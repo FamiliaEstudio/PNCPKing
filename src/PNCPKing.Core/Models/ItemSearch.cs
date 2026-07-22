@@ -26,7 +26,8 @@ public sealed record ItemSearchSession(
     string Text,
     DateTimeOffset StartedAt,
     int CandidateContractCount,
-    int PageSize = 50);
+    int PageSize = 50,
+    long RandomPivot = 0);
 
 public sealed record ItemSearchHit(
     ContractRecord Contract,
@@ -59,7 +60,12 @@ public sealed record ItemSearchPage(
     int Page,
     int PageSize,
     int MatchedItemsDiscovered,
-    bool HasMoreCandidates);
+    bool HasMoreCandidates,
+    int ContractsScanned = 0,
+    int FreshItemListsUsed = 0,
+    bool ItemListBudgetExhausted = false,
+    string GeographicStage = "",
+    int CachedItemListsReused = 0);
 
 public sealed record PriceBatchRequest(
     int BatchCount,
@@ -77,7 +83,12 @@ public sealed record PriceBatchProgress(
     TimeSpan Elapsed,
     bool CandidateSetExhausted,
     string Message,
-    ItemSearchNetworkMetrics? Network = null);
+    ItemSearchNetworkMetrics? Network = null,
+    int ContractsScanned = 0,
+    int FreshItemListsUsed = 0,
+    bool ItemListBudgetExhausted = false,
+    string GeographicStage = "",
+    int CachedItemListsReused = 0);
 
 /// <summary>
 /// Network measurements isolated to one item-search session. HTTP calls include

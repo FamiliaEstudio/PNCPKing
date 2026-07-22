@@ -6,6 +6,30 @@ namespace PNCPKing.Tests;
 public sealed class NearbyRibeiraoCatalogTests
 {
     [Fact]
+    public void BrazilCatalog_ContainsOfficialNationalSetAndPreservesFirstFifty()
+    {
+        Assert.Equal(BrazilMunicipalityCatalog.ExpectedMunicipalityCount, BrazilMunicipalityCatalog.Municipalities.Count);
+        Assert.Equal(
+            NearbyRibeiraoCatalog.Municipalities.Select(item => item.IbgeCode),
+            BrazilMunicipalityCatalog.FirstFifty.Select(item => item.IbgeCode));
+        Assert.Equal("SP", BrazilMunicipalityCatalog.StatesByProximity[0]);
+        Assert.Contains("BA", BrazilMunicipalityCatalog.StatesByProximity);
+        Assert.True(
+            BrazilMunicipalityCatalog.GetStateProximityRank("MG") <
+            BrazilMunicipalityCatalog.GetStateProximityRank("BA"));
+    }
+
+    [Fact]
+    public void BrazilCatalog_ResolvesAccentedNamesAndNationalDistances()
+    {
+        Assert.True(BrazilMunicipalityCatalog.TryResolve(null, "Ribeirao Preto", "sp", out var ribeirao));
+        Assert.Equal(0d, ribeirao.DistanceFromRibeiraoKilometers);
+        Assert.True(BrazilMunicipalityCatalog.TryResolve("2927408", null, null, out var salvador));
+        Assert.Equal("Salvador", salvador.Name);
+        Assert.True(salvador.DistanceFromRibeiraoKilometers > 1_000d);
+    }
+
+    [Fact]
     public void CatalogContainsRibeiraoAndExactlyFortyNineNearestMunicipalSeats()
     {
         var municipalities = NearbyRibeiraoCatalog.Municipalities;

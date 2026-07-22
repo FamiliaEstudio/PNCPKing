@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Collections.Concurrent;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
+using PNCPKing.Core.Geography;
+using PNCPKing.Core.Search;
 using PNCPKing.Infrastructure.Api;
 
 namespace PNCPKing.Infrastructure.Services;
@@ -14,6 +16,7 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
 {
     public const int DefaultPageSize = 50;
     public const int MaximumBatchCount = 100;
+    public const int MaximumFreshItemListsPerAction = 50;
 
     private readonly IPncpClient _client;
     private readonly IContractRepository _repository;
@@ -28,9 +31,15 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
     private CancellationTokenSource? _sessionCancellation;
     private ItemSearchSession? _session;
     private SearchQuery? _contractSearchQuery;
-    private int _nextContractSearchPage;
+    private SearchExpression? _searchExpression;
+    private ItemCandidateCursor? _candidateCursor;
     private bool _candidateSourceExhausted;
     private int _nextCandidateIndex;
+    private int _deliveredHitCount;
+    private int _contractsScanned;
+    private int _cachedItemLists;
+    private long _randomPivot;
+    private string _currentGeographicStage = "50 cidades próximas";
     private int _itemListCalls;
     private int _resultCalls;
     private int _completedResultCalls;
@@ -60,6 +69,7 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(candidateContracts);
+        var expression = SearchText.Parse(text);
         _sessionCancellation?.Cancel();
         await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -77,9 +87,15 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             _priceAvailability.Clear();
             AddCandidates(candidateContracts);
             _contractSearchQuery = null;
-            _nextContractSearchPage = 1;
+            _searchExpression = expression;
+            _candidateCursor = null;
             _candidateSourceExhausted = true;
             _nextCandidateIndex = 0;
+            _deliveredHitCount = 0;
+            _contractsScanned = 0;
+            _cachedItemLists = 0;
+            _randomPivot = Random.Shared.NextInt64(long.MaxValue);
+            _currentGeographicStage = "candidatos fornecidos";
             _itemListCalls = 0;
             _resultCalls = 0;
             _completedResultCalls = 0;
@@ -91,7 +107,8 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 text ?? string.Empty,
                 DateTimeOffset.UtcNow,
                 _candidates.Count,
-                DefaultPageSize);
+                DefaultPageSize,
+                _randomPivot);
             await _temporaryResults.ResetAsync(newSession.Id, cancellationToken).ConfigureAwait(false);
             _session = newSession;
             return newSession;
@@ -111,6 +128,7 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(contractSearch);
+        var expression = SearchText.Parse(contractSearch.Text);
         _sessionCancellation?.Cancel();
         await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -127,6 +145,9 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             _candidateKeys.Clear();
             _priceAvailability.Clear();
             _nextCandidateIndex = 0;
+            _deliveredHitCount = 0;
+            _contractsScanned = 0;
+            _cachedItemLists = 0;
             _itemListCalls = 0;
             _resultCalls = 0;
             _completedResultCalls = 0;
@@ -135,17 +156,30 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             _elapsed = Stopwatch.StartNew();
 
             _contractSearchQuery = contractSearch with { Page = 1, PageSize = 200 };
-            var firstPage = await _repository.SearchAsync(_contractSearchQuery, cancellationToken).ConfigureAwait(false);
-            AddCandidates(firstPage.Results);
-            _nextContractSearchPage = 2;
-            _candidateSourceExhausted = firstPage.Results.Count == 0 || _candidates.Count >= firstPage.Total;
-            var candidateCount = firstPage.Total > int.MaxValue ? int.MaxValue : (int)firstPage.Total;
+            _searchExpression = expression;
+            _candidateCursor = null;
+            _randomPivot = Random.Shared.NextInt64(long.MaxValue);
+            var firstPage = await _repository.SearchItemCandidatesAsync(
+                    _contractSearchQuery,
+                    expression,
+                    _randomPivot,
+                    null,
+                    200,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            AddCandidates(firstPage.Results.Select(candidate => candidate.Contract));
+            _candidateCursor = firstPage.NextCursor;
+            _candidateSourceExhausted = !firstPage.HasMore;
+            _currentGeographicStage = firstPage.Results.Count == 0
+                ? "conjunto esgotado"
+                : DescribeGeographicStage(firstPage.Results[0].Contract);
             var newSession = new ItemSearchSession(
                 Guid.NewGuid(),
                 contractSearch.Text ?? string.Empty,
                 DateTimeOffset.UtcNow,
-                candidateCount,
-                DefaultPageSize);
+                firstPage.Results.Count + (firstPage.HasMore ? 1 : 0),
+                DefaultPageSize,
+                _randomPivot);
             await _temporaryResults.ResetAsync(newSession.Id, cancellationToken).ConfigureAwait(false);
             _session = newSession;
             return newSession;
@@ -175,10 +209,14 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 return new ItemSearchPage([], page, session.PageSize, 0, false);
             }
 
-            var pageEnd = checked(page * session.PageSize);
-            await DiscoverUntilAsync(pageEnd, linked.Token).ConfigureAwait(false);
+            var firstUndeliveredHit = _deliveredHitCount;
+            var discovery = await DiscoverUntilAsync(
+                    checked(firstUndeliveredHit + session.PageSize),
+                    MaximumFreshItemListsPerAction,
+                    linked.Token)
+                .ConfigureAwait(false);
             var pageHits = _hits
-                .Skip((page - 1) * session.PageSize)
+                .Skip(firstUndeliveredHit)
                 .Take(session.PageSize)
                 .ToArray();
 
@@ -205,11 +243,24 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 Volatile.Read(ref _completedResultCalls) - beforeCompleted,
                 Volatile.Read(ref _failedResultCalls) - beforeFailures,
                 false,
-                "Preços da página atualizados."));
+                "Preços do lote atualizados.",
+                discovery.FreshItemListsUsed,
+                discovery.BudgetExhausted));
 
             var rows = await BuildRowsAsync(pageHits, minimumUnitPrice, maximumUnitPrice, linked.Token).ConfigureAwait(false);
-            var hasMore = _hits.Count > pageEnd || HasMoreContractCandidates;
-            return new ItemSearchPage(rows, page, session.PageSize, _hits.Count, hasMore);
+            _deliveredHitCount += pageHits.Length;
+            var hasMore = _hits.Count > _deliveredHitCount || HasMoreContractCandidates;
+            return new ItemSearchPage(
+                rows,
+                page,
+                session.PageSize,
+                _hits.Count,
+                hasMore,
+                _contractsScanned,
+                discovery.FreshItemListsUsed,
+                discovery.BudgetExhausted,
+                _currentGeographicStage,
+                _cachedItemLists);
         }
         finally
         {
@@ -247,6 +298,8 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         {
             var callsAtStart = Volatile.Read(ref _completedResultCalls);
             var failuresAtStart = Volatile.Read(ref _failedResultCalls);
+            var freshItemListsUsed = 0;
+            var itemListBudgetExhausted = false;
             var attemptedKeys = new HashSet<(string ContractId, long ItemNumber)>();
             while (Volatile.Read(ref _completedResultCalls) - callsAtStart < request.RequestedItemCalls)
             {
@@ -263,10 +316,22 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                         break;
                     }
 
-                    await DiscoverNextContractAsync(
+                    var discovery = await DiscoverNextContractAsync(
                             linked.Token,
-                            PncpRequestPriority.AdditionalBatches)
+                            PncpRequestPriority.AdditionalBatches,
+                            freshItemListsUsed < MaximumFreshItemListsPerAction)
                         .ConfigureAwait(false);
+                    if (discovery.BudgetBlocked)
+                    {
+                        itemListBudgetExhausted = true;
+                        break;
+                    }
+
+                    if (discovery.FreshItemListUsed)
+                    {
+                        freshItemListsUsed++;
+                    }
+
                     continue;
                 }
 
@@ -297,10 +362,20 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                     maximum: 1)
                 .ConfigureAwait(false)).Count > 0;
             var exhausted = !HasMoreContractCandidates && !hasUntouchedKnownItem;
-            var message = exhausted
+            var message = itemListBudgetExhausted
+                ? $"Limite desta ação atingido: {freshItemListsUsed} listas novas consultadas. Use Continuar para prosseguir."
+                : exhausted
                 ? $"Conjunto esgotado: {completed} itens consultados."
                 : $"{completed} itens consultados.";
-            var result = CreateProgress(request.RequestedItemCalls, completed, failed, exhausted, message);
+            _deliveredHitCount = _hits.Count;
+            var result = CreateProgress(
+                request.RequestedItemCalls,
+                completed,
+                failed,
+                exhausted,
+                message,
+                freshItemListsUsed,
+                itemListBudgetExhausted);
             progress?.Report(result);
             return result;
         }
@@ -348,28 +423,59 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         }
     }
 
-    private async Task DiscoverUntilAsync(int targetHitCount, CancellationToken cancellationToken)
+    private async Task<DiscoveryBudgetResult> DiscoverUntilAsync(
+        int targetHitCount,
+        int maximumFreshItemLists,
+        CancellationToken cancellationToken)
     {
+        var freshItemListsUsed = 0;
+        var budgetExhausted = false;
         while (_hits.Count < targetHitCount &&
                await EnsureNextCandidateAvailableAsync(cancellationToken).ConfigureAwait(false))
         {
-            await DiscoverNextContractAsync(cancellationToken, PncpRequestPriority.VisiblePrices).ConfigureAwait(false);
+            var discovery = await DiscoverNextContractAsync(
+                    cancellationToken,
+                    PncpRequestPriority.VisiblePrices,
+                    freshItemListsUsed < maximumFreshItemLists)
+                .ConfigureAwait(false);
+            if (discovery.BudgetBlocked)
+            {
+                budgetExhausted = true;
+                break;
+            }
+
+            if (discovery.FreshItemListUsed)
+            {
+                freshItemListsUsed++;
+            }
         }
+
+        return new DiscoveryBudgetResult(freshItemListsUsed, budgetExhausted);
     }
 
-    private async Task DiscoverNextContractAsync(
+    private async Task<DiscoveryAttempt> DiscoverNextContractAsync(
         CancellationToken cancellationToken,
-        PncpRequestPriority priority = PncpRequestPriority.VisiblePrices)
+        PncpRequestPriority priority,
+        bool allowFreshItemList)
     {
         var session = GetRequiredSession();
         if (!await EnsureNextCandidateAvailableAsync(cancellationToken).ConfigureAwait(false))
         {
-            return;
+            return DiscoveryAttempt.NoCandidate;
         }
 
-        var contract = _candidates[_nextCandidateIndex++];
+        var contract = _candidates[_nextCandidateIndex];
         var snapshot = await _repository.GetItemSnapshotAsync(contract.PncpId, cancellationToken).ConfigureAwait(false);
-        if (snapshot is null || !snapshot.IsCurrentFor(contract))
+        var needsFreshItemList = snapshot is null || !snapshot.IsCurrentFor(contract);
+        if (needsFreshItemList && !allowFreshItemList)
+        {
+            return DiscoveryAttempt.BudgetLimit;
+        }
+
+        _nextCandidateIndex++;
+        _contractsScanned++;
+        _currentGeographicStage = DescribeGeographicStage(contract);
+        if (needsFreshItemList)
         {
             Interlocked.Increment(ref _itemListCalls);
             try
@@ -388,6 +494,10 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 // prevent the remaining contracts from being searched.
             }
         }
+        else
+        {
+            _cachedItemLists++;
+        }
 
         var matches = await _repository.SearchItemsAsync(contract.PncpId, session.Text, cancellationToken)
             .ConfigureAwait(false);
@@ -398,6 +508,8 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 _hits.Add(new ItemSearchHit(contract, item));
             }
         }
+
+        return new DiscoveryAttempt(true, needsFreshItemList, false);
     }
 
     private bool HasMoreContractCandidates =>
@@ -409,12 +521,24 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         {
             var query = _contractSearchQuery
                 ?? throw new InvalidOperationException("Fonte paginada de contratações ausente.");
-            var next = await _repository.SearchAsync(
-                    query with { Page = _nextContractSearchPage++, PageSize = 200 },
+            var expression = _searchExpression
+                ?? throw new InvalidOperationException("Expressão da pesquisa ausente.");
+            var previousCursor = _candidateCursor;
+            var next = await _repository.SearchItemCandidatesAsync(
+                    query,
+                    expression,
+                    _randomPivot,
+                    previousCursor,
+                    200,
                     cancellationToken)
                 .ConfigureAwait(false);
-            AddCandidates(next.Results);
-            _candidateSourceExhausted = next.Results.Count == 0 || _candidates.Count >= next.Total;
+            AddCandidates(next.Results.Select(candidate => candidate.Contract));
+            _candidateCursor = next.NextCursor;
+            _candidateSourceExhausted = !next.HasMore || next.Results.Count == 0;
+            if (!_candidateSourceExhausted && Equals(previousCursor, _candidateCursor))
+            {
+                throw new InvalidOperationException("A continuação de candidatos não avançou o cursor.");
+            }
         }
 
         return _nextCandidateIndex < _candidates.Count;
@@ -429,6 +553,22 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 _candidates.Add(contract);
             }
         }
+    }
+
+    private static string DescribeGeographicStage(ContractRecord contract)
+    {
+        if (BrazilMunicipalityCatalog.IsFirstFifty(
+                contract.MunicipalityIbgeCode,
+                contract.Municipality,
+                contract.Uf))
+        {
+            return $"50 cidades — {contract.Municipality}/{contract.Uf}";
+        }
+
+        var state = contract.Uf?.Trim().ToUpperInvariant();
+        return state is { Length: 2 }
+            ? $"UF {state}"
+            : "localização não reconhecida";
     }
 
     private async Task<IReadOnlyList<ItemSearchHit>> FindItemsNeedingApiAsync(
@@ -783,7 +923,9 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         int completed,
         int failed,
         bool exhausted,
-        string message)
+        string message,
+        int freshItemListsUsed = 0,
+        bool itemListBudgetExhausted = false)
     {
         var network = CurrentNetworkMetrics;
         return new PriceBatchProgress(
@@ -795,7 +937,12 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             _elapsed.Elapsed,
             exhausted,
             message,
-            network);
+            network,
+            _contractsScanned,
+            freshItemListsUsed,
+            itemListBudgetExhausted,
+            _currentGeographicStage,
+            _cachedItemLists);
     }
 
     public ItemSearchNetworkMetrics CurrentNetworkMetrics
@@ -867,6 +1014,19 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         Permanent,
         TemporarySuccess,
         TemporaryFailure
+    }
+
+    private sealed record DiscoveryBudgetResult(
+        int FreshItemListsUsed,
+        bool BudgetExhausted);
+
+    private sealed record DiscoveryAttempt(
+        bool Processed,
+        bool FreshItemListUsed,
+        bool BudgetBlocked)
+    {
+        public static DiscoveryAttempt NoCandidate { get; } = new(false, false, false);
+        public static DiscoveryAttempt BudgetLimit { get; } = new(false, false, true);
     }
 
     private sealed record PriceAvailability(

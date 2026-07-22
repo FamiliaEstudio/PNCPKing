@@ -8,6 +8,7 @@ using PNCPKing.App.Views;
 using PNCPKing.Infrastructure.Api;
 using PNCPKing.Infrastructure.Data;
 using PNCPKing.Infrastructure.Services;
+using PNCPKing.Core.Quotations;
 
 namespace PNCPKing.App;
 
@@ -41,6 +42,7 @@ public partial class App : Application
             var databasePath = Path.Combine(settings.DataFolder, "pncpking.db");
             var repository = new SqliteContractRepository(databasePath);
             await repository.InitializeAsync().ConfigureAwait(true);
+            var quotationRepository = new SqliteQuotationRepository(databasePath);
 
             var socketsHandler = new SocketsHttpHandler
             {
@@ -78,6 +80,8 @@ public partial class App : Application
                 new ItemHydrationService(client, repository),
                 itemSearchService,
                 new BackupService(repository),
+                new QuotationService(quotationRepository, new QuotationAnalyzer()),
+                new QuotationWorkbookService(),
                 requestTelemetry,
                 settings.DataFolder);
             var mainWindow = new MainWindow(viewModel);

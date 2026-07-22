@@ -53,7 +53,15 @@ internal sealed class ItemDto
 {
     public long NumeroItem { get; set; }
     public string? Descricao { get; set; }
+    public decimal? Quantidade { get; set; }
     public string? UnidadeMedida { get; set; }
+    public string? InformacaoComplementar { get; set; }
+    public string? ItemCategoriaNome { get; set; }
+    public string? NcmNbsCodigo { get; set; }
+    public string? NcmNbsDescricao { get; set; }
+    public string? CatalogoCodigoItem { get; set; }
+    public CatalogDto? Catalogo { get; set; }
+    public CatalogCategoryDto? CategoriaItemCatalogo { get; set; }
     public string? SituacaoCompraItemNome { get; set; }
     public bool TemResultado { get; set; }
     public string? DataAtualizacao { get; set; }
@@ -64,10 +72,29 @@ internal sealed class ResultDto
     public long SequencialResultado { get; set; }
     public string? NiFornecedor { get; set; }
     public string? NomeRazaoSocialFornecedor { get; set; }
+    public string? TipoPessoa { get; set; }
+    public SupplierLocationDto? LocalidadeFornecedor { get; set; }
     public decimal? QuantidadeHomologada { get; set; }
     public decimal? ValorUnitarioHomologado { get; set; }
     public decimal? ValorTotalHomologado { get; set; }
     public string? DataResultado { get; set; }
     public JsonElement SituacaoCompraItemResultadoId { get; set; }
     public string? SituacaoCompraItemResultadoNome { get; set; }
+}
+
+internal sealed class CatalogDto
+{
+    public string? Nome { get; set; }
+}
+
+internal sealed class CatalogCategoryDto
+{
+    public string? Nome { get; set; }
+    public string? Descricao { get; set; }
+}
+
+internal sealed class SupplierLocationDto
+{
+    public string? NomeMunicipio { get; set; }
+    public string? Uf { get; set; }
 }

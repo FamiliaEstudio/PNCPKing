@@ -1,4 +1,5 @@
 using PNCPKing.Core.Models;
+using PNCPKing.Core.Search;
 
 namespace PNCPKing.Core.Interfaces;
 
@@ -8,6 +9,13 @@ public interface IContractRepository
     Task InitializeAsync(CancellationToken cancellationToken = default);
     Task UpsertContractsAsync(IReadOnlyList<ContractRecord> contracts, CancellationToken cancellationToken = default);
     Task<SearchPage> SearchAsync(SearchQuery query, CancellationToken cancellationToken = default);
+    Task<ItemCandidatePage> SearchItemCandidatesAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        long randomPivot,
+        ItemCandidateCursor? cursor,
+        int pageSize = 200,
+        CancellationToken cancellationToken = default);
     Task<ContractRecord?> GetContractAsync(string pncpId, CancellationToken cancellationToken = default);
     Task UpsertItemsAsync(string contractId, IReadOnlyList<ProcurementItem> items, bool forceRefresh, CancellationToken cancellationToken = default);
     Task<ContractItemSnapshot?> GetItemSnapshotAsync(string contractId, CancellationToken cancellationToken = default);

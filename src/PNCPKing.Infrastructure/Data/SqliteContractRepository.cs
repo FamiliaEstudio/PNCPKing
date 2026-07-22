@@ -9,18 +9,11 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 3;
+    public const int CurrentSchemaVersion = 6;
 
-    private static readonly string NearbyParameterList = string.Join(
-        ", ",
-        Enumerable.Range(0, NearbyRibeiraoCatalog.Municipalities.Count).Select(index => $"$near{index}"));
-
-    private static readonly string NearbyOrderExpression = "CASE c.municipality_ibge_code " +
-        string.Join(
-            " ",
-            Enumerable.Range(0, NearbyRibeiraoCatalog.Municipalities.Count)
-                .Select(index => $"WHEN $near{index} THEN {index}")) +
-        " ELSE 50 END";
+    private const string GeographicGroupExpression = "CASE WHEN COALESCE(c.geo_layer, 1) = 0 " +
+        "THEN COALESCE(c.municipality_distance_rank, 999999) " +
+        "ELSE COALESCE(c.state_proximity_rank, 999) END";
 
     private readonly string _connectionString;
 
@@ -117,6 +110,54 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             updateVersion.CommandText = "UPDATE schema_info SET version = 3 WHERE id = 1;";
             await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 3;
+        }
+
+        if (version < 4)
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = (SqliteTransaction)transaction;
+            migration.CommandText = SchemaV4Sql;
+            await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 4 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 4;
+        }
+
+        if (version < 5)
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = (SqliteTransaction)transaction;
+            migration.CommandText = SchemaV5Sql;
+            await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 5 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 5;
+        }
+
+        if (version < 6)
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = (SqliteTransaction)transaction;
+            migration.CommandText = SchemaV6Sql;
+            await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 6 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -149,7 +190,8 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
     {
         var page = Math.Max(1, query.Page);
         var pageSize = Math.Clamp(query.PageSize, 1, 200);
-        var match = SearchText.BuildMatchQuery(query.Text);
+        var expression = SearchText.Parse(query.Text);
+        var match = expression.ContractMatchQuery;
         var joinsFts = match.Length > 0;
         var conditions = new List<string>();
         if (joinsFts)
@@ -167,7 +209,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                 conditions.Add("c.uf = $uf");
                 break;
             case SearchGeoFilterKind.NearRibeirao:
-                conditions.Add($"c.municipality_ibge_code IN ({NearbyParameterList})");
+                conditions.Add("c.geo_layer = 0");
                 break;
         }
 
@@ -187,8 +229,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         var where = conditions.Count == 0 ? string.Empty : " WHERE " + string.Join(" AND ", conditions);
         var order = query.Sort switch
         {
-            SearchSort.Nearest when geoFilter.Kind == SearchGeoFilterKind.NearRibeirao =>
-                $" ORDER BY {NearbyOrderExpression}, c.publication_date DESC, c.pncp_id",
+            SearchSort.Nearest =>
+                $" ORDER BY COALESCE(c.geo_layer, 1), {GeographicGroupExpression}, " +
+                "c.publication_date DESC, c.pncp_id",
             SearchSort.Newest => " ORDER BY c.publication_date DESC, c.pncp_id",
             _ when joinsFts => " ORDER BY bm25(contracts_fts), c.publication_date DESC, c.pncp_id",
             _ => " ORDER BY c.publication_date DESC, c.pncp_id"
@@ -205,7 +248,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
                    c.additional_information, c.process, c.organization, c.unit, c.municipality,
                    c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status, c.publication_date,
-                   c.global_updated_at, c.total_homologated_scaled
+                   c.global_updated_at, c.total_homologated_scaled, c.distance_from_ribeirao_km
               FROM {from}{where}{order}
              LIMIT $limit OFFSET $offset;
             """;
@@ -223,6 +266,121 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         return new SearchPage(results, total, page, pageSize);
     }
 
+    public async Task<ItemCandidatePage> SearchItemCandidatesAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        long randomPivot,
+        ItemCandidateCursor? cursor,
+        int pageSize = 200,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(filters);
+        ArgumentNullException.ThrowIfNull(expression);
+        if (expression.IsEmpty)
+        {
+            return new ItemCandidatePage([], null, false);
+        }
+
+        pageSize = Math.Clamp(pageSize, 1, 500);
+        randomPivot = Math.Clamp(randomPivot, 0, long.MaxValue - 1);
+        var conditions = new List<string> { "contracts_fts MATCH $candidateMatch" };
+        var geoFilter = filters.EffectiveGeoFilter;
+        switch (geoFilter.Kind)
+        {
+            case SearchGeoFilterKind.Southeast:
+                conditions.Add("c.uf IN ('ES','MG','RJ','SP')");
+                break;
+            case SearchGeoFilterKind.State:
+                conditions.Add("c.uf = $uf");
+                break;
+            case SearchGeoFilterKind.NearRibeirao:
+                conditions.Add("c.geo_layer = 0");
+                break;
+        }
+
+        if (filters.StartDate is not null)
+        {
+            conditions.Add("date(c.publication_date) >= date($startDate)");
+        }
+
+        if (filters.EndDate is not null)
+        {
+            conditions.Add("date(c.publication_date) <= date($endDate)");
+        }
+
+        var where = string.Join(" AND ", conditions);
+        var cursorWhere = cursor is null
+            ? string.Empty
+            : """
+               WHERE geographic_layer > $cursorLayer
+                  OR (geographic_layer = $cursorLayer AND group_rank > $cursorGroup)
+                  OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band > $cursorBand)
+                  OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band = $cursorBand
+                      AND random_order_key > $cursorRandom)
+                  OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band = $cursorBand
+                      AND random_order_key = $cursorRandom AND pncp_id > $cursorId)
+              """;
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            WITH ranked AS (
+                SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
+                       c.additional_information, c.process, c.organization, c.unit, c.municipality,
+                       c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
+                       c.publication_date, c.global_updated_at, c.total_homologated_scaled,
+                       c.distance_from_ribeirao_km,
+                       COALESCE(c.geo_layer, 1) AS geographic_layer,
+                       {GeographicGroupExpression} AS group_rank,
+                       CASE WHEN COALESCE(c.random_order_key, 0) >= $randomPivot THEN 0 ELSE 1 END AS rotation_band,
+                       COALESCE(c.random_order_key, 0) AS random_order_key
+                  FROM contracts c
+                  JOIN contracts_fts ON contracts_fts.rowid = c.rowid
+                 WHERE {where}
+            )
+            SELECT * FROM ranked
+            {cursorWhere}
+             ORDER BY geographic_layer, group_rank, rotation_band, random_order_key, pncp_id
+             LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$candidateMatch", expression.CandidateMatchQuery);
+        command.Parameters.AddWithValue("$randomPivot", randomPivot);
+        command.Parameters.AddWithValue("$limit", pageSize + 1);
+        AddFilterParameters(command, filters);
+        if (cursor is not null)
+        {
+            command.Parameters.AddWithValue("$cursorLayer", cursor.GeographicLayer);
+            command.Parameters.AddWithValue("$cursorGroup", cursor.GroupRank);
+            command.Parameters.AddWithValue("$cursorBand", cursor.RotationBand);
+            command.Parameters.AddWithValue("$cursorRandom", cursor.RandomOrderKey);
+            command.Parameters.AddWithValue("$cursorId", cursor.PncpId);
+        }
+
+        var candidates = new List<ItemContractCandidate>(pageSize + 1);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var candidateCursor = new ItemCandidateCursor(
+                reader.GetInt32(19),
+                reader.GetInt32(20),
+                reader.GetInt32(21),
+                reader.GetInt64(22),
+                reader.GetString(0));
+            candidates.Add(new ItemContractCandidate(ReadContract(reader), candidateCursor));
+        }
+
+        var hasMore = candidates.Count > pageSize;
+        if (hasMore)
+        {
+            candidates.RemoveAt(candidates.Count - 1);
+        }
+
+        return new ItemCandidatePage(
+            candidates,
+            candidates.Count == 0 ? cursor : candidates[^1].Cursor,
+            hasMore);
+    }
+
     public async Task<ContractRecord?> GetContractAsync(string pncpId, CancellationToken cancellationToken = default)
     {
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -230,7 +388,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         command.CommandText = """
             SELECT pncp_id, cnpj, purchase_year, purchase_sequence, object, additional_information,
                    process, organization, unit, municipality, municipality_ibge_code, uf, modality_id, modality_name, status,
-                   publication_date, global_updated_at, total_homologated_scaled
+                   publication_date, global_updated_at, total_homologated_scaled, distance_from_ribeirao_km
               FROM contracts WHERE pncp_id = $id;
             """;
         command.Parameters.AddWithValue("$id", pncpId);
@@ -271,13 +429,25 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         command.Transaction = (SqliteTransaction)transaction;
         command.CommandText = """
             INSERT INTO items(
-                contract_id, item_number, description, unit, status, has_result,
+                contract_id, item_number, description, unit, requested_quantity_scaled,
+                additional_information, item_category, ncm_nbs_code, ncm_nbs_description,
+                catalog_code, catalog_name, catalog_category, status, has_result,
                 source_updated_at, hydration_status, last_error, cache_updated_at, search_text)
-            VALUES($contractId, $itemNumber, $description, $unit, $status, $hasResult,
+            VALUES($contractId, $itemNumber, $description, $unit, $requestedQuantity,
+                   $additionalInformation, $itemCategory, $ncmNbsCode, $ncmNbsDescription,
+                   $catalogCode, $catalogName, $catalogCategory, $status, $hasResult,
                    $sourceUpdatedAt, $hydrationStatus, NULL, $cacheUpdatedAt, $searchText)
             ON CONFLICT(contract_id, item_number) DO UPDATE SET
                 description = excluded.description,
                 unit = excluded.unit,
+                requested_quantity_scaled = excluded.requested_quantity_scaled,
+                additional_information = excluded.additional_information,
+                item_category = excluded.item_category,
+                ncm_nbs_code = excluded.ncm_nbs_code,
+                ncm_nbs_description = excluded.ncm_nbs_description,
+                catalog_code = excluded.catalog_code,
+                catalog_name = excluded.catalog_name,
+                catalog_category = excluded.catalog_category,
                 status = excluded.status,
                 has_result = excluded.has_result,
                 source_updated_at = excluded.source_updated_at,
@@ -294,6 +464,14 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         command.Parameters.Add("$itemNumber", SqliteType.Integer);
         command.Parameters.Add("$description", SqliteType.Text);
         command.Parameters.Add("$unit", SqliteType.Text);
+        command.Parameters.Add("$requestedQuantity", SqliteType.Integer);
+        command.Parameters.Add("$additionalInformation", SqliteType.Text);
+        command.Parameters.Add("$itemCategory", SqliteType.Text);
+        command.Parameters.Add("$ncmNbsCode", SqliteType.Text);
+        command.Parameters.Add("$ncmNbsDescription", SqliteType.Text);
+        command.Parameters.Add("$catalogCode", SqliteType.Text);
+        command.Parameters.Add("$catalogName", SqliteType.Text);
+        command.Parameters.Add("$catalogCategory", SqliteType.Text);
         command.Parameters.Add("$status", SqliteType.Text);
         command.Parameters.Add("$hasResult", SqliteType.Integer);
         command.Parameters.Add("$sourceUpdatedAt", SqliteType.Text);
@@ -305,19 +483,28 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         var now = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
         foreach (var item in items)
         {
+            var description = SearchText.Sanitize(item.Description);
             incoming.Parameters["$itemNumber"].Value = item.ItemNumber;
             await incoming.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
             command.Parameters["$contractId"].Value = contractId;
             command.Parameters["$itemNumber"].Value = item.ItemNumber;
-            command.Parameters["$description"].Value = item.Description;
-            command.Parameters["$unit"].Value = item.Unit;
-            command.Parameters["$status"].Value = item.Status;
+            command.Parameters["$description"].Value = description;
+            command.Parameters["$unit"].Value = SearchText.Sanitize(item.Unit);
+            command.Parameters["$requestedQuantity"].Value = DbValue(item.RequestedQuantityScaled);
+            command.Parameters["$additionalInformation"].Value = SearchText.Sanitize(item.AdditionalInformation);
+            command.Parameters["$itemCategory"].Value = SearchText.Sanitize(item.Category);
+            command.Parameters["$ncmNbsCode"].Value = SearchText.Sanitize(item.NcmNbsCode);
+            command.Parameters["$ncmNbsDescription"].Value = SearchText.Sanitize(item.NcmNbsDescription);
+            command.Parameters["$catalogCode"].Value = SearchText.Sanitize(item.CatalogCode);
+            command.Parameters["$catalogName"].Value = SearchText.Sanitize(item.CatalogName);
+            command.Parameters["$catalogCategory"].Value = SearchText.Sanitize(item.CatalogCategory);
+            command.Parameters["$status"].Value = SearchText.Sanitize(item.Status);
             command.Parameters["$hasResult"].Value = item.HasResult ? 1 : 0;
             command.Parameters["$sourceUpdatedAt"].Value = DbValue(item.UpdatedAt);
             command.Parameters["$hydrationStatus"].Value = (int)item.HydrationStatus;
             command.Parameters["$cacheUpdatedAt"].Value = now;
-            command.Parameters["$searchText"].Value = SearchText.Normalize(item.Description);
+            command.Parameters["$searchText"].Value = SearchText.Normalize(description);
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
@@ -408,14 +595,18 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         await using var command = connection.CreateCommand();
         command.CommandText = match.Length == 0
             ? """
-                SELECT i.contract_id, i.item_number, i.description, i.unit, i.status,
+                SELECT i.contract_id, i.item_number, i.description, i.unit, i.requested_quantity_scaled,
+                       i.additional_information, i.item_category, i.ncm_nbs_code, i.ncm_nbs_description,
+                       i.catalog_code, i.catalog_name, i.catalog_category, i.status,
                        i.has_result, i.source_updated_at, i.hydration_status, i.last_error
                   FROM items i
                  WHERE i.contract_id = $contractId
                  ORDER BY i.item_number;
                 """
             : """
-                SELECT i.contract_id, i.item_number, i.description, i.unit, i.status,
+                SELECT i.contract_id, i.item_number, i.description, i.unit, i.requested_quantity_scaled,
+                       i.additional_information, i.item_category, i.ncm_nbs_code, i.ncm_nbs_description,
+                       i.catalog_code, i.catalog_name, i.catalog_category, i.status,
                        i.has_result, i.source_updated_at, i.hydration_status, i.last_error
                   FROM items i
                   JOIN items_fts ON items_fts.rowid = i.rowid
@@ -448,7 +639,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         await using (var itemCommand = connection.CreateCommand())
         {
             itemCommand.CommandText = """
-                SELECT contract_id, item_number, description, unit, status, has_result,
+                SELECT contract_id, item_number, description, unit, requested_quantity_scaled,
+                       additional_information, item_category, ncm_nbs_code, ncm_nbs_description,
+                       catalog_code, catalog_name, catalog_category, status, has_result,
                        source_updated_at, hydration_status, last_error
                   FROM items
                  WHERE contract_id = $contractId AND item_number = $itemNumber;
@@ -467,6 +660,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         await using var resultCommand = connection.CreateCommand();
         resultCommand.CommandText = """
             SELECT contract_id, item_number, result_sequence, supplier_tax_id, supplier_name,
+                   supplier_type, supplier_municipality, supplier_uf,
                    quantity_scaled, unit_value_scaled, total_value_scaled, result_date,
                    result_status_id, result_status_name
               FROM item_results
@@ -508,9 +702,11 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             insert.CommandText = """
                 INSERT INTO item_results(
                     contract_id, item_number, result_sequence, supplier_tax_id, supplier_name,
+                    supplier_type, supplier_municipality, supplier_uf,
                     quantity_scaled, unit_value_scaled, total_value_scaled, result_date,
                     result_status_id, result_status_name)
-                VALUES($contractId, $itemNumber, $sequence, $taxId, $supplier, $quantity,
+                VALUES($contractId, $itemNumber, $sequence, $taxId, $supplier,
+                       $supplierType, $supplierMunicipality, $supplierUf, $quantity,
                        $unitValue, $totalValue, $resultDate, $statusId, $statusName);
                 """;
             insert.Parameters.Add("$contractId", SqliteType.Text);
@@ -518,6 +714,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             insert.Parameters.Add("$sequence", SqliteType.Integer);
             insert.Parameters.Add("$taxId", SqliteType.Text);
             insert.Parameters.Add("$supplier", SqliteType.Text);
+            insert.Parameters.Add("$supplierType", SqliteType.Text);
+            insert.Parameters.Add("$supplierMunicipality", SqliteType.Text);
+            insert.Parameters.Add("$supplierUf", SqliteType.Text);
             insert.Parameters.Add("$quantity", SqliteType.Integer);
             insert.Parameters.Add("$unitValue", SqliteType.Integer);
             insert.Parameters.Add("$totalValue", SqliteType.Integer);
@@ -530,15 +729,18 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                 insert.Parameters["$contractId"].Value = contractId;
                 insert.Parameters["$itemNumber"].Value = itemNumber;
                 insert.Parameters["$sequence"].Value = result.ResultSequence;
-                insert.Parameters["$taxId"].Value = result.SupplierTaxId;
-                insert.Parameters["$supplier"].Value = result.SupplierName;
+                insert.Parameters["$taxId"].Value = SearchText.Sanitize(result.SupplierTaxId);
+                insert.Parameters["$supplier"].Value = SearchText.Sanitize(result.SupplierName);
+                insert.Parameters["$supplierType"].Value = SearchText.Sanitize(result.SupplierType);
+                insert.Parameters["$supplierMunicipality"].Value = SearchText.Sanitize(result.SupplierMunicipality);
+                insert.Parameters["$supplierUf"].Value = SearchText.Sanitize(result.SupplierUf);
                 insert.Parameters["$quantity"].Value = DbValue(result.HomologatedQuantityScaled);
                 insert.Parameters["$unitValue"].Value = DbValue(result.HomologatedUnitValueScaled);
                 insert.Parameters["$totalValue"].Value = DbValue(result.HomologatedTotalValueScaled);
                 insert.Parameters["$resultDate"].Value = DbValue(
                     result.ResultDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
                 insert.Parameters["$statusId"].Value = result.ResultStatusId;
-                insert.Parameters["$statusName"].Value = result.ResultStatusName;
+                insert.Parameters["$statusName"].Value = SearchText.Sanitize(result.ResultStatusName);
                 await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
         }
@@ -589,7 +791,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT contract_id, item_number, description, unit, status, has_result,
+            SELECT contract_id, item_number, description, unit, requested_quantity_scaled,
+                   additional_information, item_category, ncm_nbs_code, ncm_nbs_description,
+                   catalog_code, catalog_name, catalog_category, status, has_result,
                    source_updated_at, hydration_status, last_error
               FROM items
              WHERE contract_id = $contractId AND has_result = 1
@@ -603,18 +807,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            items.Add(new ProcurementItem
-            {
-                ContractId = reader.GetString(0),
-                ItemNumber = reader.GetInt64(1),
-                Description = reader.GetString(2),
-                Unit = reader.GetString(3),
-                Status = reader.GetString(4),
-                HasResult = reader.GetInt64(5) == 1,
-                UpdatedAt = ParseDateTime(reader, 6),
-                HydrationStatus = (ItemHydrationStatus)reader.GetInt32(7),
-                LastError = reader.IsDBNull(8) ? null : reader.GetString(8)
-            });
+            items.Add(ReadItem(reader));
         }
 
         return items;
@@ -1277,6 +1470,26 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
     {
         var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        connection.CreateFunction<string?, string?, string?, double?>(
+            "pncp_geo_distance",
+            (code, name, uf) => ResolveGeography(code, name, uf).Distance,
+            isDeterministic: true);
+        connection.CreateFunction<string?, string?, string?, int?>(
+            "pncp_geo_distance_rank",
+            (code, name, uf) => ResolveGeography(code, name, uf).DistanceRank,
+            isDeterministic: true);
+        connection.CreateFunction<string?, int?>(
+            "pncp_state_rank",
+            uf => GeographicValue(BrazilMunicipalityCatalog.GetStateProximityRank(uf)),
+            isDeterministic: true);
+        connection.CreateFunction<string?, string?, string?, int>(
+            "pncp_geo_layer",
+            (code, name, uf) => ResolveGeography(code, name, uf).Layer,
+            isDeterministic: true);
+        connection.CreateFunction<string?, long>(
+            "pncp_random_key",
+            StableRandomOrderKey,
+            isDeterministic: true);
         await using var command = connection.CreateCommand();
         command.CommandText = "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000;";
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -1290,18 +1503,15 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             command.Parameters.AddWithValue("$match", match);
         }
 
+        AddFilterParameters(command, query);
+    }
+
+    private static void AddFilterParameters(SqliteCommand command, SearchQuery query)
+    {
         var geoFilter = query.EffectiveGeoFilter;
         if (geoFilter.Kind == SearchGeoFilterKind.State)
         {
             command.Parameters.AddWithValue("$uf", geoFilter.Uf!);
-        }
-
-        if (geoFilter.Kind == SearchGeoFilterKind.NearRibeirao)
-        {
-            for (var index = 0; index < NearbyRibeiraoCatalog.Municipalities.Count; index++)
-            {
-                command.Parameters.AddWithValue($"$near{index}", NearbyRibeiraoCatalog.Municipalities[index].IbgeCode);
-            }
         }
 
         if (query.StartDate is not null)
@@ -1321,38 +1531,50 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                  {
                      "$pncpId", "$cnpj", "$year", "$sequence", "$object", "$additional", "$process",
                      "$organization", "$unit", "$municipality", "$municipalityIbge", "$uf", "$modalityId", "$modalityName",
-                     "$status", "$publication", "$globalUpdated", "$totalHomologated", "$searchText"
+                     "$status", "$publication", "$globalUpdated", "$totalHomologated", "$searchText",
+                     "$distance", "$distanceRank", "$stateRank", "$geoLayer", "$randomOrderKey"
                  })
         {
-            command.Parameters.Add(name, name is "$year" or "$sequence" or "$modalityId" or "$totalHomologated"
+            command.Parameters.Add(name, name is "$year" or "$sequence" or "$modalityId" or "$totalHomologated" or
+                "$distanceRank" or "$stateRank" or "$geoLayer" or "$randomOrderKey"
                 ? SqliteType.Integer
+                : name == "$distance" ? SqliteType.Real
                 : SqliteType.Text);
         }
     }
 
     private static void SetContractParameters(SqliteCommand command, ContractRecord contract)
     {
-        command.Parameters["$pncpId"].Value = contract.PncpId;
-        command.Parameters["$cnpj"].Value = contract.Cnpj;
+        var contractObject = SearchText.Sanitize(contract.Object);
+        command.Parameters["$pncpId"].Value = SearchText.Sanitize(contract.PncpId);
+        command.Parameters["$cnpj"].Value = SearchText.Sanitize(contract.Cnpj);
         command.Parameters["$year"].Value = contract.PurchaseYear;
         command.Parameters["$sequence"].Value = contract.PurchaseSequence;
-        command.Parameters["$object"].Value = contract.Object;
-        command.Parameters["$additional"].Value = contract.AdditionalInformation;
-        command.Parameters["$process"].Value = contract.Process;
-        command.Parameters["$organization"].Value = contract.Organization;
-        command.Parameters["$unit"].Value = contract.Unit;
-        command.Parameters["$municipality"].Value = contract.Municipality;
-        // New records are associated only by the code supplied by PNCP. Name/UF
-        // matching is deliberately confined to the one-time legacy migration.
-        command.Parameters["$municipalityIbge"].Value = DbValue(contract.MunicipalityIbgeCode);
-        command.Parameters["$uf"].Value = contract.Uf;
+        command.Parameters["$object"].Value = contractObject;
+        command.Parameters["$additional"].Value = SearchText.Sanitize(contract.AdditionalInformation);
+        command.Parameters["$process"].Value = SearchText.Sanitize(contract.Process);
+        command.Parameters["$organization"].Value = SearchText.Sanitize(contract.Organization);
+        command.Parameters["$unit"].Value = SearchText.Sanitize(contract.Unit);
+        command.Parameters["$municipality"].Value = SearchText.Sanitize(contract.Municipality);
+        // Prefer the official code. The national catalog also accepts normalized
+        // municipality/UF as a fallback for older PNCP rows that omitted it.
+        command.Parameters["$municipalityIbge"].Value = DbValue(contract.MunicipalityIbgeCode is null
+            ? null
+            : SearchText.Sanitize(contract.MunicipalityIbgeCode));
+        command.Parameters["$uf"].Value = SearchText.Sanitize(contract.Uf);
         command.Parameters["$modalityId"].Value = contract.ModalityId;
-        command.Parameters["$modalityName"].Value = contract.ModalityName;
-        command.Parameters["$status"].Value = contract.Status;
+        command.Parameters["$modalityName"].Value = SearchText.Sanitize(contract.ModalityName);
+        command.Parameters["$status"].Value = SearchText.Sanitize(contract.Status);
         command.Parameters["$publication"].Value = DbValue(contract.PublicationDate);
         command.Parameters["$globalUpdated"].Value = DbValue(contract.GlobalUpdatedAt);
         command.Parameters["$totalHomologated"].Value = DbValue(contract.TotalHomologatedScaled);
-        command.Parameters["$searchText"].Value = SearchText.Normalize(contract.Object);
+        command.Parameters["$searchText"].Value = SearchText.Normalize(contractObject);
+        var geography = ResolveGeography(contract.MunicipalityIbgeCode, contract.Municipality, contract.Uf);
+        command.Parameters["$distance"].Value = DbValue(geography.Distance);
+        command.Parameters["$distanceRank"].Value = DbValue(geography.DistanceRank);
+        command.Parameters["$stateRank"].Value = DbValue(geography.StateRank);
+        command.Parameters["$geoLayer"].Value = geography.Layer;
+        command.Parameters["$randomOrderKey"].Value = StableRandomOrderKey(contract.PncpId);
     }
 
     private static ContractRecord ReadContract(SqliteDataReader reader) => new()
@@ -1375,9 +1597,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         PublicationDate = ParseDateTime(reader, 15),
         GlobalUpdatedAt = ParseDateTime(reader, 16),
         TotalHomologatedScaled = ReadNullableLong(reader, 17),
-        DistanceFromRibeiraoKilometers = reader.IsDBNull(10)
-            ? null
-            : GetNearbyDistance(reader.GetString(10))
+        DistanceFromRibeiraoKilometers = reader.FieldCount > 18 && !reader.IsDBNull(18)
+            ? reader.GetDouble(18)
+            : reader.IsDBNull(10) ? null : GetNearbyDistance(reader.GetString(10))
     };
 
     private static ProcurementItem ReadItem(SqliteDataReader reader) => new()
@@ -1386,11 +1608,19 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         ItemNumber = reader.GetInt64(1),
         Description = reader.GetString(2),
         Unit = reader.GetString(3),
-        Status = reader.GetString(4),
-        HasResult = reader.GetInt64(5) == 1,
-        UpdatedAt = ParseDateTime(reader, 6),
-        HydrationStatus = (ItemHydrationStatus)reader.GetInt32(7),
-        LastError = reader.IsDBNull(8) ? null : reader.GetString(8)
+        RequestedQuantityScaled = ReadNullableLong(reader, 4),
+        AdditionalInformation = reader.GetString(5),
+        Category = reader.GetString(6),
+        NcmNbsCode = reader.GetString(7),
+        NcmNbsDescription = reader.GetString(8),
+        CatalogCode = reader.GetString(9),
+        CatalogName = reader.GetString(10),
+        CatalogCategory = reader.GetString(11),
+        Status = reader.GetString(12),
+        HasResult = reader.GetInt64(13) == 1,
+        UpdatedAt = ParseDateTime(reader, 14),
+        HydrationStatus = (ItemHydrationStatus)reader.GetInt32(15),
+        LastError = reader.IsDBNull(16) ? null : reader.GetString(16)
     };
 
     private static HomologationResult ReadResult(SqliteDataReader reader) => new()
@@ -1400,12 +1630,15 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         ResultSequence = reader.GetInt64(2),
         SupplierTaxId = reader.GetString(3),
         SupplierName = reader.GetString(4),
-        HomologatedQuantityScaled = ReadNullableLong(reader, 5),
-        HomologatedUnitValueScaled = ReadNullableLong(reader, 6),
-        HomologatedTotalValueScaled = ReadNullableLong(reader, 7),
-        ResultDate = ParseDate(reader, 8),
-        ResultStatusId = reader.GetInt32(9),
-        ResultStatusName = reader.GetString(10)
+        SupplierType = reader.GetString(5),
+        SupplierMunicipality = reader.GetString(6),
+        SupplierUf = reader.GetString(7),
+        HomologatedQuantityScaled = ReadNullableLong(reader, 8),
+        HomologatedUnitValueScaled = ReadNullableLong(reader, 9),
+        HomologatedTotalValueScaled = ReadNullableLong(reader, 10),
+        ResultDate = ParseDate(reader, 11),
+        ResultStatusId = reader.GetInt32(12),
+        ResultStatusName = reader.GetString(13)
     };
 
     private static string GetDisplayStatus(bool hasResult, ItemHydrationStatus hydration, bool hasStoredResult, int resultStatusId)
@@ -1461,9 +1694,41 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         reader.IsDBNull(ordinal) ? null : reader.GetInt64(ordinal);
 
     private static double? GetNearbyDistance(string ibgeCode) =>
-        NearbyRibeiraoCatalog.TryGetByIbgeCode(ibgeCode, out var municipality)
+        BrazilMunicipalityCatalog.TryResolve(ibgeCode, null, null, out var municipality)
             ? municipality.DistanceFromRibeiraoKilometers
             : null;
+
+    private static GeographicMetadata ResolveGeography(string? ibgeCode, string? name, string? uf)
+    {
+        var stateRank = GeographicValue(BrazilMunicipalityCatalog.GetStateProximityRank(uf));
+        if (!BrazilMunicipalityCatalog.TryResolve(ibgeCode, name, uf, out var municipality))
+        {
+            return new GeographicMetadata(null, null, stateRank, 1);
+        }
+
+        var distanceRank = BrazilMunicipalityCatalog.GetDistanceRank(municipality.IbgeCode);
+        return new GeographicMetadata(
+            municipality.DistanceFromRibeiraoKilometers,
+            GeographicValue(distanceRank),
+            stateRank,
+            distanceRank < 50 ? 0 : 1);
+    }
+
+    private static int? GeographicValue(int value) => value == int.MaxValue ? null : value;
+
+    private static long StableRandomOrderKey(string? value)
+    {
+        const ulong offsetBasis = 14695981039346656037UL;
+        const ulong prime = 1099511628211UL;
+        var hash = offsetBasis;
+        foreach (var octet in System.Text.Encoding.UTF8.GetBytes(value ?? string.Empty))
+        {
+            hash ^= octet;
+            hash *= prime;
+        }
+
+        return (long)(hash & long.MaxValue);
+    }
 
     private static string FormatDate(DateOnly date) =>
         date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
@@ -1769,6 +2034,12 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         DateTimeOffset? UpdatedAt,
         string? LastError);
 
+    private sealed record GeographicMetadata(
+        double? Distance,
+        int? DistanceRank,
+        int? StateRank,
+        int Layer);
+
     private sealed record LegacyPartition(
         string PartitionKey,
         SyncMode Mode,
@@ -1784,10 +2055,13 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         INSERT INTO contracts(
             pncp_id, cnpj, purchase_year, purchase_sequence, object, additional_information,
             process, organization, unit, municipality, municipality_ibge_code, uf, modality_id, modality_name, status,
-            publication_date, global_updated_at, total_homologated_scaled, search_text)
+            publication_date, global_updated_at, total_homologated_scaled, search_text,
+            distance_from_ribeirao_km, municipality_distance_rank, state_proximity_rank,
+            geo_layer, random_order_key)
         VALUES($pncpId, $cnpj, $year, $sequence, $object, $additional, $process, $organization,
                $unit, $municipality, $municipalityIbge, $uf, $modalityId, $modalityName, $status, $publication,
-               $globalUpdated, $totalHomologated, $searchText)
+               $globalUpdated, $totalHomologated, $searchText, $distance, $distanceRank,
+               $stateRank, $geoLayer, $randomOrderKey)
         ON CONFLICT(pncp_id) DO UPDATE SET
             cnpj = excluded.cnpj,
             purchase_year = excluded.purchase_year,
@@ -1806,7 +2080,12 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             publication_date = excluded.publication_date,
             global_updated_at = excluded.global_updated_at,
             total_homologated_scaled = excluded.total_homologated_scaled,
-            search_text = excluded.search_text;
+            search_text = excluded.search_text,
+            distance_from_ribeirao_km = excluded.distance_from_ribeirao_km,
+            municipality_distance_rank = excluded.municipality_distance_rank,
+            state_proximity_rank = excluded.state_proximity_rank,
+            geo_layer = excluded.geo_layer,
+            random_order_key = excluded.random_order_key;
         """;
 
     private const string SchemaSql = """
@@ -2003,5 +2282,128 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         ALTER TABLE sync_partitions ADD COLUMN status INTEGER;
         ALTER TABLE sync_partitions ADD COLUMN last_error TEXT;
         ALTER TABLE sync_partitions ADD COLUMN next_retry_at TEXT;
+        """;
+
+    private const string SchemaV4Sql = """
+        CREATE TABLE IF NOT EXISTS item_results(
+            contract_id TEXT NOT NULL,
+            item_number INTEGER NOT NULL,
+            result_sequence INTEGER NOT NULL,
+            supplier_tax_id TEXT NOT NULL DEFAULT '',
+            supplier_name TEXT NOT NULL DEFAULT '',
+            quantity_scaled INTEGER,
+            unit_value_scaled INTEGER,
+            total_value_scaled INTEGER,
+            result_date TEXT,
+            result_status_id INTEGER NOT NULL DEFAULT 0,
+            result_status_name TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(contract_id, item_number, result_sequence),
+            FOREIGN KEY(contract_id, item_number) REFERENCES items(contract_id, item_number) ON DELETE CASCADE
+        );
+
+        ALTER TABLE items ADD COLUMN requested_quantity_scaled INTEGER;
+        ALTER TABLE items ADD COLUMN additional_information TEXT NOT NULL DEFAULT '';
+        ALTER TABLE items ADD COLUMN item_category TEXT NOT NULL DEFAULT '';
+        ALTER TABLE items ADD COLUMN ncm_nbs_code TEXT NOT NULL DEFAULT '';
+        ALTER TABLE items ADD COLUMN ncm_nbs_description TEXT NOT NULL DEFAULT '';
+        ALTER TABLE items ADD COLUMN catalog_code TEXT NOT NULL DEFAULT '';
+        ALTER TABLE items ADD COLUMN catalog_name TEXT NOT NULL DEFAULT '';
+        ALTER TABLE items ADD COLUMN catalog_category TEXT NOT NULL DEFAULT '';
+
+        ALTER TABLE item_results ADD COLUMN supplier_type TEXT NOT NULL DEFAULT '';
+        ALTER TABLE item_results ADD COLUMN supplier_municipality TEXT NOT NULL DEFAULT '';
+        ALTER TABLE item_results ADD COLUMN supplier_uf TEXT NOT NULL DEFAULT '';
+
+        CREATE TABLE quotation_projects(
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE quotation_lines(
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES quotation_projects(id) ON DELETE CASCADE,
+            description TEXT NOT NULL,
+            requested_quantity_scaled INTEGER NOT NULL,
+            requested_unit TEXT NOT NULL,
+            minimum_unit_price_scaled INTEGER,
+            maximum_unit_price_scaled INTEGER,
+            sample_version INTEGER NOT NULL DEFAULT 1,
+            sampled_at TEXT NOT NULL,
+            selected_basket_key TEXT,
+            selection_confirmed INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX idx_quotation_lines_project ON quotation_lines(project_id, sampled_at);
+
+        CREATE TABLE quotation_references(
+            id TEXT NOT NULL,
+            line_id TEXT NOT NULL REFERENCES quotation_lines(id) ON DELETE CASCADE,
+            contract_id TEXT NOT NULL,
+            item_number INTEGER NOT NULL,
+            result_sequence INTEGER NOT NULL,
+            supplier_name TEXT NOT NULL,
+            supplier_tax_id TEXT NOT NULL,
+            supplier_type TEXT NOT NULL,
+            homologated_quantity_scaled INTEGER,
+            unit_price_scaled INTEGER NOT NULL,
+            result_date TEXT,
+            item_description TEXT NOT NULL,
+            item_additional_information TEXT NOT NULL,
+            item_unit TEXT NOT NULL,
+            item_requested_quantity_scaled INTEGER,
+            item_category TEXT NOT NULL,
+            ncm_nbs_code TEXT NOT NULL,
+            ncm_nbs_description TEXT NOT NULL,
+            catalog_code TEXT NOT NULL,
+            catalog_name TEXT NOT NULL,
+            catalog_category TEXT NOT NULL,
+            organization TEXT NOT NULL,
+            municipality TEXT NOT NULL,
+            uf TEXT NOT NULL,
+            distance_ribeirao_km REAL,
+            publication_date TEXT,
+            portal_url TEXT NOT NULL,
+            description_score_scaled INTEGER NOT NULL,
+            unit_score_scaled INTEGER NOT NULL,
+            quantity_score_scaled INTEGER NOT NULL,
+            proximity_score_scaled INTEGER NOT NULL,
+            recency_score_scaled INTEGER NOT NULL,
+            explanation TEXT NOT NULL,
+            state INTEGER NOT NULL,
+            state_reason TEXT NOT NULL,
+            duplicate_of_reference_id TEXT,
+            PRIMARY KEY(line_id, id)
+        );
+
+        CREATE INDEX idx_quotation_references_line_state
+            ON quotation_references(line_id, state, unit_price_scaled);
+        """;
+
+    private const string SchemaV5Sql = """
+        ALTER TABLE quotation_lines ADD COLUMN description_weight INTEGER NOT NULL DEFAULT 50;
+        ALTER TABLE quotation_lines ADD COLUMN unit_weight INTEGER NOT NULL DEFAULT 20;
+        ALTER TABLE quotation_lines ADD COLUMN quantity_weight INTEGER NOT NULL DEFAULT 10;
+        ALTER TABLE quotation_lines ADD COLUMN proximity_weight INTEGER NOT NULL DEFAULT 15;
+        ALTER TABLE quotation_lines ADD COLUMN recency_weight INTEGER NOT NULL DEFAULT 5;
+        """;
+
+    private const string SchemaV6Sql = """
+        ALTER TABLE contracts ADD COLUMN distance_from_ribeirao_km REAL;
+        ALTER TABLE contracts ADD COLUMN municipality_distance_rank INTEGER;
+        ALTER TABLE contracts ADD COLUMN state_proximity_rank INTEGER;
+        ALTER TABLE contracts ADD COLUMN geo_layer INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE contracts ADD COLUMN random_order_key INTEGER NOT NULL DEFAULT 0;
+
+        UPDATE contracts
+           SET distance_from_ribeirao_km = pncp_geo_distance(municipality_ibge_code, municipality, uf),
+               municipality_distance_rank = pncp_geo_distance_rank(municipality_ibge_code, municipality, uf),
+               state_proximity_rank = pncp_state_rank(uf),
+               geo_layer = pncp_geo_layer(municipality_ibge_code, municipality, uf),
+               random_order_key = pncp_random_key(pncp_id);
+
+        CREATE INDEX idx_contracts_geographic_sample
+            ON contracts(geo_layer, state_proximity_rank, municipality_distance_rank, random_order_key, pncp_id);
         """;
 }

@@ -8,7 +8,7 @@
     <RootNamespace>PNCPKing.App</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="../PNCPKing.Core/PNCPKing.Core.csproj" />
-    <ProjectReference Include="../PNCPKing.Infrastructure/PNCPKing.Infrastructure.csproj" />
+    <ProjectReference Include="../PNCPKing.Infrastructure/PNCPKing.Infrastructure.csproj"
+                      SkipGetTargetFrameworkProperties="true" />
   </ItemGroup>
 </Project>

@@ -384,7 +384,7 @@ public sealed class ItemSearchSessionTests
     }
 
     [Fact]
-    public async Task RepositoryCandidateSource_LoadsTheNextTwoHundredContractPageLazily()
+    public async Task RepositoryCandidateSource_ContinuesByCursorAndCapsFreshListsPerAction()
     {
         await using var database = await TestDatabase.CreateAsync();
         var contracts = Enumerable.Range(1, 200)
@@ -408,12 +408,25 @@ public sealed class ItemSearchSessionTests
             Path.Combine(database.Directory, "paged.db"));
         var session = await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
 
-        var page = await service.LoadPageAsync(1);
+        ItemSearchPage? page = null;
+        for (var action = 1; action <= 5; action++)
+        {
+            var before = client.ItemListCalls;
+            page = await service.LoadPageAsync(action);
+            Assert.InRange(client.ItemListCalls - before, 0, ItemSearchSessionService.MaximumFreshItemListsPerAction);
+            if (page.Rows.Count > 0)
+            {
+                break;
+            }
+
+            Assert.True(page.ItemListBudgetExhausted);
+        }
 
         Assert.Equal(201, session.CandidateContractCount);
+        Assert.NotNull(page);
         Assert.Single(page.Rows);
         Assert.Equal("last", page.Rows[0].Contract.PncpId);
-        Assert.Equal(201, client.ItemListCalls);
+        Assert.InRange(client.ItemListCalls, 1, 201);
     }
 
     private static ProcurementItem Item(string contractId, long number, string description, bool hasResult) => new()

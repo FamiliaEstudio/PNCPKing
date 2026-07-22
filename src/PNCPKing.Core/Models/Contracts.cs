@@ -73,3 +73,19 @@ public sealed record SearchPage(
     long Total,
     int Page,
     int PageSize);
+
+public sealed record ItemCandidateCursor(
+    int GeographicLayer,
+    int GroupRank,
+    int RotationBand,
+    long RandomOrderKey,
+    string PncpId);
+
+public sealed record ItemContractCandidate(
+    ContractRecord Contract,
+    ItemCandidateCursor Cursor);
+
+public sealed record ItemCandidatePage(
+    IReadOnlyList<ItemContractCandidate> Results,
+    ItemCandidateCursor? NextCursor,
+    bool HasMore);

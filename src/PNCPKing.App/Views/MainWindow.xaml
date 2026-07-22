@@ -148,30 +148,14 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <TextBox Text="{Binding QueryText, UpdateSourceTrigger=PropertyChanged}"
-                     ToolTip="Primeiro pesquisa o objeto; depois mantém somente os itens com a mesma expressão."
+                     ToolTip="Sintaxe: café filtro ou café + filtro (E); café OU chá ou café | chá (OU); &quot;café torrado&quot; (frase); -cafeteira e -&quot;filtro de papel&quot; (exclusões)."
                      VerticalContentAlignment="Center" FontSize="15" />
             <ComboBox Grid.Column="1" ItemsSource="{Binding GeoFilters}"
                       SelectedItem="{Binding SelectedGeoFilter}" />
             <ComboBox Grid.Column="2" ItemsSource="{Binding DateRanges}"
                       SelectedItem="{Binding SelectedDateRange}" />
             <ComboBox Grid.Column="3" ItemsSource="{Binding SortOptions}"
-                      SelectedItem="{Binding SelectedSortOption}">
-                <ComboBox.ItemContainerStyle>
-                    <Style TargetType="ComboBoxItem">
-                        <Setter Property="IsEnabled" Value="True" />
-                        <Style.Triggers>
-                            <MultiDataTrigger>
-                                <MultiDataTrigger.Conditions>
-                                    <Condition Binding="{Binding Value}" Value="{x:Static models:SearchSort.Nearest}" />
-                                    <Condition Binding="{Binding DataContext.CanSortByNearest, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}"
-                                               Value="False" />
-                                </MultiDataTrigger.Conditions>
-                                <Setter Property="IsEnabled" Value="False" />
-                            </MultiDataTrigger>
-                        </Style.Triggers>
-                    </Style>
-                </ComboBox.ItemContainerStyle>
-            </ComboBox>
+                      SelectedItem="{Binding SelectedSortOption}" />
             <DatePicker Grid.Column="4" SelectedDate="{Binding CustomStartDate}"
                         IsEnabled="{Binding IsCustomDateRange}" ToolTip="Data inicial" />
             <DatePicker Grid.Column="5" SelectedDate="{Binding CustomEndDate}"
@@ -220,7 +204,6 @@
                     </Grid.RowDefinitions>
                     <DataGrid x:Name="ItemResultsGrid" ItemsSource="{Binding ItemSearchRows}"
                               SelectedItem="{Binding SelectedItemSearchRow}"
-                              LoadingRow="ItemResultsGrid_LoadingRow"
                               AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
                               EnableRowVirtualization="True" EnableColumnVirtualization="True">
                         <DataGrid.RowStyle>
@@ -265,7 +248,9 @@
                         <TextBlock Text="{Binding CurrentItemPage, StringFormat=Página de itens carregada: {0}}"
                                    VerticalAlignment="Center" />
                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
-                            <Button Content="Carregar próximos 50" Command="{Binding LoadNextItemPageCommand}" />
+                            <Button Content="Usar esta amostra em uma cotação"
+                                    Command="{Binding UseQuotationSampleCommand}" />
+                            <Button Content="Continuar busca (até 50 listas)" Command="{Binding LoadNextItemPageCommand}" />
                             <Button Content="Abrir contratação no PNCP" Command="{Binding OpenPncpCommand}"
                                     CommandParameter="{Binding SelectedItemSearchRow.Contract}" />
                         </StackPanel>
@@ -341,6 +326,155 @@
                                 <DataGridTextColumn Header="Data" Binding="{Binding ResultDate, StringFormat=dd/MM/yyyy}" Width="90" />
                             </DataGrid.Columns>
                         </DataGrid>
+                    </Grid>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="Cotações">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <DockPanel Margin="0,0,0,6">
+                        <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+                            <TextBlock Text="Projeto:" VerticalAlignment="Center" Margin="0,0,5,0" />
+                            <ComboBox Width="260" ItemsSource="{Binding QuotationProjects}"
+                                      SelectedItem="{Binding SelectedQuotationProject}" />
+                            <Button Content="Atualizar amostra com a pesquisa atual"
+                                    Command="{Binding UpdateQuotationSampleCommand}" />
+                            <Button Content="Ajustar pesos do índice"
+                                    Command="{Binding AdjustQuotationWeightsCommand}" />
+                            <Button Content="Exportar Excel" Command="{Binding ExportQuotationCommand}" />
+                        </StackPanel>
+                        <TextBlock Text="{Binding QuotationSummary}" VerticalAlignment="Center"
+                                   HorizontalAlignment="Right" TextTrimming="CharacterEllipsis" />
+                    </DockPanel>
+
+                    <Grid Grid.Row="1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="38*" />
+                            <ColumnDefinition Width="8" />
+                            <ColumnDefinition Width="62*" />
+                        </Grid.ColumnDefinitions>
+                        <DataGrid ItemsSource="{Binding QuotationLines}"
+                                  SelectedItem="{Binding SelectedQuotationLine}"
+                                  AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
+                                  EnableRowVirtualization="True">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Descrição" Binding="{Binding Description}" Width="*" MinWidth="180" />
+                                <DataGridTextColumn Header="Qtd." Binding="{Binding RequestedQuantity, StringFormat=N4}" Width="72" />
+                                <DataGridTextColumn Header="Unidade" Binding="{Binding RequestedUnit}" Width="75" />
+                                <DataGridTextColumn Header="Amostra" Binding="{Binding CollectedCount}" Width="66" />
+                                <DataGridTextColumn Header="Elegíveis" Binding="{Binding EligibleCount}" Width="66" />
+                                <DataGridTextColumn Header="Duplicados" Binding="{Binding DuplicateCount}" Width="72" />
+                                <DataGridTextColumn Header="Descartados" Binding="{Binding RejectedCount}" Width="75" />
+                                <DataGridTextColumn Header="Cestas" Binding="{Binding BasketCount}" Width="62" />
+                                <DataGridTextColumn Header="Versão" Binding="{Binding SampleVersion}" Width="58" />
+                                <DataGridTextColumn Header="Amostra em" Binding="{Binding SampledAt, StringFormat=dd/MM/yyyy HH:mm}" Width="122" />
+                                <DataGridTextColumn Header="Pesos do índice" Binding="{Binding WeightSummary}" Width="330" />
+                                <DataGridTextColumn Header="Situação" Binding="{Binding Status}" Width="135" />
+                                <DataGridTextColumn Header="Média escolhida/anterior" Binding="{Binding SelectedAveragePrice, StringFormat=C4}" Width="145" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+
+                        <GridSplitter Grid.Column="1" Width="8" HorizontalAlignment="Stretch" Background="#DDD" />
+
+                        <TabControl Grid.Column="2">
+                            <TabItem Header="Cestas válidas">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="*" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="145" />
+                                    </Grid.RowDefinitions>
+                                    <DataGrid ItemsSource="{Binding QuotationBaskets}"
+                                              SelectedItem="{Binding SelectedQuotationBasket}"
+                                              AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
+                                              EnableRowVirtualization="True">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Classificação" Binding="{Binding Tags}" Width="150" />
+                                            <DataGridTextColumn Header="Média" Binding="{Binding AveragePrice, StringFormat=C4}" Width="105" />
+                                            <DataGridTextColumn Header="Menor" Binding="{Binding MinimumPrice, StringFormat=C4}" Width="100" />
+                                            <DataGridTextColumn Header="Maior" Binding="{Binding MaximumPrice, StringFormat=C4}" Width="100" />
+                                            <DataGridTextColumn Header="Desvio máx." Binding="{Binding MaximumDeviationPercent, StringFormat={}{0:N2}%}" Width="92" />
+                                            <DataGridTextColumn Header="Índice" Binding="{Binding Score, StringFormat=N2}" Width="75" />
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                    <DockPanel Grid.Row="1" Margin="0,5">
+                                        <TextBlock Text="{Binding QuotationBasketPageSummary}" VerticalAlignment="Center" />
+                                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                            <Button Content="Página anterior" Command="{Binding PreviousQuotationBasketPageCommand}" />
+                                            <Button Content="Próxima página" Command="{Binding NextQuotationBasketPageCommand}" />
+                                            <Button Content="Confirmar cesta escolhida" Command="{Binding ConfirmQuotationBasketCommand}" />
+                                        </StackPanel>
+                                    </DockPanel>
+                                    <DataGrid Grid.Row="2" ItemsSource="{Binding SelectedBasketReferences}"
+                                              AutoGenerateColumns="False" IsReadOnly="True">
+                                        <DataGrid.Columns>
+                                            <DataGridTemplateColumn Header="Ação" Width="95">
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <Button Content="Abrir PNCP"
+                                                                Command="{Binding DataContext.OpenQuotationReferenceCommand, RelativeSource={RelativeSource AncestorType={x:Type DataGrid}}}"
+                                                                CommandParameter="{Binding}" />
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+                                            <DataGridTextColumn Header="Empresa" Binding="{Binding SupplierName}" Width="*" MinWidth="150" />
+                                            <DataGridTextColumn Header="CNPJ" Binding="{Binding SupplierTaxId}" Width="135" />
+                                            <DataGridTextColumn Header="Preço" Binding="{Binding UnitPrice, StringFormat=C4}" Width="105" />
+                                            <DataGridTextColumn Header="Descrição encontrada" Binding="{Binding ItemDescription}" Width="2*" MinWidth="180" />
+                                            <DataGridTextColumn Header="Unidade" Binding="{Binding ItemUnit}" Width="78" />
+                                            <DataGridTextColumn Header="Qtd. homologada" Binding="{Binding HomologatedQuantity, StringFormat=N4}" Width="110" />
+                                            <DataGridTextColumn Header="Município/UF" Binding="{Binding MunicipalityRegion}" Width="125" />
+                                            <DataGridTextColumn Header="Índice" Binding="{Binding AdequacyTotal, StringFormat=N2}" Width="70" />
+                                            <DataGridTextColumn Header="Descrição" Binding="{Binding DescriptionScore, StringFormat=N2}" Width="72" />
+                                            <DataGridTextColumn Header="Unid./emb." Binding="{Binding UnitScore, StringFormat=N2}" Width="72" />
+                                            <DataGridTextColumn Header="Quantidade" Binding="{Binding QuantityScore, StringFormat=N2}" Width="76" />
+                                            <DataGridTextColumn Header="Proximidade" Binding="{Binding ProximityScore, StringFormat=N2}" Width="80" />
+                                            <DataGridTextColumn Header="Atualidade" Binding="{Binding RecencyScore, StringFormat=N2}" Width="72" />
+                                            <DataGridTextColumn Header="Como corresponde" Binding="{Binding Explanation}" Width="3*" MinWidth="320" />
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                </Grid>
+                            </TabItem>
+
+                            <TabItem Header="Referências e auditoria">
+                                <DataGrid ItemsSource="{Binding QuotationReferences}"
+                                          AutoGenerateColumns="False" IsReadOnly="True"
+                                          EnableRowVirtualization="True" EnableColumnVirtualization="True">
+                                    <DataGrid.Columns>
+                                        <DataGridTemplateColumn Header="Ação" Width="95">
+                                            <DataGridTemplateColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <Button Content="Abrir PNCP"
+                                                            Command="{Binding DataContext.OpenQuotationReferenceCommand, RelativeSource={RelativeSource AncestorType={x:Type DataGrid}}}"
+                                                            CommandParameter="{Binding}" />
+                                                </DataTemplate>
+                                            </DataGridTemplateColumn.CellTemplate>
+                                        </DataGridTemplateColumn>
+                                        <DataGridTextColumn Header="Estado" Binding="{Binding State}" Width="85" />
+                                        <DataGridTextColumn Header="Empresa" Binding="{Binding SupplierName}" Width="170" />
+                                        <DataGridTextColumn Header="CNPJ" Binding="{Binding SupplierTaxId}" Width="135" />
+                                        <DataGridTextColumn Header="Preço" Binding="{Binding UnitPrice, StringFormat=C4}" Width="105" />
+                                        <DataGridTextColumn Header="Descrição encontrada" Binding="{Binding ItemDescription}" Width="2*" MinWidth="220" />
+                                        <DataGridTextColumn Header="Unidade" Binding="{Binding ItemUnit}" Width="80" />
+                                        <DataGridTextColumn Header="Qtd. homologada" Binding="{Binding HomologatedQuantity, StringFormat=N4}" Width="115" />
+                                        <DataGridTextColumn Header="Município" Binding="{Binding Municipality}" Width="130" />
+                                        <DataGridTextColumn Header="UF" Binding="{Binding Uf}" Width="40" />
+                                        <DataGridTextColumn Header="Data" Binding="{Binding ResultDate, StringFormat=dd/MM/yyyy}" Width="90" />
+                                        <DataGridTextColumn Header="Índice" Binding="{Binding AdequacyTotal, StringFormat=N2}" Width="70" />
+                                        <DataGridTextColumn Header="Descrição" Binding="{Binding DescriptionScore, StringFormat=N2}" Width="75" />
+                                        <DataGridTextColumn Header="Unidade" Binding="{Binding UnitScore, StringFormat=N2}" Width="68" />
+                                        <DataGridTextColumn Header="Quantidade" Binding="{Binding QuantityScore, StringFormat=N2}" Width="78" />
+                                        <DataGridTextColumn Header="Proximidade" Binding="{Binding ProximityScore, StringFormat=N2}" Width="82" />
+                                        <DataGridTextColumn Header="Atualidade" Binding="{Binding RecencyScore, StringFormat=N2}" Width="72" />
+                                        <DataGridTextColumn Header="Explicação" Binding="{Binding Explanation}" Width="3*" MinWidth="350" />
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </TabItem>
+                        </TabControl>
                     </Grid>
                 </Grid>
             </TabItem>

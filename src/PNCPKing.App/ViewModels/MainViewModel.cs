@@ -14,7 +14,7 @@ using PNCPKing.Infrastructure.Services;
 
 namespace PNCPKing.App.ViewModels;
 
-public sealed class MainViewModel : ObservableObject, IAsyncDisposable
+public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 {
     private const int ContractPageSize = 20;
     private const int ItemPageSize = 50;
@@ -78,6 +78,8 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
         ItemHydrationService hydrationService,
         ItemSearchSessionService itemSearchService,
         BackupService backupService,
+        QuotationService quotationService,
+        IQuotationWorkbookService quotationWorkbookService,
         IPncpRequestTelemetry telemetry,
         string dataFolder)
     {
@@ -88,6 +90,7 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
         _hydrationService = hydrationService;
         _itemSearchService = itemSearchService;
         _backupService = backupService;
+        InitializeQuotation(quotationService, quotationWorkbookService);
         _telemetry = telemetry;
         _dataFolder = dataFolder;
 
@@ -98,7 +101,7 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
             new SearchSortOption("Mais recentes", SearchSort.Newest),
             new SearchSortOption("Mais próximas", SearchSort.Nearest)
         ];
-        _selectedSortOption = SortOptions[0];
+        _selectedSortOption = SortOptions[2];
         DateRanges =
         [
             new DateRangeOption("Últimos 7 dias", 7),
@@ -188,38 +191,13 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
     public SearchGeoFilter SelectedGeoFilter
     {
         get => _selectedGeoFilter;
-        set
-        {
-            if (!SetProperty(ref _selectedGeoFilter, value))
-            {
-                return;
-            }
-
-            if (value.Kind == SearchGeoFilterKind.NearRibeirao && SelectedSortOption.Value == SearchSort.Relevance)
-            {
-                SelectedSortOption = SortOptions.Single(option => option.Value == SearchSort.Nearest);
-            }
-            else if (value.Kind != SearchGeoFilterKind.NearRibeirao && SelectedSortOption.Value == SearchSort.Nearest)
-            {
-                SelectedSortOption = SortOptions.Single(option => option.Value == SearchSort.Relevance);
-            }
-
-            OnPropertyChanged(nameof(CanSortByNearest));
-        }
+        set => SetProperty(ref _selectedGeoFilter, value);
     }
 
     public SearchSortOption SelectedSortOption
     {
         get => _selectedSortOption;
-        set
-        {
-            if (value.Value == SearchSort.Nearest && !CanSortByNearest)
-            {
-                return;
-            }
-
-            SetProperty(ref _selectedSortOption, value);
-        }
+        set => SetProperty(ref _selectedSortOption, value);
     }
 
     public DateRangeOption SelectedDateRange
@@ -247,7 +225,7 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
     }
 
     public bool IsCustomDateRange => SelectedDateRange.IsCustom;
-    public bool CanSortByNearest => SelectedGeoFilter.Kind == SearchGeoFilterKind.NearRibeirao;
+    public bool CanSortByNearest => true;
 
     public string MinimumPriceText
     {
@@ -491,6 +469,7 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
 
     public async Task InitializeAsync()
     {
+        await RefreshQuotationProjectsAsync().ConfigureAwait(true);
         await RefreshDatasetSummaryAsync().ConfigureAwait(true);
         await RefreshCoverageAsync().ConfigureAwait(true);
         await SearchAsync(resetSession: false).ConfigureAwait(true);
@@ -521,9 +500,7 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
         try
         {
             var (startDate, endDate) = ResolveDateRange();
-            var sort = SelectedSortOption.Value == SearchSort.Nearest && !CanSortByNearest
-                ? SearchSort.Relevance
-                : SelectedSortOption.Value;
+            var sort = SelectedSortOption.Value;
             _activeSearchQuery = new SearchQuery(
                 QueryText.Trim(),
                 SelectedGeoFilter,
@@ -565,12 +542,13 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
                 _priceCancellation.Token).ConfigureAwait(true);
             SetItemSearchActive(true);
             NotifyCommands();
-            ItemSearchSummary = "Procurando o texto dentro dos itens e preparando os primeiros 50 preços…";
+            ItemSearchSummary = "Camada inicial: 50 municípios próximos. Consultando no máximo 50 listas novas nesta ação…";
             _ = LoadItemPageSafelyAsync(1, append: false, _priceCancellation.Token);
         }
         catch (Exception exception)
         {
             StatusText = $"Não foi possível pesquisar: {exception.Message}";
+            ItemSearchSummary = $"Pesquisa rejeitada: {exception.Message}";
         }
     }
 
@@ -655,7 +633,12 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
             HasMoreItemCandidates = result.HasMoreCandidates;
             ItemSearchSummary =
                 $"{result.MatchedItemsDiscovered:N0} item(ns) compatível(is) descoberto(s); " +
-                $"{ItemSearchRows.Count:N0} linha(s) visível(is). {BuildSearchTrafficSummary()}";
+                $"{ItemSearchRows.Count:N0} linha(s); etapa {result.GeographicStage}; " +
+                $"{result.ContractsScanned:N0} contrato(s) examinado(s); " +
+                $"{result.CachedItemListsReused:N0} lista(s) do cache reutilizada(s); " +
+                $"{result.FreshItemListsUsed:N0}/50 lista(s) nova(s) nesta ação" +
+                (result.ItemListBudgetExhausted ? " — limite atingido, use Continuar. " : ". ") +
+                BuildSearchTrafficSummary();
             StatusText = "Pesquisa dentro dos itens atualizada.";
         }
         catch (OperationCanceledException)
@@ -686,7 +669,7 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
                 $"Payload de resultados estimado: {FormatBytes(projection.Bytes)}.\n" +
                 $"Duração estimada com até duas chamadas simultâneas: {FormatDuration(projection.Duration)}.\n" +
                 $"Média usada por resultado: {FormatBytes(projection.AverageBytes)} em {FormatDuration(projection.AverageDuration)}.\n" +
-                "As chamadas para descobrir listas de itens são adicionais e serão medidas durante a execução.\n" +
+                "A descoberta é limitada a 50 listas novas nesta ação; use Continuar para avançar.\n" +
                 "Uma consulta pode retornar zero, um ou vários resultados.",
                 "Confirmar lotes de preços",
                 MessageBoxButton.YesNo,
@@ -717,7 +700,11 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
                 cancellation.Token).ConfigureAwait(true);
             await ReloadAllDiscoveredRowsAsync(cancellation.Token).ConfigureAwait(true);
             HasMoreItemCandidates = !result.CandidateSetExhausted;
-            ItemSearchSummary = $"{result.Message} Falhas: {result.FailedItemCalls:N0}. {BuildSearchTrafficSummary()}";
+            ItemSearchSummary =
+                $"{result.Message} Etapa {result.GeographicStage}; " +
+                $"{result.ContractsScanned:N0} contrato(s) examinado(s); " +
+                $"{result.CachedItemListsReused:N0} lista(s) do cache; falhas: {result.FailedItemCalls:N0}. " +
+                BuildSearchTrafficSummary();
         }
         catch (OperationCanceledException)
         {
@@ -798,7 +785,9 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
     private void UpdateItemSearchProgress(PriceBatchProgress progress)
     {
         ItemSearchSummary =
-            $"{progress.Message} Listas de itens: {progress.ItemListCalls:N0}; " +
+            $"{progress.Message} Etapa {progress.GeographicStage}; contratos: {progress.ContractsScanned:N0}; " +
+            $"cache reutilizado: {progress.CachedItemListsReused:N0}; " +
+            $"listas novas nesta ação: {progress.FreshItemListsUsed:N0}/50; listas da sessão: {progress.ItemListCalls:N0}; " +
             $"falhas: {progress.FailedItemCalls:N0}. {BuildSearchTrafficSummary()}";
     }
 
@@ -1484,7 +1473,11 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
                      LoadNextItemPageCommand, FireBatchesCommand, ApplyPriceFilterCommand,
                      StopItemSearchCommand, CalculatePreflightCommand, StartSyncCommand,
                      PauseSyncCommand, CancelIndexCommand, HydrateCommand, RetryPendingCommand,
-                     OpenPncpCommand, ExportBackupCommand, ImportBackupCommand, ClearCacheCommand
+                     OpenPncpCommand, ExportBackupCommand, ImportBackupCommand, ClearCacheCommand,
+                     UseQuotationSampleCommand, UpdateQuotationSampleCommand,
+                     AdjustQuotationWeightsCommand,
+                     ConfirmQuotationBasketCommand, ExportQuotationCommand,
+                     PreviousQuotationBasketPageCommand, NextQuotationBasketPageCommand
                  })
         {
             switch (command)
@@ -1497,6 +1490,9 @@ public sealed class MainViewModel : ObservableObject, IAsyncDisposable
                     break;
                 case RelayCommand<ContractRecord> contractCommand:
                     contractCommand.NotifyCanExecuteChanged();
+                    break;
+                case RelayCommand<QuotationReferenceDisplay> referenceCommand:
+                    referenceCommand.NotifyCanExecuteChanged();
                     break;
             }
         }

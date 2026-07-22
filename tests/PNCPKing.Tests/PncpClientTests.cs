@@ -185,6 +185,42 @@ public sealed class PncpClientTests
     }
 
     [Fact]
+    public async Task Client_SanitizesUnicodeNoncharactersAtTheApiBoundary()
+    {
+        var handler = new SequenceHandler(_ => Json("""
+            {
+              "data": [{
+                "numeroControlePNCP": "123",
+                "anoCompra": 2026,
+                "sequencialCompra": 1,
+                "objetoCompra": "Aquisição \uFFFE de café",
+                "orgaoEntidade": {
+                  "cnpj": "12345678000100",
+                  "razaoSocial": "Fornecedor \uFFFF"
+                }
+              }],
+              "totalRegistros": 1,
+              "totalPaginas": 1,
+              "numeroPagina": 1
+            }
+            """));
+        var client = CreateClient(handler);
+
+        var page = await client.GetContractsPageAsync(
+            new DateOnly(2026, 5, 7),
+            new DateOnly(2026, 5, 7),
+            6,
+            null,
+            10,
+            50,
+            SyncMode.Publication);
+
+        var contract = Assert.Single(page.Contracts);
+        Assert.Equal("Aquisição � de café", contract.Object);
+        Assert.Equal("Fornecedor �", contract.Organization);
+    }
+
+    [Fact]
     public async Task ItemPagination_LoadsDistinctFullPagesWithoutDuplicatingItems()
     {
         var handler = new SequenceHandler(
