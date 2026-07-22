@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyName>PNCPKing</AssemblyName>
+    <RootNamespace>PNCPKing.App</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../PNCPKing.Core/PNCPKing.Core.csproj" />
+    <ProjectReference Include="../PNCPKing.Infrastructure/PNCPKing.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>

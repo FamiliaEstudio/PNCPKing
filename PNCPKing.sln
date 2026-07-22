@@ -1,0 +1,37 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PNCPKing.Core", "src\PNCPKing.Core\PNCPKing.Core.csproj", "{A9351DBB-DB49-4F63-9C4D-178FF97C3072}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PNCPKing.Infrastructure", "src\PNCPKing.Infrastructure\PNCPKing.Infrastructure.csproj", "{82CD87C1-10F7-4A36-95B1-08453CF21031}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PNCPKing.App", "src\PNCPKing.App\PNCPKing.App.csproj", "{2FE69B42-3848-43BA-B6C4-03E68CFD17CC}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PNCPKing.Tests", "tests\PNCPKing.Tests\PNCPKing.Tests.csproj", "{D9820897-6872-416D-9F49-5D12D2470103}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A9351DBB-DB49-4F63-9C4D-178FF97C3072}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A9351DBB-DB49-4F63-9C4D-178FF97C3072}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A9351DBB-DB49-4F63-9C4D-178FF97C3072}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A9351DBB-DB49-4F63-9C4D-178FF97C3072}.Release|Any CPU.Build.0 = Release|Any CPU
+		{82CD87C1-10F7-4A36-95B1-08453CF21031}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{82CD87C1-10F7-4A36-95B1-08453CF21031}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{82CD87C1-10F7-4A36-95B1-08453CF21031}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{82CD87C1-10F7-4A36-95B1-08453CF21031}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2FE69B42-3848-43BA-B6C4-03E68CFD17CC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2FE69B42-3848-43BA-B6C4-03E68CFD17CC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2FE69B42-3848-43BA-B6C4-03E68CFD17CC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2FE69B42-3848-43BA-B6C4-03E68CFD17CC}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D9820897-6872-416D-9F49-5D12D2470103}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D9820897-6872-416D-9F49-5D12D2470103}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D9820897-6872-416D-9F49-5D12D2470103}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D9820897-6872-416D-9F49-5D12D2470103}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

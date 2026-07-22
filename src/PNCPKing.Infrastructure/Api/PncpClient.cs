@@ -1,0 +1,403 @@
+using System.Diagnostics;
+using System.Globalization;
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using PNCPKing.Core.Interfaces;
+using PNCPKing.Core.Models;
+
+namespace PNCPKing.Infrastructure.Api;
+
+public sealed class PncpClient : IPncpClient
+{
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
+    private readonly HttpClient _httpClient;
+    private readonly Uri _consultationBase;
+    private readonly Uri _integrationBase;
+    private readonly Func<int, TimeSpan> _backoffDelay;
+
+    public PncpClient(
+        HttpClient httpClient,
+        Uri? consultationBase = null,
+        Uri? integrationBase = null,
+        Func<int, TimeSpan>? backoffDelay = null)
+    {
+        _httpClient = httpClient;
+        _consultationBase = consultationBase ?? new Uri("https://pncp.gov.br/api/consulta/");
+        _integrationBase = integrationBase ?? new Uri("https://pncp.gov.br/api/pncp/");
+        _backoffDelay = backoffDelay ?? DefaultBackoffDelay;
+    }
+
+    public async Task<IReadOnlyList<Modality>> GetModalitiesAsync(CancellationToken cancellationToken = default)
+    {
+        var result = await GetJsonAsync<List<ModalityDto>>(
+            new Uri(_integrationBase, "v1/modalidades"),
+            cancellationToken).ConfigureAwait(false);
+
+        return (result.Value ?? [])
+            .Where(item => item.StatusAtivo)
+            .OrderBy(item => item.Id)
+            .Select(item => new Modality(item.Id, item.Nome ?? $"Modalidade {item.Id}", item.StatusAtivo))
+            .ToArray();
+    }
+
+    public async Task<ContractPage> GetContractsPageAsync(
+        DateOnly startDate,
+        DateOnly endDate,
+        long modalityId,
+        string? uf,
+        int page,
+        int pageSize,
+        SyncMode mode,
+        CancellationToken cancellationToken = default)
+    {
+        if (startDate > endDate)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(startDate),
+                $"A data inicial {startDate:dd/MM/yyyy} não pode ser posterior à data final {endDate:dd/MM/yyyy}.");
+        }
+
+        var endpoint = mode == SyncMode.Publication
+            ? "v1/contratacoes/publicacao"
+            : "v1/contratacoes/atualizacao";
+        var query = new StringBuilder()
+            .Append(endpoint)
+            .Append("?dataInicial=").Append(startDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture))
+            .Append("&dataFinal=").Append(endDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture))
+            .Append("&codigoModalidadeContratacao=").Append(modalityId.ToString(CultureInfo.InvariantCulture))
+            .Append("&pagina=").Append(page.ToString(CultureInfo.InvariantCulture))
+            .Append("&tamanhoPagina=").Append(pageSize.ToString(CultureInfo.InvariantCulture));
+
+        if (!string.IsNullOrWhiteSpace(uf))
+        {
+            query.Append("&uf=").Append(Uri.EscapeDataString(uf));
+        }
+
+        var result = await GetJsonAsync<ContractPageDto>(new Uri(_consultationBase, query.ToString()), cancellationToken)
+            .ConfigureAwait(false);
+        var dto = result.Value;
+        if (dto is null)
+        {
+            return new ContractPage([], 0, 0, page, result.PayloadBytes, result.Elapsed);
+        }
+
+        var contracts = (dto.Data ?? [])
+            .Select(MapContract)
+            .Where(item => item is not null)
+            .Cast<ContractRecord>()
+            .ToArray();
+
+        return new ContractPage(
+            contracts,
+            dto.TotalRegistros,
+            dto.TotalPaginas,
+            dto.NumeroPagina == 0 ? page : dto.NumeroPagina,
+            result.PayloadBytes,
+            result.Elapsed);
+    }
+
+    public async Task<int> GetItemCountAsync(ContractRecord contract, CancellationToken cancellationToken = default)
+    {
+        var uri = BuildContractUri(contract, "itens/quantidade");
+        var result = await GetJsonAsync<int?>(uri, cancellationToken).ConfigureAwait(false);
+        return result.Value ?? 0;
+    }
+
+    public async Task<IReadOnlyList<ProcurementItem>> GetItemsAsync(
+        ContractRecord contract,
+        CancellationToken cancellationToken = default)
+    {
+        const int pageSize = 500;
+        var allItems = new Dictionary<long, ProcurementItem>();
+        var itemOrder = new List<long>();
+        for (var page = 1; ; page++)
+        {
+            var uri = BuildContractUri(contract, $"itens?pagina={page}&tamanhoPagina={pageSize}");
+            var result = await GetJsonAsync<List<ItemDto>>(uri, cancellationToken).ConfigureAwait(false);
+            var items = result.Value ?? [];
+            var newItemNumbers = 0;
+            foreach (var item in items)
+            {
+                var mapped = new ProcurementItem
+                {
+                    ContractId = contract.PncpId,
+                    ItemNumber = item.NumeroItem,
+                    Description = item.Descricao ?? string.Empty,
+                    Unit = item.UnidadeMedida ?? string.Empty,
+                    Status = item.SituacaoCompraItemNome ?? string.Empty,
+                    HasResult = item.TemResultado,
+                    UpdatedAt = ParseDateTime(item.DataAtualizacao),
+                    HydrationStatus = item.TemResultado
+                        ? ItemHydrationStatus.NotLoaded
+                        : ItemHydrationStatus.Complete
+                };
+
+                if (!allItems.ContainsKey(mapped.ItemNumber))
+                {
+                    itemOrder.Add(mapped.ItemNumber);
+                    newItemNumbers++;
+                }
+
+                // If PNCP repeats an item across a page boundary, retain the most
+                // recent representation without creating duplicate local keys.
+                allItems[mapped.ItemNumber] = mapped;
+            }
+
+            if (items.Count < pageSize || newItemNumbers == 0)
+            {
+                break;
+            }
+        }
+
+        return itemOrder.Select(number => allItems[number]).ToArray();
+    }
+
+    public async Task<IReadOnlyList<HomologationResult>> GetItemResultsAsync(
+        ContractRecord contract,
+        long itemNumber,
+        CancellationToken cancellationToken = default)
+    {
+        var uri = BuildContractUri(contract, $"itens/{itemNumber}/resultados");
+        var result = await GetJsonAsync<List<ResultDto>>(uri, cancellationToken).ConfigureAwait(false);
+        return (result.Value ?? []).Select(item => new HomologationResult
+        {
+            ContractId = contract.PncpId,
+            ItemNumber = itemNumber,
+            ResultSequence = item.SequencialResultado,
+            SupplierTaxId = item.NiFornecedor ?? string.Empty,
+            SupplierName = item.NomeRazaoSocialFornecedor ?? string.Empty,
+            HomologatedQuantityScaled = DecimalScale.ToScaled(item.QuantidadeHomologada),
+            HomologatedUnitValueScaled = DecimalScale.ToScaled(item.ValorUnitarioHomologado),
+            HomologatedTotalValueScaled = DecimalScale.ToScaled(item.ValorTotalHomologado),
+            ResultDate = ParseDate(item.DataResultado),
+            ResultStatusId = ReadFlexibleInt(item.SituacaoCompraItemResultadoId),
+            ResultStatusName = item.SituacaoCompraItemResultadoNome ?? string.Empty
+        }).ToArray();
+    }
+
+    private Uri BuildContractUri(ContractRecord contract, string suffix)
+    {
+        var cnpj = Uri.EscapeDataString(contract.Cnpj);
+        return new Uri(
+            _integrationBase,
+            $"v1/orgaos/{cnpj}/compras/{contract.PurchaseYear}/{contract.PurchaseSequence}/{suffix}");
+    }
+
+    private static ContractRecord? MapContract(ContractDto item)
+    {
+        var cnpj = item.OrgaoEntidade?.Cnpj?.Trim() ?? string.Empty;
+        var pncpId = item.NumeroControlePNCP?.Trim();
+        if (string.IsNullOrWhiteSpace(pncpId) || string.IsNullOrWhiteSpace(cnpj))
+        {
+            return null;
+        }
+
+        return new ContractRecord
+        {
+            PncpId = pncpId,
+            Cnpj = cnpj,
+            PurchaseYear = item.AnoCompra,
+            PurchaseSequence = item.SequencialCompra,
+            Object = item.ObjetoCompra ?? string.Empty,
+            AdditionalInformation = item.InformacaoComplementar ?? string.Empty,
+            Process = item.Processo ?? string.Empty,
+            Organization = item.OrgaoEntidade?.RazaoSocial ?? string.Empty,
+            Unit = item.UnidadeOrgao?.NomeUnidade ?? string.Empty,
+            Municipality = item.UnidadeOrgao?.MunicipioNome ?? string.Empty,
+            MunicipalityIbgeCode = ReadFlexibleString(item.UnidadeOrgao?.CodigoIbge),
+            Uf = item.UnidadeOrgao?.UfSigla?.ToUpperInvariant() ?? string.Empty,
+            ModalityId = item.ModalidadeId,
+            ModalityName = item.ModalidadeNome ?? string.Empty,
+            Status = item.SituacaoCompraNome ?? string.Empty,
+            PublicationDate = ParseDateTime(item.DataPublicacaoPncp),
+            GlobalUpdatedAt = ParseDateTime(item.DataAtualizacaoGlobal),
+            TotalHomologatedScaled = DecimalScale.ToScaled(item.ValorTotalHomologado)
+        };
+    }
+
+    private async Task<JsonPayload<T>> GetJsonAsync<T>(Uri uri, CancellationToken cancellationToken)
+    {
+        const int maximumAttempts = 7;
+        for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                using var response = await _httpClient.GetAsync(
+                    uri,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken).ConfigureAwait(false);
+                stopwatch.Stop();
+
+                if (response.StatusCode == HttpStatusCode.NoContent)
+                {
+                    return new JsonPayload<T>(default, 0, stopwatch.Elapsed);
+                }
+
+                if (response.IsSuccessStatusCode)
+                {
+                    await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                    using var memory = new MemoryStream();
+                    await stream.CopyToAsync(memory, cancellationToken).ConfigureAwait(false);
+                    var bytes = memory.ToArray();
+                    if (bytes.Length == 0)
+                    {
+                        return new JsonPayload<T>(default, 0, stopwatch.Elapsed);
+                    }
+
+                    var value = JsonSerializer.Deserialize<T>(bytes, JsonOptions);
+                    return new JsonPayload<T>(value, bytes.LongLength, stopwatch.Elapsed);
+                }
+
+                if (response.StatusCode == HttpStatusCode.UnprocessableEntity)
+                {
+                    var validationBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                    var isDateRangeRejection = validationBody.Contains("Data Inicial", StringComparison.OrdinalIgnoreCase) &&
+                                               validationBody.Contains("Data Final", StringComparison.OrdinalIgnoreCase);
+                    if (isDateRangeRejection && attempt < 3)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    throw CreateResponseException(response, validationBody, uri);
+                }
+
+                var isTransient = response.StatusCode == HttpStatusCode.TooManyRequests ||
+                                  (int)response.StatusCode >= 500;
+                if (!isTransient || attempt == maximumAttempts)
+                {
+                    var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                    throw CreateResponseException(response, body, uri);
+                }
+
+                var retryDelay = GetRetryDelay(response, attempt);
+                // Release the shared scheduler slot before waiting for Retry-After.
+                // Disposing twice is safe because the response is also scoped by using.
+                response.Dispose();
+                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (ShouldRetryTransportFailure(
+                                                   exception,
+                                                   cancellationToken,
+                                                   attempt,
+                                                   maximumAttempts))
+            {
+                stopwatch.Stop();
+                await Task.Delay(_backoffDelay(attempt), cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        throw new InvalidOperationException("Falha inesperada ao consultar o PNCP.");
+    }
+
+    private TimeSpan GetRetryDelay(HttpResponseMessage response, int attempt)
+    {
+        if (response.Headers.RetryAfter?.Delta is { } delta)
+        {
+            return delta > TimeSpan.FromMinutes(5) ? TimeSpan.FromMinutes(5) : delta;
+        }
+
+        if (response.Headers.RetryAfter?.Date is { } retryDate)
+        {
+            var fromHeader = retryDate - DateTimeOffset.UtcNow;
+            if (fromHeader > TimeSpan.Zero)
+            {
+                return fromHeader > TimeSpan.FromMinutes(5) ? TimeSpan.FromMinutes(5) : fromHeader;
+            }
+        }
+
+        return _backoffDelay(attempt);
+    }
+
+    private static bool ShouldRetryTransportFailure(
+        Exception exception,
+        CancellationToken cancellationToken,
+        int attempt,
+        int maximumAttempts) =>
+        attempt < maximumAttempts &&
+        !cancellationToken.IsCancellationRequested &&
+        (exception is HttpRequestException { StatusCode: null } or IOException or TaskCanceledException);
+
+    private static TimeSpan DefaultBackoffDelay(int attempt)
+    {
+        var exponentialSeconds = Math.Min(300, 5 * Math.Pow(2, attempt - 1));
+        return TimeSpan.FromMilliseconds(exponentialSeconds * 1000 + Random.Shared.Next(250, 1250));
+    }
+
+    private static int ReadFlexibleInt(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Number && element.TryGetInt32(out var number))
+        {
+            return number;
+        }
+
+        if (element.ValueKind == JsonValueKind.String &&
+            int.TryParse(element.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out number))
+        {
+            return number;
+        }
+
+        return 0;
+    }
+
+    private static string? ReadFlexibleString(JsonElement? element)
+    {
+        if (element is not { } value)
+        {
+            return null;
+        }
+
+        var text = value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Number => value.GetRawText(),
+            _ => null
+        };
+        return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+    }
+
+    private static DateTimeOffset? ParseDateTime(string? value) =>
+        DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var parsed)
+            ? parsed
+            : null;
+
+    private static DateOnly? ParseDate(string? value) =>
+        DateOnly.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed)
+            ? parsed
+            : null;
+
+    private static string Trim(string value, int maximumLength) =>
+        value.Length <= maximumLength ? value : value[..maximumLength];
+
+    private static HttpRequestException CreateResponseException(
+        HttpResponseMessage response,
+        string body,
+        Uri uri) => new(
+        $"PNCP respondeu {(int)response.StatusCode} ({response.ReasonPhrase}). " +
+        $"Intervalo solicitado: {GetQueryValue(uri, "dataInicial") ?? "?"} a " +
+        $"{GetQueryValue(uri, "dataFinal") ?? "?"}. {Trim(body, 300)}",
+        null,
+        response.StatusCode);
+
+    private static string? GetQueryValue(Uri uri, string name)
+    {
+        foreach (var part in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var separator = part.IndexOf('=');
+            if (separator > 0 && string.Equals(part[..separator], name, StringComparison.OrdinalIgnoreCase))
+            {
+                return Uri.UnescapeDataString(part[(separator + 1)..]);
+            }
+        }
+
+        return null;
+    }
+
+    private sealed record JsonPayload<T>(T? Value, long PayloadBytes, TimeSpan Elapsed);
+}
