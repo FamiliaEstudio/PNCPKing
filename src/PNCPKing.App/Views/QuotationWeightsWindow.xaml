@@ -1,0 +1,70 @@
+<Window x:Class="PNCPKing.App.Views.QuotationWeightsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Pesos do índice de adequação" Height="455" Width="650"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize">
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Text="Arraste uma barra. Ao aumentar um critério, os demais diminuem proporcionalmente para que o total permaneça em 100%."
+                   TextWrapping="Wrap" Margin="0,0,0,14" />
+
+        <Grid Grid.Row="1" Margin="5">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="135" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="58" />
+            </Grid.ColumnDefinitions>
+
+            <TextBlock Text="Descrição" VerticalAlignment="Center" />
+            <Slider x:Name="DescriptionWeightSlider" Grid.Column="1" Tag="0" Minimum="0" Maximum="100"
+                    TickFrequency="1" IsSnapToTickEnabled="True" />
+            <TextBlock Grid.Column="2" Text="{Binding ElementName=DescriptionWeightSlider, Path=Value, StringFormat={}{0:N0}%}"
+                       HorizontalAlignment="Right" VerticalAlignment="Center" />
+
+            <TextBlock Grid.Row="1" Text="Unidade/embalagem" VerticalAlignment="Center" />
+            <Slider x:Name="UnitWeightSlider" Grid.Row="1" Grid.Column="1" Tag="1" Minimum="0" Maximum="100"
+                    TickFrequency="1" IsSnapToTickEnabled="True" />
+            <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding ElementName=UnitWeightSlider, Path=Value, StringFormat={}{0:N0}%}"
+                       HorizontalAlignment="Right" VerticalAlignment="Center" />
+
+            <TextBlock Grid.Row="2" Text="Quantidade" VerticalAlignment="Center" />
+            <Slider x:Name="QuantityWeightSlider" Grid.Row="2" Grid.Column="1" Tag="2" Minimum="0" Maximum="100"
+                    TickFrequency="1" IsSnapToTickEnabled="True" />
+            <TextBlock Grid.Row="2" Grid.Column="2" Text="{Binding ElementName=QuantityWeightSlider, Path=Value, StringFormat={}{0:N0}%}"
+                       HorizontalAlignment="Right" VerticalAlignment="Center" />
+
+            <TextBlock Grid.Row="3" Text="Proximidade" VerticalAlignment="Center" />
+            <Slider x:Name="ProximityWeightSlider" Grid.Row="3" Grid.Column="1" Tag="3" Minimum="0" Maximum="100"
+                    TickFrequency="1" IsSnapToTickEnabled="True" />
+            <TextBlock Grid.Row="3" Grid.Column="2" Text="{Binding ElementName=ProximityWeightSlider, Path=Value, StringFormat={}{0:N0}%}"
+                       HorizontalAlignment="Right" VerticalAlignment="Center" />
+
+            <TextBlock Grid.Row="4" Text="Atualidade" VerticalAlignment="Center" />
+            <Slider x:Name="RecencyWeightSlider" Grid.Row="4" Grid.Column="1" Tag="4" Minimum="0" Maximum="100"
+                    TickFrequency="1" IsSnapToTickEnabled="True" />
+            <TextBlock Grid.Row="4" Grid.Column="2" Text="{Binding ElementName=RecencyWeightSlider, Path=Value, StringFormat={}{0:N0}%}"
+                       HorizontalAlignment="Right" VerticalAlignment="Center" />
+        </Grid>
+
+        <TextBlock Grid.Row="2" Text="Total: 100%. Incompatibilidades comprovadas de produto, unidade ou medida continuam sendo descartadas independentemente dos pesos."
+                   TextWrapping="Wrap" Foreground="#5F6871" Margin="0,12,0,8" />
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Cancelar" IsCancel="True" MinWidth="95" />
+            <Button Content="Aplicar pesos" IsDefault="True" MinWidth="120" Click="Accept_Click" />
+        </StackPanel>
+    </Grid>
+</Window>

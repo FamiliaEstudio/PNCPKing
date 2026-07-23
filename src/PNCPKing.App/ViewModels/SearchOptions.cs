@@ -22,7 +22,8 @@ public sealed class ItemSearchDisplayRow
         {
             DistanceFromRibeiraoKilometers = storedDistance;
         }
-        else if (NearbyRibeiraoCatalog.TryGetByNameAndUf(
+        else if (BrazilMunicipalityCatalog.TryResolve(
+                source.Contract.MunicipalityIbgeCode,
                 source.Contract.Municipality,
                 source.Contract.Uf,
                 out var municipality))

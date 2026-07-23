@@ -16,11 +16,21 @@ public sealed record ProcurementItem
     public required long ItemNumber { get; init; }
     public string Description { get; init; } = string.Empty;
     public string Unit { get; init; } = string.Empty;
+    public long? RequestedQuantityScaled { get; init; }
+    public string AdditionalInformation { get; init; } = string.Empty;
+    public string Category { get; init; } = string.Empty;
+    public string NcmNbsCode { get; init; } = string.Empty;
+    public string NcmNbsDescription { get; init; } = string.Empty;
+    public string CatalogCode { get; init; } = string.Empty;
+    public string CatalogName { get; init; } = string.Empty;
+    public string CatalogCategory { get; init; } = string.Empty;
     public string Status { get; init; } = string.Empty;
     public bool HasResult { get; init; }
     public DateTimeOffset? UpdatedAt { get; init; }
     public ItemHydrationStatus HydrationStatus { get; init; } = ItemHydrationStatus.NotLoaded;
     public string? LastError { get; init; }
+
+    public decimal? RequestedQuantity => DecimalScale.FromScaled(RequestedQuantityScaled);
 }
 
 public sealed record HomologationResult
@@ -30,6 +40,9 @@ public sealed record HomologationResult
     public required long ResultSequence { get; init; }
     public string SupplierTaxId { get; init; } = string.Empty;
     public string SupplierName { get; init; } = string.Empty;
+    public string SupplierType { get; init; } = string.Empty;
+    public string SupplierMunicipality { get; init; } = string.Empty;
+    public string SupplierUf { get; init; } = string.Empty;
     public long? HomologatedQuantityScaled { get; init; }
     public long? HomologatedUnitValueScaled { get; init; }
     public long? HomologatedTotalValueScaled { get; init; }

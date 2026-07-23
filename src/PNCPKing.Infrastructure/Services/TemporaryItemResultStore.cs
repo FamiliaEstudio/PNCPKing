@@ -54,6 +54,9 @@ internal sealed class TemporaryItemResultStore(string databasePath) : IAsyncDisp
                 result_sequence INTEGER NOT NULL,
                 supplier_tax_id TEXT NOT NULL DEFAULT '',
                 supplier_name TEXT NOT NULL DEFAULT '',
+                supplier_type TEXT NOT NULL DEFAULT '',
+                supplier_municipality TEXT NOT NULL DEFAULT '',
+                supplier_uf TEXT NOT NULL DEFAULT '',
                 quantity_scaled INTEGER,
                 unit_value_scaled INTEGER,
                 total_value_scaled INTEGER,
@@ -98,9 +101,11 @@ internal sealed class TemporaryItemResultStore(string databasePath) : IAsyncDisp
             insert.CommandText = """
                 INSERT INTO item_results(
                     contract_id, item_number, result_sequence, supplier_tax_id, supplier_name,
+                    supplier_type, supplier_municipality, supplier_uf,
                     quantity_scaled, unit_value_scaled, total_value_scaled, result_date,
                     result_status_id, result_status_name)
-                VALUES($contractId, $itemNumber, $sequence, $taxId, $supplier, $quantity,
+                VALUES($contractId, $itemNumber, $sequence, $taxId, $supplier,
+                       $supplierType, $supplierMunicipality, $supplierUf, $quantity,
                        $unitValue, $totalValue, $resultDate, $statusId, $statusName);
                 """;
             insert.Parameters.Add("$contractId", SqliteType.Text);
@@ -108,6 +113,9 @@ internal sealed class TemporaryItemResultStore(string databasePath) : IAsyncDisp
             insert.Parameters.Add("$sequence", SqliteType.Integer);
             insert.Parameters.Add("$taxId", SqliteType.Text);
             insert.Parameters.Add("$supplier", SqliteType.Text);
+            insert.Parameters.Add("$supplierType", SqliteType.Text);
+            insert.Parameters.Add("$supplierMunicipality", SqliteType.Text);
+            insert.Parameters.Add("$supplierUf", SqliteType.Text);
             insert.Parameters.Add("$quantity", SqliteType.Integer);
             insert.Parameters.Add("$unitValue", SqliteType.Integer);
             insert.Parameters.Add("$totalValue", SqliteType.Integer);
@@ -122,6 +130,9 @@ internal sealed class TemporaryItemResultStore(string databasePath) : IAsyncDisp
                 insert.Parameters["$sequence"].Value = result.ResultSequence;
                 insert.Parameters["$taxId"].Value = result.SupplierTaxId;
                 insert.Parameters["$supplier"].Value = result.SupplierName;
+                insert.Parameters["$supplierType"].Value = result.SupplierType;
+                insert.Parameters["$supplierMunicipality"].Value = result.SupplierMunicipality;
+                insert.Parameters["$supplierUf"].Value = result.SupplierUf;
                 insert.Parameters["$quantity"].Value = DbValue(result.HomologatedQuantityScaled);
                 insert.Parameters["$unitValue"].Value = DbValue(result.HomologatedUnitValueScaled);
                 insert.Parameters["$totalValue"].Value = DbValue(result.HomologatedTotalValueScaled);
@@ -180,6 +191,7 @@ internal sealed class TemporaryItemResultStore(string databasePath) : IAsyncDisp
             await using var command = connection.CreateCommand();
             command.CommandText = """
                 SELECT contract_id, item_number, result_sequence, supplier_tax_id, supplier_name,
+                       supplier_type, supplier_municipality, supplier_uf,
                        quantity_scaled, unit_value_scaled, total_value_scaled, result_date,
                        result_status_id, result_status_name
                   FROM item_results
@@ -248,14 +260,17 @@ internal sealed class TemporaryItemResultStore(string databasePath) : IAsyncDisp
         ResultSequence = reader.GetInt64(2),
         SupplierTaxId = reader.GetString(3),
         SupplierName = reader.GetString(4),
-        HomologatedQuantityScaled = reader.IsDBNull(5) ? null : reader.GetInt64(5),
-        HomologatedUnitValueScaled = reader.IsDBNull(6) ? null : reader.GetInt64(6),
-        HomologatedTotalValueScaled = reader.IsDBNull(7) ? null : reader.GetInt64(7),
-        ResultDate = reader.IsDBNull(8) || !DateOnly.TryParse(reader.GetString(8), CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)
+        SupplierType = reader.GetString(5),
+        SupplierMunicipality = reader.GetString(6),
+        SupplierUf = reader.GetString(7),
+        HomologatedQuantityScaled = reader.IsDBNull(8) ? null : reader.GetInt64(8),
+        HomologatedUnitValueScaled = reader.IsDBNull(9) ? null : reader.GetInt64(9),
+        HomologatedTotalValueScaled = reader.IsDBNull(10) ? null : reader.GetInt64(10),
+        ResultDate = reader.IsDBNull(11) || !DateOnly.TryParse(reader.GetString(11), CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)
             ? null
             : date,
-        ResultStatusId = reader.GetInt32(9),
-        ResultStatusName = reader.GetString(10)
+        ResultStatusId = reader.GetInt32(12),
+        ResultStatusName = reader.GetString(13)
     };
 
     private void DeleteFiles()

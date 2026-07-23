@@ -91,6 +91,25 @@ public sealed class SyncTests
         Assert.Equal(2, counts.Contracts);
     }
 
+    [Fact]
+    public async Task Synchronization_SanitizesMalformedUnicodeAndAdvancesCheckpoint()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var date = new DateOnly(2026, 7, 21);
+        var service = new SyncService(new MalformedUnicodeClient(), database.Repository);
+
+        await service.SynchronizeAsync(date, date, GeoScope.All, SyncMode.Publication);
+
+        var match = await database.Repository.SearchAsync(new SearchQuery("cafe", GeoScope.All));
+        var contract = Assert.Single(match.Results);
+        Assert.Equal("Aquisição � � de café", contract.Object);
+        var checkpoint = await database.Repository.GetPartitionCheckpointAsync(
+            $"Publication:{date:yyyyMMdd}:{date:yyyyMMdd}:m6:ufALL");
+        Assert.NotNull(checkpoint);
+        Assert.Equal(SyncPartitionStatus.Complete, checkpoint.Status);
+        Assert.Equal(0, checkpoint.NextPage);
+    }
+
     private sealed class CheckpointClient : IPncpClient
     {
         private bool _failed;
@@ -176,6 +195,22 @@ public sealed class SyncTests
                 "SP",
                 startDate.Day);
             return Task.FromResult(new ContractPage([contract], 1, 1, page, 500, TimeSpan.FromMilliseconds(10)));
+        }
+
+        public Task<int> GetItemCountAsync(ContractRecord contract, CancellationToken cancellationToken = default) => Task.FromResult(0);
+        public Task<IReadOnlyList<ProcurementItem>> GetItemsAsync(ContractRecord contract, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<ProcurementItem>>([]);
+        public Task<IReadOnlyList<HomologationResult>> GetItemResultsAsync(ContractRecord contract, long itemNumber, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<HomologationResult>>([]);
+    }
+
+    private sealed class MalformedUnicodeClient : IPncpClient
+    {
+        public Task<IReadOnlyList<Modality>> GetModalitiesAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<Modality>>([new Modality(6, "Pregão")]);
+
+        public Task<ContractPage> GetContractsPageAsync(DateOnly startDate, DateOnly endDate, long modalityId, string? uf, int page, int pageSize, SyncMode mode, CancellationToken cancellationToken = default)
+        {
+            var contract = RepositorySearchTests.Contract("unicode", "Aquisição \uD800 \uFFFE de café", "SP", 1);
+            return Task.FromResult(new ContractPage([contract], 1, 1, page, 500, TimeSpan.Zero));
         }
 
         public Task<int> GetItemCountAsync(ContractRecord contract, CancellationToken cancellationToken = default) => Task.FromResult(0);

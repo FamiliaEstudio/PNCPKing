@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
+using PNCPKing.Core.Search;
 
 namespace PNCPKing.Infrastructure.Api;
 
@@ -41,7 +42,10 @@ public sealed class PncpClient : IPncpClient
         return (result.Value ?? [])
             .Where(item => item.StatusAtivo)
             .OrderBy(item => item.Id)
-            .Select(item => new Modality(item.Id, item.Nome ?? $"Modalidade {item.Id}", item.StatusAtivo))
+            .Select(item => new Modality(
+                item.Id,
+                SearchText.Sanitize(item.Nome ?? $"Modalidade {item.Id}"),
+                item.StatusAtivo))
             .ToArray();
     }
 
@@ -127,9 +131,17 @@ public sealed class PncpClient : IPncpClient
                 {
                     ContractId = contract.PncpId,
                     ItemNumber = item.NumeroItem,
-                    Description = item.Descricao ?? string.Empty,
-                    Unit = item.UnidadeMedida ?? string.Empty,
-                    Status = item.SituacaoCompraItemNome ?? string.Empty,
+                    Description = SearchText.Sanitize(item.Descricao),
+                    Unit = SearchText.Sanitize(item.UnidadeMedida),
+                    RequestedQuantityScaled = DecimalScale.ToScaled(item.Quantidade),
+                    AdditionalInformation = SearchText.Sanitize(item.InformacaoComplementar),
+                    Category = SearchText.Sanitize(item.ItemCategoriaNome),
+                    NcmNbsCode = SearchText.Sanitize(item.NcmNbsCodigo),
+                    NcmNbsDescription = SearchText.Sanitize(item.NcmNbsDescricao),
+                    CatalogCode = SearchText.Sanitize(item.CatalogoCodigoItem),
+                    CatalogName = SearchText.Sanitize(item.Catalogo?.Nome),
+                    CatalogCategory = SearchText.Sanitize(item.CategoriaItemCatalogo?.Nome ?? item.CategoriaItemCatalogo?.Descricao),
+                    Status = SearchText.Sanitize(item.SituacaoCompraItemNome),
                     HasResult = item.TemResultado,
                     UpdatedAt = ParseDateTime(item.DataAtualizacao),
                     HydrationStatus = item.TemResultado
@@ -169,14 +181,17 @@ public sealed class PncpClient : IPncpClient
             ContractId = contract.PncpId,
             ItemNumber = itemNumber,
             ResultSequence = item.SequencialResultado,
-            SupplierTaxId = item.NiFornecedor ?? string.Empty,
-            SupplierName = item.NomeRazaoSocialFornecedor ?? string.Empty,
+            SupplierTaxId = SearchText.Sanitize(item.NiFornecedor),
+            SupplierName = SearchText.Sanitize(item.NomeRazaoSocialFornecedor),
+            SupplierType = SearchText.Sanitize(item.TipoPessoa),
+            SupplierMunicipality = SearchText.Sanitize(item.LocalidadeFornecedor?.NomeMunicipio),
+            SupplierUf = SearchText.Sanitize(item.LocalidadeFornecedor?.Uf),
             HomologatedQuantityScaled = DecimalScale.ToScaled(item.QuantidadeHomologada),
             HomologatedUnitValueScaled = DecimalScale.ToScaled(item.ValorUnitarioHomologado),
             HomologatedTotalValueScaled = DecimalScale.ToScaled(item.ValorTotalHomologado),
             ResultDate = ParseDate(item.DataResultado),
             ResultStatusId = ReadFlexibleInt(item.SituacaoCompraItemResultadoId),
-            ResultStatusName = item.SituacaoCompraItemResultadoNome ?? string.Empty
+            ResultStatusName = SearchText.Sanitize(item.SituacaoCompraItemResultadoNome)
         }).ToArray();
     }
 
@@ -190,8 +205,8 @@ public sealed class PncpClient : IPncpClient
 
     private static ContractRecord? MapContract(ContractDto item)
     {
-        var cnpj = item.OrgaoEntidade?.Cnpj?.Trim() ?? string.Empty;
-        var pncpId = item.NumeroControlePNCP?.Trim();
+        var cnpj = SearchText.Sanitize(item.OrgaoEntidade?.Cnpj).Trim();
+        var pncpId = SearchText.Sanitize(item.NumeroControlePNCP).Trim();
         if (string.IsNullOrWhiteSpace(pncpId) || string.IsNullOrWhiteSpace(cnpj))
         {
             return null;
@@ -203,17 +218,17 @@ public sealed class PncpClient : IPncpClient
             Cnpj = cnpj,
             PurchaseYear = item.AnoCompra,
             PurchaseSequence = item.SequencialCompra,
-            Object = item.ObjetoCompra ?? string.Empty,
-            AdditionalInformation = item.InformacaoComplementar ?? string.Empty,
-            Process = item.Processo ?? string.Empty,
-            Organization = item.OrgaoEntidade?.RazaoSocial ?? string.Empty,
-            Unit = item.UnidadeOrgao?.NomeUnidade ?? string.Empty,
-            Municipality = item.UnidadeOrgao?.MunicipioNome ?? string.Empty,
+            Object = SearchText.Sanitize(item.ObjetoCompra),
+            AdditionalInformation = SearchText.Sanitize(item.InformacaoComplementar),
+            Process = SearchText.Sanitize(item.Processo),
+            Organization = SearchText.Sanitize(item.OrgaoEntidade?.RazaoSocial),
+            Unit = SearchText.Sanitize(item.UnidadeOrgao?.NomeUnidade),
+            Municipality = SearchText.Sanitize(item.UnidadeOrgao?.MunicipioNome),
             MunicipalityIbgeCode = ReadFlexibleString(item.UnidadeOrgao?.CodigoIbge),
-            Uf = item.UnidadeOrgao?.UfSigla?.ToUpperInvariant() ?? string.Empty,
+            Uf = SearchText.Sanitize(item.UnidadeOrgao?.UfSigla).ToUpperInvariant(),
             ModalityId = item.ModalidadeId,
-            ModalityName = item.ModalidadeNome ?? string.Empty,
-            Status = item.SituacaoCompraNome ?? string.Empty,
+            ModalityName = SearchText.Sanitize(item.ModalidadeNome),
+            Status = SearchText.Sanitize(item.SituacaoCompraNome),
             PublicationDate = ParseDateTime(item.DataPublicacaoPncp),
             GlobalUpdatedAt = ParseDateTime(item.DataAtualizacaoGlobal),
             TotalHomologatedScaled = DecimalScale.ToScaled(item.ValorTotalHomologado)
@@ -359,7 +374,8 @@ public sealed class PncpClient : IPncpClient
             JsonValueKind.Number => value.GetRawText(),
             _ => null
         };
-        return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+        var sanitized = SearchText.Sanitize(text);
+        return string.IsNullOrWhiteSpace(sanitized) ? null : sanitized.Trim();
     }
 
     private static DateTimeOffset? ParseDateTime(string? value) =>
@@ -381,7 +397,7 @@ public sealed class PncpClient : IPncpClient
         Uri uri) => new(
         $"PNCP respondeu {(int)response.StatusCode} ({response.ReasonPhrase}). " +
         $"Intervalo solicitado: {GetQueryValue(uri, "dataInicial") ?? "?"} a " +
-        $"{GetQueryValue(uri, "dataFinal") ?? "?"}. {Trim(body, 300)}",
+        $"{GetQueryValue(uri, "dataFinal") ?? "?"}. {Trim(SearchText.Sanitize(body), 300)}",
         null,
         response.StatusCode);
 

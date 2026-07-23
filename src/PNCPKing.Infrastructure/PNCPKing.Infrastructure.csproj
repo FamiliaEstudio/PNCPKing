@@ -3,7 +3,9 @@
     <TargetFramework>net8.0</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="../PNCPKing.Core/PNCPKing.Core.csproj" />
+    <ProjectReference Include="../PNCPKing.Core/PNCPKing.Core.csproj"
+                      SkipGetTargetFrameworkProperties="true" />
+    <PackageReference Include="ClosedXML" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
   </ItemGroup>
 </Project>
