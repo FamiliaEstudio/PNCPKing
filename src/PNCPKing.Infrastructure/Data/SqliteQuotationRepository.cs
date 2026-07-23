@@ -53,6 +53,45 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
         return project;
     }
 
+    public async Task RenameProjectAsync(Guid projectId, string name, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE quotation_projects SET name = $name, updated_at = $updated WHERE id = $id;";
+        command.Parameters.AddWithValue("$name", name.Trim());
+        command.Parameters.AddWithValue("$updated", FormatDateTime(DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$id", projectId.ToString("N"));
+        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+        {
+            throw new InvalidOperationException("A cotação não existe mais.");
+        }
+    }
+
+    public async Task DeleteProjectAsync(Guid projectId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM quotation_projects WHERE id = $id;";
+        command.Parameters.AddWithValue("$id", projectId.ToString("N"));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task DeleteLineAsync(Guid lineId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = (SqliteTransaction)transaction;
+            command.CommandText = "DELETE FROM quotation_lines WHERE id = $id;";
+            command.Parameters.AddWithValue("$id", lineId.ToString("N"));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<QuotationLine>> GetLinesAsync(Guid projectId, CancellationToken cancellationToken = default)
     {
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -61,10 +100,12 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
             SELECT id, project_id, description, requested_quantity_scaled, requested_unit,
                    minimum_unit_price_scaled, maximum_unit_price_scaled, description_weight,
                    unit_weight, quantity_weight, proximity_weight, recency_weight, sample_version,
-                   sampled_at, selected_basket_key, selection_confirmed
+                   sampled_at, selected_basket_key, selection_confirmed, search_text,
+                   requested_batch_count, display_order, automation_run_id, automation_state,
+                   automation_message
               FROM quotation_lines
              WHERE project_id = $projectId
-             ORDER BY sampled_at, id;
+             ORDER BY display_order, sampled_at, id;
             """;
         command.Parameters.AddWithValue("$projectId", projectId.ToString("N"));
         var lines = new List<QuotationLine>();
@@ -113,10 +154,14 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
                     id, project_id, description, requested_quantity_scaled, requested_unit,
                     minimum_unit_price_scaled, maximum_unit_price_scaled, description_weight,
                     unit_weight, quantity_weight, proximity_weight, recency_weight, sample_version,
-                    sampled_at, selected_basket_key, selection_confirmed)
+                    sampled_at, selected_basket_key, selection_confirmed, search_text,
+                    requested_batch_count, display_order, automation_run_id, automation_state,
+                    automation_message)
                 VALUES($id, $projectId, $description, $quantity, $unit, $minimum, $maximum,
                        $descriptionWeight, $unitWeight, $quantityWeight, $proximityWeight, $recencyWeight,
-                       1, $sampledAt, NULL, 0)
+                       1, $sampledAt, NULL, 0, $description, 1,
+                       COALESCE((SELECT MAX(display_order) + 1 FROM quotation_lines WHERE project_id = $projectId), 0),
+                       NULL, 0, '')
                 ON CONFLICT(id) DO UPDATE SET
                     description = excluded.description,
                     requested_quantity_scaled = excluded.requested_quantity_scaled,
@@ -242,6 +287,201 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<QuotationAutomationRun> CreateAutomationRunAsync(
+        Guid projectId,
+        string outputPath,
+        SearchGeoFilter geoFilter,
+        DateOnly startDate,
+        DateOnly endDate,
+        IReadOnlyList<QuotationImportItem> items,
+        AdequacyWeights weights,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+        ArgumentNullException.ThrowIfNull(geoFilter);
+        ArgumentNullException.ThrowIfNull(items);
+        if (items.Count == 0)
+        {
+            throw new ArgumentException("A importação não contém itens.", nameof(items));
+        }
+
+        weights.Validate();
+        var now = DateTimeOffset.UtcNow;
+        var run = new QuotationAutomationRun
+        {
+            Id = Guid.NewGuid(),
+            ProjectId = projectId,
+            OutputPath = Path.GetFullPath(outputPath),
+            GeoFilter = geoFilter,
+            StartDate = startDate,
+            EndDate = endDate,
+            State = QuotationAutomationRunState.Pending,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var runCommand = connection.CreateCommand())
+        {
+            runCommand.Transaction = (SqliteTransaction)transaction;
+            runCommand.CommandText = """
+                INSERT INTO quotation_automation_runs(
+                    id, project_id, output_path, geo_filter_kind, geo_filter_uf,
+                    start_date, end_date, state, message, created_at, updated_at)
+                VALUES($id, $projectId, $output, $geoKind, $geoUf, $start, $end, $state, '', $created, $updated);
+                """;
+            runCommand.Parameters.AddWithValue("$id", run.Id.ToString("N"));
+            runCommand.Parameters.AddWithValue("$projectId", projectId.ToString("N"));
+            runCommand.Parameters.AddWithValue("$output", run.OutputPath);
+            runCommand.Parameters.AddWithValue("$geoKind", (int)geoFilter.Kind);
+            runCommand.Parameters.AddWithValue("$geoUf", DbValue(geoFilter.Uf));
+            runCommand.Parameters.AddWithValue("$start", startDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+            runCommand.Parameters.AddWithValue("$end", endDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+            runCommand.Parameters.AddWithValue("$state", (int)run.State);
+            runCommand.Parameters.AddWithValue("$created", FormatDateTime(now));
+            runCommand.Parameters.AddWithValue("$updated", FormatDateTime(now));
+            await runCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var nextOrder = 0;
+        await using (var orderCommand = connection.CreateCommand())
+        {
+            orderCommand.Transaction = (SqliteTransaction)transaction;
+            orderCommand.CommandText = "SELECT COALESCE(MAX(display_order) + 1, 0) FROM quotation_lines WHERE project_id = $projectId;";
+            orderCommand.Parameters.AddWithValue("$projectId", projectId.ToString("N"));
+            nextOrder = Convert.ToInt32(
+                await orderCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                CultureInfo.InvariantCulture);
+        }
+
+        foreach (var item in items)
+        {
+            await using var line = connection.CreateCommand();
+            line.Transaction = (SqliteTransaction)transaction;
+            line.CommandText = """
+                INSERT INTO quotation_lines(
+                    id, project_id, description, requested_quantity_scaled, requested_unit,
+                    minimum_unit_price_scaled, maximum_unit_price_scaled, description_weight,
+                    unit_weight, quantity_weight, proximity_weight, recency_weight, sample_version,
+                    sampled_at, selected_basket_key, selection_confirmed, search_text,
+                    requested_batch_count, display_order, automation_run_id, automation_state,
+                    automation_message)
+                VALUES($id, $projectId, $description, $quantity, $unit, $minimum, $maximum,
+                       $descriptionWeight, $unitWeight, $quantityWeight, $proximityWeight, $recencyWeight,
+                       0, $sampledAt, NULL, 0, $searchText, $batches, $displayOrder, $runId, $state, '');
+                """;
+            line.Parameters.AddWithValue("$id", Guid.NewGuid().ToString("N"));
+            line.Parameters.AddWithValue("$projectId", projectId.ToString("N"));
+            line.Parameters.AddWithValue("$description", item.OutputDescription.Trim());
+            line.Parameters.AddWithValue("$quantity", DecimalScale.ToScaled(item.Quantity)!.Value);
+            line.Parameters.AddWithValue("$unit", item.Unit.Trim());
+            line.Parameters.AddWithValue("$minimum", DbValue(DecimalScale.ToScaled(item.MinimumUnitPrice)));
+            line.Parameters.AddWithValue("$maximum", DbValue(DecimalScale.ToScaled(item.MaximumUnitPrice)));
+            line.Parameters.AddWithValue("$descriptionWeight", weights.Description);
+            line.Parameters.AddWithValue("$unitWeight", weights.Unit);
+            line.Parameters.AddWithValue("$quantityWeight", weights.Quantity);
+            line.Parameters.AddWithValue("$proximityWeight", weights.Proximity);
+            line.Parameters.AddWithValue("$recencyWeight", weights.Recency);
+            line.Parameters.AddWithValue("$sampledAt", FormatDateTime(now));
+            line.Parameters.AddWithValue("$searchText", item.SearchText.Trim());
+            line.Parameters.AddWithValue("$batches", item.BatchCount);
+            line.Parameters.AddWithValue("$displayOrder", nextOrder++);
+            line.Parameters.AddWithValue("$runId", run.Id.ToString("N"));
+            line.Parameters.AddWithValue("$state", (int)QuotationAutomationItemState.Pending);
+            await line.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var project = connection.CreateCommand())
+        {
+            project.Transaction = (SqliteTransaction)transaction;
+            project.CommandText = "UPDATE quotation_projects SET updated_at = $updated WHERE id = $id;";
+            project.Parameters.AddWithValue("$updated", FormatDateTime(now));
+            project.Parameters.AddWithValue("$id", projectId.ToString("N"));
+            if (await project.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+            {
+                throw new InvalidOperationException("A cotação de destino não existe mais.");
+            }
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return run;
+    }
+
+    public async Task<QuotationAutomationRun?> GetLatestAutomationRunAsync(
+        Guid projectId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, project_id, output_path, geo_filter_kind, geo_filter_uf,
+                   start_date, end_date, state, message, created_at, updated_at
+              FROM quotation_automation_runs
+             WHERE project_id = $projectId AND state <> $completed
+             ORDER BY updated_at DESC LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$projectId", projectId.ToString("N"));
+        command.Parameters.AddWithValue("$completed", (int)QuotationAutomationRunState.Completed);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadAutomationRun(reader) : null;
+    }
+
+    public async Task RecoverInterruptedAutomationAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var lines = connection.CreateCommand())
+        {
+            lines.Transaction = (SqliteTransaction)transaction;
+            lines.CommandText = "UPDATE quotation_lines SET automation_state = $pending, automation_message = 'Execução interrompida; pronta para retomar.' WHERE automation_state = $running;";
+            lines.Parameters.AddWithValue("$pending", (int)QuotationAutomationItemState.Pending);
+            lines.Parameters.AddWithValue("$running", (int)QuotationAutomationItemState.Running);
+            await lines.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var runs = connection.CreateCommand())
+        {
+            runs.Transaction = (SqliteTransaction)transaction;
+            runs.CommandText = "UPDATE quotation_automation_runs SET state = $pending, message = 'Execução interrompida; pronta para retomar.' WHERE state = $running;";
+            runs.Parameters.AddWithValue("$pending", (int)QuotationAutomationRunState.Pending);
+            runs.Parameters.AddWithValue("$running", (int)QuotationAutomationRunState.Running);
+            await runs.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task UpdateAutomationItemStateAsync(
+        Guid lineId,
+        QuotationAutomationItemState state,
+        string message,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE quotation_lines SET automation_state = $state, automation_message = $message WHERE id = $id;";
+        command.Parameters.AddWithValue("$state", (int)state);
+        command.Parameters.AddWithValue("$message", message ?? string.Empty);
+        command.Parameters.AddWithValue("$id", lineId.ToString("N"));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task UpdateAutomationRunStateAsync(
+        Guid runId,
+        QuotationAutomationRunState state,
+        string message,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE quotation_automation_runs SET state = $state, message = $message, updated_at = $updated WHERE id = $id;";
+        command.Parameters.AddWithValue("$state", (int)state);
+        command.Parameters.AddWithValue("$message", message ?? string.Empty);
+        command.Parameters.AddWithValue("$updated", FormatDateTime(DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$id", runId.ToString("N"));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     private static async Task InsertReferencesAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -346,6 +586,33 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
         ParseDateTime(reader.GetString(2)),
         ParseDateTime(reader.GetString(3)));
 
+    private static QuotationAutomationRun ReadAutomationRun(SqliteDataReader reader)
+    {
+        var kind = (SearchGeoFilterKind)reader.GetInt32(3);
+        var uf = reader.IsDBNull(4) ? null : reader.GetString(4);
+        var filter = kind switch
+        {
+            SearchGeoFilterKind.All => SearchGeoFilter.All,
+            SearchGeoFilterKind.Southeast => SearchGeoFilter.Southeast,
+            SearchGeoFilterKind.NearRibeirao => SearchGeoFilter.NearRibeirao,
+            SearchGeoFilterKind.State when uf is not null => SearchGeoFilter.State(uf),
+            _ => SearchGeoFilter.All
+        };
+        return new QuotationAutomationRun
+        {
+            Id = Guid.ParseExact(reader.GetString(0), "N"),
+            ProjectId = Guid.ParseExact(reader.GetString(1), "N"),
+            OutputPath = reader.GetString(2),
+            GeoFilter = filter,
+            StartDate = DateOnly.ParseExact(reader.GetString(5), "yyyy-MM-dd", CultureInfo.InvariantCulture),
+            EndDate = DateOnly.ParseExact(reader.GetString(6), "yyyy-MM-dd", CultureInfo.InvariantCulture),
+            State = (QuotationAutomationRunState)reader.GetInt32(7),
+            Message = reader.GetString(8),
+            CreatedAt = ParseDateTime(reader.GetString(9)),
+            UpdatedAt = ParseDateTime(reader.GetString(10))
+        };
+    }
+
     private static QuotationLine ReadLine(SqliteDataReader reader) => new()
     {
         Id = Guid.ParseExact(reader.GetString(0), "N"),
@@ -364,7 +631,13 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
         SampleVersion = reader.GetInt32(12),
         SampledAt = ParseDateTime(reader.GetString(13)),
         SelectedBasketKey = reader.IsDBNull(14) ? null : reader.GetString(14),
-        SelectionConfirmed = reader.GetInt64(15) == 1
+        SelectionConfirmed = reader.GetInt64(15) == 1,
+        SearchText = reader.GetString(16),
+        RequestedBatchCount = reader.GetInt32(17),
+        DisplayOrder = reader.GetInt32(18),
+        AutomationRunId = reader.IsDBNull(19) ? null : Guid.ParseExact(reader.GetString(19), "N"),
+        AutomationState = (QuotationAutomationItemState)reader.GetInt32(20),
+        AutomationMessage = reader.GetString(21)
     };
 
     private static QuotationReference ReadReference(SqliteDataReader reader) => new()

@@ -15,6 +15,56 @@ public sealed class QuotationService(
     public Task<QuotationProject> CreateProjectAsync(string name, CancellationToken cancellationToken = default) =>
         repository.CreateProjectAsync(name, cancellationToken);
 
+    public Task RenameProjectAsync(Guid projectId, string name, CancellationToken cancellationToken = default) =>
+        repository.RenameProjectAsync(projectId, name, cancellationToken);
+
+    public Task DeleteProjectAsync(Guid projectId, CancellationToken cancellationToken = default) =>
+        repository.DeleteProjectAsync(projectId, cancellationToken);
+
+    public Task DeleteLineAsync(Guid lineId, CancellationToken cancellationToken = default) =>
+        repository.DeleteLineAsync(lineId, cancellationToken);
+
+    public Task<QuotationAutomationRun> CreateAutomationRunAsync(
+        Guid projectId,
+        string outputPath,
+        SearchGeoFilter geoFilter,
+        DateOnly startDate,
+        DateOnly endDate,
+        IReadOnlyList<QuotationImportItem> items,
+        AdequacyWeights weights,
+        CancellationToken cancellationToken = default) =>
+        repository.CreateAutomationRunAsync(
+            projectId,
+            outputPath,
+            geoFilter,
+            startDate,
+            endDate,
+            items,
+            weights,
+            cancellationToken);
+
+    public Task<QuotationAutomationRun?> GetLatestAutomationRunAsync(
+        Guid projectId,
+        CancellationToken cancellationToken = default) =>
+        repository.GetLatestAutomationRunAsync(projectId, cancellationToken);
+
+    public Task RecoverInterruptedAutomationAsync(CancellationToken cancellationToken = default) =>
+        repository.RecoverInterruptedAutomationAsync(cancellationToken);
+
+    public Task UpdateAutomationItemStateAsync(
+        Guid lineId,
+        QuotationAutomationItemState state,
+        string message,
+        CancellationToken cancellationToken = default) =>
+        repository.UpdateAutomationItemStateAsync(lineId, state, message, cancellationToken);
+
+    public Task UpdateAutomationRunStateAsync(
+        Guid runId,
+        QuotationAutomationRunState state,
+        string message,
+        CancellationToken cancellationToken = default) =>
+        repository.UpdateAutomationRunStateAsync(runId, state, message, cancellationToken);
+
     public async Task<QuotationLineAnalysis> CaptureSampleAsync(
         Guid projectId,
         Guid? lineId,

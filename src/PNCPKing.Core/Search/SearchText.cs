@@ -131,6 +131,7 @@ public static partial class SearchText
         var groups = new List<SearchConjunction>();
         var current = new List<SearchTerm>();
         var exclusions = new List<SearchTerm>();
+        var acceptedUnits = new List<string>();
         var requiresPositiveTerm = false;
 
         for (var index = 0; index < tokens.Count; index++)
@@ -150,6 +151,16 @@ public static partial class SearchText
                     }
 
                     exclusions.Add(tokens[++index].Term!);
+                    break;
+
+                case SearchTokenKind.Unit:
+                    if (requiresPositiveTerm)
+                    {
+                        throw new SearchQueryException(
+                            "O filtro de unidade é global; não use '+' ou OU imediatamente antes de uma unidade.");
+                    }
+
+                    acceptedUnits.Add(token.Term!.Words.Single());
                     break;
 
                 case SearchTokenKind.And:
@@ -187,12 +198,17 @@ public static partial class SearchText
             groups.Add(new SearchConjunction(current.ToArray()));
         }
 
-        if (groups.Count == 0)
+        if (groups.Count == 0 && acceptedUnits.Count == 0)
         {
-            throw new SearchQueryException("Informe ao menos uma palavra ou frase positiva; não é possível pesquisar somente exclusões.");
+            throw new SearchQueryException(
+                "Informe ao menos uma palavra, frase ou unidade positiva; não é possível pesquisar somente exclusões.");
         }
 
-        return new SearchExpression(sanitized.Trim(), groups, exclusions);
+        return new SearchExpression(
+            sanitized.Trim(),
+            groups,
+            exclusions,
+            acceptedUnits.Distinct(StringComparer.Ordinal).ToArray());
     }
 
     private static List<SearchToken> Tokenize(string text)
@@ -233,24 +249,46 @@ public static partial class SearchText
                 continue;
             }
 
-            if (character == '"')
+            if (character is '"' or '“')
             {
-                var closingQuote = text.IndexOf('"', index + 1);
-                if (closingQuote < 0)
+                var closingQuote = character == '"' ? text.IndexOf('"', index + 1) : -1;
+                var isClosedPhrase = closingQuote > index + 1 && !char.IsWhiteSpace(text[closingQuote - 1]);
+                if (isClosedPhrase)
                 {
-                    throw new SearchQueryException("Há uma frase com aspas incompletas.");
+                    var phrase = CreateTerm(text[(index + 1)..closingQuote], isPhrase: true);
+                    tokens.Add(new SearchToken(SearchTokenKind.Term, phrase));
+                    index = closingQuote + 1;
+                    continue;
                 }
 
-                var phrase = CreateTerm(text[(index + 1)..closingQuote], isPhrase: true);
-                tokens.Add(new SearchToken(SearchTokenKind.Term, phrase));
-                index = closingQuote + 1;
+                index++;
+                var unitStart = index;
+                while (index < text.Length &&
+                       !char.IsWhiteSpace(text[index]) &&
+                       text[index] is not '+' and not '|' and not '-' and not '"' and not '“' and not '”')
+                {
+                    index++;
+                }
+
+                var unitWords = WordRegex().Matches(Normalize(text[unitStart..index]))
+                    .Select(match => match.Value)
+                    .ToArray();
+                if (unitWords.Length != 1)
+                {
+                    throw new SearchQueryException(
+                        "Use uma aspas antes de cada unidade, por exemplo: \"pacote \"unidade.");
+                }
+
+                tokens.Add(new SearchToken(
+                    SearchTokenKind.Unit,
+                    new SearchTerm(unitWords, IsPhrase: false)));
                 continue;
             }
 
             var start = index;
             while (index < text.Length &&
                    !char.IsWhiteSpace(text[index]) &&
-                   text[index] is not '+' and not '|' and not '-' and not '"')
+                   text[index] is not '+' and not '|' and not '-' and not '"' and not '“' and not '”')
             {
                 index++;
             }
@@ -307,7 +345,8 @@ public static partial class SearchText
         Term,
         And,
         Or,
-        Exclude
+        Exclude,
+        Unit
     }
 
     private sealed record SearchToken(SearchTokenKind Kind, SearchTerm? Term = null);
@@ -322,6 +361,39 @@ public sealed record SearchTerm(IReadOnlyList<string> Words, bool IsPhrase)
         var phrase = $"\"{string.Join(' ', Words)}\"";
         return phrase + "*";
     }
+
+    internal bool Matches(IReadOnlyList<string> foundWords)
+    {
+        if (!IsPhrase)
+        {
+            return foundWords.Any(word => word.StartsWith(Words[0], StringComparison.Ordinal));
+        }
+
+        for (var start = 0; start <= foundWords.Count - Words.Count; start++)
+        {
+            var matches = true;
+            for (var offset = 0; offset < Words.Count; offset++)
+            {
+                var found = foundWords[start + offset];
+                var requested = Words[offset];
+                var wordMatches = offset == Words.Count - 1
+                    ? found.StartsWith(requested, StringComparison.Ordinal)
+                    : string.Equals(found, requested, StringComparison.Ordinal);
+                if (!wordMatches)
+                {
+                    matches = false;
+                    break;
+                }
+            }
+
+            if (matches)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 }
 
 public sealed record SearchConjunction(IReadOnlyList<SearchTerm> Terms)
@@ -331,16 +403,26 @@ public sealed record SearchConjunction(IReadOnlyList<SearchTerm> Terms)
         var value = string.Join(" AND ", Terms.Select(term => term.ToFtsQuery()));
         return Terms.Count > 1 ? $"({value})" : value;
     }
+
+    internal bool Matches(IReadOnlyList<string> foundWords) =>
+        Terms.All(term => term.Matches(foundWords));
 }
 
 public sealed record SearchExpression(
     string OriginalText,
     IReadOnlyList<SearchConjunction> PositiveGroups,
-    IReadOnlyList<SearchTerm> Exclusions)
+    IReadOnlyList<SearchTerm> Exclusions,
+    IReadOnlyList<string> AcceptedUnits)
 {
-    public static SearchExpression Empty { get; } = new(string.Empty, [], []);
+    public static SearchExpression Empty { get; } = new(string.Empty, [], [], []);
 
-    public bool IsEmpty => PositiveGroups.Count == 0;
+    public bool IsEmpty => PositiveGroups.Count == 0 && Exclusions.Count == 0 && AcceptedUnits.Count == 0;
+
+    public bool HasPositiveDescriptionTerms => PositiveGroups.Count > 0;
+
+    public string PositiveText => string.Join(
+        ' ',
+        PositiveGroups.SelectMany(group => group.Terms).SelectMany(term => term.Words));
 
     public string ContractMatchQuery => BuildPositiveQuery();
 
@@ -349,6 +431,11 @@ public sealed record SearchExpression(
         get
         {
             var value = BuildPositiveQuery();
+            if (value.Length == 0)
+            {
+                return string.Empty;
+            }
+
             foreach (var exclusion in Exclusions)
             {
                 value = $"({value}) NOT {exclusion.ToFtsQuery()}";
@@ -356,6 +443,25 @@ public sealed record SearchExpression(
 
             return value;
         }
+    }
+
+    public bool MatchesItem(string? description, string? unit)
+    {
+        var descriptionWords = Words(description);
+        var matchesPositive = PositiveGroups.Count == 0 || PositiveGroups.Any(group => group.Matches(descriptionWords));
+        if (!matchesPositive || Exclusions.Any(exclusion => exclusion.Matches(descriptionWords)))
+        {
+            return false;
+        }
+
+        if (AcceptedUnits.Count == 0)
+        {
+            return true;
+        }
+
+        var unitWords = Words(unit);
+        return AcceptedUnits.Any(accepted =>
+            unitWords.Any(found => found.StartsWith(accepted, StringComparison.Ordinal)));
     }
 
     public string CandidateMatchQuery
@@ -381,4 +487,9 @@ public sealed record SearchExpression(
         var value = string.Join(" OR ", PositiveGroups.Select(group => group.ToFtsQuery()));
         return PositiveGroups.Count > 1 ? $"({value})" : value;
     }
+
+    private static IReadOnlyList<string> Words(string? text) => Regex
+        .Matches(SearchText.Normalize(text), @"[\p{L}\p{N}]+")
+        .Select(match => match.Value)
+        .ToArray();
 }

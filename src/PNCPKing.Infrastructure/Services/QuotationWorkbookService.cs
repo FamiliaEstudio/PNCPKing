@@ -30,10 +30,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         try
         {
             using var workbook = new XLWorkbook();
-            WriteSummary(workbook, report);
-            WriteReferences(workbook, report);
-            WritePending(workbook, report);
-            WriteMethodology(workbook, report);
+            WriteSimpleQuotation(workbook, report);
             cancellationToken.ThrowIfCancellationRequested();
             workbook.SaveAs(partialPath);
             File.Move(partialPath, destinationPath, true);
@@ -46,6 +43,69 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 File.Delete(partialPath);
             }
         }
+    }
+
+    private static void WriteSimpleQuotation(XLWorkbook workbook, QuotationProjectReport report)
+    {
+        var sheet = workbook.Worksheets.Add("Cotação");
+        var row = 1;
+        foreach (var analysis in report.Lines.OrderBy(line => line.Line.DisplayOrder))
+        {
+            var descriptionRange = sheet.Range(row, 1, row, 4);
+            descriptionRange.Merge();
+            descriptionRange.FirstCell().Value = analysis.Line.Description;
+            descriptionRange.Style.Font.Bold = true;
+            descriptionRange.Style.Font.FontSize = 12;
+            descriptionRange.Style.Fill.BackgroundColor = XLColor.FromHtml("#D9EAF7");
+            descriptionRange.Style.Alignment.WrapText = true;
+            row++;
+
+            var selectedBasket = analysis.Line.SelectionConfirmed
+                ? analysis.SelectedBasket
+                : null;
+            selectedBasket ??= analysis.Baskets.FirstOrDefault(basket => basket.IsRecommended);
+            var references = selectedBasket?.References
+                ?? analysis.References
+                    .Where(reference => reference.State == QuotationReferenceState.Eligible)
+                    .OrderByDescending(reference => reference.Adequacy.Total)
+                    .ThenBy(reference => reference.DistanceFromRibeiraoKilometers ?? double.MaxValue)
+                    .ThenByDescending(reference => reference.ResultDate)
+                    .ThenBy(reference => reference.Id, StringComparer.Ordinal)
+                    .Take(2)
+                    .ToArray();
+
+            foreach (var reference in references)
+            {
+                sheet.Cell(row, 1).Value = reference.SupplierName;
+                sheet.Cell(row, 2).Value = FormatBrazilianTaxId(reference.SupplierTaxId);
+                sheet.Cell(row, 2).Style.NumberFormat.Format = "@";
+                sheet.Cell(row, 3).Value = "INCISO II";
+                sheet.Cell(row, 4).Value = reference.UnitPrice;
+                sheet.Cell(row, 4).Style.NumberFormat.Format = "R$ #,##0.0000";
+                row++;
+            }
+
+            if (references.Count < 3)
+            {
+                var observation = sheet.Range(row, 1, row, 4);
+                observation.Merge();
+                observation.FirstCell().Value =
+                    $"OBSERVAÇÃO: Não foram encontrados três preços válidos; foram encontrados {references.Count:N0}.";
+                observation.Style.Font.Italic = true;
+                observation.Style.Font.FontColor = XLColor.DarkRed;
+                observation.Style.Alignment.WrapText = true;
+                row++;
+            }
+
+            row++;
+        }
+
+        sheet.Column(1).Width = 42;
+        sheet.Column(2).Width = 20;
+        sheet.Column(3).Width = 15;
+        sheet.Column(4).Width = 18;
+        sheet.Column(4).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Right;
+        sheet.SheetView.FreezeRows(1);
     }
 
     private static void WriteSummary(XLWorkbook workbook, QuotationProjectReport report)
@@ -128,7 +188,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 sheet.Cell(row, 3).Value = analysis.Line.RequestedQuantity;
                 sheet.Cell(row, 4).Value = analysis.Line.RequestedUnit;
                 sheet.Cell(row, 5).Value = reference.SupplierName;
-                sheet.Cell(row, 6).Value = reference.SupplierTaxId;
+                sheet.Cell(row, 6).Value = FormatBrazilianTaxId(reference.SupplierTaxId);
                 sheet.Cell(row, 6).Style.NumberFormat.Format = "@";
                 sheet.Cell(row, 7).Value = reference.UnitPrice;
                 sheet.Cell(row, 8).Value = reference.ItemDescription;
@@ -218,25 +278,10 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
 
         if (analysis.EligibleCount < 3)
         {
-            return $"Somente {analysis.EligibleCount:N0} referência(s) passou/passaram pelos critérios de adequação, CNPJ, preço e compatibilidade.";
+            return $"Somente {analysis.EligibleCount:N0} referência(s) passou/passaram pela faixa de preço e pela compatibilidade descritiva.";
         }
 
-        var suppliers = analysis.References
-            .Where(reference => reference.State == QuotationReferenceState.Eligible)
-            .Select(reference => reference.SupplierTaxId)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Count();
-        var contracts = analysis.References
-            .Where(reference => reference.State == QuotationReferenceState.Eligible)
-            .Select(reference => reference.ContractId)
-            .Distinct(StringComparer.Ordinal)
-            .Count();
-        if (suppliers < 3 || contracts < 3)
-        {
-            return $"A amostra tem apenas {suppliers:N0} CNPJ(s) e {contracts:N0} contratação(ões) distintos entre as referências elegíveis.";
-        }
-
-        return "As referências elegíveis não formam um trio em que todos os preços permaneçam dentro de 25% da média.";
+        return "Não foi possível formar uma cesta com três referências únicas.";
     }
 
     private static void WriteMethodology(XLWorkbook workbook, QuotationProjectReport report)
@@ -252,13 +297,13 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             ("Versão das regras", QuotationAnalyzer.RulesVersion),
             ("Origem geográfica", "Ribeirão Preto/SP"),
             ("Fonte de preços", "Resultados unitários homologados ativos já coletados pela pesquisa do PNCP King"),
-            ("Regra da cesta", "Três CNPJs e três contratações distintos; desvio de cada preço em relação à média aritmética menor ou igual a 25%."),
-            ("Índice da referência", "Os pesos de descrição, unidade/embalagem, quantidade, proximidade e atualidade são definidos por item e sempre somam 100%. O mínimo de elegibilidade é 60/100."),
+            ("Regra da cesta", "Três referências únicas dentro da faixa de preço e com compatibilidade descritiva. CNPJ, origem, unidade, quantidade, desvio e índice são informações para a escolha do usuário, não bloqueios automáticos."),
+            ("Índice da referência", "Os pesos de descrição, unidade/embalagem, quantidade, proximidade e atualidade são definidos por item e sempre somam 100%. O índice ordena e informa; não determina elegibilidade."),
             ("Adequação descritiva", "Mede a cobertura dos termos e expressões solicitados. Informações adicionais do item encontrado não reduzem a nota."),
             ("Quantidade", "Compara a escala das quantidades por faixas graduais; diferenças grandes reduzem a preferência, mas não anulam uma referência de preço unitário compatível."),
             ("Índice da cesta", "70% média das adequações + 20% menor adequação + 10% coesão de preços."),
             ("Auditoria dos pesos", "Os pesos efetivamente usados em cada item constam nas abas Resumo e Referências."),
-            ("Duplicidade provável", "Mesmo CNPJ, órgão e item normalizado; datas em até 30 dias e preços com diferença de até 1%."),
+            ("CNPJ e repetição", "Permanecem visíveis para auditoria e decisão do usuário; não excluem automaticamente uma referência compatível."),
             ("Conjunto de cestas", "Até 60 referências: 40 melhores por adequação, 10 menores preços e 10 maiores preços."),
             ("Volume da cotação", $"{collected:N0} coletados; {eligible:N0} elegíveis; {duplicates:N0} duplicados; {rejected:N0} descartados."),
             ("Observação", "O arquivo contém todas as cestas confirmadas e relaciona separadamente os itens pendentes.")
@@ -289,6 +334,23 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         range.Style.Font.Bold = true;
         range.Style.Fill.BackgroundColor = XLColor.FromHtml("#1F4E78");
         range.Style.Font.FontColor = XLColor.White;
+    }
+
+    private static string FormatBrazilianTaxId(string value)
+    {
+        var normalized = new string(value
+            .Where(char.IsAsciiLetterOrDigit)
+            .Select(char.ToUpperInvariant)
+            .ToArray());
+        if (normalized.Length != 14 ||
+            normalized[..12].Any(character => !char.IsAsciiLetterOrDigit(character)) ||
+            normalized[^2..].Any(character => !char.IsAsciiDigit(character)))
+        {
+            return value;
+        }
+
+        return $"{normalized[..2]}.{normalized[2..5]}.{normalized[5..8]}/" +
+               $"{normalized[8..12]}-{normalized[12..]}";
     }
 
     private static void FinishTable(IXLWorksheet sheet, int headerRow, int lastRow, int lastColumn)

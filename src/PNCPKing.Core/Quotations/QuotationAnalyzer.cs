@@ -7,7 +7,7 @@ namespace PNCPKing.Core.Quotations;
 
 public sealed partial class QuotationAnalyzer
 {
-    public const string RulesVersion = "1.2";
+    public const string RulesVersion = "1.3";
     public const int MaximumBasketPoolSize = 60;
     public const decimal MinimumDescriptionScore = 20m;
     public const decimal MinimumTotalScore = 60m;
@@ -52,19 +52,18 @@ public sealed partial class QuotationAnalyzer
             .Select(group => group.First())
             .ToArray();
         var scored = exactlyUnique.Select(reference => ScoreReference(line, reference)).ToArray();
-        var deduplicated = SuppressProbableDuplicates(scored);
-        var eligible = deduplicated.Where(reference => reference.State == QuotationReferenceState.Eligible).ToArray();
+        var eligible = scored.Where(reference => reference.State == QuotationReferenceState.Eligible).ToArray();
         var pool = BuildBasketPool(eligible);
         var baskets = BuildBaskets(pool);
 
         return new QuotationLineAnalysis(
             line,
-            deduplicated,
+            scored,
             baskets,
             exactlyUnique.Length,
             eligible.Length,
-            deduplicated.Count(reference => reference.State == QuotationReferenceState.Duplicate),
-            deduplicated.Count(reference => reference.State == QuotationReferenceState.Rejected),
+            0,
+            scored.Count(reference => reference.State == QuotationReferenceState.Rejected),
             pool.Count);
     }
 
@@ -117,17 +116,32 @@ public sealed partial class QuotationAnalyzer
         var rejectionReason = GetRejectionReason(
             line,
             reference,
-            normalizedTaxId,
-            breakdown,
-            descriptionQuality,
-            unitConflict,
-            measureConflict);
+            descriptionQuality);
+        var observations = new List<string>();
+        if (!IsValidCnpj(normalizedTaxId))
+        {
+            observations.Add("CNPJ/NI não validado");
+        }
+
+        if (unitConflict || measureConflict)
+        {
+            observations.Add("unidade, embalagem ou medida divergente");
+        }
+
+        if (breakdown.Total < MinimumTotalScore)
+        {
+            observations.Add($"índice abaixo de {MinimumTotalScore:N0}/100");
+        }
+
+        var eligibleReason = observations.Count == 0
+            ? "Referência elegível; o índice é informativo."
+            : $"Referência elegível; o índice é informativo. Atenção: {string.Join("; ", observations)}.";
         return reference with
         {
             SupplierTaxId = normalizedTaxId,
             Adequacy = breakdown,
             State = rejectionReason is null ? QuotationReferenceState.Eligible : QuotationReferenceState.Rejected,
-            StateReason = rejectionReason ?? "Referência elegível.",
+            StateReason = rejectionReason ?? eligibleReason,
             DuplicateOfReferenceId = null
         };
     }
@@ -251,19 +265,9 @@ public sealed partial class QuotationAnalyzer
         {
             for (var second = first + 1; second < pool.Count - 1; second++)
             {
-                if (SameSource(pool[first], pool[second]))
-                {
-                    continue;
-                }
-
                 for (var third = second + 1; third < pool.Count; third++)
                 {
                     var references = new[] { pool[first], pool[second], pool[third] };
-                    if (SameSource(pool[first], pool[third]) || SameSource(pool[second], pool[third]))
-                    {
-                        continue;
-                    }
-
                     var average = references.Average(reference => reference.UnitPrice);
                     if (average <= 0)
                     {
@@ -271,11 +275,6 @@ public sealed partial class QuotationAnalyzer
                     }
 
                     var maximumDeviation = references.Max(reference => Math.Abs(reference.UnitPrice - average) / average * 100m);
-                    if (maximumDeviation > 25m)
-                    {
-                        continue;
-                    }
-
                     var averageAdequacy = references.Average(reference => reference.Adequacy.Total);
                     var minimumAdequacy = references.Min(reference => reference.Adequacy.Total);
                     var cohesion = Math.Clamp(100m * (1m - maximumDeviation / 25m), 0m, 100m);
@@ -521,20 +520,11 @@ public sealed partial class QuotationAnalyzer
     private static string? GetRejectionReason(
         QuotationLine line,
         QuotationReference reference,
-        string normalizedTaxId,
-        AdequacyBreakdown breakdown,
-        decimal descriptionQuality,
-        bool unitConflict,
-        bool measureConflict)
+        decimal descriptionQuality)
     {
         if (reference.UnitPrice <= 0)
         {
             return "Preço unitário homologado ausente ou não positivo.";
-        }
-
-        if (!IsValidCnpj(normalizedTaxId))
-        {
-            return "Identificação do fornecedor não é um CNPJ válido.";
         }
 
         if (line.MinimumUnitPrice is not null && reference.UnitPrice < line.MinimumUnitPrice)
@@ -547,19 +537,12 @@ public sealed partial class QuotationAnalyzer
             return "Preço acima do máximo definido para a cotação.";
         }
 
-        if (unitConflict || measureConflict)
-        {
-            return "Unidade, embalagem ou medida incompatível com o item solicitado.";
-        }
-
         if (descriptionQuality < MinimumDescriptionScore)
         {
             return $"Adequação descritiva abaixo de {MinimumDescriptionScore:N0}/50.";
         }
 
-        return breakdown.Total < MinimumTotalScore
-            ? $"Índice total abaixo de {MinimumTotalScore:N0}/100."
-            : null;
+        return null;
     }
 
     private static string BuildExplanation(

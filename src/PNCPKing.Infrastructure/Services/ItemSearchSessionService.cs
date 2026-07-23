@@ -385,6 +385,145 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Runs one complete user-selected price budget without imposing the legacy
+    /// fifty-item-list discovery boundary. Newly completed rows are reported as
+    /// soon as they become available so the UI can grow a single virtualized grid.
+    /// </summary>
+    public async Task<PriceBatchProgress> RunContinuousAsync(
+        PriceBatchRequest request,
+        decimal? minimumUnitPrice = null,
+        decimal? maximumUnitPrice = null,
+        IProgress<PriceBatchProgress>? progress = null,
+        IProgress<IReadOnlyList<ItemSearchRow>>? rowProgress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidatePriceRange(minimumUnitPrice, maximumUnitPrice);
+        if (request.BatchCount is < 1 or > MaximumBatchCount)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(request),
+                $"A quantidade de disparos deve estar entre 1 e {MaximumBatchCount}.");
+        }
+
+        if (request.BatchCount > 10 && !request.LargeRequestConfirmed)
+        {
+            throw new InvalidOperationException(
+                "Mais de 500 consultas de itens exigem confirmação explícita do usuário.");
+        }
+
+        var session = GetRequiredSession();
+        if (session.Text.Length == 0)
+        {
+            return CreateProgress(request.RequestedItemCalls, 0, 0, true, "Pesquisa vazia não dispara consultas de itens.");
+        }
+
+        using var linked = CreateLinkedCancellation(cancellationToken);
+        await _operationGate.WaitAsync(linked.Token).ConfigureAwait(false);
+        try
+        {
+            var callsAtStart = Volatile.Read(ref _completedResultCalls);
+            var failuresAtStart = Volatile.Read(ref _failedResultCalls);
+            var attemptedKeys = new HashSet<(string ContractId, long ItemNumber)>();
+            while (Volatile.Read(ref _completedResultCalls) - callsAtStart < request.RequestedItemCalls)
+            {
+                var remaining = request.RequestedItemCalls -
+                                (Volatile.Read(ref _completedResultCalls) - callsAtStart);
+                var pending = await FindItemsNeedingApiAsync(
+                        Math.Min(DefaultPageSize, remaining),
+                        attemptedKeys,
+                        linked.Token)
+                    .ConfigureAwait(false);
+                if (pending.Count > 0)
+                {
+                    foreach (var hit in pending)
+                    {
+                        attemptedKeys.Add((hit.Contract.PncpId, hit.Item.ItemNumber));
+                    }
+
+                    await HydrateSelectedAsync(
+                            pending,
+                            PncpRequestPriority.AdditionalBatches,
+                            progress,
+                            request.RequestedItemCalls,
+                            callsAtStart,
+                            failuresAtStart,
+                            retryFailures: true,
+                            cancellationToken: linked.Token,
+                            completedRowProgress: rowProgress,
+                            minimumUnitPrice: minimumUnitPrice,
+                            maximumUnitPrice: maximumUnitPrice)
+                        .ConfigureAwait(false);
+                    continue;
+                }
+
+                if (!await EnsureNextCandidateAvailableAsync(linked.Token).ConfigureAwait(false))
+                {
+                    break;
+                }
+
+                var hitCountBefore = _hits.Count;
+                await DiscoverNextContractAsync(
+                        linked.Token,
+                        PncpRequestPriority.AdditionalBatches,
+                        allowFreshItemList: true)
+                    .ConfigureAwait(false);
+                if (_hits.Count > hitCountBefore && rowProgress is not null)
+                {
+                    var newlyDiscovered = _hits.Skip(hitCountBefore).ToArray();
+                    var availableRows = (await BuildRowsAsync(
+                            newlyDiscovered,
+                            minimumUnitPrice,
+                            maximumUnitPrice,
+                            linked.Token)
+                        .ConfigureAwait(false))
+                        .Where(row => row.PriceState != ItemSearchPriceState.Pending)
+                        .ToArray();
+                    if (availableRows.Length > 0)
+                    {
+                        rowProgress.Report(availableRows);
+                    }
+                }
+
+                var discoveredCompleted = Volatile.Read(ref _completedResultCalls) - callsAtStart;
+                progress?.Report(CreateProgress(
+                    request.RequestedItemCalls,
+                    discoveredCompleted,
+                    Volatile.Read(ref _failedResultCalls) - failuresAtStart,
+                    false,
+                    $"Descobrindo itens: {discoveredCompleted:N0} de {request.RequestedItemCalls:N0} preços; " +
+                    $"{_contractsScanned:N0} contratos examinados."));
+            }
+
+            var completed = Volatile.Read(ref _completedResultCalls) - callsAtStart;
+            var failed = Volatile.Read(ref _failedResultCalls) - failuresAtStart;
+            var hasUntouchedKnownItem = (await FilterItemsNeedingApiAsync(
+                    _hits.Where(hit => hit.Item.HasResult),
+                    retryFailures: false,
+                    excludedKeys: null,
+                    cancellationToken: linked.Token,
+                    maximum: 1)
+                .ConfigureAwait(false)).Count > 0;
+            var exhausted = !HasMoreContractCandidates && !hasUntouchedKnownItem;
+            _deliveredHitCount = _hits.Count;
+            var message = exhausted
+                ? $"Conjunto esgotado após {completed:N0} consulta(s) de preço."
+                : $"Disparos concluídos: {completed:N0} consulta(s) de preço.";
+            var result = CreateProgress(
+                request.RequestedItemCalls,
+                completed,
+                failed,
+                exhausted,
+                message);
+            progress?.Report(result);
+            return result;
+        }
+        finally
+        {
+            _operationGate.Release();
+        }
+    }
+
     public async Task<IReadOnlyList<ItemSearchRow>> GetDiscoveredRowsAsync(
         decimal? minimumUnitPrice = null,
         decimal? maximumUnitPrice = null,
@@ -653,7 +792,10 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         int completedBaseline,
         int failedBaseline,
         bool retryFailures,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<IReadOnlyList<ItemSearchRow>>? completedRowProgress = null,
+        decimal? minimumUnitPrice = null,
+        decimal? maximumUnitPrice = null)
     {
         using var semaphore = new SemaphoreSlim(2, 2);
         var progressGate = new object();
@@ -672,6 +814,20 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 if (!attempt.CalledApi)
                 {
                     return;
+                }
+
+                if (completedRowProgress is not null)
+                {
+                    var completedRows = await BuildRowsAsync(
+                            [hit],
+                            minimumUnitPrice,
+                            maximumUnitPrice,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (completedRows.Count > 0)
+                    {
+                        completedRowProgress.Report(completedRows);
+                    }
                 }
 
                 var completed = Volatile.Read(ref _completedResultCalls) - completedBaseline;

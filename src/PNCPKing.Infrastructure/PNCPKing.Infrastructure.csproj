@@ -6,6 +6,7 @@
     <ProjectReference Include="../PNCPKing.Core/PNCPKing.Core.csproj"
                       SkipGetTargetFrameworkProperties="true" />
     <PackageReference Include="ClosedXML" />
+    <PackageReference Include="DocumentFormat.OpenXml" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
   </ItemGroup>
 </Project>

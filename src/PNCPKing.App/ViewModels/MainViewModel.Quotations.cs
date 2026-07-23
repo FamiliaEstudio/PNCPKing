@@ -16,6 +16,8 @@ public sealed partial class MainViewModel
     private const int QuotationBasketPageSize = 100;
     private QuotationService _quotationService = null!;
     private IQuotationWorkbookService _quotationWorkbookService = null!;
+    private IQuotationWorkbookImportService _quotationWorkbookImportService = null!;
+    private CancellationTokenSource? _quotationAutomationCancellation;
     private QuotationProjectDisplay? _selectedQuotationProject;
     private QuotationLineDisplay? _selectedQuotationLine;
     private QuotationBasketDisplay? _selectedQuotationBasket;
@@ -36,6 +38,13 @@ public sealed partial class MainViewModel
     public ICommand PreviousQuotationBasketPageCommand { get; private set; } = null!;
     public ICommand NextQuotationBasketPageCommand { get; private set; } = null!;
     public ICommand OpenQuotationReferenceCommand { get; private set; } = null!;
+    public ICommand NewQuotationCommand { get; private set; } = null!;
+    public ICommand RenameQuotationCommand { get; private set; } = null!;
+    public ICommand DeleteQuotationCommand { get; private set; } = null!;
+    public ICommand DeleteQuotationLineCommand { get; private set; } = null!;
+    public ICommand ImportQuotationCommand { get; private set; } = null!;
+    public ICommand ResumeQuotationAutomationCommand { get; private set; } = null!;
+    public ICommand CancelQuotationAutomationCommand { get; private set; } = null!;
 
     public QuotationProjectDisplay? SelectedQuotationProject
     {
@@ -118,10 +127,12 @@ public sealed partial class MainViewModel
 
     private void InitializeQuotation(
         QuotationService quotationService,
-        IQuotationWorkbookService quotationWorkbookService)
+        IQuotationWorkbookService quotationWorkbookService,
+        IQuotationWorkbookImportService quotationWorkbookImportService)
     {
         _quotationService = quotationService;
         _quotationWorkbookService = quotationWorkbookService;
+        _quotationWorkbookImportService = quotationWorkbookImportService;
         UseQuotationSampleCommand = new AsyncRelayCommand(
             UseCurrentSampleAsync,
             () => !IsFileBusy && !IsPriceBusy && _itemSearchService.CurrentSession is not null);
@@ -148,6 +159,23 @@ public sealed partial class MainViewModel
         OpenQuotationReferenceCommand = new RelayCommand<QuotationReferenceDisplay>(
             OpenQuotationReference,
             reference => reference is not null && Uri.TryCreate(reference.Source.PortalUrl, UriKind.Absolute, out _));
+        NewQuotationCommand = new AsyncRelayCommand(NewQuotationAsync, () => !IsFileBusy && !IsPriceBusy);
+        RenameQuotationCommand = new AsyncRelayCommand(
+            RenameQuotationAsync,
+            () => !IsFileBusy && !IsPriceBusy && SelectedQuotationProject is not null);
+        DeleteQuotationCommand = new AsyncRelayCommand(
+            DeleteQuotationAsync,
+            () => !IsFileBusy && !IsPriceBusy && SelectedQuotationProject is not null);
+        DeleteQuotationLineCommand = new AsyncRelayCommand(
+            DeleteQuotationLineAsync,
+            () => !IsFileBusy && !IsPriceBusy && SelectedQuotationLine is not null);
+        ImportQuotationCommand = new AsyncRelayCommand(ImportQuotationAsync, () => !IsFileBusy && !IsPriceBusy);
+        ResumeQuotationAutomationCommand = new AsyncRelayCommand(
+            ResumeQuotationAutomationAsync,
+            () => !IsFileBusy && !IsPriceBusy && SelectedQuotationProject is not null);
+        CancelQuotationAutomationCommand = new RelayCommand(
+            () => _quotationAutomationCancellation?.Cancel(),
+            () => _quotationAutomationCancellation is not null);
     }
 
     private async Task RefreshQuotationProjectsAsync(Guid? preferredProjectId = null)
@@ -200,10 +228,394 @@ public sealed partial class MainViewModel
         }
     }
 
+    private async Task NewQuotationAsync()
+    {
+        var window = new TextPromptWindow(
+            "Nova cotação",
+            "Informe o nome da nova cotação:",
+            $"Cotação {DateTime.Now:dd-MM-yyyy HH-mm}")
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (window.ShowDialog() != true)
+        {
+            return;
+        }
+
+        var project = await _quotationService.CreateProjectAsync(window.Value).ConfigureAwait(true);
+        await RefreshQuotationProjectsAsync(project.Id).ConfigureAwait(true);
+        StatusText = $"Cotação '{project.Name}' criada.";
+    }
+
+    private async Task RenameQuotationAsync()
+    {
+        var project = SelectedQuotationProject;
+        if (project is null)
+        {
+            return;
+        }
+
+        var window = new TextPromptWindow("Renomear cotação", "Novo nome:", project.Name)
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (window.ShowDialog() != true)
+        {
+            return;
+        }
+
+        await _quotationService.RenameProjectAsync(project.Id, window.Value).ConfigureAwait(true);
+        await RefreshQuotationProjectsAsync(project.Id).ConfigureAwait(true);
+        StatusText = "Cotação renomeada.";
+    }
+
+    private async Task DeleteQuotationAsync()
+    {
+        var project = SelectedQuotationProject;
+        if (project is null || MessageBox.Show(
+                $"Excluir permanentemente a cotação '{project.Name}' e todos os seus itens?",
+                "Excluir cotação",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        await _quotationService.DeleteProjectAsync(project.Id).ConfigureAwait(true);
+        await RefreshQuotationProjectsAsync().ConfigureAwait(true);
+        StatusText = "Cotação excluída.";
+    }
+
+    private async Task DeleteQuotationLineAsync()
+    {
+        var project = SelectedQuotationProject;
+        var line = SelectedQuotationLine;
+        if (project is null || line is null || MessageBox.Show(
+                $"Excluir o item '{line.Description}' desta cotação?",
+                "Excluir item",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        await _quotationService.DeleteLineAsync(line.Line.Id).ConfigureAwait(true);
+        await LoadQuotationProjectAsync(project.Id).ConfigureAwait(true);
+        StatusText = "Item excluído da cotação.";
+    }
+
+    private async Task ImportQuotationAsync()
+    {
+        var open = new OpenFileDialog
+        {
+            Title = "Importar itens de cotação",
+            Filter = "Planilha do Excel (*.xlsx)|*.xlsx",
+            CheckFileExists = true,
+            Multiselect = false
+        };
+        if (open.ShowDialog() != true)
+        {
+            return;
+        }
+
+        QuotationImportDocument document;
+        try
+        {
+            document = await _quotationWorkbookImportService.ReadAsync(open.FileName).ConfigureAwait(true);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(exception.Message, "Importar cotação", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var weightsWindow = new QuotationWeightsWindow(AdequacyWeights.Default)
+        {
+            Owner = Application.Current.MainWindow,
+            Title = "Pesos globais da cotação importada"
+        };
+        if (weightsWindow.ShowDialog() != true)
+        {
+            return;
+        }
+
+        var (startDate, endDate) = ResolveDateRange();
+        var projects = await _quotationService.GetProjectsAsync().ConfigureAwait(true);
+        var preview = new QuotationImportWindow(
+            document,
+            projects,
+            SelectedQuotationProject?.Id,
+            weightsWindow.Weights,
+            $"{SelectedGeoFilter}; {startDate:dd/MM/yyyy} a {endDate:dd/MM/yyyy}")
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (preview.ShowDialog() != true)
+        {
+            return;
+        }
+
+        var projectId = preview.ExistingProjectId;
+        if (projectId is null)
+        {
+            var created = await _quotationService.CreateProjectAsync(preview.NewProjectName).ConfigureAwait(true);
+            projectId = created.Id;
+        }
+
+        var run = await _quotationService.CreateAutomationRunAsync(
+                projectId.Value,
+                preview.OutputPath,
+                SelectedGeoFilter,
+                startDate,
+                endDate,
+                document.Items,
+                weightsWindow.Weights)
+            .ConfigureAwait(true);
+        await RefreshQuotationProjectsAsync(projectId).ConfigureAwait(true);
+        await LoadQuotationProjectAsync(projectId).ConfigureAwait(true);
+        SelectedResultsTabIndex = 2;
+        await RunQuotationAutomationAsync(run).ConfigureAwait(true);
+    }
+
+    private async Task ResumeQuotationAutomationAsync()
+    {
+        var project = SelectedQuotationProject;
+        if (project is null)
+        {
+            return;
+        }
+
+        var run = await _quotationService.GetLatestAutomationRunAsync(project.Id).ConfigureAwait(true);
+        if (run is null)
+        {
+            MessageBox.Show(
+                "Esta cotação não possui uma automação pendente ou com falha.",
+                "Retomar automação",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        await RunQuotationAutomationAsync(run).ConfigureAwait(true);
+    }
+
+    private async Task RunQuotationAutomationAsync(QuotationAutomationRun run)
+    {
+        _quotationAutomationCancellation?.Dispose();
+        _quotationAutomationCancellation = new CancellationTokenSource();
+        var cancellationToken = _quotationAutomationCancellation.Token;
+        IsFileBusy = true;
+        SetPriceBusy(true, usesNetwork: true);
+        NotifyCommands();
+        try
+        {
+            await _quotationService.UpdateAutomationRunStateAsync(
+                run.Id,
+                QuotationAutomationRunState.Running,
+                "Cotação automática em andamento.").ConfigureAwait(true);
+            var analyses = await _quotationService.GetAnalysesAsync(run.ProjectId).ConfigureAwait(true);
+            var pending = analyses
+                .Where(analysis => analysis.Line.AutomationRunId == run.Id &&
+                                   analysis.Line.AutomationState is QuotationAutomationItemState.Pending or
+                                       QuotationAutomationItemState.Failed)
+                .OrderBy(analysis => analysis.Line.DisplayOrder)
+                .ToArray();
+            for (var index = 0; index < pending.Length; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var current = pending[index];
+                var line = current.Line;
+                await _quotationService.UpdateAutomationItemStateAsync(
+                    line.Id,
+                    QuotationAutomationItemState.Running,
+                    "Pesquisa automática em andamento.").ConfigureAwait(true);
+                try
+                {
+                    QueryText = line.SearchText;
+                    BatchCount = line.RequestedBatchCount;
+                    MinimumPriceText = line.MinimumUnitPrice?.ToString("N4") ?? string.Empty;
+                    MaximumPriceText = line.MaximumUnitPrice?.ToString("N4") ?? string.Empty;
+                    ItemSearchRows.Clear();
+                    PriceSearchProgress = 0;
+                    _itemSearchService.Stop();
+                    await _itemSearchService.StartAsync(
+                        new SearchQuery(
+                            line.SearchText,
+                            run.GeoFilter,
+                            run.StartDate,
+                            run.EndDate,
+                            SearchSort.Nearest,
+                            1,
+                            200),
+                        cancellationToken).ConfigureAwait(true);
+                    SetItemSearchActive(true);
+                    var prefix = $"Item {index + 1:N0}/{pending.Length:N0} — {line.Description}. ";
+                    var progress = new Progress<PriceBatchProgress>(value =>
+                    {
+                        UpdateItemSearchProgress(value);
+                        ItemSearchSummary = prefix + ItemSearchSummary;
+                    });
+                    var rowsProgress = new Progress<IReadOnlyList<ItemSearchRow>>(AppendUniqueRows);
+                    await _itemSearchService.RunContinuousAsync(
+                        new PriceBatchRequest(line.RequestedBatchCount, true),
+                        line.MinimumUnitPrice,
+                        line.MaximumUnitPrice,
+                        progress,
+                        rowsProgress,
+                        cancellationToken).ConfigureAwait(true);
+                    var rows = await _itemSearchService.GetDiscoveredRowsAsync(
+                        line.MinimumUnitPrice,
+                        line.MaximumUnitPrice,
+                        cancellationToken).ConfigureAwait(true);
+                    var input = new QuotationLineInput(
+                        line.Description,
+                        line.RequestedQuantity,
+                        line.RequestedUnit,
+                        line.MinimumUnitPrice,
+                        line.MaximumUnitPrice)
+                    {
+                        Weights = line.Weights
+                    };
+                    var analysis = await _quotationService.CaptureSampleAsync(
+                        run.ProjectId,
+                        line.Id,
+                        input,
+                        rows,
+                        cancellationToken).ConfigureAwait(true);
+                    var recommended = analysis.Baskets.FirstOrDefault(basket => basket.IsRecommended);
+                    if (recommended is not null)
+                    {
+                        await _quotationService.ConfirmBasketAsync(
+                            analysis,
+                            recommended.Key,
+                            cancellationToken).ConfigureAwait(true);
+                    }
+
+                    var state = analysis.EligibleCount >= 3 && recommended is not null
+                        ? QuotationAutomationItemState.Completed
+                        : QuotationAutomationItemState.Insufficient;
+                    var message = state == QuotationAutomationItemState.Completed
+                        ? "Cesta recomendada selecionada automaticamente."
+                        : $"Foram encontradas {analysis.EligibleCount:N0} referência(s) válida(s).";
+                    await _quotationService.UpdateAutomationItemStateAsync(
+                        line.Id,
+                        state,
+                        message,
+                        cancellationToken).ConfigureAwait(true);
+                }
+                catch (OperationCanceledException)
+                {
+                    await PreservePartialAutomationSampleAsync(run.ProjectId, line).ConfigureAwait(true);
+                    await _quotationService.UpdateAutomationItemStateAsync(
+                        line.Id,
+                        QuotationAutomationItemState.Pending,
+                        "Execução interrompida; pronta para retomar.").ConfigureAwait(true);
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    await _quotationService.UpdateAutomationItemStateAsync(
+                        line.Id,
+                        QuotationAutomationItemState.Failed,
+                        exception.Message).ConfigureAwait(true);
+                }
+
+                await LoadQuotationProjectAsync(run.ProjectId, line.Id).ConfigureAwait(true);
+            }
+
+            var finalAnalyses = await _quotationService.GetAnalysesAsync(run.ProjectId).ConfigureAwait(true);
+            var remainingFailures = finalAnalyses.Count(analysis =>
+                analysis.Line.AutomationRunId == run.Id &&
+                analysis.Line.AutomationState is QuotationAutomationItemState.Pending or
+                    QuotationAutomationItemState.Failed);
+            var report = await _quotationService.GetReportAsync(run.ProjectId).ConfigureAwait(true);
+            await _quotationWorkbookService.ExportAsync(run.OutputPath, report, cancellationToken).ConfigureAwait(true);
+            if (remainingFailures == 0)
+            {
+                await _quotationService.UpdateAutomationRunStateAsync(
+                    run.Id,
+                    QuotationAutomationRunState.Completed,
+                    $"Concluída e exportada para {run.OutputPath}.").ConfigureAwait(true);
+                StatusText = $"Cotação automática concluída: {run.OutputPath}.";
+            }
+            else
+            {
+                await _quotationService.UpdateAutomationRunStateAsync(
+                    run.Id,
+                    QuotationAutomationRunState.Failed,
+                    $"{remainingFailures:N0} item(ns) com falha; o arquivo parcial foi exportado.").ConfigureAwait(true);
+                StatusText = $"Cotação exportada com {remainingFailures:N0} falha(s); use Retomar automação.";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            await _quotationService.UpdateAutomationRunStateAsync(
+                run.Id,
+                QuotationAutomationRunState.Cancelled,
+                "Execução cancelada; itens pendentes podem ser retomados.").ConfigureAwait(true);
+            StatusText = "Cotação automática cancelada; os itens concluídos foram preservados.";
+        }
+        catch (Exception exception)
+        {
+            await _quotationService.UpdateAutomationRunStateAsync(
+                run.Id,
+                QuotationAutomationRunState.Failed,
+                exception.Message).ConfigureAwait(true);
+            MessageBox.Show(exception.Message, "Cotação automática", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            _quotationAutomationCancellation.Dispose();
+            _quotationAutomationCancellation = null;
+            SetPriceBusy(false, usesNetwork: false);
+            IsFileBusy = false;
+            await LoadQuotationProjectAsync(run.ProjectId).ConfigureAwait(true);
+            NotifyCommands();
+        }
+    }
+
+    private async Task PreservePartialAutomationSampleAsync(Guid projectId, QuotationLine line)
+    {
+        try
+        {
+            var rows = await _itemSearchService.GetDiscoveredRowsAsync(
+                line.MinimumUnitPrice,
+                line.MaximumUnitPrice,
+                CancellationToken.None).ConfigureAwait(true);
+            if (rows.Count == 0)
+            {
+                return;
+            }
+
+            await _quotationService.CaptureSampleAsync(
+                projectId,
+                line.Id,
+                new QuotationLineInput(
+                    line.Description,
+                    line.RequestedQuantity,
+                    line.RequestedUnit,
+                    line.MinimumUnitPrice,
+                    line.MaximumUnitPrice)
+                {
+                    Weights = line.Weights
+                },
+                rows,
+                CancellationToken.None).ConfigureAwait(true);
+        }
+        catch
+        {
+            // A retomada continuará válida mesmo se a amostra parcial não puder ser persistida.
+        }
+    }
+
     private async Task UseCurrentSampleAsync()
     {
         var projects = (await _quotationService.GetProjectsAsync().ConfigureAwait(true));
-        var window = new QuotationSampleWindow(projects, QueryText.Trim(), MinimumPriceText, MaximumPriceText)
+        var expression = SearchText.Parse(QueryText);
+        var quotationDescription = expression.PositiveText.Length > 0
+            ? expression.PositiveText
+            : QueryText.Trim();
+        var window = new QuotationSampleWindow(projects, quotationDescription, MinimumPriceText, MaximumPriceText)
         {
             Owner = Application.Current.MainWindow
         };
@@ -261,7 +673,8 @@ public sealed partial class MainViewModel
             return;
         }
 
-        var sessionText = SearchText.Normalize(_itemSearchService.CurrentSession?.Text);
+        var sessionText = SearchText.Normalize(
+            SearchText.Parse(_itemSearchService.CurrentSession?.Text).PositiveText);
         var lineText = SearchText.Normalize(selectedLine.Description);
         if (sessionText.Length > 0 && lineText.Length > 0 && !lineText.Contains(sessionText, StringComparison.Ordinal) &&
             !sessionText.Contains(lineText, StringComparison.Ordinal))

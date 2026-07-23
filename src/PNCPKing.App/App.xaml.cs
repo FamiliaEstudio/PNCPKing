@@ -82,7 +82,9 @@ public partial class App : Application
                 new BackupService(repository),
                 new QuotationService(quotationRepository, new QuotationAnalyzer()),
                 new QuotationWorkbookService(),
+                new QuotationWorkbookImportService(),
                 requestTelemetry,
+                new SqliteSweetCodeRepository(databasePath),
                 settings.DataFolder);
             var mainWindow = new MainWindow(viewModel);
             MainWindow = mainWindow;

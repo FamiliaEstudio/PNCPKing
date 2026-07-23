@@ -14,6 +14,7 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis)
     public QuotationLineAnalysis Analysis { get; } = analysis;
     public QuotationLine Line => Analysis.Line;
     public string Description => Line.Description;
+    public string SearchText => Line.SearchText;
     public decimal RequestedQuantity => Line.RequestedQuantity;
     public string RequestedUnit => Line.RequestedUnit;
     public int CollectedCount => Analysis.CollectedCount;
@@ -35,6 +36,17 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis)
                     ? "Escolha anterior inválida"
                 : "Aguardando escolha";
     public decimal? SelectedAveragePrice => Analysis.SelectedBasket?.AveragePrice;
+    public string AutomationStatus => Line.AutomationState switch
+    {
+        QuotationAutomationItemState.Manual => "Manual",
+        QuotationAutomationItemState.Pending => "Pendente",
+        QuotationAutomationItemState.Running => "Executando",
+        QuotationAutomationItemState.Completed => "Concluído",
+        QuotationAutomationItemState.Insufficient => "Insuficiente",
+        QuotationAutomationItemState.Failed => "Falha",
+        _ => Line.AutomationState.ToString()
+    };
+    public string AutomationMessage => Line.AutomationMessage;
 }
 
 public sealed class QuotationBasketDisplay(QuotationBasket source, bool wasPreviouslySelected = false)

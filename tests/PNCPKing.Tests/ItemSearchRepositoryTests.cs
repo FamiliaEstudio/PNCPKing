@@ -65,6 +65,38 @@ public sealed class ItemSearchRepositoryTests
     }
 
     [Fact]
+    public async Task ItemSearch_FiltersStructuredUnitWithQuoteMarkersAndAllowsUnitOnlySearch()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contract = RepositorySearchTests.Contract("units", "Café torrado", "SP", 1);
+        await database.Repository.UpsertContractsAsync([contract]);
+        await database.Repository.UpsertItemsAsync(contract.PncpId, [
+            Item(contract.PncpId, 1, "Café torrado tradicional", false) with { Unit = "PACOTE (PAC)" },
+            Item(contract.PncpId, 2, "Café torrado tradicional", false) with { Unit = "UNIDADE" },
+            Item(contract.PncpId, 3, "Café torrado tradicional", false) with { Unit = "CAIXA" },
+            Item(contract.PncpId, 4, "Unidade móvel para café", false) with { Unit = "CAIXA" }
+        ], false);
+
+        var selected = await database.Repository.SearchItemsAsync(
+            contract.PncpId,
+            "café torrado \"pacote \"unidade");
+        var unitOnly = await database.Repository.SearchItemsAsync(contract.PncpId, "\"caixa");
+        var ordinaryWord = await database.Repository.SearchItemsAsync(contract.PncpId, "unidade");
+        var unitExpression = PNCPKing.Core.Search.SearchText.Parse("\"pacote");
+        var unitCandidates = await database.Repository.SearchItemCandidatesAsync(
+            new SearchQuery("\"pacote", GeoScope.All),
+            unitExpression,
+            0,
+            null);
+
+        Assert.Equal([1L, 2L], selected.Select(item => item.ItemNumber));
+        Assert.Equal([3L, 4L], unitOnly.Select(item => item.ItemNumber));
+        Assert.Equal([4L], ordinaryWord.Select(item => item.ItemNumber));
+        Assert.Single(unitCandidates.Results);
+        Assert.Equal(contract.PncpId, unitCandidates.Results[0].Contract.PncpId);
+    }
+
+    [Fact]
     public async Task CandidateCursor_OrdersFirstFiftyThenRemainingSpThenStatesAndRotatesWithinUf()
     {
         await using var database = await TestDatabase.CreateAsync();

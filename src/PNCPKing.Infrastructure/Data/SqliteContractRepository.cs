@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 6;
+    public const int CurrentSchemaVersion = 7;
 
     private const string GeographicGroupExpression = "CASE WHEN COALESCE(c.geo_layer, 1) = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -158,6 +158,22 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             updateVersion.CommandText = "UPDATE schema_info SET version = 6 WHERE id = 1;";
             await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 6;
+        }
+
+        if (version < 7)
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = (SqliteTransaction)transaction;
+            migration.CommandText = SchemaV7Sql;
+            await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 7 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -283,7 +299,13 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
 
         pageSize = Math.Clamp(pageSize, 1, 500);
         randomPivot = Math.Clamp(randomPivot, 0, long.MaxValue - 1);
-        var conditions = new List<string> { "contracts_fts MATCH $candidateMatch" };
+        var candidateMatch = expression.CandidateMatchQuery;
+        var joinsFts = candidateMatch.Length > 0;
+        var conditions = new List<string>();
+        if (joinsFts)
+        {
+            conditions.Add("contracts_fts MATCH $candidateMatch");
+        }
         var geoFilter = filters.EffectiveGeoFilter;
         switch (geoFilter.Kind)
         {
@@ -308,7 +330,10 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             conditions.Add("date(c.publication_date) <= date($endDate)");
         }
 
-        var where = string.Join(" AND ", conditions);
+        var where = conditions.Count == 0 ? string.Empty : " WHERE " + string.Join(" AND ", conditions);
+        var ftsJoin = joinsFts
+            ? "JOIN contracts_fts ON contracts_fts.rowid = c.rowid"
+            : string.Empty;
         var cursorWhere = cursor is null
             ? string.Empty
             : """
@@ -335,15 +360,18 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                        CASE WHEN COALESCE(c.random_order_key, 0) >= $randomPivot THEN 0 ELSE 1 END AS rotation_band,
                        COALESCE(c.random_order_key, 0) AS random_order_key
                   FROM contracts c
-                  JOIN contracts_fts ON contracts_fts.rowid = c.rowid
-                 WHERE {where}
+                  {ftsJoin}
+                  {where}
             )
             SELECT * FROM ranked
             {cursorWhere}
              ORDER BY geographic_layer, group_rank, rotation_band, random_order_key, pncp_id
              LIMIT $limit;
             """;
-        command.Parameters.AddWithValue("$candidateMatch", expression.CandidateMatchQuery);
+        if (joinsFts)
+        {
+            command.Parameters.AddWithValue("$candidateMatch", candidateMatch);
+        }
         command.Parameters.AddWithValue("$randomPivot", randomPivot);
         command.Parameters.AddWithValue("$limit", pageSize + 1);
         AddFilterParameters(command, filters);
@@ -590,7 +618,8 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         string text,
         CancellationToken cancellationToken = default)
     {
-        var match = SearchText.BuildMatchQuery(text);
+        var expression = SearchText.Parse(text);
+        var match = expression.ItemMatchQuery;
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = match.Length == 0
@@ -623,7 +652,11 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            items.Add(ReadItem(reader));
+            var item = ReadItem(reader);
+            if (expression.MatchesItem(item.Description, item.Unit))
+            {
+                items.Add(item);
+            }
         }
 
         return items;
@@ -2405,5 +2438,43 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
 
         CREATE INDEX idx_contracts_geographic_sample
             ON contracts(geo_layer, state_proximity_rank, municipality_distance_rank, random_order_key, pncp_id);
+        """;
+
+    private const string SchemaV7Sql = """
+        CREATE TABLE sweet_code_settings(
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            enabled INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO sweet_code_settings(id, enabled) VALUES(1, 1);
+
+        CREATE TABLE sweet_codes(
+            position INTEGER PRIMARY KEY,
+            expression TEXT NOT NULL UNIQUE
+        );
+
+        CREATE TABLE quotation_automation_runs(
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES quotation_projects(id) ON DELETE CASCADE,
+            output_path TEXT NOT NULL,
+            geo_filter_kind INTEGER NOT NULL,
+            geo_filter_uf TEXT,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            state INTEGER NOT NULL DEFAULT 0,
+            message TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        ALTER TABLE quotation_lines ADD COLUMN search_text TEXT NOT NULL DEFAULT '';
+        ALTER TABLE quotation_lines ADD COLUMN requested_batch_count INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE quotation_lines ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE quotation_lines ADD COLUMN automation_run_id TEXT REFERENCES quotation_automation_runs(id) ON DELETE SET NULL;
+        ALTER TABLE quotation_lines ADD COLUMN automation_state INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE quotation_lines ADD COLUMN automation_message TEXT NOT NULL DEFAULT '';
+
+        UPDATE quotation_lines SET search_text = description WHERE search_text = '';
+        CREATE INDEX idx_quotation_lines_automation
+            ON quotation_lines(automation_run_id, automation_state, display_order);
         """;
 }
