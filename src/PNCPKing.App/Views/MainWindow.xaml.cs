@@ -1,7 +1,7 @@
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
+using System.Windows.Input;
 using PNCPKing.App.ViewModels;
 
 namespace PNCPKing.App.Views;
@@ -47,40 +47,49 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ChooseItemColumns_Click(object sender, RoutedEventArgs e)
+    private void ChooseColumns_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button button)
+        if (sender is not Button { Tag: DataGrid dataGrid } button)
         {
             return;
         }
 
-        var menu = new ContextMenu
+        DataGridColumnChooser.Show(button, dataGrid);
+    }
+
+    private void QueryTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (!SweetCodePopup.IsOpen || SweetCodeList.Items.Count == 0)
         {
-            PlacementTarget = button,
-            Placement = PlacementMode.Top,
-            StaysOpen = true
-        };
-        foreach (var column in ItemResultsGrid.Columns)
-        {
-            var item = new MenuItem
-            {
-                Header = column.Header?.ToString() ?? "Coluna",
-                IsCheckable = true,
-                IsChecked = column.Visibility == Visibility.Visible,
-                StaysOpenOnClick = true,
-                Tag = column
-            };
-            item.Click += (_, _) =>
-            {
-                if (item.Tag is DataGridColumn selectedColumn)
-                {
-                    selectedColumn.Visibility = item.IsChecked ? Visibility.Visible : Visibility.Collapsed;
-                }
-            };
-            menu.Items.Add(item);
+            return;
         }
 
-        menu.IsOpen = true;
+        if (e.Key is Key.Down or Key.Up)
+        {
+            var direction = e.Key == Key.Down ? 1 : -1;
+            var current = SweetCodeList.SelectedIndex < 0 ? 0 : SweetCodeList.SelectedIndex;
+            SweetCodeList.SelectedIndex = Math.Clamp(current + direction, 0, SweetCodeList.Items.Count - 1);
+            SweetCodeList.ScrollIntoView(SweetCodeList.SelectedItem);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Tab)
+        {
+            _viewModel.ApplySelectedSweetCode();
+            QueryTextBox.CaretIndex = QueryTextBox.Text.Length;
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape)
+        {
+            _viewModel.DismissSweetCodeSuggestions();
+            e.Handled = true;
+        }
+    }
+
+    private void SweetCodeList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        _viewModel.ApplySelectedSweetCode();
+        QueryTextBox.Focus();
+        QueryTextBox.CaretIndex = QueryTextBox.Text.Length;
     }
 
 }

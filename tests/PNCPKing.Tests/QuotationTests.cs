@@ -374,7 +374,52 @@ public sealed class QuotationTests
     }
 
     [Fact]
-    public async Task Workbook_ExportsConfirmedReferencesAndPendingItems()
+    public async Task AutomationRun_PersistsImportedSearchesAndRecoversInterruptedItems()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer(Today));
+        var project = await service.CreateProjectAsync("Automática");
+        var run = await service.CreateAutomationRunAsync(
+            project.Id,
+            Path.Combine(database.Directory, "saida.xlsx"),
+            SearchGeoFilter.Southeast,
+            new DateOnly(2026, 1, 1),
+            new DateOnly(2026, 7, 1),
+            [
+                new QuotationImportItem(1, "cafe -maquina \"pacote", "Café", 100m, "pacote", 30m, 45m, 2),
+                new QuotationImportItem(2, "acucar", "Açúcar", 50m, "kg", null, null, 1)
+            ],
+            AdequacyWeights.Default);
+
+        var lines = await repository.GetLinesAsync(project.Id);
+        Assert.Equal(2, lines.Count);
+        Assert.Equal("cafe -maquina \"pacote", lines[0].SearchText);
+        Assert.Equal(2, lines[0].RequestedBatchCount);
+        Assert.Equal(QuotationAutomationItemState.Pending, lines[0].AutomationState);
+        Assert.Equal(run.Id, lines[0].AutomationRunId);
+        Assert.True(lines[0].DisplayOrder < lines[1].DisplayOrder);
+
+        await service.UpdateAutomationItemStateAsync(
+            lines[0].Id,
+            QuotationAutomationItemState.Running,
+            "executando");
+        await service.UpdateAutomationRunStateAsync(
+            run.Id,
+            QuotationAutomationRunState.Running,
+            "executando");
+        await service.RecoverInterruptedAutomationAsync();
+
+        lines = await repository.GetLinesAsync(project.Id);
+        Assert.Equal(QuotationAutomationItemState.Pending, lines[0].AutomationState);
+        var recovered = await service.GetLatestAutomationRunAsync(project.Id);
+        Assert.NotNull(recovered);
+        Assert.Equal(QuotationAutomationRunState.Pending, recovered.State);
+        Assert.Equal(SearchGeoFilterKind.Southeast, recovered.GeoFilter.Kind);
+    }
+
+    [Fact]
+    public async Task Workbook_ExportsOneSimpleSheetWithIncisoIiAndPendingObservation()
     {
         var analyzer = new QuotationAnalyzer(Today);
         var project = new QuotationProject(Guid.NewGuid(), "Cotação teste", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
@@ -401,17 +446,80 @@ public sealed class QuotationTests
                 new QuotationProjectReport(project, [resolved, pending]));
 
             using var workbook = new XLWorkbook(path);
-            Assert.Equal(3, workbook.Worksheet("Referências").RowsUsed().Count() - 1);
-            Assert.Single(workbook.Worksheet("Pendências").RowsUsed().Skip(1));
-            Assert.Equal("11222333000181", workbook.Worksheet("Referências").Cell(2, 6).GetString());
-            Assert.Equal(XLDataType.Text, workbook.Worksheet("Referências").Cell(2, 6).DataType);
-            Assert.Equal("Abrir no PNCP", workbook.Worksheet("Referências").Cell(2, 25).GetString());
-            Assert.NotNull(workbook.Worksheet("Referências").Cell(2, 25).GetHyperlink());
-            Assert.Contains("Proximidade 15%", workbook.Worksheet("Resumo").Cell(5, 16).GetString());
-            Assert.Contains("Proximidade 15%", workbook.Worksheet("Referências").Cell(2, 26).GetString());
-            Assert.Contains(
-                workbook.Worksheet("Metodologia").CellsUsed().Select(cell => cell.GetString()),
-                value => value.Contains("coletados", StringComparison.OrdinalIgnoreCase));
+            var sheet = Assert.Single(workbook.Worksheets);
+            Assert.Equal("Cotação", sheet.Name);
+            Assert.Equal("Café torrado", sheet.Cell(1, 1).GetString());
+            Assert.Equal("11.222.333/0001-81", sheet.Cell(2, 2).GetString());
+            Assert.Equal(XLDataType.Text, sheet.Cell(2, 2).DataType);
+            Assert.Equal("INCISO II", sheet.Cell(2, 3).GetString());
+            Assert.Equal(90m, sheet.Cell(2, 4).GetValue<decimal>());
+            Assert.Equal("Açúcar", sheet.Cell(6, 1).GetString());
+            Assert.Contains("Não foram encontrados três preços válidos", sheet.Cell(7, 1).GetString());
+            Assert.DoesNotContain(sheet.CellsUsed(), cell => cell.GetString() is "Empresa" or "CNPJ" or "Valor");
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            var directory = Path.GetDirectoryName(path)!;
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public async Task Workbook_FormatsNumericAndAlphanumericCnpjAndPreservesOtherIdentifiersAsText()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var project = new QuotationProject(Guid.NewGuid(), "CNPJ", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+        var analysis = analyzer.Analyze(Line("Café", 10m, "pacote"), [
+            Reference("numeric", "c1", "03370573000103", 40m),
+            Reference("alpha", "c2", "12ABC34501DE35", 41m),
+            Reference("other", "c3", "NI-123", 42m)
+        ]);
+        var path = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"), "cnpj.xlsx");
+        try
+        {
+            await new QuotationWorkbookService().ExportAsync(
+                path,
+                new QuotationProjectReport(project, [analysis]));
+
+            using var workbook = new XLWorkbook(path);
+            var sheet = workbook.Worksheet("Cotação");
+            var taxIds = sheet.Range(2, 2, 4, 2).Cells().Select(cell => cell.GetString()).ToArray();
+            Assert.Contains("03.370.573/0001-03", taxIds);
+            Assert.Contains("12.ABC.345/01DE-35", taxIds);
+            Assert.Contains("NI123", taxIds);
+            Assert.All(sheet.Range(2, 2, 4, 2).Cells(), cell => Assert.Equal(XLDataType.Text, cell.DataType));
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            var directory = Path.GetDirectoryName(path)!;
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public async Task Workbook_ExportsTwoBestEligibleReferencesAndInsufficiencyObservation()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var project = new QuotationProject(Guid.NewGuid(), "Cotação curta", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+        var analysis = analyzer.Analyze(Line("Café", 10m, "pacote"), [
+            Reference("melhor", "c1", "11222333000181", 40m),
+            Reference("segunda", "c2", "60701190000104", 42m)
+        ]);
+        var path = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"), "short.xlsx");
+        try
+        {
+            await new QuotationWorkbookService().ExportAsync(
+                path,
+                new QuotationProjectReport(project, [analysis]));
+
+            using var workbook = new XLWorkbook(path);
+            var sheet = workbook.Worksheet("Cotação");
+            Assert.Equal("Café", sheet.Cell(1, 1).GetString());
+            Assert.Equal("INCISO II", sheet.Cell(2, 3).GetString());
+            Assert.Equal("INCISO II", sheet.Cell(3, 3).GetString());
+            Assert.Contains("foram encontrados 2", sheet.Cell(4, 1).GetString());
         }
         finally
         {

@@ -7,6 +7,104 @@ namespace PNCPKing.Tests;
 public sealed class SyncMigrationTests
 {
     [Fact]
+    public async Task VersionSixMigrationAddsAutomationAndSweetCodesWithoutLosingQuotationLines()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "version-six.db");
+        try
+        {
+            var current = new SqliteContractRepository(path);
+            await current.InitializeAsync();
+            var quotation = new SqliteQuotationRepository(path);
+            var project = await quotation.CreateProjectAsync("Preservar");
+            await quotation.SaveSampleAsync(
+                project.Id,
+                null,
+                new QuotationLineInput("Café", 10m, "pacote", 30m, 50m),
+                []);
+
+            SqliteConnection.ClearAllPools();
+            await using (var connection = new SqliteConnection($"Data Source={path}"))
+            {
+                await connection.OpenAsync();
+                string referenceSql;
+                await using (var readSql = connection.CreateCommand())
+                {
+                    readSql.CommandText = "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'quotation_references';";
+                    referenceSql = Convert.ToString(await readSql.ExecuteScalarAsync())!;
+                }
+
+                await using var command = connection.CreateCommand();
+                command.CommandText = $"""
+                    PRAGMA foreign_keys=OFF;
+                    DROP TABLE quotation_references;
+                    DROP TABLE quotation_automation_runs;
+                    DROP TABLE sweet_codes;
+                    DROP TABLE sweet_code_settings;
+                    ALTER TABLE quotation_lines RENAME TO quotation_lines_v7;
+                    CREATE TABLE quotation_lines(
+                        id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL REFERENCES quotation_projects(id) ON DELETE CASCADE,
+                        description TEXT NOT NULL,
+                        requested_quantity_scaled INTEGER NOT NULL,
+                        requested_unit TEXT NOT NULL,
+                        minimum_unit_price_scaled INTEGER,
+                        maximum_unit_price_scaled INTEGER,
+                        sample_version INTEGER NOT NULL DEFAULT 1,
+                        sampled_at TEXT NOT NULL,
+                        selected_basket_key TEXT,
+                        selection_confirmed INTEGER NOT NULL DEFAULT 0,
+                        description_weight INTEGER NOT NULL DEFAULT 50,
+                        unit_weight INTEGER NOT NULL DEFAULT 20,
+                        quantity_weight INTEGER NOT NULL DEFAULT 10,
+                        proximity_weight INTEGER NOT NULL DEFAULT 15,
+                        recency_weight INTEGER NOT NULL DEFAULT 5
+                    );
+                    INSERT INTO quotation_lines(
+                        id, project_id, description, requested_quantity_scaled, requested_unit,
+                        minimum_unit_price_scaled, maximum_unit_price_scaled, sample_version,
+                        sampled_at, selected_basket_key, selection_confirmed, description_weight,
+                        unit_weight, quantity_weight, proximity_weight, recency_weight)
+                    SELECT id, project_id, description, requested_quantity_scaled, requested_unit,
+                           minimum_unit_price_scaled, maximum_unit_price_scaled, sample_version,
+                           sampled_at, selected_basket_key, selection_confirmed, description_weight,
+                           unit_weight, quantity_weight, proximity_weight, recency_weight
+                      FROM quotation_lines_v7;
+                    DROP TABLE quotation_lines_v7;
+                    {referenceSql};
+                    CREATE INDEX idx_quotation_references_line_state
+                        ON quotation_references(line_id, state, unit_price_scaled);
+                    CREATE INDEX idx_quotation_lines_project ON quotation_lines(project_id, sampled_at);
+                    UPDATE schema_info SET version = 6 WHERE id = 1;
+                    """;
+                await command.ExecuteNonQueryAsync();
+            }
+
+            SqliteConnection.ClearAllPools();
+            var migrated = new SqliteContractRepository(path);
+            await migrated.InitializeAsync();
+
+            var lines = await new SqliteQuotationRepository(path).GetLinesAsync(project.Id);
+            var line = Assert.Single(lines);
+            Assert.Equal("Café", line.Description);
+            Assert.Equal("Café", line.SearchText);
+            Assert.Equal(QuotationAutomationItemState.Manual, line.AutomationState);
+            Assert.True((await new SqliteSweetCodeRepository(path).LoadAsync()).Enabled);
+            await using var verify = new SqliteConnection($"Data Source={path}");
+            await verify.OpenAsync();
+            await using var version = verify.CreateCommand();
+            version.CommandText = "SELECT version FROM schema_info WHERE id = 1;";
+            Assert.Equal(7, Convert.ToInt32(await version.ExecuteScalarAsync()));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
     public async Task VersionOneMigrationPreservesDeclaredCoverageAndStructuresRecognizedCheckpoints()
     {
         var directory = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"));

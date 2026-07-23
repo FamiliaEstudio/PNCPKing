@@ -429,6 +429,65 @@ public sealed class ItemSearchSessionTests
         Assert.InRange(client.ItemListCalls, 1, 201);
     }
 
+    [Fact]
+    public async Task ContinuousRun_StreamsAllRowsForSelectedDisparosWithoutPaging()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contract = RepositorySearchTests.Contract("continuous", "Café", "SP", 1);
+        await database.Repository.UpsertContractsAsync([contract]);
+        var client = new SessionPncpClient(new Dictionary<string, IReadOnlyList<ProcurementItem>>
+        {
+            [contract.PncpId] = Enumerable.Range(1, 120)
+                .Select(number => Item(contract.PncpId, number, $"Café {number}", true))
+                .ToArray()
+        });
+        await using var service = new ItemSearchSessionService(
+            client,
+            database.Repository,
+            Path.Combine(database.Directory, "continuous.db"));
+        await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
+        var streamed = new List<ItemSearchRow>();
+        var progressValues = new List<int>();
+
+        var result = await service.RunContinuousAsync(
+            new PriceBatchRequest(2),
+            progress: new InlineProgress<PriceBatchProgress>(value => progressValues.Add(value.CompletedItemCalls)),
+            rowProgress: new InlineProgress<IReadOnlyList<ItemSearchRow>>(rows => streamed.AddRange(rows)));
+
+        Assert.Equal(100, result.CompletedItemCalls);
+        Assert.Equal(100, client.ResultCalls);
+        Assert.Equal(100, streamed.Count(row => row.PriceState == ItemSearchPriceState.Homologated));
+        Assert.True(progressValues.SequenceEqual(progressValues.Order()));
+        Assert.False(result.CandidateSetExhausted);
+    }
+
+    [Fact]
+    public async Task ContinuousRun_CanCrossMoreThanFiftyFreshItemListsInOneAction()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contracts = Enumerable.Range(1, 75)
+            .Select(number => RepositorySearchTests.Contract($"empty-continuous-{number}", "Café", "SP", 1))
+            .Append(RepositorySearchTests.Contract("continuous-last", "Café", "SP", 1))
+            .ToArray();
+        await database.Repository.UpsertContractsAsync(contracts);
+        var client = new SessionPncpClient(new Dictionary<string, IReadOnlyList<ProcurementItem>>
+        {
+            ["continuous-last"] = [Item("continuous-last", 1, "Café encontrado", true)]
+        });
+        await using var service = new ItemSearchSessionService(
+            client,
+            database.Repository,
+            Path.Combine(database.Directory, "continuous-lists.db"));
+        await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
+
+        var result = await service.RunContinuousAsync(new PriceBatchRequest(1));
+
+        Assert.True(result.CandidateSetExhausted);
+        Assert.Equal(76, client.ItemListCalls);
+        Assert.Equal(1, client.ResultCalls);
+        Assert.Equal(1, result.CompletedItemCalls);
+    }
+
     private static ProcurementItem Item(string contractId, long number, string description, bool hasResult) => new()
     {
         ContractId = contractId,

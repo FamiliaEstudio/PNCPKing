@@ -30,10 +30,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         try
         {
             using var workbook = new XLWorkbook();
-            WriteSummary(workbook, report);
-            WriteReferences(workbook, report);
-            WritePending(workbook, report);
-            WriteMethodology(workbook, report);
+            WriteSimpleQuotation(workbook, report);
             cancellationToken.ThrowIfCancellationRequested();
             workbook.SaveAs(partialPath);
             File.Move(partialPath, destinationPath, true);
@@ -46,6 +43,69 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 File.Delete(partialPath);
             }
         }
+    }
+
+    private static void WriteSimpleQuotation(XLWorkbook workbook, QuotationProjectReport report)
+    {
+        var sheet = workbook.Worksheets.Add("Cotação");
+        var row = 1;
+        foreach (var analysis in report.Lines.OrderBy(line => line.Line.DisplayOrder))
+        {
+            var descriptionRange = sheet.Range(row, 1, row, 4);
+            descriptionRange.Merge();
+            descriptionRange.FirstCell().Value = analysis.Line.Description;
+            descriptionRange.Style.Font.Bold = true;
+            descriptionRange.Style.Font.FontSize = 12;
+            descriptionRange.Style.Fill.BackgroundColor = XLColor.FromHtml("#D9EAF7");
+            descriptionRange.Style.Alignment.WrapText = true;
+            row++;
+
+            var selectedBasket = analysis.Line.SelectionConfirmed
+                ? analysis.SelectedBasket
+                : null;
+            selectedBasket ??= analysis.Baskets.FirstOrDefault(basket => basket.IsRecommended);
+            var references = selectedBasket?.References
+                ?? analysis.References
+                    .Where(reference => reference.State == QuotationReferenceState.Eligible)
+                    .OrderByDescending(reference => reference.Adequacy.Total)
+                    .ThenBy(reference => reference.DistanceFromRibeiraoKilometers ?? double.MaxValue)
+                    .ThenByDescending(reference => reference.ResultDate)
+                    .ThenBy(reference => reference.Id, StringComparer.Ordinal)
+                    .Take(2)
+                    .ToArray();
+
+            foreach (var reference in references)
+            {
+                sheet.Cell(row, 1).Value = reference.SupplierName;
+                sheet.Cell(row, 2).Value = FormatBrazilianTaxId(reference.SupplierTaxId);
+                sheet.Cell(row, 2).Style.NumberFormat.Format = "@";
+                sheet.Cell(row, 3).Value = "INCISO II";
+                sheet.Cell(row, 4).Value = reference.UnitPrice;
+                sheet.Cell(row, 4).Style.NumberFormat.Format = "R$ #,##0.0000";
+                row++;
+            }
+
+            if (references.Count < 3)
+            {
+                var observation = sheet.Range(row, 1, row, 4);
+                observation.Merge();
+                observation.FirstCell().Value =
+                    $"OBSERVAÇÃO: Não foram encontrados três preços válidos; foram encontrados {references.Count:N0}.";
+                observation.Style.Font.Italic = true;
+                observation.Style.Font.FontColor = XLColor.DarkRed;
+                observation.Style.Alignment.WrapText = true;
+                row++;
+            }
+
+            row++;
+        }
+
+        sheet.Column(1).Width = 42;
+        sheet.Column(2).Width = 20;
+        sheet.Column(3).Width = 15;
+        sheet.Column(4).Width = 18;
+        sheet.Column(4).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Right;
+        sheet.SheetView.FreezeRows(1);
     }
 
     private static void WriteSummary(XLWorkbook workbook, QuotationProjectReport report)
@@ -128,7 +188,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 sheet.Cell(row, 3).Value = analysis.Line.RequestedQuantity;
                 sheet.Cell(row, 4).Value = analysis.Line.RequestedUnit;
                 sheet.Cell(row, 5).Value = reference.SupplierName;
-                sheet.Cell(row, 6).Value = reference.SupplierTaxId;
+                sheet.Cell(row, 6).Value = FormatBrazilianTaxId(reference.SupplierTaxId);
                 sheet.Cell(row, 6).Style.NumberFormat.Format = "@";
                 sheet.Cell(row, 7).Value = reference.UnitPrice;
                 sheet.Cell(row, 8).Value = reference.ItemDescription;
@@ -274,6 +334,23 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         range.Style.Font.Bold = true;
         range.Style.Fill.BackgroundColor = XLColor.FromHtml("#1F4E78");
         range.Style.Font.FontColor = XLColor.White;
+    }
+
+    private static string FormatBrazilianTaxId(string value)
+    {
+        var normalized = new string(value
+            .Where(char.IsAsciiLetterOrDigit)
+            .Select(char.ToUpperInvariant)
+            .ToArray());
+        if (normalized.Length != 14 ||
+            normalized[..12].Any(character => !char.IsAsciiLetterOrDigit(character)) ||
+            normalized[^2..].Any(character => !char.IsAsciiDigit(character)))
+        {
+            return value;
+        }
+
+        return $"{normalized[..2]}.{normalized[2..5]}.{normalized[5..8]}/" +
+               $"{normalized[8..12]}-{normalized[12..]}";
     }
 
     private static void FinishTable(IXLWorksheet sheet, int headerRow, int lastRow, int lastColumn)

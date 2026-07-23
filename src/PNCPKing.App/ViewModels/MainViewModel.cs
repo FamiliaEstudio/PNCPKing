@@ -9,6 +9,7 @@ using System.Windows.Threading;
 using Microsoft.Win32;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
+using PNCPKing.Core.Search;
 using PNCPKing.Infrastructure.Api;
 using PNCPKing.Infrastructure.Services;
 
@@ -27,6 +28,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private readonly ItemSearchSessionService _itemSearchService;
     private readonly BackupService _backupService;
     private readonly IPncpRequestTelemetry _telemetry;
+    private readonly ISweetCodeRepository _sweetCodeRepository;
     private readonly string _dataFolder;
     private readonly DispatcherTimer _maintenanceTimer;
     private readonly SemaphoreSlim _itemPageGate = new(1, 1);
@@ -59,6 +61,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _isForegroundBusy;
     private bool _isFileBusy;
     private double _operationProgress;
+    private double _priceSearchProgress;
     private int _currentContractPage = 1;
     private long _contractSearchTotal;
     private int _currentItemPage;
@@ -68,7 +71,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private PreflightEstimate? _preflight;
     private bool _automaticMaintenanceRunning;
     private bool _isItemSearchActive;
+    private bool _sweetCodeEnabled;
+    private string? _selectedSweetCodeSuggestion;
     private bool _disposed;
+    private SweetCodeLibrary _sweetCodeLibrary = new(true, []);
 
     public MainViewModel(
         IContractRepository repository,
@@ -80,7 +86,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         BackupService backupService,
         QuotationService quotationService,
         IQuotationWorkbookService quotationWorkbookService,
+        IQuotationWorkbookImportService quotationWorkbookImportService,
         IPncpRequestTelemetry telemetry,
+        ISweetCodeRepository sweetCodeRepository,
         string dataFolder)
     {
         _repository = repository;
@@ -90,8 +98,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _hydrationService = hydrationService;
         _itemSearchService = itemSearchService;
         _backupService = backupService;
-        InitializeQuotation(quotationService, quotationWorkbookService);
+        InitializeQuotation(quotationService, quotationWorkbookService, quotationWorkbookImportService);
         _telemetry = telemetry;
+        _sweetCodeRepository = sweetCodeRepository;
         _dataFolder = dataFolder;
 
         GeoFilters = BuildGeoFilters();
@@ -116,7 +125,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _customStartDate = today.AddDays(-364);
         _customEndDate = today;
 
-        SearchCommand = new AsyncRelayCommand(() => SearchAsync(resetSession: true), () => !IsFileBusy);
+        SearchCommand = new AsyncRelayCommand(
+            () => SearchAsync(resetSession: true),
+            () => !IsFileBusy && !IsPriceBusy);
         PreviousContractPageCommand = new AsyncRelayCommand(
             () => ChangeContractPageAsync(CurrentContractPage - 1),
             () => !IsFileBusy && CurrentContractPage > 1 && _activeSearchQuery is not null);
@@ -151,6 +162,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         ClearCacheCommand = new AsyncRelayCommand(
             ClearCacheAsync,
             () => !IsFileBusy && !IsForegroundBusy && !IsPriceBusy);
+        ManageSweetCodesCommand = new AsyncRelayCommand(ManageSweetCodesAsync, () => !IsFileBusy);
 
         _maintenanceTimer = new DispatcherTimer { Interval = SyncService.AutomaticRetryDelay };
         _maintenanceTimer.Tick += async (_, _) => await TryRunAutomaticMaintenanceAsync().ConfigureAwait(true);
@@ -160,6 +172,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public ObservableCollection<ItemSearchDisplayRow> ItemSearchRows { get; } = [];
     public ObservableCollection<ItemDisplayRow> ContractItemRows { get; } = [];
     public ObservableCollection<CoverageDay> CoverageDays { get; } = [];
+    public ObservableCollection<string> SweetCodeSuggestions { get; } = [];
     public IReadOnlyList<SearchGeoFilter> GeoFilters { get; }
     public IReadOnlyList<SearchSortOption> SortOptions { get; }
     public IReadOnlyList<DateRangeOption> DateRanges { get; }
@@ -181,12 +194,40 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public ICommand ExportBackupCommand { get; }
     public ICommand ImportBackupCommand { get; }
     public ICommand ClearCacheCommand { get; }
+    public ICommand ManageSweetCodesCommand { get; }
 
     public string QueryText
     {
         get => _queryText;
-        set => SetProperty(ref _queryText, value);
+        set
+        {
+            if (SetProperty(ref _queryText, value))
+            {
+                RefreshSweetCodeSuggestions();
+            }
+        }
     }
+
+    public bool SweetCodeEnabled
+    {
+        get => _sweetCodeEnabled;
+        set
+        {
+            if (SetProperty(ref _sweetCodeEnabled, value))
+            {
+                _ = _sweetCodeRepository.SetEnabledAsync(value);
+                RefreshSweetCodeSuggestions();
+            }
+        }
+    }
+
+    public string? SelectedSweetCodeSuggestion
+    {
+        get => _selectedSweetCodeSuggestion;
+        set => SetProperty(ref _selectedSweetCodeSuggestion, value);
+    }
+
+    public bool HasSweetCodeSuggestions => SweetCodeEnabled && SweetCodeSuggestions.Count > 0;
 
     public SearchGeoFilter SelectedGeoFilter
     {
@@ -407,6 +448,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         private set => SetProperty(ref _operationProgress, value);
     }
 
+    public double PriceSearchProgress
+    {
+        get => _priceSearchProgress;
+        private set => SetProperty(ref _priceSearchProgress, Math.Clamp(value, 0d, 100d));
+    }
+
     public int CurrentContractPage
     {
         get => _currentContractPage;
@@ -469,6 +516,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     public async Task InitializeAsync()
     {
+        await LoadSweetCodesAsync().ConfigureAwait(true);
+        await _quotationService.RecoverInterruptedAutomationAsync().ConfigureAwait(true);
         await RefreshQuotationProjectsAsync().ConfigureAwait(true);
         await RefreshDatasetSummaryAsync().ConfigureAwait(true);
         await RefreshCoverageAsync().ConfigureAwait(true);
@@ -489,11 +538,96 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _indexCancellation?.Cancel();
         _priceCancellation?.Cancel();
         _foregroundCancellation?.Cancel();
+        _quotationAutomationCancellation?.Cancel();
         SetItemSearchActive(false);
         await _itemSearchService.DisposeAsync().ConfigureAwait(false);
     }
 
     public ValueTask DisposeAsync() => new(ShutdownAsync());
+
+    public void ApplySelectedSweetCode()
+    {
+        if (SelectedSweetCodeSuggestion is not { Length: > 0 } suggestion)
+        {
+            return;
+        }
+
+        QueryText = suggestion;
+        SweetCodeSuggestions.Clear();
+        SelectedSweetCodeSuggestion = null;
+        OnPropertyChanged(nameof(HasSweetCodeSuggestions));
+    }
+
+    public void DismissSweetCodeSuggestions()
+    {
+        SweetCodeSuggestions.Clear();
+        SelectedSweetCodeSuggestion = null;
+        OnPropertyChanged(nameof(HasSweetCodeSuggestions));
+    }
+
+    private async Task LoadSweetCodesAsync()
+    {
+        _sweetCodeLibrary = await _sweetCodeRepository.LoadAsync().ConfigureAwait(true);
+        _sweetCodeEnabled = _sweetCodeLibrary.Enabled;
+        OnPropertyChanged(nameof(SweetCodeEnabled));
+        RefreshSweetCodeSuggestions();
+    }
+
+    private async Task ManageSweetCodesAsync()
+    {
+        var window = new Views.SweetCodeWindow(_sweetCodeLibrary.Enabled, _sweetCodeLibrary.Expressions)
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (window.ShowDialog() != true)
+        {
+            return;
+        }
+
+        IsFileBusy = true;
+        try
+        {
+            await _sweetCodeRepository.SaveAsync(window.SweetCodesEnabled, window.Expressions).ConfigureAwait(true);
+            _sweetCodeLibrary = new SweetCodeLibrary(window.SweetCodesEnabled, window.Expressions);
+            _sweetCodeEnabled = window.SweetCodesEnabled;
+            OnPropertyChanged(nameof(SweetCodeEnabled));
+            RefreshSweetCodeSuggestions();
+            StatusText = $"Sweet Code atualizado: {window.Expressions.Count:N0} expressão(ões).";
+        }
+        finally
+        {
+            IsFileBusy = false;
+        }
+    }
+
+    private void RefreshSweetCodeSuggestions()
+    {
+        SweetCodeSuggestions.Clear();
+        SelectedSweetCodeSuggestion = null;
+        if (!SweetCodeEnabled)
+        {
+            OnPropertyChanged(nameof(HasSweetCodeSuggestions));
+            return;
+        }
+
+        var prefix = SearchText.Normalize(QueryText);
+        if (prefix.Length == 0)
+        {
+            OnPropertyChanged(nameof(HasSweetCodeSuggestions));
+            return;
+        }
+
+        foreach (var expression in _sweetCodeLibrary.Expressions
+                     .Where(expression => SearchText.Normalize(expression)
+                         .StartsWith(prefix, StringComparison.Ordinal))
+                     .Take(12))
+        {
+            SweetCodeSuggestions.Add(expression);
+        }
+
+        SelectedSweetCodeSuggestion = SweetCodeSuggestions.FirstOrDefault();
+        OnPropertyChanged(nameof(HasSweetCodeSuggestions));
+    }
 
     private async Task SearchAsync(bool resetSession)
     {
@@ -537,13 +671,16 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             SelectedItemSearchRow = null;
             SelectedResultsTabIndex = 0;
             _searchTelemetryBaseline = _telemetry.GetSnapshot();
+            PriceSearchProgress = 0;
             await _itemSearchService.StartAsync(
                 _activeSearchQuery with { Page = 1, PageSize = 200 },
                 _priceCancellation.Token).ConfigureAwait(true);
             SetItemSearchActive(true);
             NotifyCommands();
-            ItemSearchSummary = "Camada inicial: 50 municípios próximos. Consultando no máximo 50 listas novas nesta ação…";
-            _ = LoadItemPageSafelyAsync(1, append: false, _priceCancellation.Token);
+            ItemSearchSummary =
+                $"Pesquisa contínua iniciada com {BatchCount:N0} disparo(s), até {BatchCount * ItemPageSize:N0} consultas. " +
+                "O tempo depende também da quantidade de contratos que precisa ser examinada.";
+            await RunSelectedBatchesAsync(isAdditional: false, _priceCancellation.Token).ConfigureAwait(true);
         }
         catch (Exception exception)
         {
@@ -658,6 +795,18 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task FireBatchesAsync()
     {
+        var cancellation = _priceCancellation;
+        if (cancellation is null || cancellation.IsCancellationRequested)
+        {
+            ItemSearchSummary = "Execute novamente a pesquisa para iniciar uma nova sessão de preços.";
+            return;
+        }
+
+        await RunSelectedBatchesAsync(isAdditional: true, cancellation.Token).ConfigureAwait(true);
+    }
+
+    private async Task RunSelectedBatchesAsync(bool isAdditional, CancellationToken cancellationToken)
+    {
         var requestedItems = checked(BatchCount * ItemPageSize);
         var largeConfirmed = requestedItems <= 500;
         if (!largeConfirmed)
@@ -669,7 +818,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 $"Payload de resultados estimado: {FormatBytes(projection.Bytes)}.\n" +
                 $"Duração estimada com até duas chamadas simultâneas: {FormatDuration(projection.Duration)}.\n" +
                 $"Média usada por resultado: {FormatBytes(projection.AverageBytes)} em {FormatDuration(projection.AverageDuration)}.\n" +
-                "A descoberta é limitada a 50 listas novas nesta ação; use Continuar para avançar.\n" +
+                "A pesquisa examinará automaticamente quantos contratos forem necessários.\n" +
+                "Ela pode demorar quando poucos contratos contêm itens compatíveis.\n" +
                 "Uma consulta pode retornar zero, um ou vários resultados.",
                 "Confirmar lotes de preços",
                 MessageBoxButton.YesNo,
@@ -682,24 +832,28 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             largeConfirmed = true;
         }
 
-        var cancellation = _priceCancellation;
-        if (cancellation is null || cancellation.IsCancellationRequested)
-        {
-            ItemSearchSummary = "Execute novamente a pesquisa para iniciar uma nova sessão de preços.";
-            return;
-        }
-
         SetPriceBusy(true, usesNetwork: true);
         try
         {
+            if (!isAdditional)
+            {
+                ItemSearchRows.Clear();
+            }
+
+            PriceSearchProgress = 0;
+            var (minimum, maximum) = ParsePriceRange();
             using var requestScope = PncpRequestOptions.BeginScope(PncpRequestPriority.AdditionalBatches);
             var progress = new Progress<PriceBatchProgress>(UpdateItemSearchProgress);
-            var result = await _itemSearchService.FireBatchesAsync(
+            var rowProgress = new Progress<IReadOnlyList<ItemSearchRow>>(AppendUniqueRows);
+            var result = await _itemSearchService.RunContinuousAsync(
                 new PriceBatchRequest(BatchCount, largeConfirmed),
+                minimum,
+                maximum,
                 progress,
-                cancellation.Token).ConfigureAwait(true);
-            await ReloadAllDiscoveredRowsAsync(cancellation.Token).ConfigureAwait(true);
+                rowProgress,
+                cancellationToken).ConfigureAwait(true);
             HasMoreItemCandidates = !result.CandidateSetExhausted;
+            PriceSearchProgress = 100;
             ItemSearchSummary =
                 $"{result.Message} Etapa {result.GeographicStage}; " +
                 $"{result.ContractsScanned:N0} contrato(s) examinado(s); " +
@@ -784,10 +938,15 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private void UpdateItemSearchProgress(PriceBatchProgress progress)
     {
+        PriceSearchProgress = progress.CandidateSetExhausted
+            ? 100d
+            : progress.RequestedItemCalls <= 0
+                ? 0d
+                : Math.Min(100d, progress.CompletedItemCalls * 100d / progress.RequestedItemCalls);
         ItemSearchSummary =
             $"{progress.Message} Etapa {progress.GeographicStage}; contratos: {progress.ContractsScanned:N0}; " +
             $"cache reutilizado: {progress.CachedItemListsReused:N0}; " +
-            $"listas novas nesta ação: {progress.FreshItemListsUsed:N0}/50; listas da sessão: {progress.ItemListCalls:N0}; " +
+            $"listas da sessão: {progress.ItemListCalls:N0}; " +
             $"falhas: {progress.FailedItemCalls:N0}. {BuildSearchTrafficSummary()}";
     }
 
@@ -1474,10 +1633,14 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      StopItemSearchCommand, CalculatePreflightCommand, StartSyncCommand,
                      PauseSyncCommand, CancelIndexCommand, HydrateCommand, RetryPendingCommand,
                      OpenPncpCommand, ExportBackupCommand, ImportBackupCommand, ClearCacheCommand,
+                     ManageSweetCodesCommand,
                      UseQuotationSampleCommand, UpdateQuotationSampleCommand,
                      AdjustQuotationWeightsCommand,
                      ConfirmQuotationBasketCommand, ExportQuotationCommand,
-                     PreviousQuotationBasketPageCommand, NextQuotationBasketPageCommand
+                     PreviousQuotationBasketPageCommand, NextQuotationBasketPageCommand,
+                     NewQuotationCommand, RenameQuotationCommand, DeleteQuotationCommand,
+                     DeleteQuotationLineCommand, ImportQuotationCommand,
+                     ResumeQuotationAutomationCommand, CancelQuotationAutomationCommand
                  })
         {
             switch (command)

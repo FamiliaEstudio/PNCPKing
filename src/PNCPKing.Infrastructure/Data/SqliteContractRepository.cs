@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 6;
+    public const int CurrentSchemaVersion = 7;
 
     private const string GeographicGroupExpression = "CASE WHEN COALESCE(c.geo_layer, 1) = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -156,6 +156,22 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             await using var updateVersion = connection.CreateCommand();
             updateVersion.Transaction = (SqliteTransaction)transaction;
             updateVersion.CommandText = "UPDATE schema_info SET version = 6 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 6;
+        }
+
+        if (version < 7)
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = (SqliteTransaction)transaction;
+            migration.CommandText = SchemaV7Sql;
+            await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 7 WHERE id = 1;";
             await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -2422,5 +2438,43 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
 
         CREATE INDEX idx_contracts_geographic_sample
             ON contracts(geo_layer, state_proximity_rank, municipality_distance_rank, random_order_key, pncp_id);
+        """;
+
+    private const string SchemaV7Sql = """
+        CREATE TABLE sweet_code_settings(
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            enabled INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO sweet_code_settings(id, enabled) VALUES(1, 1);
+
+        CREATE TABLE sweet_codes(
+            position INTEGER PRIMARY KEY,
+            expression TEXT NOT NULL UNIQUE
+        );
+
+        CREATE TABLE quotation_automation_runs(
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES quotation_projects(id) ON DELETE CASCADE,
+            output_path TEXT NOT NULL,
+            geo_filter_kind INTEGER NOT NULL,
+            geo_filter_uf TEXT,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            state INTEGER NOT NULL DEFAULT 0,
+            message TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        ALTER TABLE quotation_lines ADD COLUMN search_text TEXT NOT NULL DEFAULT '';
+        ALTER TABLE quotation_lines ADD COLUMN requested_batch_count INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE quotation_lines ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE quotation_lines ADD COLUMN automation_run_id TEXT REFERENCES quotation_automation_runs(id) ON DELETE SET NULL;
+        ALTER TABLE quotation_lines ADD COLUMN automation_state INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE quotation_lines ADD COLUMN automation_message TEXT NOT NULL DEFAULT '';
+
+        UPDATE quotation_lines SET search_text = description WHERE search_text = '';
+        CREATE INDEX idx_quotation_lines_automation
+            ON quotation_lines(automation_run_id, automation_state, display_order);
         """;
 }

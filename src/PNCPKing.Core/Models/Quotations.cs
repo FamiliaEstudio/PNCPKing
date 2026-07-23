@@ -97,7 +97,60 @@ public sealed record QuotationLine
     public DateTimeOffset SampledAt { get; init; }
     public string? SelectedBasketKey { get; init; }
     public bool SelectionConfirmed { get; init; }
+    public string SearchText { get; init; } = string.Empty;
+    public int RequestedBatchCount { get; init; } = 1;
+    public int DisplayOrder { get; init; }
+    public Guid? AutomationRunId { get; init; }
+    public QuotationAutomationItemState AutomationState { get; init; } = QuotationAutomationItemState.Manual;
+    public string AutomationMessage { get; init; } = string.Empty;
 }
+
+public enum QuotationAutomationItemState
+{
+    Manual,
+    Pending,
+    Running,
+    Completed,
+    Insufficient,
+    Failed
+}
+
+public enum QuotationAutomationRunState
+{
+    Pending,
+    Running,
+    Completed,
+    Cancelled,
+    Failed
+}
+
+public sealed record QuotationAutomationRun
+{
+    public required Guid Id { get; init; }
+    public required Guid ProjectId { get; init; }
+    public required string OutputPath { get; init; }
+    public required SearchGeoFilter GeoFilter { get; init; }
+    public required DateOnly StartDate { get; init; }
+    public required DateOnly EndDate { get; init; }
+    public QuotationAutomationRunState State { get; init; }
+    public string Message { get; init; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset UpdatedAt { get; init; }
+}
+
+public sealed record QuotationImportItem(
+    int SourceRow,
+    string SearchText,
+    string OutputDescription,
+    decimal Quantity,
+    string Unit,
+    decimal? MinimumUnitPrice,
+    decimal? MaximumUnitPrice,
+    int BatchCount);
+
+public sealed record QuotationImportDocument(
+    string SourcePath,
+    IReadOnlyList<QuotationImportItem> Items);
 
 public enum QuotationReferenceState
 {
