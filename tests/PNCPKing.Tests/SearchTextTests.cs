@@ -54,15 +54,46 @@ public sealed class SearchTextTests
         Assert.Equal("\"cafe\"* OR \"torrado\"* OR \"cha\"*", expression.CandidateMatchQuery);
     }
 
+    [Fact]
+    public void Parse_SeparatesObjectTextFromOneOrMoreAcceptedUnits()
+    {
+        var expression = SearchText.Parse(
+            "Café torrado -máquina -cápsula -xicara -hotelaria -copo \"pacote \"unidade");
+
+        Assert.Equal(["pacote", "unidade"], expression.AcceptedUnits);
+        Assert.Equal("cafe torrado", expression.PositiveText);
+        Assert.Equal("(\"cafe\"* AND \"torrado\"*)", expression.ContractMatchQuery);
+        Assert.True(expression.MatchesItem("Café torrado tradicional", "PACOTE (PAC)"));
+        Assert.True(expression.MatchesItem("Café torrado tradicional", "Unidade"));
+        Assert.False(expression.MatchesItem("Café torrado tradicional", "Caixa"));
+        Assert.False(expression.MatchesItem("Café torrado para máquina", "Pacote"));
+    }
+
+    [Fact]
+    public void Parse_UnmarkedUnitIsTextButQuotePrefixIsAUnitFilter()
+    {
+        var text = SearchText.Parse("unidade");
+        var unit = SearchText.Parse("\"unidade");
+        var curlyUnit = SearchText.Parse("“pacote");
+
+        Assert.Empty(text.AcceptedUnits);
+        Assert.Equal("unidade", text.PositiveText);
+        Assert.Equal(["unidade"], unit.AcceptedUnits);
+        Assert.Empty(unit.PositiveGroups);
+        Assert.True(unit.MatchesItem("qualquer descrição", "UNIDADE DE FORNECIMENTO"));
+        Assert.Equal(["pacote"], curlyUnit.AcceptedUnits);
+    }
+
     [Theory]
     [InlineData("-cafeteira")]
-    [InlineData("\"café torrado")]
+    [InlineData("\"")]
     [InlineData("café +")]
     [InlineData("café OU")]
     [InlineData("OU café")]
     [InlineData("café - filtro")]
     [InlineData("café AND filtro")]
     [InlineData("café & filtro")]
+    [InlineData("café + \"pacote")]
     public void Parse_RejectsInvalidExpressionsBeforeSearch(string text)
     {
         Assert.Throws<SearchQueryException>(() => SearchText.Parse(text));

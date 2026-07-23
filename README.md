@@ -16,7 +16,7 @@ A distribuição autocontida mais recente para Windows x64 está em `artifacts\w
 - remoção de contratações vencidas somente depois que a nova borda da janela estiver comprovadamente completa;
 - atualização por `dataAtualizacaoGlobal` com sobreposição de 48 horas;
 - SQLite em WAL com FTS5 e pesquisa sem diferença entre acentos/maiúsculas, sempre por prefixo;
-- sintaxe textual com E implícito ou `+`, OU por `OU`, `OR` ou `|`, frases entre aspas e exclusões globais por `-palavra` ou `-"frase"`;
+- sintaxe textual com E implícito ou `+`, OU por `OU`, `OR` ou `|`, frases entre aspas fechadas, exclusões globais por `-palavra` ou `-"frase"` e unidades aceitas por marcadores como `"pacote "unidade`;
 - pesquisa em duas etapas: o objeto local seleciona candidatos por qualquer termo positivo e somente a descrição do item que satisfaz a expressão completa produz preços;
 - filtros `Todos`, `Cidades Próximas`, `Sudeste` e UF, períodos de 7 a 365 dias ou personalizados e ordenação por relevância, data ou proximidade;
 - catálogo nacional embutido das localidades oficiais de 2022 do IBGE, usado somente para distância e ordem geográfica, sem consultas remotas por município;
@@ -29,8 +29,8 @@ A distribuição autocontida mais recente para Windows x64 está em `artifacts\w
 - faixa inclusiva de preço unitário homologado, aplicada somente a resultados ativos e sem conversão entre unidades;
 - projetos persistentes de cotação que copiam a amostra já coletada, respeitando a faixa informada e sem novas chamadas ao PNCP;
 - qualificação auditável por cobertura do descritivo solicitado, unidade/embalagem, quantidade em faixas graduais, proximidade e atualidade;
-- exclusão de medidas incompatíveis, CNPJs inválidos e duplicidades prováveis, preservando o motivo de cada descarte;
-- formação local de cestas com três fornecedores e contratações distintos, aceitando desvio máximo de 25% da média;
+- elegibilidade de cotação determinada somente pela faixa de preço e compatibilidade descritiva; CNPJ, unidade, quantidade, proximidade, atualidade e índice permanecem informativos;
+- formação local de cestas com três referências únicas, mantendo origem e dispersão visíveis para a decisão objetiva do usuário;
 - classificação da cesta recomendada, mais barata e mais cara, com revisão e confirmação obrigatória pelo usuário;
 - atualização incremental da amostra com versionamento e reconfirmação da escolha anterior;
 - exportação parcial ou completa para `.xlsx`, com resumo, referências, pendências e metodologia;
@@ -74,7 +74,7 @@ A suíte automatizada cobre pesquisa por objeto e item, geografia, faixa de pre�
 3. Revise o volume, o espaço e a duração estimados.
 4. Clique em **Baixar/atualizar dados** e confirme os números exibidos.
 5. Digite o objeto, escolha geografia, período e ordenação e clique em **Pesquisar**.
-6. Você pode combinar termos: `café filtro` ou `café + filtro` exigem ambos; `café OU chá` aceita qualquer um; `"café torrado"` busca a frase; `café -cafeteira -"filtro de papel"` exclui essas descrições.
+6. Você pode combinar termos: `café filtro` ou `café + filtro` exigem ambos; `café OU chá` aceita qualquer um; `"café torrado"` busca a frase; `café -cafeteira -"filtro de papel"` exclui descrições; `"pacote "unidade` aceita qualquer uma dessas unidades estruturadas do item.
 7. A grade principal manterá somente os itens cuja descrição satisfaz a expressão e consultará no máximo 50 listas novas na ação inicial.
 8. Use **Continuar busca (até 50 listas)** para avançar explicitamente; a sequência é 50 municípios próximos, restante de SP e demais UFs. Para ampliar preços de itens já descobertos, informe de 1 a 100 em **Disparar lotes**.
 9. Use os campos de preço mínimo/máximo para filtrar o valor unitário homologado ativo.

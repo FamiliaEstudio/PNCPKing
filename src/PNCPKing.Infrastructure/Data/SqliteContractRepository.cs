@@ -283,7 +283,13 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
 
         pageSize = Math.Clamp(pageSize, 1, 500);
         randomPivot = Math.Clamp(randomPivot, 0, long.MaxValue - 1);
-        var conditions = new List<string> { "contracts_fts MATCH $candidateMatch" };
+        var candidateMatch = expression.CandidateMatchQuery;
+        var joinsFts = candidateMatch.Length > 0;
+        var conditions = new List<string>();
+        if (joinsFts)
+        {
+            conditions.Add("contracts_fts MATCH $candidateMatch");
+        }
         var geoFilter = filters.EffectiveGeoFilter;
         switch (geoFilter.Kind)
         {
@@ -308,7 +314,10 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             conditions.Add("date(c.publication_date) <= date($endDate)");
         }
 
-        var where = string.Join(" AND ", conditions);
+        var where = conditions.Count == 0 ? string.Empty : " WHERE " + string.Join(" AND ", conditions);
+        var ftsJoin = joinsFts
+            ? "JOIN contracts_fts ON contracts_fts.rowid = c.rowid"
+            : string.Empty;
         var cursorWhere = cursor is null
             ? string.Empty
             : """
@@ -335,15 +344,18 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                        CASE WHEN COALESCE(c.random_order_key, 0) >= $randomPivot THEN 0 ELSE 1 END AS rotation_band,
                        COALESCE(c.random_order_key, 0) AS random_order_key
                   FROM contracts c
-                  JOIN contracts_fts ON contracts_fts.rowid = c.rowid
-                 WHERE {where}
+                  {ftsJoin}
+                  {where}
             )
             SELECT * FROM ranked
             {cursorWhere}
              ORDER BY geographic_layer, group_rank, rotation_band, random_order_key, pncp_id
              LIMIT $limit;
             """;
-        command.Parameters.AddWithValue("$candidateMatch", expression.CandidateMatchQuery);
+        if (joinsFts)
+        {
+            command.Parameters.AddWithValue("$candidateMatch", candidateMatch);
+        }
         command.Parameters.AddWithValue("$randomPivot", randomPivot);
         command.Parameters.AddWithValue("$limit", pageSize + 1);
         AddFilterParameters(command, filters);
@@ -590,7 +602,8 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         string text,
         CancellationToken cancellationToken = default)
     {
-        var match = SearchText.BuildMatchQuery(text);
+        var expression = SearchText.Parse(text);
+        var match = expression.ItemMatchQuery;
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = match.Length == 0
@@ -623,7 +636,11 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            items.Add(ReadItem(reader));
+            var item = ReadItem(reader);
+            if (expression.MatchesItem(item.Description, item.Unit))
+            {
+                items.Add(item);
+            }
         }
 
         return items;

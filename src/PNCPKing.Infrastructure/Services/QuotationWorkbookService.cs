@@ -218,25 +218,10 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
 
         if (analysis.EligibleCount < 3)
         {
-            return $"Somente {analysis.EligibleCount:N0} referência(s) passou/passaram pelos critérios de adequação, CNPJ, preço e compatibilidade.";
+            return $"Somente {analysis.EligibleCount:N0} referência(s) passou/passaram pela faixa de preço e pela compatibilidade descritiva.";
         }
 
-        var suppliers = analysis.References
-            .Where(reference => reference.State == QuotationReferenceState.Eligible)
-            .Select(reference => reference.SupplierTaxId)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Count();
-        var contracts = analysis.References
-            .Where(reference => reference.State == QuotationReferenceState.Eligible)
-            .Select(reference => reference.ContractId)
-            .Distinct(StringComparer.Ordinal)
-            .Count();
-        if (suppliers < 3 || contracts < 3)
-        {
-            return $"A amostra tem apenas {suppliers:N0} CNPJ(s) e {contracts:N0} contratação(ões) distintos entre as referências elegíveis.";
-        }
-
-        return "As referências elegíveis não formam um trio em que todos os preços permaneçam dentro de 25% da média.";
+        return "Não foi possível formar uma cesta com três referências únicas.";
     }
 
     private static void WriteMethodology(XLWorkbook workbook, QuotationProjectReport report)
@@ -252,13 +237,13 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             ("Versão das regras", QuotationAnalyzer.RulesVersion),
             ("Origem geográfica", "Ribeirão Preto/SP"),
             ("Fonte de preços", "Resultados unitários homologados ativos já coletados pela pesquisa do PNCP King"),
-            ("Regra da cesta", "Três CNPJs e três contratações distintos; desvio de cada preço em relação à média aritmética menor ou igual a 25%."),
-            ("Índice da referência", "Os pesos de descrição, unidade/embalagem, quantidade, proximidade e atualidade são definidos por item e sempre somam 100%. O mínimo de elegibilidade é 60/100."),
+            ("Regra da cesta", "Três referências únicas dentro da faixa de preço e com compatibilidade descritiva. CNPJ, origem, unidade, quantidade, desvio e índice são informações para a escolha do usuário, não bloqueios automáticos."),
+            ("Índice da referência", "Os pesos de descrição, unidade/embalagem, quantidade, proximidade e atualidade são definidos por item e sempre somam 100%. O índice ordena e informa; não determina elegibilidade."),
             ("Adequação descritiva", "Mede a cobertura dos termos e expressões solicitados. Informações adicionais do item encontrado não reduzem a nota."),
             ("Quantidade", "Compara a escala das quantidades por faixas graduais; diferenças grandes reduzem a preferência, mas não anulam uma referência de preço unitário compatível."),
             ("Índice da cesta", "70% média das adequações + 20% menor adequação + 10% coesão de preços."),
             ("Auditoria dos pesos", "Os pesos efetivamente usados em cada item constam nas abas Resumo e Referências."),
-            ("Duplicidade provável", "Mesmo CNPJ, órgão e item normalizado; datas em até 30 dias e preços com diferença de até 1%."),
+            ("CNPJ e repetição", "Permanecem visíveis para auditoria e decisão do usuário; não excluem automaticamente uma referência compatível."),
             ("Conjunto de cestas", "Até 60 referências: 40 melhores por adequação, 10 menores preços e 10 maiores preços."),
             ("Volume da cotação", $"{collected:N0} coletados; {eligible:N0} elegíveis; {duplicates:N0} duplicados; {rejected:N0} descartados."),
             ("Observação", "O arquivo contém todas as cestas confirmadas e relaciona separadamente os itens pendentes.")

@@ -93,7 +93,7 @@
         </GroupBox>
 
         <TextBlock Grid.Row="7" Grid.ColumnSpan="3" Margin="0,14,0,0" Foreground="#5F6871"
-                   Text="Com uma faixa preenchida, somente os preços dentro desses limites serão copiados para comparação. Sem faixa, todos os resultados homologados ativos coletados serão usados." TextWrapping="Wrap" />
+                   Text="Somente faixa de preço e compatibilidade descritiva bloqueiam uma referência. O índice, CNPJ, unidade, quantidade, proximidade, atualidade e dispersão permanecem informativos para sua escolha objetiva da cesta." TextWrapping="Wrap" />
 
         <StackPanel Grid.Row="8" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="Cancelar" IsCancel="True" MinWidth="95" />

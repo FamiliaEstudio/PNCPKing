@@ -203,7 +203,11 @@ public sealed partial class MainViewModel
     private async Task UseCurrentSampleAsync()
     {
         var projects = (await _quotationService.GetProjectsAsync().ConfigureAwait(true));
-        var window = new QuotationSampleWindow(projects, QueryText.Trim(), MinimumPriceText, MaximumPriceText)
+        var expression = SearchText.Parse(QueryText);
+        var quotationDescription = expression.PositiveText.Length > 0
+            ? expression.PositiveText
+            : QueryText.Trim();
+        var window = new QuotationSampleWindow(projects, quotationDescription, MinimumPriceText, MaximumPriceText)
         {
             Owner = Application.Current.MainWindow
         };
@@ -261,7 +265,8 @@ public sealed partial class MainViewModel
             return;
         }
 
-        var sessionText = SearchText.Normalize(_itemSearchService.CurrentSession?.Text);
+        var sessionText = SearchText.Normalize(
+            SearchText.Parse(_itemSearchService.CurrentSession?.Text).PositiveText);
         var lineText = SearchText.Normalize(selectedLine.Description);
         if (sessionText.Length > 0 && lineText.Length > 0 && !lineText.Contains(sessionText, StringComparison.Ordinal) &&
             !sessionText.Contains(lineText, StringComparison.Ordinal))

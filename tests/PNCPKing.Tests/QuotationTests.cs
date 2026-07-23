@@ -20,7 +20,7 @@ public sealed class QuotationTests
     }
 
     [Fact]
-    public void HigherProximityWeight_MakesGeographyRelevantToEligibility()
+    public void HigherProximityWeight_ChangesIndexButNotEligibility()
     {
         var analyzer = new QuotationAnalyzer(Today);
         var line = Line("Café", 100m, "pacote") with
@@ -39,7 +39,7 @@ public sealed class QuotationTests
 
         Assert.Equal(0m, far.Adequacy.ProximityScore);
         Assert.Equal(55m, far.Adequacy.Total);
-        Assert.Equal(QuotationReferenceState.Rejected, far.State);
+        Assert.Equal(QuotationReferenceState.Eligible, far.State);
         Assert.Equal(45m, local.Adequacy.ProximityScore);
         Assert.Equal(100m, local.Adequacy.Total);
         Assert.Equal(QuotationReferenceState.Eligible, local.State);
@@ -77,7 +77,7 @@ public sealed class QuotationTests
     }
 
     [Fact]
-    public void IncompatiblePackageMeasure_IsRejected()
+    public void IncompatiblePackageMeasure_IsInformativeAndDoesNotRejectPrice()
     {
         var analyzer = new QuotationAnalyzer(Today);
         var line = Line("Café pacote de 500 g", 10m, "pacote");
@@ -86,8 +86,9 @@ public sealed class QuotationTests
             line,
             Reference("ref", "contract", "11222333000181", 40m, "Café pacote de 250 g", "pacote", 10m));
 
-        Assert.Equal(QuotationReferenceState.Rejected, scored.State);
-        Assert.Contains("incompatível", scored.StateReason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(QuotationReferenceState.Eligible, scored.State);
+        Assert.Contains("informativo", scored.StateReason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("divergente", scored.StateReason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -162,7 +163,7 @@ public sealed class QuotationTests
     }
 
     [Fact]
-    public void BasketRule_AcceptsExactlyTwentyFivePercentAndRejectsAboveIt()
+    public void BasketDispersion_IsInformativeEvenAboveTwentyFivePercent()
     {
         var analyzer = new QuotationAnalyzer(Today);
         var line = Line("Café torrado", 100m, "pacote");
@@ -179,11 +180,12 @@ public sealed class QuotationTests
 
         Assert.Single(exact.Baskets);
         Assert.Equal(25m, exact.Baskets[0].MaximumDeviationPercent);
-        Assert.Empty(above.Baskets);
+        Assert.Single(above.Baskets);
+        Assert.True(above.Baskets[0].MaximumDeviationPercent > 25m);
     }
 
     [Fact]
-    public void BasketRule_RequiresDistinctSuppliersAndContracts()
+    public void BasketOrigin_IsInformativeAndDoesNotPreventCombination()
     {
         var analyzer = new QuotationAnalyzer(Today);
         var line = Line("Café torrado", 100m, "pacote");
@@ -198,12 +200,12 @@ public sealed class QuotationTests
             Reference("f", "c3", "33000167000101", 110m)
         ]);
 
-        Assert.Empty(sameSupplier.Baskets);
-        Assert.Empty(sameContract.Baskets);
+        Assert.Single(sameSupplier.Baskets);
+        Assert.Single(sameContract.Baskets);
     }
 
     [Fact]
-    public void ProbableDuplicate_KeepsBestReferenceAndAuditsSuppressedOne()
+    public void ProbableDuplicate_RemainsEligibleForUserReview()
     {
         var analyzer = new QuotationAnalyzer(Today);
         var line = Line("Café torrado", 100m, "pacote");
@@ -212,9 +214,42 @@ public sealed class QuotationTests
             Reference("repeat", "c2", "11222333000181", 100.50m, date: Today.AddDays(-10))
         ]);
 
-        Assert.Equal(1, result.EligibleCount);
-        Assert.Equal(1, result.DuplicateCount);
-        Assert.Contains(result.References, reference => reference.State == QuotationReferenceState.Duplicate && reference.DuplicateOfReferenceId is not null);
+        Assert.Equal(2, result.EligibleCount);
+        Assert.Equal(0, result.DuplicateCount);
+        Assert.All(result.References, reference => Assert.Equal(QuotationReferenceState.Eligible, reference.State));
+    }
+
+    [Fact]
+    public void OnlyPriceRangeAndDescriptionBlockQuotationEligibility()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var line = Line("Café torrado", 100m, "pacote") with
+        {
+            MinimumUnitPrice = 30m,
+            MaximumUnitPrice = 50m,
+            Weights = new AdequacyWeights(10, 10, 10, 65, 5)
+        };
+        var informativeProblems = analyzer.ScoreReference(
+            line,
+            Reference("info", "same", "CNPJ INVÁLIDO", 40m, "Café torrado 250 g", "caixa") with
+            {
+                Municipality = "Cidade distante",
+                Uf = "RR",
+                DistanceFromRibeiraoKilometers = null
+            });
+        var outsideRange = analyzer.ScoreReference(
+            line,
+            Reference("range", "c2", "", 60m, "Café torrado", "pacote"));
+        var wrongDescription = analyzer.ScoreReference(
+            line,
+            Reference("description", "c3", "", 40m, "Açúcar cristal", "pacote"));
+
+        Assert.Equal(QuotationReferenceState.Eligible, informativeProblems.State);
+        Assert.Contains("informativo", informativeProblems.StateReason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(QuotationReferenceState.Rejected, outsideRange.State);
+        Assert.Contains("máximo", outsideRange.StateReason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(QuotationReferenceState.Rejected, wrongDescription.State);
+        Assert.Contains("descritiva", wrongDescription.StateReason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
