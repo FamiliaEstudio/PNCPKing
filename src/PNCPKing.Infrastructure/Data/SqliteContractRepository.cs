@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 7;
+    public const int CurrentSchemaVersion = 8;
 
     private const string GeographicGroupExpression = "CASE WHEN COALESCE(c.geo_layer, 1) = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -172,6 +172,22 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             await using var updateVersion = connection.CreateCommand();
             updateVersion.Transaction = (SqliteTransaction)transaction;
             updateVersion.CommandText = "UPDATE schema_info SET version = 7 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 7;
+        }
+
+        if (version < 8)
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = (SqliteTransaction)transaction;
+            migration.CommandText = SchemaV8Sql;
+            await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 8 WHERE id = 1;";
             await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -407,6 +423,143 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             candidates,
             candidates.Count == 0 ? cursor : candidates[^1].Cursor,
             hasMore);
+    }
+
+    public async Task<ItemSearchLocalSummary> GetItemSearchLocalSummaryAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(filters);
+        ArgumentNullException.ThrowIfNull(expression);
+        if (expression.IsEmpty)
+        {
+            return new ItemSearchLocalSummary(0, 0, 0);
+        }
+
+        var candidateMatch = expression.CandidateMatchQuery;
+        var candidateConditions = new List<string>();
+        if (candidateMatch.Length > 0)
+        {
+            candidateConditions.Add("contracts_fts MATCH $candidateMatch");
+        }
+
+        switch (filters.EffectiveGeoFilter.Kind)
+        {
+            case SearchGeoFilterKind.Southeast:
+                candidateConditions.Add("c.uf IN ('ES','MG','RJ','SP')");
+                break;
+            case SearchGeoFilterKind.State:
+                candidateConditions.Add("c.uf = $uf");
+                break;
+            case SearchGeoFilterKind.NearRibeirao:
+                candidateConditions.Add("c.geo_layer = 0");
+                break;
+        }
+
+        if (filters.StartDate is not null)
+        {
+            candidateConditions.Add("date(c.publication_date) >= date($startDate)");
+        }
+
+        if (filters.EndDate is not null)
+        {
+            candidateConditions.Add("date(c.publication_date) <= date($endDate)");
+        }
+
+        var candidateWhere = candidateConditions.Count == 0
+            ? string.Empty
+            : " WHERE " + string.Join(" AND ", candidateConditions);
+        var candidateFtsJoin = candidateMatch.Length > 0
+            ? "JOIN contracts_fts ON contracts_fts.rowid = c.rowid"
+            : string.Empty;
+        var itemMatch = expression.ItemMatchQuery;
+        var itemFtsJoin = itemMatch.Length > 0
+            ? "JOIN items_fts ON items_fts.rowid = i.rowid"
+            : string.Empty;
+        var itemWhere = itemMatch.Length > 0
+            ? "WHERE items_fts MATCH $itemMatch"
+            : string.Empty;
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        long candidateContracts;
+        await using (var count = connection.CreateCommand())
+        {
+            count.CommandText = $"""
+                SELECT COUNT(*)
+                  FROM contracts c
+                  {candidateFtsJoin}
+                  {candidateWhere};
+                """;
+            if (candidateMatch.Length > 0)
+            {
+                count.Parameters.AddWithValue("$candidateMatch", candidateMatch);
+            }
+
+            AddFilterParameters(count, filters);
+            candidateContracts = Convert.ToInt64(
+                await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                CultureInfo.InvariantCulture);
+        }
+
+        long cachedMatchingItems = 0;
+        long cachedItemsWithPrices = 0;
+        await using (var cached = connection.CreateCommand())
+        {
+            cached.CommandText = $"""
+                WITH candidate_contracts AS (
+                    SELECT c.pncp_id
+                      FROM contracts c
+                      {candidateFtsJoin}
+                      {candidateWhere}
+                )
+                SELECT i.description, i.unit,
+                       CASE WHEN i.hydration_status = $complete
+                                  AND EXISTS(
+                                      SELECT 1
+                                        FROM item_results r
+                                       WHERE r.contract_id = i.contract_id
+                                         AND r.item_number = i.item_number
+                                         AND r.result_status_id = 1
+                                         AND r.unit_value_scaled > 0)
+                            THEN 1 ELSE 0 END AS has_active_price
+                  FROM items i
+                  JOIN candidate_contracts cc ON cc.pncp_id = i.contract_id
+                  {itemFtsJoin}
+                  {itemWhere};
+                """;
+            if (candidateMatch.Length > 0)
+            {
+                cached.Parameters.AddWithValue("$candidateMatch", candidateMatch);
+            }
+
+            if (itemMatch.Length > 0)
+            {
+                cached.Parameters.AddWithValue("$itemMatch", itemMatch);
+            }
+
+            cached.Parameters.AddWithValue("$complete", (int)ItemHydrationStatus.Complete);
+            AddFilterParameters(cached, filters);
+            await using var reader = await cached.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (!expression.MatchesItem(reader.GetString(0), reader.GetString(1)))
+                {
+                    continue;
+                }
+
+                cachedMatchingItems++;
+                if (reader.GetInt32(2) == 1)
+                {
+                    cachedItemsWithPrices++;
+                }
+            }
+        }
+
+        return new ItemSearchLocalSummary(
+            candidateContracts,
+            cachedMatchingItems,
+            cachedItemsWithPrices);
     }
 
     public async Task<ContractRecord?> GetContractAsync(string pncpId, CancellationToken cancellationToken = default)
@@ -2476,5 +2629,40 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         UPDATE quotation_lines SET search_text = description WHERE search_text = '';
         CREATE INDEX idx_quotation_lines_automation
             ON quotation_lines(automation_run_id, automation_state, display_order);
+        """;
+
+    private const string SchemaV8Sql = """
+        ALTER TABLE quotation_lines
+            ADD COLUMN requested_basket_size INTEGER NOT NULL DEFAULT 3
+            CHECK(requested_basket_size BETWEEN 3 AND 10);
+
+        CREATE TABLE quotation_manual_baskets(
+            id TEXT NOT NULL,
+            line_id TEXT NOT NULL REFERENCES quotation_lines(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            display_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(id),
+            UNIQUE(id, line_id)
+        );
+
+        CREATE INDEX idx_quotation_manual_baskets_line
+            ON quotation_manual_baskets(line_id, display_order, name);
+
+        CREATE TABLE quotation_manual_basket_references(
+            basket_id TEXT NOT NULL,
+            line_id TEXT NOT NULL,
+            reference_id TEXT NOT NULL,
+            display_order INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(basket_id, reference_id),
+            FOREIGN KEY(basket_id, line_id)
+                REFERENCES quotation_manual_baskets(id, line_id) ON DELETE CASCADE,
+            FOREIGN KEY(line_id, reference_id)
+                REFERENCES quotation_references(line_id, id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX idx_quotation_manual_basket_references_order
+            ON quotation_manual_basket_references(basket_id, display_order);
         """;
 }

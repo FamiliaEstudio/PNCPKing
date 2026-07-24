@@ -7,8 +7,9 @@ namespace PNCPKing.Core.Quotations;
 
 public sealed partial class QuotationAnalyzer
 {
-    public const string RulesVersion = "1.3";
+    public const string RulesVersion = "2.0";
     public const int MaximumBasketPoolSize = 60;
+    public const int MaximumCuratedBaskets = 100;
     public const decimal MinimumDescriptionScore = 20m;
     public const decimal MinimumTotalScore = 60m;
 
@@ -41,11 +42,18 @@ public sealed partial class QuotationAnalyzer
 
     public QuotationLineAnalysis Analyze(
         QuotationLine line,
-        IReadOnlyList<QuotationReference> collectedReferences)
+        IReadOnlyList<QuotationReference> collectedReferences,
+        IReadOnlyList<QuotationManualBasket>? manualBaskets = null)
     {
         ArgumentNullException.ThrowIfNull(line);
         ArgumentNullException.ThrowIfNull(collectedReferences);
         line.Weights.Validate();
+        if (line.RequestedBasketSize is < 3 or > 10)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(line),
+                "O número de preços da cesta automática deve estar entre 3 e 10.");
+        }
 
         var exactlyUnique = collectedReferences
             .GroupBy(reference => reference.Id, StringComparer.Ordinal)
@@ -54,7 +62,9 @@ public sealed partial class QuotationAnalyzer
         var scored = exactlyUnique.Select(reference => ScoreReference(line, reference)).ToArray();
         var eligible = scored.Where(reference => reference.State == QuotationReferenceState.Eligible).ToArray();
         var pool = BuildBasketPool(eligible);
-        var baskets = BuildBaskets(pool);
+        var automaticBaskets = BuildAutomaticBaskets(pool, line.RequestedBasketSize);
+        var persistedManualBaskets = BuildManualBaskets(scored, manualBaskets ?? []);
+        var baskets = persistedManualBaskets.Concat(automaticBaskets).ToArray();
 
         return new QuotationLineAnalysis(
             line,
@@ -258,50 +268,84 @@ public sealed partial class QuotationAnalyzer
         }
     }
 
-    private static IReadOnlyList<QuotationBasket> BuildBaskets(IReadOnlyList<QuotationReference> pool)
+    private static IReadOnlyList<QuotationBasket> BuildAutomaticBaskets(
+        IReadOnlyList<QuotationReference> pool,
+        int requestedSize)
     {
-        var baskets = new List<QuotationBasket>();
-        for (var first = 0; first < pool.Count - 2; first++)
-        {
-            for (var second = first + 1; second < pool.Count - 1; second++)
-            {
-                for (var third = second + 1; third < pool.Count; third++)
-                {
-                    var references = new[] { pool[first], pool[second], pool[third] };
-                    var average = references.Average(reference => reference.UnitPrice);
-                    if (average <= 0)
-                    {
-                        continue;
-                    }
-
-                    var maximumDeviation = references.Max(reference => Math.Abs(reference.UnitPrice - average) / average * 100m);
-                    var averageAdequacy = references.Average(reference => reference.Adequacy.Total);
-                    var minimumAdequacy = references.Min(reference => reference.Adequacy.Total);
-                    var cohesion = Math.Clamp(100m * (1m - maximumDeviation / 25m), 0m, 100m);
-                    var ids = references.Select(reference => reference.Id).Order(StringComparer.Ordinal).ToArray();
-                    baskets.Add(new QuotationBasket
-                    {
-                        Key = string.Join("||", ids),
-                        References = references.OrderBy(reference => reference.UnitPrice).ThenBy(reference => reference.Id).ToArray(),
-                        AveragePrice = average,
-                        MinimumPrice = references.Min(reference => reference.UnitPrice),
-                        MaximumPrice = references.Max(reference => reference.UnitPrice),
-                        MaximumDeviationPercent = maximumDeviation,
-                        Score = 0.70m * averageAdequacy + 0.20m * minimumAdequacy + 0.10m * cohesion
-                    });
-                }
-            }
-        }
-
-        if (baskets.Count == 0)
+        if (pool.Count < 2)
         {
             return [];
         }
 
-        var recommended = baskets.OrderByDescending(basket => basket.Score).ThenBy(basket => basket.Key, StringComparer.Ordinal).First();
-        var cheapest = baskets.OrderBy(basket => basket.AveragePrice).ThenByDescending(basket => basket.Score).ThenBy(basket => basket.Key, StringComparer.Ordinal).First();
-        var mostExpensive = baskets.OrderByDescending(basket => basket.AveragePrice).ThenByDescending(basket => basket.Score).ThenBy(basket => basket.Key, StringComparer.Ordinal).First();
-        return baskets
+        var basketSize = Math.Min(requestedSize, pool.Count);
+        var candidates = new Dictionary<string, QuotationBasket>(StringComparer.Ordinal);
+        var rankings = new[]
+        {
+            pool.OrderByDescending(reference => reference.Adequacy.Total)
+                .ThenBy(reference => reference.Id, StringComparer.Ordinal).ToArray(),
+            pool.OrderBy(reference => reference.UnitPrice)
+                .ThenByDescending(reference => reference.Adequacy.Total)
+                .ThenBy(reference => reference.Id, StringComparer.Ordinal).ToArray(),
+            pool.OrderByDescending(reference => reference.UnitPrice)
+                .ThenByDescending(reference => reference.Adequacy.Total)
+                .ThenBy(reference => reference.Id, StringComparer.Ordinal).ToArray()
+        };
+
+        foreach (var ranking in rankings)
+        {
+            for (var start = 0; start < ranking.Length; start++)
+            {
+                AddAutomaticCandidate(
+                    candidates,
+                    Enumerable.Range(0, basketSize)
+                        .Select(offset => ranking[(start + offset) % ranking.Length]),
+                    requestedSize);
+            }
+        }
+
+        foreach (var seed in pool.OrderBy(reference => reference.Id, StringComparer.Ordinal))
+        {
+            var selected = new List<QuotationReference> { seed };
+            while (selected.Count < basketSize)
+            {
+                var next = pool
+                    .Where(candidate => selected.All(existing => existing.Id != candidate.Id))
+                    .Select(candidate => new
+                    {
+                        Reference = candidate,
+                        Basket = CreateBasket(
+                            selected.Append(candidate).ToArray(),
+                            QuotationBasketKind.Automatic,
+                            string.Empty,
+                            null,
+                            requestedSize)
+                    })
+                    .OrderByDescending(candidate => candidate.Basket.Score)
+                    .ThenBy(candidate => candidate.Reference.Id, StringComparer.Ordinal)
+                    .First()
+                    .Reference;
+                selected.Add(next);
+            }
+
+            AddAutomaticCandidate(candidates, selected, requestedSize);
+        }
+
+        var baskets = candidates.Values.ToArray();
+        var recommended = baskets
+            .OrderByDescending(basket => basket.Score)
+            .ThenBy(basket => basket.Key, StringComparer.Ordinal)
+            .First();
+        var cheapest = baskets
+            .OrderBy(basket => basket.AveragePrice)
+            .ThenByDescending(basket => basket.Score)
+            .ThenBy(basket => basket.Key, StringComparer.Ordinal)
+            .First();
+        var mostExpensive = baskets
+            .OrderByDescending(basket => basket.AveragePrice)
+            .ThenByDescending(basket => basket.Score)
+            .ThenBy(basket => basket.Key, StringComparer.Ordinal)
+            .First();
+        var marked = baskets
             .Select(basket => basket with
             {
                 IsRecommended = basket.Key == recommended.Key,
@@ -310,12 +354,154 @@ public sealed partial class QuotationAnalyzer
             })
             .OrderByDescending(basket => basket.Score)
             .ThenBy(basket => basket.Key, StringComparer.Ordinal)
+            .ToList();
+        var selectedBaskets = marked.Take(MaximumCuratedBaskets).ToDictionary(basket => basket.Key, StringComparer.Ordinal);
+        foreach (var mandatory in marked.Where(basket => basket.IsRecommended || basket.IsCheapest || basket.IsMostExpensive))
+        {
+            if (selectedBaskets.ContainsKey(mandatory.Key))
+            {
+                continue;
+            }
+
+            var removable = selectedBaskets.Values
+                .Where(basket => !basket.IsRecommended && !basket.IsCheapest && !basket.IsMostExpensive)
+                .OrderBy(basket => basket.Score)
+                .ThenByDescending(basket => basket.Key, StringComparer.Ordinal)
+                .First();
+            selectedBaskets.Remove(removable.Key);
+            selectedBaskets.Add(mandatory.Key, mandatory);
+        }
+
+        return selectedBaskets.Values
+            .OrderByDescending(basket => basket.IsRecommended)
+            .ThenByDescending(basket => basket.Score)
+            .ThenBy(basket => basket.Key, StringComparer.Ordinal)
             .ToArray();
     }
 
-    private static bool SameSource(QuotationReference first, QuotationReference second) =>
-        string.Equals(first.SupplierTaxId, second.SupplierTaxId, StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(first.ContractId, second.ContractId, StringComparison.Ordinal);
+    private static void AddAutomaticCandidate(
+        IDictionary<string, QuotationBasket> candidates,
+        IEnumerable<QuotationReference> references,
+        int requestedSize)
+    {
+        var basket = CreateBasket(
+            references.ToArray(),
+            QuotationBasketKind.Automatic,
+            string.Empty,
+            null,
+            requestedSize);
+        candidates.TryAdd(basket.Key, basket);
+    }
+
+    private static IReadOnlyList<QuotationBasket> BuildManualBaskets(
+        IReadOnlyList<QuotationReference> scoredReferences,
+        IReadOnlyList<QuotationManualBasket> manualBaskets)
+    {
+        var referencesById = scoredReferences.ToDictionary(reference => reference.Id, StringComparer.Ordinal);
+        var result = new List<QuotationBasket>();
+        foreach (var manual in manualBaskets.OrderBy(basket => basket.DisplayOrder).ThenBy(basket => basket.Name))
+        {
+            var references = manual.ReferenceIds
+                .Distinct(StringComparer.Ordinal)
+                .Where(referencesById.ContainsKey)
+                .Select(id => referencesById[id])
+                .ToArray();
+            if (references.Length == 0)
+            {
+                continue;
+            }
+
+            result.Add(CreateBasket(
+                references,
+                QuotationBasketKind.Manual,
+                manual.Name,
+                manual.Id,
+                requestedSize: 3));
+        }
+
+        return result;
+    }
+
+    private static QuotationBasket CreateBasket(
+        IReadOnlyList<QuotationReference> references,
+        QuotationBasketKind kind,
+        string name,
+        Guid? manualBasketId,
+        int requestedSize)
+    {
+        var ordered = references
+            .OrderBy(reference => reference.UnitPrice)
+            .ThenBy(reference => reference.Id, StringComparer.Ordinal)
+            .ToArray();
+        var average = ordered.Average(reference => reference.UnitPrice);
+        var maximumDeviation = average <= 0
+            ? 0
+            : ordered.Max(reference => Math.Abs(reference.UnitPrice - average) / average * 100m);
+        var averageAdequacy = ordered.Average(reference => reference.Adequacy.Total);
+        var minimumAdequacy = ordered.Min(reference => reference.Adequacy.Total);
+        var cohesion = Math.Clamp(100m * (1m - maximumDeviation / 25m), 0m, 100m);
+        var visualState = kind == QuotationBasketKind.Automatic
+            ? maximumDeviation <= 25m
+                ? QuotationBasketVisualState.AutomaticRegular
+                : QuotationBasketVisualState.AutomaticHighDispersion
+            : ordered.Length < 3
+                ? QuotationBasketVisualState.ManualIncomplete
+                : ordered.All(reference => reference.State == QuotationReferenceState.Eligible) &&
+                  maximumDeviation <= 25m
+                    ? QuotationBasketVisualState.ManualRegular
+                    : QuotationBasketVisualState.ManualInvalid;
+        var validationMessage = visualState switch
+        {
+            QuotationBasketVisualState.AutomaticRegular when ordered.Length < requestedSize =>
+                $"Cesta automática reduzida: {ordered.Length:N0} de {requestedSize:N0} preços.",
+            QuotationBasketVisualState.AutomaticHighDispersion when ordered.Length < requestedSize =>
+                $"Cesta automática reduzida para {ordered.Length:N0} preço(s) e com desvio acima de 25%.",
+            QuotationBasketVisualState.AutomaticHighDispersion => "Desvio máximo acima de 25%.",
+            QuotationBasketVisualState.ManualIncomplete =>
+                $"Cesta manual incompleta: {ordered.Length:N0} de pelo menos 3 preços.",
+            QuotationBasketVisualState.ManualInvalid =>
+                BuildManualValidationMessage(ordered, maximumDeviation),
+            _ => "Cesta regular."
+        };
+        var ids = ordered.Select(reference => reference.Id).Order(StringComparer.Ordinal).ToArray();
+        return new QuotationBasket
+        {
+            Key = kind == QuotationBasketKind.Manual
+                ? $"manual:{manualBasketId!.Value:N}"
+                : string.Join("||", ids),
+            References = ordered,
+            AveragePrice = average,
+            MinimumPrice = ordered.Min(reference => reference.UnitPrice),
+            MaximumPrice = ordered.Max(reference => reference.UnitPrice),
+            MaximumDeviationPercent = maximumDeviation,
+            Score = 0.70m * averageAdequacy + 0.20m * minimumAdequacy + 0.10m * cohesion,
+            Kind = kind,
+            Name = kind == QuotationBasketKind.Manual ? name : string.Empty,
+            ManualBasketId = manualBasketId,
+            RequestedSize = requestedSize,
+            VisualState = visualState,
+            ValidationMessage = validationMessage
+        };
+    }
+
+    private static string BuildManualValidationMessage(
+        IReadOnlyList<QuotationReference> references,
+        decimal maximumDeviation)
+    {
+        var reasons = new List<string>();
+        var ineligible = references.Count(reference => reference.State != QuotationReferenceState.Eligible);
+        if (ineligible > 0)
+        {
+            reasons.Add($"{ineligible:N0} referência(s) inelegível(is)");
+        }
+
+        if (maximumDeviation > 25m)
+        {
+            reasons.Add($"desvio máximo de {maximumDeviation:N2}%");
+        }
+
+        return $"Cesta manual inválida: {string.Join("; ", reasons)}.";
+    }
 
     private static (decimal Score, string Explanation) CalculateDescriptionScore(string requested, string found)
     {

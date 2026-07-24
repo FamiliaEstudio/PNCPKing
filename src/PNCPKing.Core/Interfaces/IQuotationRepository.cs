@@ -11,6 +11,9 @@ public interface IQuotationRepository
     Task DeleteLineAsync(Guid lineId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<QuotationLine>> GetLinesAsync(Guid projectId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<QuotationReference>> GetReferencesAsync(Guid lineId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<QuotationManualBasket>> GetManualBasketsAsync(
+        Guid lineId,
+        CancellationToken cancellationToken = default);
     Task<QuotationLine> SaveSampleAsync(
         Guid projectId,
         Guid? lineId,
@@ -18,6 +21,21 @@ public interface IQuotationRepository
         IReadOnlyList<QuotationReference> references,
         CancellationToken cancellationToken = default);
     Task ConfirmBasketAsync(Guid lineId, string basketKey, CancellationToken cancellationToken = default);
+    Task<QuotationManualBasket> SaveManualBasketAsync(
+        Guid lineId,
+        Guid? basketId,
+        string name,
+        IReadOnlyList<string> referenceIds,
+        CancellationToken cancellationToken = default);
+    Task RenameManualBasketAsync(
+        Guid basketId,
+        string name,
+        CancellationToken cancellationToken = default);
+    Task RemoveManualBasketReferenceAsync(
+        Guid basketId,
+        string referenceId,
+        CancellationToken cancellationToken = default);
+    Task DeleteManualBasketAsync(Guid basketId, CancellationToken cancellationToken = default);
     Task UpdateWeightsAsync(Guid lineId, AdequacyWeights weights, CancellationToken cancellationToken = default);
     Task<QuotationAutomationRun> CreateAutomationRunAsync(
         Guid projectId,

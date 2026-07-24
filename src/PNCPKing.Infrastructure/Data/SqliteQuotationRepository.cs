@@ -102,7 +102,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
                    unit_weight, quantity_weight, proximity_weight, recency_weight, sample_version,
                    sampled_at, selected_basket_key, selection_confirmed, search_text,
                    requested_batch_count, display_order, automation_run_id, automation_state,
-                   automation_message
+                   automation_message, requested_basket_size
               FROM quotation_lines
              WHERE project_id = $projectId
              ORDER BY display_order, sampled_at, id;
@@ -134,6 +134,66 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
         return references;
     }
 
+    public async Task<IReadOnlyList<QuotationManualBasket>> GetManualBasketsAsync(
+        Guid lineId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        var baskets = new List<(Guid Id, string Name, int DisplayOrder, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt)>();
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT id, name, display_order, created_at, updated_at
+                  FROM quotation_manual_baskets
+                 WHERE line_id = $lineId
+                 ORDER BY display_order, name, id;
+                """;
+            command.Parameters.AddWithValue("$lineId", lineId.ToString("N"));
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                baskets.Add((
+                    Guid.ParseExact(reader.GetString(0), "N"),
+                    reader.GetString(1),
+                    reader.GetInt32(2),
+                    ParseDateTime(reader.GetString(3)),
+                    ParseDateTime(reader.GetString(4))));
+            }
+        }
+
+        var result = new List<QuotationManualBasket>(baskets.Count);
+        foreach (var basket in baskets)
+        {
+            await using var references = connection.CreateCommand();
+            references.CommandText = """
+                SELECT reference_id
+                  FROM quotation_manual_basket_references
+                 WHERE basket_id = $basketId
+                 ORDER BY display_order, reference_id;
+                """;
+            references.Parameters.AddWithValue("$basketId", basket.Id.ToString("N"));
+            var referenceIds = new List<string>();
+            await using var reader = await references.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                referenceIds.Add(reader.GetString(0));
+            }
+
+            result.Add(new QuotationManualBasket
+            {
+                Id = basket.Id,
+                LineId = lineId,
+                Name = basket.Name,
+                ReferenceIds = referenceIds,
+                DisplayOrder = basket.DisplayOrder,
+                CreatedAt = basket.CreatedAt,
+                UpdatedAt = basket.UpdatedAt
+            });
+        }
+
+        return result;
+    }
+
     public async Task<QuotationLine> SaveSampleAsync(
         Guid projectId,
         Guid? lineId,
@@ -156,12 +216,12 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
                     unit_weight, quantity_weight, proximity_weight, recency_weight, sample_version,
                     sampled_at, selected_basket_key, selection_confirmed, search_text,
                     requested_batch_count, display_order, automation_run_id, automation_state,
-                    automation_message)
+                    automation_message, requested_basket_size)
                 VALUES($id, $projectId, $description, $quantity, $unit, $minimum, $maximum,
                        $descriptionWeight, $unitWeight, $quantityWeight, $proximityWeight, $recencyWeight,
                        1, $sampledAt, NULL, 0, $description, 1,
                        COALESCE((SELECT MAX(display_order) + 1 FROM quotation_lines WHERE project_id = $projectId), 0),
-                       NULL, 0, '')
+                       NULL, 0, '', $basketSize)
                 ON CONFLICT(id) DO UPDATE SET
                     description = excluded.description,
                     requested_quantity_scaled = excluded.requested_quantity_scaled,
@@ -173,6 +233,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
                     quantity_weight = excluded.quantity_weight,
                     proximity_weight = excluded.proximity_weight,
                     recency_weight = excluded.recency_weight,
+                    requested_basket_size = excluded.requested_basket_size,
                     sample_version = quotation_lines.sample_version + 1,
                     sampled_at = excluded.sampled_at,
                     selection_confirmed = 0;
@@ -189,16 +250,9 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
             lineCommand.Parameters.AddWithValue("$quantityWeight", input.Weights.Quantity);
             lineCommand.Parameters.AddWithValue("$proximityWeight", input.Weights.Proximity);
             lineCommand.Parameters.AddWithValue("$recencyWeight", input.Weights.Recency);
+            lineCommand.Parameters.AddWithValue("$basketSize", input.RequestedBasketSize);
             lineCommand.Parameters.AddWithValue("$sampledAt", FormatDateTime(now));
             await lineCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        await using (var delete = connection.CreateCommand())
-        {
-            delete.Transaction = (SqliteTransaction)transaction;
-            delete.CommandText = "DELETE FROM quotation_references WHERE line_id = $lineId;";
-            delete.Parameters.AddWithValue("$lineId", id.ToString("N"));
-            await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
         await InsertReferencesAsync(connection, (SqliteTransaction)transaction, id, references, cancellationToken).ConfigureAwait(false);
@@ -235,6 +289,243 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
         {
             throw new InvalidOperationException("O item da cotação não existe mais.");
         }
+    }
+
+    public async Task<QuotationManualBasket> SaveManualBasketAsync(
+        Guid lineId,
+        Guid? basketId,
+        string name,
+        IReadOnlyList<string> referenceIds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentNullException.ThrowIfNull(referenceIds);
+        var uniqueReferenceIds = referenceIds
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (uniqueReferenceIds.Length == 0)
+        {
+            throw new ArgumentException("Selecione pelo menos um preço homologado.", nameof(referenceIds));
+        }
+
+        var id = basketId ?? Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        if (basketId is not null)
+        {
+            await using var ownership = connection.CreateCommand();
+            ownership.Transaction = (SqliteTransaction)transaction;
+            ownership.CommandText = "SELECT line_id FROM quotation_manual_baskets WHERE id = $id;";
+            ownership.Parameters.AddWithValue("$id", id.ToString("N"));
+            var owner = await ownership.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            if (owner is not string ownerId || ownerId != lineId.ToString("N"))
+            {
+                throw new InvalidOperationException("A cesta manual não pertence ao item selecionado.");
+            }
+        }
+
+        await using (var validate = connection.CreateCommand())
+        {
+            validate.Transaction = (SqliteTransaction)transaction;
+            var parameterNames = uniqueReferenceIds.Select((_, index) => $"$reference{index}").ToArray();
+            validate.CommandText = $"""
+                SELECT COUNT(*)
+                  FROM quotation_references
+                 WHERE line_id = $lineId AND id IN ({string.Join(", ", parameterNames)});
+                """;
+            validate.Parameters.AddWithValue("$lineId", lineId.ToString("N"));
+            for (var index = 0; index < uniqueReferenceIds.Length; index++)
+            {
+                validate.Parameters.AddWithValue(parameterNames[index], uniqueReferenceIds[index]);
+            }
+
+            var count = Convert.ToInt32(
+                await validate.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                CultureInfo.InvariantCulture);
+            if (count != uniqueReferenceIds.Length)
+            {
+                throw new InvalidOperationException("Uma ou mais referências não pertencem ao item da cotação.");
+            }
+        }
+
+        await using (var basket = connection.CreateCommand())
+        {
+            basket.Transaction = (SqliteTransaction)transaction;
+            basket.CommandText = """
+                INSERT INTO quotation_manual_baskets(
+                    id, line_id, name, display_order, created_at, updated_at)
+                VALUES(
+                    $id, $lineId, $name,
+                    COALESCE((SELECT MAX(display_order) + 1
+                                FROM quotation_manual_baskets
+                               WHERE line_id = $lineId), 0),
+                    $created, $updated)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    updated_at = excluded.updated_at;
+                """;
+            basket.Parameters.AddWithValue("$id", id.ToString("N"));
+            basket.Parameters.AddWithValue("$lineId", lineId.ToString("N"));
+            basket.Parameters.AddWithValue("$name", name.Trim());
+            basket.Parameters.AddWithValue("$created", FormatDateTime(now));
+            basket.Parameters.AddWithValue("$updated", FormatDateTime(now));
+            await basket.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var delete = connection.CreateCommand())
+        {
+            delete.Transaction = (SqliteTransaction)transaction;
+            delete.CommandText = "DELETE FROM quotation_manual_basket_references WHERE basket_id = $basketId;";
+            delete.Parameters.AddWithValue("$basketId", id.ToString("N"));
+            await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var insert = connection.CreateCommand())
+        {
+            insert.Transaction = (SqliteTransaction)transaction;
+            insert.CommandText = """
+                INSERT INTO quotation_manual_basket_references(
+                    basket_id, line_id, reference_id, display_order)
+                VALUES($basketId, $lineId, $referenceId, $displayOrder);
+                """;
+            insert.Parameters.Add("$basketId", SqliteType.Text);
+            insert.Parameters.Add("$lineId", SqliteType.Text);
+            insert.Parameters.Add("$referenceId", SqliteType.Text);
+            insert.Parameters.Add("$displayOrder", SqliteType.Integer);
+            for (var index = 0; index < uniqueReferenceIds.Length; index++)
+            {
+                insert.Parameters["$basketId"].Value = id.ToString("N");
+                insert.Parameters["$lineId"].Value = lineId.ToString("N");
+                insert.Parameters["$referenceId"].Value = uniqueReferenceIds[index];
+                insert.Parameters["$displayOrder"].Value = index;
+                await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        await TouchLineAndProjectAsync(
+            connection,
+            (SqliteTransaction)transaction,
+            lineId,
+            clearSelection: true,
+            cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return (await GetManualBasketsAsync(lineId, cancellationToken).ConfigureAwait(false))
+            .Single(basket => basket.Id == id);
+    }
+
+    public async Task RenameManualBasketAsync(
+        Guid basketId,
+        string name,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE quotation_manual_baskets
+               SET name = $name, updated_at = $updated
+             WHERE id = $id;
+            """;
+        command.Parameters.AddWithValue("$name", name.Trim());
+        command.Parameters.AddWithValue("$updated", FormatDateTime(DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$id", basketId.ToString("N"));
+        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+        {
+            throw new InvalidOperationException("A cesta manual não existe mais.");
+        }
+    }
+
+    public async Task RemoveManualBasketReferenceAsync(
+        Guid basketId,
+        string referenceId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(referenceId);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        Guid lineId;
+        await using (var owner = connection.CreateCommand())
+        {
+            owner.Transaction = (SqliteTransaction)transaction;
+            owner.CommandText = "SELECT line_id FROM quotation_manual_baskets WHERE id = $id;";
+            owner.Parameters.AddWithValue("$id", basketId.ToString("N"));
+            var value = await owner.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            lineId = value is string text
+                ? Guid.ParseExact(text, "N")
+                : throw new InvalidOperationException("A cesta manual não existe mais.");
+        }
+
+        await using (var delete = connection.CreateCommand())
+        {
+            delete.Transaction = (SqliteTransaction)transaction;
+            delete.CommandText = """
+                DELETE FROM quotation_manual_basket_references
+                 WHERE basket_id = $basketId AND reference_id = $referenceId;
+                """;
+            delete.Parameters.AddWithValue("$basketId", basketId.ToString("N"));
+            delete.Parameters.AddWithValue("$referenceId", referenceId);
+            await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var cleanup = connection.CreateCommand())
+        {
+            cleanup.Transaction = (SqliteTransaction)transaction;
+            cleanup.CommandText = """
+                DELETE FROM quotation_manual_baskets
+                 WHERE id = $basketId
+                   AND NOT EXISTS(
+                       SELECT 1 FROM quotation_manual_basket_references
+                        WHERE basket_id = $basketId);
+                """;
+            cleanup.Parameters.AddWithValue("$basketId", basketId.ToString("N"));
+            await cleanup.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await TouchLineAndProjectAsync(
+            connection,
+            (SqliteTransaction)transaction,
+            lineId,
+            clearSelection: true,
+            cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task DeleteManualBasketAsync(Guid basketId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        Guid lineId;
+        await using (var owner = connection.CreateCommand())
+        {
+            owner.Transaction = (SqliteTransaction)transaction;
+            owner.CommandText = "SELECT line_id FROM quotation_manual_baskets WHERE id = $id;";
+            owner.Parameters.AddWithValue("$id", basketId.ToString("N"));
+            var value = await owner.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            if (value is not string text)
+            {
+                return;
+            }
+
+            lineId = Guid.ParseExact(text, "N");
+        }
+
+        await using (var delete = connection.CreateCommand())
+        {
+            delete.Transaction = (SqliteTransaction)transaction;
+            delete.CommandText = "DELETE FROM quotation_manual_baskets WHERE id = $id;";
+            delete.Parameters.AddWithValue("$id", basketId.ToString("N"));
+            await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await TouchLineAndProjectAsync(
+            connection,
+            (SqliteTransaction)transaction,
+            lineId,
+            clearSelection: true,
+            cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task UpdateWeightsAsync(
@@ -356,6 +647,13 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
 
         foreach (var item in items)
         {
+            if (item.RequestedBasketSize is < 3 or > 10)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(items),
+                    $"A linha {item.SourceRow:N0} deve solicitar de 3 a 10 preços por cesta.");
+            }
+
             await using var line = connection.CreateCommand();
             line.Transaction = (SqliteTransaction)transaction;
             line.CommandText = """
@@ -365,10 +663,11 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
                     unit_weight, quantity_weight, proximity_weight, recency_weight, sample_version,
                     sampled_at, selected_basket_key, selection_confirmed, search_text,
                     requested_batch_count, display_order, automation_run_id, automation_state,
-                    automation_message)
+                    automation_message, requested_basket_size)
                 VALUES($id, $projectId, $description, $quantity, $unit, $minimum, $maximum,
                        $descriptionWeight, $unitWeight, $quantityWeight, $proximityWeight, $recencyWeight,
-                       0, $sampledAt, NULL, 0, $searchText, $batches, $displayOrder, $runId, $state, '');
+                       0, $sampledAt, NULL, 0, $searchText, $batches, $displayOrder, $runId, $state, '',
+                       $basketSize);
                 """;
             line.Parameters.AddWithValue("$id", Guid.NewGuid().ToString("N"));
             line.Parameters.AddWithValue("$projectId", projectId.ToString("N"));
@@ -385,6 +684,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
             line.Parameters.AddWithValue("$sampledAt", FormatDateTime(now));
             line.Parameters.AddWithValue("$searchText", item.SearchText.Trim());
             line.Parameters.AddWithValue("$batches", item.BatchCount);
+            line.Parameters.AddWithValue("$basketSize", item.RequestedBasketSize);
             line.Parameters.AddWithValue("$displayOrder", nextOrder++);
             line.Parameters.AddWithValue("$runId", run.Id.ToString("N"));
             line.Parameters.AddWithValue("$state", (int)QuotationAutomationItemState.Pending);
@@ -482,6 +782,40 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    private static async Task TouchLineAndProjectAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        Guid lineId,
+        bool clearSelection,
+        CancellationToken cancellationToken)
+    {
+        var now = FormatDateTime(DateTimeOffset.UtcNow);
+        await using (var line = connection.CreateCommand())
+        {
+            line.Transaction = transaction;
+            line.CommandText = clearSelection
+                ? "UPDATE quotation_lines SET selection_confirmed = 0 WHERE id = $lineId;"
+                : "SELECT 1;";
+            if (clearSelection)
+            {
+                line.Parameters.AddWithValue("$lineId", lineId.ToString("N"));
+            }
+
+            await line.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using var project = connection.CreateCommand();
+        project.Transaction = transaction;
+        project.CommandText = """
+            UPDATE quotation_projects
+               SET updated_at = $updated
+             WHERE id = (SELECT project_id FROM quotation_lines WHERE id = $lineId);
+            """;
+        project.Parameters.AddWithValue("$updated", now);
+        project.Parameters.AddWithValue("$lineId", lineId.ToString("N"));
+        await project.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     private static async Task InsertReferencesAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -512,7 +846,42 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
                    $itemCategory, $ncmNbsCode, $ncmNbsDescription, $catalogCode, $catalogName,
                    $catalogCategory, $organization, $municipality, $uf, $distance, $publicationDate,
                    $portalUrl, $descriptionScore, $unitScore, $quantityScore, $proximityScore,
-                   $recencyScore, $explanation, $state, $stateReason, $duplicateOf);
+                   $recencyScore, $explanation, $state, $stateReason, $duplicateOf)
+            ON CONFLICT(line_id, id) DO UPDATE SET
+                contract_id = excluded.contract_id,
+                item_number = excluded.item_number,
+                result_sequence = excluded.result_sequence,
+                supplier_name = excluded.supplier_name,
+                supplier_tax_id = excluded.supplier_tax_id,
+                supplier_type = excluded.supplier_type,
+                homologated_quantity_scaled = excluded.homologated_quantity_scaled,
+                unit_price_scaled = excluded.unit_price_scaled,
+                result_date = excluded.result_date,
+                item_description = excluded.item_description,
+                item_additional_information = excluded.item_additional_information,
+                item_unit = excluded.item_unit,
+                item_requested_quantity_scaled = excluded.item_requested_quantity_scaled,
+                item_category = excluded.item_category,
+                ncm_nbs_code = excluded.ncm_nbs_code,
+                ncm_nbs_description = excluded.ncm_nbs_description,
+                catalog_code = excluded.catalog_code,
+                catalog_name = excluded.catalog_name,
+                catalog_category = excluded.catalog_category,
+                organization = excluded.organization,
+                municipality = excluded.municipality,
+                uf = excluded.uf,
+                distance_ribeirao_km = excluded.distance_ribeirao_km,
+                publication_date = excluded.publication_date,
+                portal_url = excluded.portal_url,
+                description_score_scaled = excluded.description_score_scaled,
+                unit_score_scaled = excluded.unit_score_scaled,
+                quantity_score_scaled = excluded.quantity_score_scaled,
+                proximity_score_scaled = excluded.proximity_score_scaled,
+                recency_score_scaled = excluded.recency_score_scaled,
+                explanation = excluded.explanation,
+                state = excluded.state,
+                state_reason = excluded.state_reason,
+                duplicate_of_reference_id = excluded.duplicate_of_reference_id;
             """;
         foreach (var name in new[]
                  {
@@ -637,7 +1006,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
         DisplayOrder = reader.GetInt32(18),
         AutomationRunId = reader.IsDBNull(19) ? null : Guid.ParseExact(reader.GetString(19), "N"),
         AutomationState = (QuotationAutomationItemState)reader.GetInt32(20),
-        AutomationMessage = reader.GetString(21)
+        AutomationMessage = reader.GetString(21),
+        RequestedBasketSize = reader.GetInt32(22)
     };
 
     private static QuotationReference ReadReference(SqliteDataReader reader) => new()
@@ -694,6 +1064,13 @@ public sealed class SqliteQuotationRepository : IQuotationRepository
             input.MinimumUnitPrice is not null && input.MaximumUnitPrice is not null && input.MinimumUnitPrice > input.MaximumUnitPrice)
         {
             throw new ArgumentException("A faixa de preço da cotação é inválida.", nameof(input));
+        }
+
+        if (input.RequestedBasketSize is < 3 or > 10)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(input),
+                "O número de preços da cesta automática deve estar entre 3 e 10.");
         }
 
         input.Weights.Validate();

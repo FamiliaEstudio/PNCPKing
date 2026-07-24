@@ -16,6 +16,10 @@ public interface IContractRepository
         ItemCandidateCursor? cursor,
         int pageSize = 200,
         CancellationToken cancellationToken = default);
+    Task<ItemSearchLocalSummary> GetItemSearchLocalSummaryAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        CancellationToken cancellationToken = default);
     Task<ContractRecord?> GetContractAsync(string pncpId, CancellationToken cancellationToken = default);
     Task UpsertItemsAsync(string contractId, IReadOnlyList<ProcurementItem> items, bool forceRefresh, CancellationToken cancellationToken = default);
     Task<ContractItemSnapshot?> GetItemSnapshotAsync(string contractId, CancellationToken cancellationToken = default);

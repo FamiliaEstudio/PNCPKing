@@ -45,7 +45,7 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
                 throw new InvalidDataException(
                     $"O arquivo \"{Path.GetFileName(sourcePath)}\" é uma planilha de resultado da cotação. " +
                     "Para importar, selecione a planilha de entrada com Pesquisa, Descrição, Quantidade, " +
-                    "Unidade, Faixa mínima, Faixa máxima e Disparos nas colunas A:G.");
+                    "Unidade, Faixa mínima, Faixa máxima, Disparos e Número de preços na cesta nas colunas A:H.");
             }
 
             var items = new List<QuotationImportItem>();
@@ -76,6 +76,7 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
                     var minimum = OptionalDecimal(row, 5, "Faixa mínima", sheetName);
                     var maximum = OptionalDecimal(row, 6, "Faixa máxima", sheetName);
                     var batchesDecimal = RequiredDecimal(row, 7, "Número de disparos", sheetName);
+                    var basketSizeDecimal = OptionalDecimal(row, 8, "Número de preços na cesta", sheetName) ?? 3m;
                     if (quantity <= 0)
                     {
                         throw CellError(
@@ -116,6 +117,17 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
                             "deve ser um inteiro de 1 a 100.");
                     }
 
+                    if (basketSizeDecimal != decimal.Truncate(basketSizeDecimal) ||
+                        basketSizeDecimal is < 3 or > 10)
+                    {
+                        throw CellError(
+                            row,
+                            8,
+                            sheetName,
+                            "Número de preços na cesta",
+                            "deve ser um inteiro de 3 a 10; deixe vazio para usar 3.");
+                    }
+
                     items.Add(new QuotationImportItem(
                         checked((int)row.Number),
                         searchText,
@@ -124,7 +136,8 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
                         unit,
                         minimum,
                         maximum,
-                        decimal.ToInt32(batchesDecimal)));
+                        decimal.ToInt32(batchesDecimal),
+                        decimal.ToInt32(basketSizeDecimal)));
                 }
                 catch (CellValidationException exception)
                 {
@@ -134,7 +147,7 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
 
             if (items.Count == 0 && errors.Count == 0)
             {
-                errors.Add($"{sheetName}!A:G — a primeira planilha visível não contém itens nas colunas A:G.");
+                errors.Add($"{sheetName}!A:H — a primeira planilha visível não contém itens nas colunas A:H.");
             }
 
             if (errors.Count > 0)
@@ -194,12 +207,12 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
         {
             cancellationToken.ThrowIfCancellationRequested();
             var cells = Enumerable
-                .Repeat(new SpreadsheetCell(string.Empty, false, false), 7)
+                .Repeat(new SpreadsheetCell(string.Empty, false, false), 8)
                 .ToArray();
             foreach (var sourceCell in sourceRow.Elements<Cell>())
             {
                 var column = GetColumnNumber(sourceCell.CellReference?.Value);
-                if (column is < 1 or > 7)
+                if (column is < 1 or > 8)
                 {
                     continue;
                 }

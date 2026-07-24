@@ -21,6 +21,7 @@ public sealed partial class MainViewModel
     private QuotationProjectDisplay? _selectedQuotationProject;
     private QuotationLineDisplay? _selectedQuotationLine;
     private QuotationBasketDisplay? _selectedQuotationBasket;
+    private QuotationReferenceDisplay? _selectedBasketReference;
     private int _quotationBasketPage = 1;
     private string _quotationSummary = "Nenhum projeto de cotação selecionado.";
 
@@ -45,6 +46,9 @@ public sealed partial class MainViewModel
     public ICommand ImportQuotationCommand { get; private set; } = null!;
     public ICommand ResumeQuotationAutomationCommand { get; private set; } = null!;
     public ICommand CancelQuotationAutomationCommand { get; private set; } = null!;
+    public ICommand RenameManualBasketCommand { get; private set; } = null!;
+    public ICommand DeleteManualBasketCommand { get; private set; } = null!;
+    public ICommand RemoveManualBasketReferenceCommand { get; private set; } = null!;
 
     public QuotationProjectDisplay? SelectedQuotationProject
     {
@@ -81,6 +85,7 @@ public sealed partial class MainViewModel
             if (SetProperty(ref _selectedQuotationBasket, value))
             {
                 SelectedBasketReferences.Clear();
+                SelectedBasketReference = null;
                 if (value is not null)
                 {
                     foreach (var reference in value.Source.References)
@@ -89,6 +94,18 @@ public sealed partial class MainViewModel
                     }
                 }
 
+                NotifyCommands();
+            }
+        }
+    }
+
+    public QuotationReferenceDisplay? SelectedBasketReference
+    {
+        get => _selectedBasketReference;
+        set
+        {
+            if (SetProperty(ref _selectedBasketReference, value))
+            {
                 NotifyCommands();
             }
         }
@@ -114,7 +131,7 @@ public sealed partial class MainViewModel
             var pages = Math.Max(1, (int)Math.Ceiling(total / (double)QuotationBasketPageSize));
             var pool = SelectedQuotationLine?.BasketPoolCount ?? 0;
             var eligible = SelectedQuotationLine?.EligibleCount ?? 0;
-            return $"Página {QuotationBasketPage:N0} de {pages:N0} — {total:N0} cesta(s) válida(s); " +
+            return $"Página {QuotationBasketPage:N0} de {pages:N0} — {total:N0} cesta(s) automática(s)/manual(is); " +
                    $"conjunto auditável: {pool:N0} de {eligible:N0} referência(s) elegível(is)";
         }
     }
@@ -176,6 +193,16 @@ public sealed partial class MainViewModel
         CancelQuotationAutomationCommand = new RelayCommand(
             () => _quotationAutomationCancellation?.Cancel(),
             () => _quotationAutomationCancellation is not null);
+        RenameManualBasketCommand = new AsyncRelayCommand(
+            RenameSelectedManualBasketAsync,
+            () => !IsFileBusy && SelectedQuotationBasket?.Source.IsManual == true);
+        DeleteManualBasketCommand = new AsyncRelayCommand(
+            DeleteSelectedManualBasketAsync,
+            () => !IsFileBusy && SelectedQuotationBasket?.Source.IsManual == true);
+        RemoveManualBasketReferenceCommand = new AsyncRelayCommand(
+            RemoveSelectedManualBasketReferenceAsync,
+            () => !IsFileBusy && SelectedQuotationBasket?.Source.IsManual == true &&
+                  SelectedBasketReference is not null);
     }
 
     private async Task RefreshQuotationProjectsAsync(Guid? preferredProjectId = null)
@@ -438,15 +465,21 @@ public sealed partial class MainViewModel
                     ItemSearchRows.Clear();
                     PriceSearchProgress = 0;
                     _itemSearchService.Stop();
+                    var automationQuery = new SearchQuery(
+                        line.SearchText,
+                        run.GeoFilter,
+                        run.StartDate,
+                        run.EndDate,
+                        SearchSort.Nearest,
+                        1,
+                        200);
+                    _localItemSearchSummary = await _repository.GetItemSearchLocalSummaryAsync(
+                        automationQuery,
+                        SearchText.Parse(line.SearchText),
+                        cancellationToken).ConfigureAwait(true);
+                    _searchTelemetryBaseline = _telemetry.GetSnapshot();
                     await _itemSearchService.StartAsync(
-                        new SearchQuery(
-                            line.SearchText,
-                            run.GeoFilter,
-                            run.StartDate,
-                            run.EndDate,
-                            SearchSort.Nearest,
-                            1,
-                            200),
+                        automationQuery,
                         cancellationToken).ConfigureAwait(true);
                     SetItemSearchActive(true);
                     var prefix = $"Item {index + 1:N0}/{pending.Length:N0} — {line.Description}. ";
@@ -474,7 +507,8 @@ public sealed partial class MainViewModel
                         line.MinimumUnitPrice,
                         line.MaximumUnitPrice)
                     {
-                        Weights = line.Weights
+                        Weights = line.Weights,
+                        RequestedBasketSize = line.RequestedBasketSize
                     };
                     var analysis = await _quotationService.CaptureSampleAsync(
                         run.ProjectId,
@@ -491,12 +525,20 @@ public sealed partial class MainViewModel
                             cancellationToken).ConfigureAwait(true);
                     }
 
-                    var state = analysis.EligibleCount >= 3 && recommended is not null
-                        ? QuotationAutomationItemState.Completed
-                        : QuotationAutomationItemState.Insufficient;
-                    var message = state == QuotationAutomationItemState.Completed
-                        ? "Cesta recomendada selecionada automaticamente."
-                        : $"Foram encontradas {analysis.EligibleCount:N0} referência(s) válida(s).";
+                    var state = recommended is null
+                        ? QuotationAutomationItemState.Insufficient
+                        : recommended.References.Count >= line.RequestedBasketSize
+                            ? QuotationAutomationItemState.Completed
+                            : QuotationAutomationItemState.CompletedWithWarning;
+                    var message = state switch
+                    {
+                        QuotationAutomationItemState.Completed =>
+                            "Cesta recomendada selecionada automaticamente.",
+                        QuotationAutomationItemState.CompletedWithWarning =>
+                            $"Cesta recomendada reduzida para {recommended!.References.Count:N0} de " +
+                            $"{line.RequestedBasketSize:N0} preços.",
+                        _ => $"Foram encontradas {analysis.EligibleCount:N0} referência(s) válida(s)."
+                    };
                     await _quotationService.UpdateAutomationItemStateAsync(
                         line.Id,
                         state,
@@ -597,7 +639,8 @@ public sealed partial class MainViewModel
                     line.MinimumUnitPrice,
                     line.MaximumUnitPrice)
                 {
-                    Weights = line.Weights
+                    Weights = line.Weights,
+                    RequestedBasketSize = line.RequestedBasketSize
                 },
                 rows,
                 CancellationToken.None).ConfigureAwait(true);
@@ -605,6 +648,90 @@ public sealed partial class MainViewModel
         catch
         {
             // A retomada continuará válida mesmo se a amostra parcial não puder ser persistida.
+        }
+    }
+
+    public async Task CreateOrAppendManualBasketAsync(
+        IReadOnlyList<ItemSearchDisplayRow> selectedRows)
+    {
+        ArgumentNullException.ThrowIfNull(selectedRows);
+        var validRows = selectedRows
+            .Where(row => row.Source.PriceState == ItemSearchPriceState.Homologated &&
+                          row.Source.Result is { IsActive: true, HomologatedUnitValue: > 0 })
+            .ToArray();
+        if (validRows.Length == 0)
+        {
+            MessageBox.Show(
+                "Selecione pelo menos uma linha com preço homologado ativo e positivo.",
+                "Cesta manual",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var projects = await _quotationService.GetProjectsAsync().ConfigureAwait(true);
+        var analyses = new Dictionary<Guid, IReadOnlyList<QuotationLineAnalysis>>();
+        foreach (var project in projects)
+        {
+            analyses[project.Id] = await _quotationService.GetAnalysesAsync(project.Id).ConfigureAwait(true);
+        }
+
+        var expression = SearchText.Parse(QueryText);
+        var description = expression.PositiveText.Length > 0
+            ? expression.PositiveText
+            : QueryText.Trim();
+        var window = new ManualBasketWindow(
+            projects,
+            analyses,
+            SelectedQuotationProject?.Id,
+            description,
+            MinimumPriceText,
+            MaximumPriceText)
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (window.ShowDialog() != true || window.Input is null)
+        {
+            return;
+        }
+
+        IsFileBusy = true;
+        try
+        {
+            var projectId = window.ExistingProjectId;
+            if (projectId is null)
+            {
+                var project = await _quotationService.CreateProjectAsync(window.NewProjectName).ConfigureAwait(true);
+                projectId = project.Id;
+            }
+
+            var saved = await _quotationService.SaveManualBasketAsync(
+                    projectId.Value,
+                    window.ExistingLineId,
+                    window.Input,
+                    window.ExistingBasketId,
+                    window.BasketName,
+                    validRows.Select(row => row.Source).ToArray())
+                .ConfigureAwait(true);
+            await RefreshQuotationProjectsAsync(projectId).ConfigureAwait(true);
+            await LoadQuotationProjectAsync(projectId, saved.Analysis.Line.Id).ConfigureAwait(true);
+            SelectedResultsTabIndex = 2;
+            StatusText =
+                $"Cesta manual \"{saved.Basket.Name}\" salva com " +
+                $"{saved.Basket.ReferenceIds.Count:N0} preço(s).";
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                exception.Message,
+                "Cesta manual",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+        finally
+        {
+            IsFileBusy = false;
+            NotifyCommands();
         }
     }
 
@@ -701,7 +828,8 @@ public sealed partial class MainViewModel
                 line.MinimumUnitPrice,
                 line.MaximumUnitPrice)
             {
-                Weights = line.Weights
+                Weights = line.Weights,
+                RequestedBasketSize = line.RequestedBasketSize
             };
             var rows = await _itemSearchService.GetDiscoveredRowsAsync(
                     minimumUnitPrice: input.MinimumUnitPrice,
@@ -737,6 +865,22 @@ public sealed partial class MainViewModel
             return;
         }
 
+        if (basket.Source.IsManual &&
+            basket.Source.VisualState is QuotationBasketVisualState.ManualIncomplete or
+                QuotationBasketVisualState.ManualInvalid)
+        {
+            var answer = MessageBox.Show(
+                $"{basket.Source.ValidationMessage}\n\n" +
+                "A cesta poderá ser exportada, e a planilha registrará esta ressalva. Deseja confirmar?",
+                "Confirmar cesta manual com ressalva",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+            if (answer != MessageBoxResult.Yes)
+            {
+                return;
+            }
+        }
+
         try
         {
             await _quotationService.ConfirmBasketAsync(line.Analysis, basket.Key).ConfigureAwait(true);
@@ -747,6 +891,77 @@ public sealed partial class MainViewModel
         {
             MessageBox.Show(exception.Message, "Confirmar cesta", MessageBoxButton.OK, MessageBoxImage.Error);
         }
+    }
+
+    private async Task RenameSelectedManualBasketAsync()
+    {
+        var basket = SelectedQuotationBasket?.Source;
+        var project = SelectedQuotationProject;
+        var line = SelectedQuotationLine;
+        if (basket?.ManualBasketId is null || project is null || line is null)
+        {
+            return;
+        }
+
+        var window = new TextPromptWindow(
+            "Renomear cesta manual",
+            "Novo nome:",
+            basket.Name)
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (window.ShowDialog() != true)
+        {
+            return;
+        }
+
+        await _quotationService.RenameManualBasketAsync(basket.ManualBasketId.Value, window.Value)
+            .ConfigureAwait(true);
+        await LoadQuotationProjectAsync(project.Id, line.Line.Id).ConfigureAwait(true);
+        StatusText = "Cesta manual renomeada.";
+    }
+
+    private async Task DeleteSelectedManualBasketAsync()
+    {
+        var basket = SelectedQuotationBasket?.Source;
+        var project = SelectedQuotationProject;
+        var line = SelectedQuotationLine;
+        if (basket?.ManualBasketId is null || project is null || line is null)
+        {
+            return;
+        }
+
+        if (MessageBox.Show(
+                $"Excluir a cesta manual \"{basket.Name}\"?",
+                "Excluir cesta manual",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        await _quotationService.DeleteManualBasketAsync(basket.ManualBasketId.Value).ConfigureAwait(true);
+        await LoadQuotationProjectAsync(project.Id, line.Line.Id).ConfigureAwait(true);
+        StatusText = "Cesta manual excluída.";
+    }
+
+    private async Task RemoveSelectedManualBasketReferenceAsync()
+    {
+        var basket = SelectedQuotationBasket?.Source;
+        var reference = SelectedBasketReference;
+        var project = SelectedQuotationProject;
+        var line = SelectedQuotationLine;
+        if (basket?.ManualBasketId is null || reference is null || project is null || line is null)
+        {
+            return;
+        }
+
+        await _quotationService.RemoveManualBasketReferenceAsync(
+                basket.ManualBasketId.Value,
+                reference.Id)
+            .ConfigureAwait(true);
+        await LoadQuotationProjectAsync(project.Id, line.Line.Id).ConfigureAwait(true);
+        StatusText = "Referência removida da cesta manual.";
     }
 
     private async Task AdjustQuotationWeightsAsync()

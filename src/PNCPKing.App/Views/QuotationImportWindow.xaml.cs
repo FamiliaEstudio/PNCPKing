@@ -25,11 +25,11 @@ public partial class QuotationImportWindow : Window
         var baseName = Path.GetFileNameWithoutExtension(document.SourcePath);
         NewProjectNameTextBox.Text = projects.Count == 0 ? baseName : string.Empty;
         _defaultOutputName = baseName + "-cotação.xlsx";
-        var calls = document.Items.Sum(item => checked(item.BatchCount * 50));
+        var contracts = document.Items.Sum(item => checked(item.BatchCount * 50));
         SummaryTextBlock.Text =
-            $"{document.Items.Count:N0} item(ns), até {calls:N0} consultas de preços. " +
+            $"{document.Items.Count:N0} item(ns), até {contracts:N0} contratações candidatas examinadas. " +
             $"Filtros: {filterSummary}. Pesos: {weights}. " +
-            "A execução é sequencial e pode demorar conforme os disparos e contratos examinados.";
+            "Cada disparo examina 50 contratações e revela todos os itens compatíveis encontrados.";
     }
 
     public IReadOnlyList<QuotationImportItem> Items { get; }

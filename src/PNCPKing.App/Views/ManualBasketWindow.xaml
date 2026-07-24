@@ -1,0 +1,76 @@
+<Window x:Class="PNCPKing.App.Views.ManualBasketWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Criar ou ampliar cesta manual" Height="560" Width="720"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize">
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="190" />
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="145" />
+        </Grid.ColumnDefinitions>
+
+        <TextBlock Grid.ColumnSpan="3" Margin="0,0,0,14" TextWrapping="Wrap"
+                   Text="Os preços selecionados serão copiados para uma cesta manual persistente. O alvo da cesta automática não limita a cesta manual." />
+
+        <TextBlock Grid.Row="1" Text="Projeto existente" VerticalAlignment="Center" />
+        <ComboBox x:Name="ProjectComboBox" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2"
+                  DisplayMemberPath="Name" SelectionChanged="ProjectComboBox_SelectionChanged" />
+
+        <TextBlock Grid.Row="2" Text="Ou nome de novo projeto" VerticalAlignment="Center" />
+        <TextBox x:Name="NewProjectNameTextBox" Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" />
+
+        <TextBlock Grid.Row="3" Text="Item da cotação" VerticalAlignment="Center" />
+        <ComboBox x:Name="LineComboBox" Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2"
+                  DisplayMemberPath="Label" SelectionChanged="LineComboBox_SelectionChanged" />
+
+        <TextBlock Grid.Row="4" Text="Cesta manual" VerticalAlignment="Center" />
+        <ComboBox x:Name="BasketComboBox" Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2"
+                  DisplayMemberPath="Label" SelectionChanged="BasketComboBox_SelectionChanged" />
+
+        <TextBlock Grid.Row="5" Text="Nome da cesta" VerticalAlignment="Center" />
+        <TextBox x:Name="BasketNameTextBox" Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2" />
+
+        <TextBlock Grid.Row="6" Text="Descrição do novo item" VerticalAlignment="Center" />
+        <TextBox x:Name="DescriptionTextBox" Grid.Row="6" Grid.Column="1" Grid.ColumnSpan="2"
+                 Height="58" TextWrapping="Wrap" AcceptsReturn="True" />
+
+        <TextBlock Grid.Row="7" Text="Quantidade, unidade e alvo auto." VerticalAlignment="Center" />
+        <TextBox x:Name="QuantityTextBox" Grid.Row="7" Grid.Column="1" />
+        <StackPanel Grid.Row="7" Grid.Column="2" Orientation="Horizontal">
+            <TextBox x:Name="UnitTextBox" Width="85" ToolTip="Unidade" />
+            <TextBox x:Name="BasketSizeTextBox" Width="45" Text="3" ToolTip="Alvo automático de 3 a 10" />
+        </StackPanel>
+
+        <Grid Grid.Row="8" Grid.ColumnSpan="3" Margin="0,10,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="190" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="18" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Faixa unitária opcional" VerticalAlignment="Center" />
+            <TextBox x:Name="MinimumPriceTextBox" Grid.Column="1" ToolTip="Preço mínimo" />
+            <TextBlock Grid.Column="2" Text="a" HorizontalAlignment="Center" VerticalAlignment="Center" />
+            <TextBox x:Name="MaximumPriceTextBox" Grid.Column="3" ToolTip="Preço máximo" />
+        </Grid>
+
+        <StackPanel Grid.Row="9" Grid.ColumnSpan="3" Orientation="Horizontal"
+                    HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Content="Cancelar" IsCancel="True" MinWidth="95" />
+            <Button Content="Salvar cesta manual" IsDefault="True" MinWidth="145" Click="Accept_Click" />
+        </StackPanel>
+    </Grid>
+</Window>

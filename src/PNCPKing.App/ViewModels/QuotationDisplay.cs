@@ -23,11 +23,14 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis)
     public int RejectedCount => Analysis.RejectedCount;
     public int BasketCount => Analysis.Baskets.Count;
     public int BasketPoolCount => Analysis.BasketPoolCount;
+    public int RequestedBasketSize => Line.RequestedBasketSize;
     public int SampleVersion => Line.SampleVersion;
     public DateTimeOffset SampledAt => Line.SampledAt;
     public string WeightSummary => Line.Weights.ToString();
-    public string Status => Line.SelectionConfirmed && Analysis.SelectedBasket is not null
-        ? "Resolvido"
+    public string Status => Line.SelectionConfirmed && Analysis.SelectedBasket is { } selected
+        ? selected.IsIncomplete || !selected.IsValid
+            ? "Resolvido com ressalva"
+            : "Resolvido"
         : Analysis.Baskets.Count == 0
             ? "Sem cesta válida"
             : Line.SelectedBasketKey is not null && Analysis.SelectedBasket is not null
@@ -44,6 +47,7 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis)
         QuotationAutomationItemState.Completed => "Concluído",
         QuotationAutomationItemState.Insufficient => "Insuficiente",
         QuotationAutomationItemState.Failed => "Falha",
+        QuotationAutomationItemState.CompletedWithWarning => "Concluído com ressalva",
         _ => Line.AutomationState.ToString()
     };
     public string AutomationMessage => Line.AutomationMessage;
@@ -59,6 +63,30 @@ public sealed class QuotationBasketDisplay(QuotationBasket source, bool wasPrevi
     public decimal MaximumPrice => Source.MaximumPrice;
     public decimal MaximumDeviationPercent => Source.MaximumDeviationPercent;
     public decimal Score => Source.Score;
+    public string Type => Source.IsManual ? "Manual" : "Automática";
+    public string Name => Source.IsManual ? Source.Name : string.Empty;
+    public string Status => Source.VisualState switch
+    {
+        QuotationBasketVisualState.AutomaticRegular when Source.References.Count == 2 => "Resolvida com ressalva",
+        QuotationBasketVisualState.AutomaticRegular when Source.IsIncomplete => "Reduzida",
+        QuotationBasketVisualState.AutomaticRegular => "Regular",
+        QuotationBasketVisualState.AutomaticHighDispersion when Source.References.Count == 2 => "Resolvida com ressalva",
+        QuotationBasketVisualState.AutomaticHighDispersion => "Desvio > 25%",
+        QuotationBasketVisualState.ManualIncomplete => "Incompleta",
+        QuotationBasketVisualState.ManualRegular => "Regular",
+        QuotationBasketVisualState.ManualInvalid => "Inválida",
+        _ => string.Empty
+    };
+    public string ValidationMessage => Source.ValidationMessage;
+    public int ReferenceCount => Source.References.Count;
+    public string Background => Source.VisualState switch
+    {
+        QuotationBasketVisualState.AutomaticRegular => "#EAF7EE",
+        QuotationBasketVisualState.AutomaticHighDispersion => "#FDECEC",
+        QuotationBasketVisualState.ManualIncomplete or QuotationBasketVisualState.ManualRegular => "#EAF2FF",
+        QuotationBasketVisualState.ManualInvalid => "#F3EAFB",
+        _ => "Transparent"
+    };
     public string Tags
     {
         get
@@ -67,6 +95,7 @@ public sealed class QuotationBasketDisplay(QuotationBasket source, bool wasPrevi
             if (Source.IsRecommended) tags.Add("Recomendada");
             if (Source.IsCheapest) tags.Add("Mais barata");
             if (Source.IsMostExpensive) tags.Add("Mais cara");
+            if (Source.IsManual) tags.Add(Source.Name);
             if (WasPreviouslySelected) tags.Add("Escolhida anteriormente");
             return string.Join(" · ", tags);
         }
@@ -77,6 +106,7 @@ public sealed class QuotationReferenceDisplay(QuotationReference source)
 {
     public QuotationReference Source { get; } = source;
     public string SupplierName => Source.SupplierName;
+    public string Id => Source.Id;
     public string SupplierTaxId => Source.SupplierTaxId;
     public decimal UnitPrice => Source.UnitPrice;
     public string ItemDescription => Source.ItemDescription;

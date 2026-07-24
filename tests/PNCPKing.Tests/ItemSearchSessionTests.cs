@@ -86,101 +86,104 @@ public sealed class ItemSearchSessionTests
     public async Task ManualBatch_ConsultsNextFiftyAndLargeRequestRequiresConfirmation()
     {
         await using var database = await TestDatabase.CreateAsync();
-        var contract = RepositorySearchTests.Contract("contract", "Café", "SP", 1);
-        await database.Repository.UpsertContractsAsync([contract]);
-        var client = new SessionPncpClient(new Dictionary<string, IReadOnlyList<ProcurementItem>>
-        {
-            [contract.PncpId] = Enumerable.Range(1, 120)
-                .Select(number => Item(contract.PncpId, number, $"Café {number}", true))
-                .ToArray()
-        });
+        var contracts = CandidateContracts(120, "batch");
+        await database.Repository.UpsertContractsAsync(contracts);
+        var client = new SessionPncpClient(contracts.ToDictionary(
+            contract => contract.PncpId,
+            contract => (IReadOnlyList<ProcurementItem>)[
+                Item(contract.PncpId, 1, "Café em grãos", true)
+            ]));
         await using var service = new ItemSearchSessionService(
             client,
             database.Repository,
             Path.Combine(database.Directory, "batches.db"));
-        await service.StartAsync("cafe", [contract]);
-        await service.LoadPageAsync(1);
+        await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
 
-        var batch = await service.FireBatchesAsync(new PriceBatchRequest(1));
-        Assert.Equal(50, batch.CompletedItemCalls);
+        var firstBatch = await service.FireBatchesAsync(new PriceBatchRequest(1));
+        Assert.Equal(50, firstBatch.ProcessedContracts);
+        Assert.Equal(50, firstBatch.CompletedItemCalls);
+        Assert.Equal(50, client.ItemListCalls);
+        Assert.Equal(50, client.ResultCalls);
+        Assert.False(firstBatch.CandidateSetExhausted);
+
+        var secondBatch = await service.FireBatchesAsync(new PriceBatchRequest(1));
+        Assert.Equal(50, secondBatch.ProcessedContracts);
+        Assert.Equal(100, client.ItemListCalls);
         Assert.Equal(100, client.ResultCalls);
+        Assert.False(secondBatch.CandidateSetExhausted);
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             service.FireBatchesAsync(new PriceBatchRequest(11)));
 
         service.Stop();
         var retained = await service.GetDiscoveredRowsAsync();
-        Assert.Equal(120, retained.Count);
-        Assert.Equal(100, retained.Count(row => row.PriceState == ItemSearchPriceState.Homologated));
+        Assert.Equal(100, retained.Count);
+        Assert.All(retained, row => Assert.Equal(ItemSearchPriceState.Homologated, row.PriceState));
     }
 
     [Fact]
-    public async Task ManualBatch_RetriesAFailedAutomaticPriceOnceWithoutLooping()
+    public async Task ManualBatch_DoesNotRepeatAContractWhosePriceFailed()
     {
         await using var database = await TestDatabase.CreateAsync();
-        var contract = RepositorySearchTests.Contract("contract", "Café", "SP", 1);
-        await database.Repository.UpsertContractsAsync([contract]);
+        var contracts = CandidateContracts(2, "failure");
+        await database.Repository.UpsertContractsAsync(contracts);
         var attempts = 0;
-        var client = new SessionPncpClient(new Dictionary<string, IReadOnlyList<ProcurementItem>>
+        var client = new SessionPncpClient(contracts.ToDictionary(
+            contract => contract.PncpId,
+            contract => (IReadOnlyList<ProcurementItem>)[
+                Item(contract.PncpId, 1, "Café em grãos", true)
+            ]), (_, _) =>
         {
-            [contract.PncpId] = [Item(contract.PncpId, 1, "Café em grãos", true)]
-        }, (_, itemNumber) =>
-        {
-            if (Interlocked.Increment(ref attempts) == 1)
-            {
-                throw new HttpRequestException("falha transitória");
-            }
-
-            return [Result(contract.PncpId, itemNumber, 1, 18m, 1)];
+            Interlocked.Increment(ref attempts);
+            throw new HttpRequestException("falha transitória");
         });
         await using var service = new ItemSearchSessionService(
             client,
             database.Repository,
             Path.Combine(database.Directory, "retry.db"));
-        await service.StartAsync("cafe", [contract]);
+        await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
 
-        var failedPage = await service.LoadPageAsync(1);
-        Assert.Single(failedPage.Rows);
-        Assert.Equal(ItemSearchPriceState.Failed, failedPage.Rows[0].PriceState);
+        var first = await service.FireBatchesAsync(new PriceBatchRequest(1));
+        var second = await service.FireBatchesAsync(new PriceBatchRequest(1));
 
-        var retry = await service.FireBatchesAsync(new PriceBatchRequest(1));
-        var recovered = await service.GetDiscoveredRowsAsync();
-
-        Assert.Equal(1, retry.CompletedItemCalls);
-        Assert.Equal(0, retry.FailedItemCalls);
-        Assert.True(retry.CandidateSetExhausted);
+        Assert.Equal(2, first.ProcessedContracts);
+        Assert.Equal(2, first.FailedItemCalls);
+        Assert.True(first.CandidateSetExhausted);
+        Assert.Equal(0, second.ProcessedContracts);
+        Assert.Equal(2, attempts);
         Assert.Equal(2, client.ResultCalls);
-        Assert.Single(recovered);
-        Assert.Equal(ItemSearchPriceState.Homologated, recovered[0].PriceState);
-        Assert.Equal(18m, recovered[0].HomologatedUnitValue);
     }
 
     [Fact]
-    public async Task ManualBatch_DoesNotRetryTheSameFailureRepeatedlyWithinOneRequest()
+    public async Task ManualBatch_DoesNotRepeatPreviouslyProcessedSuccessfulContracts()
     {
         await using var database = await TestDatabase.CreateAsync();
-        var contract = RepositorySearchTests.Contract("contract", "Café", "SP", 1);
-        await database.Repository.UpsertContractsAsync([contract]);
-        var client = new SessionPncpClient(new Dictionary<string, IReadOnlyList<ProcurementItem>>
-        {
-            [contract.PncpId] = [Item(contract.PncpId, 1, "Café em grãos", true)]
-        }, (_, _) => throw new HttpRequestException("indisponível"));
+        var contracts = CandidateContracts(60, "continuation");
+        await database.Repository.UpsertContractsAsync(contracts);
+        var client = new SessionPncpClient(contracts.ToDictionary(
+            contract => contract.PncpId,
+            contract => (IReadOnlyList<ProcurementItem>)[
+                Item(contract.PncpId, 1, "Café em grãos", true)
+            ]));
         await using var service = new ItemSearchSessionService(
             client,
             database.Repository,
             Path.Combine(database.Directory, "single-retry.db"));
-        await service.StartAsync("cafe", [contract]);
-        await service.LoadPageAsync(1);
+        await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
 
-        var retry = await service.FireBatchesAsync(new PriceBatchRequest(1));
+        var first = await service.FireBatchesAsync(new PriceBatchRequest(1));
+        var second = await service.FireBatchesAsync(new PriceBatchRequest(1));
+        var exhausted = await service.FireBatchesAsync(new PriceBatchRequest(1));
 
-        Assert.Equal(1, retry.CompletedItemCalls);
-        Assert.Equal(1, retry.FailedItemCalls);
-        Assert.True(retry.CandidateSetExhausted);
-        Assert.Equal(2, client.ResultCalls);
+        Assert.Equal(50, first.ProcessedContracts);
+        Assert.Equal(10, second.ProcessedContracts);
+        Assert.Equal(0, exhausted.ProcessedContracts);
+        Assert.True(second.CandidateSetExhausted);
+        Assert.True(exhausted.CandidateSetExhausted);
+        Assert.Equal(60, client.ResultCalls);
     }
 
     [Fact]
-    public async Task ManualBatch_PrioritizesUntouchedItemsOverEarlierFailures()
+    public async Task ManualBatch_ConsultsAllMatchingItemsInsideEachContract()
     {
         await using var database = await TestDatabase.CreateAsync();
         var contract = RepositorySearchTests.Contract("contract", "Café", "SP", 1);
@@ -205,41 +208,45 @@ public sealed class ItemSearchSessionTests
             client,
             database.Repository,
             Path.Combine(database.Directory, "no-starvation.db"));
-        await service.StartAsync("cafe", [contract]);
-        await service.LoadPageAsync(1);
+        await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
 
-        await service.FireBatchesAsync(new PriceBatchRequest(1));
+        var result = await service.FireBatchesAsync(new PriceBatchRequest(1));
 
-        Assert.Equal(2, attempts[1]);
-        Assert.All(Enumerable.Range(51, 10), itemNumber => Assert.Equal(1, attempts[itemNumber]));
+        Assert.Equal(1, result.ProcessedContracts);
+        Assert.Equal(60, result.CompletedItemCalls);
+        Assert.Equal(1, result.FailedItemCalls);
+        Assert.Equal(1, attempts[1]);
+        Assert.All(Enumerable.Range(2, 59), itemNumber => Assert.Equal(1, attempts[itemNumber]));
     }
 
     [Fact]
-    public async Task BatchProgress_IsCumulativeAcrossFiftyItemChunks()
+    public async Task BatchProgress_IsCumulativeAcrossFiftyContractChunks()
     {
         await using var database = await TestDatabase.CreateAsync();
-        var contract = RepositorySearchTests.Contract("contract", "Café", "SP", 1);
-        await database.Repository.UpsertContractsAsync([contract]);
-        var client = new SessionPncpClient(new Dictionary<string, IReadOnlyList<ProcurementItem>>
-        {
-            [contract.PncpId] = Enumerable.Range(1, 150)
-                .Select(number => Item(contract.PncpId, number, $"Café {number}", true))
-                .ToArray()
-        });
+        var contracts = CandidateContracts(120, "progress");
+        await database.Repository.UpsertContractsAsync(contracts);
+        var client = new SessionPncpClient(contracts.ToDictionary(
+            contract => contract.PncpId,
+            contract => (IReadOnlyList<ProcurementItem>)[
+                Item(contract.PncpId, 1, "Café em grãos", true)
+            ]));
         await using var service = new ItemSearchSessionService(
             client,
             database.Repository,
             Path.Combine(database.Directory, "progress.db"));
-        await service.StartAsync("cafe", [contract]);
-        await service.LoadPageAsync(1);
-        var reports = new List<int>();
-        var progress = new InlineProgress<PriceBatchProgress>(value => reports.Add(value.CompletedItemCalls));
+        await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
+        var reports = new List<PriceBatchProgress>();
+        var progress = new InlineProgress<PriceBatchProgress>(reports.Add);
 
         var completed = await service.FireBatchesAsync(new PriceBatchRequest(2), progress);
 
+        Assert.Equal(100, completed.ProcessedContracts);
         Assert.Equal(100, completed.CompletedItemCalls);
-        Assert.Equal(100, reports[^1]);
-        Assert.True(reports.SequenceEqual(reports.Order()), "O progresso não pode regredir entre blocos de 50 itens.");
+        Assert.Equal(100, reports[^1].ProcessedContracts);
+        Assert.True(
+            reports.Select(report => report.ProcessedContracts)
+                .SequenceEqual(reports.Select(report => report.ProcessedContracts).Order()),
+            "O progresso não pode regredir entre blocos de 50 contratações.");
     }
 
     [Fact]
@@ -290,11 +297,12 @@ public sealed class ItemSearchSessionTests
             Path.Combine(database.Directory, "without-result.db"));
         await service.StartAsync("cafe", [contract]);
 
-        var firstPage = await service.LoadPageAsync(1);
         var batch = await service.FireBatchesAsync(new PriceBatchRequest(1));
+        var rows = await service.GetDiscoveredRowsAsync();
 
-        Assert.Equal(50, firstPage.Rows.Count);
-        Assert.All(firstPage.Rows, row => Assert.Equal(ItemSearchPriceState.NoHomologatedResult, row.PriceState));
+        Assert.Equal(60, rows.Count);
+        Assert.Equal(50, rows.Count(row => row.PriceState == ItemSearchPriceState.NoHomologatedResult));
+        Assert.Equal(10, rows.Count(row => row.PriceState == ItemSearchPriceState.Homologated));
         Assert.Equal(10, batch.CompletedItemCalls);
         Assert.Equal(10, client.ResultCalls);
         Assert.True(batch.CandidateSetExhausted);
@@ -454,15 +462,22 @@ public sealed class ItemSearchSessionTests
             progress: new InlineProgress<PriceBatchProgress>(value => progressValues.Add(value.CompletedItemCalls)),
             rowProgress: new InlineProgress<IReadOnlyList<ItemSearchRow>>(rows => streamed.AddRange(rows)));
 
-        Assert.Equal(100, result.CompletedItemCalls);
-        Assert.Equal(100, client.ResultCalls);
-        Assert.Equal(100, streamed.Count(row => row.PriceState == ItemSearchPriceState.Homologated));
+        Assert.Equal(1, result.ProcessedContracts);
+        Assert.Equal(120, result.CompletedItemCalls);
+        Assert.Equal(120, client.ResultCalls);
+        Assert.Equal(
+            120,
+            streamed
+                .Where(row => row.PriceState == ItemSearchPriceState.Homologated)
+                .Select(row => (row.Contract.PncpId, row.Item.ItemNumber, row.Result!.ResultSequence))
+                .Distinct()
+                .Count());
         Assert.True(progressValues.SequenceEqual(progressValues.Order()));
-        Assert.False(result.CandidateSetExhausted);
+        Assert.True(result.CandidateSetExhausted);
     }
 
     [Fact]
-    public async Task ContinuousRun_CanCrossMoreThanFiftyFreshItemListsInOneAction()
+    public async Task ContinuousRun_LeavesTheFiftyFirstContractForTheNextBatch()
     {
         await using var database = await TestDatabase.CreateAsync();
         var contracts = Enumerable.Range(1, 75)
@@ -480,12 +495,33 @@ public sealed class ItemSearchSessionTests
             Path.Combine(database.Directory, "continuous-lists.db"));
         await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
 
-        var result = await service.RunContinuousAsync(new PriceBatchRequest(1));
+        var first = await service.RunContinuousAsync(new PriceBatchRequest(1));
+        var second = await service.RunContinuousAsync(new PriceBatchRequest(1));
 
-        Assert.True(result.CandidateSetExhausted);
+        Assert.Equal(50, first.ProcessedContracts);
+        Assert.False(first.CandidateSetExhausted);
+        Assert.Equal(26, second.ProcessedContracts);
+        Assert.True(second.CandidateSetExhausted);
         Assert.Equal(76, client.ItemListCalls);
         Assert.Equal(1, client.ResultCalls);
-        Assert.Equal(1, result.CompletedItemCalls);
+        Assert.Equal(1, first.CompletedItemCalls + second.CompletedItemCalls);
+    }
+
+    private static ContractRecord[] CandidateContracts(int count, string prefix)
+    {
+        var published = new DateTimeOffset(2026, 6, 1, 12, 0, 0, TimeSpan.Zero);
+        return Enumerable.Range(1, count)
+            .Select(number => RepositorySearchTests.Contract(
+                $"{prefix}-{number:D4}",
+                $"Aquisição de café {number}",
+                "SP",
+                (number - 1) % 28 + 1) with
+            {
+                PurchaseSequence = number,
+                PublicationDate = published.AddMinutes(number),
+                GlobalUpdatedAt = published.AddMinutes(number)
+            })
+            .ToArray();
     }
 
     private static ProcurementItem Item(string contractId, long number, string description, bool hasResult) => new()

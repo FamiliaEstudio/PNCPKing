@@ -17,13 +17,13 @@ A distribuição autocontida mais recente para Windows x64 está em `artifacts\w
 - atualização por `dataAtualizacaoGlobal` com sobreposição de 48 horas;
 - SQLite em WAL com FTS5 e pesquisa sem diferença entre acentos/maiúsculas, sempre por prefixo;
 - sintaxe textual com E implícito ou `+`, OU por `OU`, `OR` ou `|`, frases entre aspas fechadas, exclusões globais por `-palavra` ou `-"frase"` e unidades aceitas por marcadores como `"pacote "unidade`;
-- pesquisa em duas etapas: o objeto local seleciona candidatos por qualquer termo positivo e somente a descrição do item que satisfaz a expressão completa produz preços;
+- pesquisa em duas etapas: um resumo local mostra imediatamente o total exato de contratações candidatas e as contagens parciais de itens/preços já existentes no cache; depois a API revela os valores;
 - filtros `Todos`, `Cidades Próximas`, `Sudeste` e UF, períodos de 7 a 365 dias ou personalizados e ordenação por relevância, data ou proximidade;
 - catálogo nacional embutido das localidades oficiais de 2022 do IBGE, usado somente para distância e ordem geográfica, sem consultas remotas por município;
 - percurso fixo de candidatos: Ribeirão Preto e os outros 49 municípios mais próximos por distância, restante de SP em amostra aleatória estável e depois cada UF pela proximidade de sua sede municipal mais próxima;
 - sorteio estável durante cada pesquisa, paginação por cursor sem repetição e nova rotação aleatória ao iniciar outra pesquisa;
-- pesquisa contínua pelo orçamento escolhido de 1 a 100 disparos, com até 50 consultas de resultado por disparo, sem paginação manual nem limite intermediário de listas;
-- resultados acrescentados progressivamente em uma única grade virtualizada, com barra vertical, percentual, etapa geográfica, contratos e falhas atualizados durante a execução;
+- primeiro lote automático de 50 contratações e pesquisa contínua de 1 a 100 disparos adicionais; cada disparo examina 50 contratações e consulta todos os itens compatíveis encontrados nelas;
+- resultados acrescentados progressivamente em uma única grade virtualizada, com percentual, contratações solicitadas/processadas, itens compatíveis, preços revelados e chamadas reais de listas/resultados;
 - biblioteca opcional Sweet Code, persistida no backup, com um crivo por linha e autocomplete por prefixo usando setas e `TAB`;
 - banco temporário separado para os preços automáticos, apagado ao pesquisar novamente, fechar ou reabrir após encerramento inesperado;
 - cache permanente separado para a atualização manual de uma contratação;
@@ -31,12 +31,13 @@ A distribuição autocontida mais recente para Windows x64 está em `artifacts\w
 - projetos persistentes de cotação que copiam a amostra já coletada, respeitando a faixa informada e sem novas chamadas ao PNCP;
 - qualificação auditável por cobertura do descritivo solicitado, unidade/embalagem, quantidade em faixas graduais, proximidade e atualidade;
 - elegibilidade de cotação determinada somente pela faixa de preço e compatibilidade descritiva; CNPJ, unidade, quantidade, proximidade, atualidade e índice permanecem informativos;
-- formação local de cestas com três referências únicas, mantendo origem e dispersão visíveis para a decisão objetiva do usuário;
-- classificação da cesta recomendada, mais barata e mais cara, com revisão e confirmação obrigatória pelo usuário;
+- formação local de cestas automáticas com alvo configurável de 3 a 10 preços, redução até 2 quando necessário e até 100 opções curadas e determinísticas;
+- criação de várias cestas manuais persistentes por seleção múltipla dos preços na grade, com renomeação, exclusão e remoção individual de referências;
+- classificação da cesta recomendada, mais barata e mais cara, com situação textual e fundos suaves verde/vermelho para automáticas e azul/roxo para manuais;
 - atualização incremental da amostra com versionamento e reconfirmação da escolha anterior;
-- importação de cotações por `.xlsx` nas colunas A:G, fila sequencial retomável e escolha automática da cesta recomendada;
+- importação de cotações por `.xlsx` compatível com A:G e alvo opcional em H (`Número de preços na cesta`), fila sequencial retomável e escolha automática da cesta recomendada;
 - gerenciamento para criar, renomear e excluir cotações ou itens, além de cancelar e retomar automações;
-- exportação simplificada em uma única aba `.xlsx`, com empresa, CNPJ, `INCISO II`, valor e observação quando faltarem três preços;
+- exportação simplificada em uma única aba `.xlsx`, completando faltas automáticas até o alvo e faltas manuais até três com `IMPOSSÍVEL OBTER PELO INCISO II`, além das ressalvas de cestas manuais;
 - medição por sessão de chamadas, bytes, duração e médias de listas de itens e resultados;
 - agendador único com no máximo duas chamadas ao PNCP e prioridade para ações visíveis do usuário;
 - distinção entre preço encontrado, resultado cancelado, item sem resultado, pendência e falha;
@@ -78,13 +79,13 @@ A suíte automatizada cobre pesquisa por objeto e item, geografia, faixa de pre�
 4. Clique em **Baixar/atualizar dados** e confirme os números exibidos.
 5. Digite o objeto, escolha geografia, período e ordenação e clique em **Pesquisar**.
 6. Você pode combinar termos: `café filtro` ou `café + filtro` exigem ambos; `café OU chá` aceita qualquer um; `"café torrado"` busca a frase; `café -cafeteira -"filtro de papel"` exclui descrições; `"pacote "unidade` aceita qualquer uma dessas unidades estruturadas do item.
-7. Informe de 1 a 100 disparos e pesquise. A execução avançará automaticamente pela sequência 50 municípios próximos, restante de SP e demais UFs, enquanto a grade e o progresso crescem sem páginas manuais.
-8. Para ampliar a sessão atual sem apagar o que já apareceu, use **Buscar mais com estes disparos**. Use **Parar preços** para interromper preservando os resultados concluídos.
+7. Ao clicar em **Pesquisar**, confira o resumo local exibido na própria tela. O aplicativo examinará automaticamente as primeiras 50 contratações candidatas e revelará todos os itens compatíveis encontrados.
+8. Para ampliar a sessão atual sem repetir contratações, informe de 1 a 100 lotes e use **Mostrar valores das próximas contratações**. Cada lote contém 50 contratações. Use **Parar preços** para interromper preservando os resultados concluídos.
 9. Use os campos de preço mínimo/máximo para filtrar o valor unitário homologado ativo.
-10. Para iniciar uma cotação, clique em **Usar esta amostra em uma cotação**, selecione ou crie um projeto e informe quantidade, unidade e faixa de preço opcional.
-11. Na aba **Cotações**, compare todas as cestas válidas, examine a composição do índice e confirme a cesta escolhida.
+10. Para iniciar uma cotação, clique em **Usar esta amostra em uma cotação**, selecione ou crie um projeto e informe quantidade, unidade, alvo automático de 3 a 10 preços e faixa opcional.
+11. Para montar sua própria composição, selecione uma ou mais linhas homologadas com `Ctrl`/`Shift` e use **Criar/adicionar à cesta manual**. Na aba **Cotações**, você pode ampliar, renomear, revisar, confirmar ou excluir essas cestas.
 12. Faça novas pesquisas e adicione outros itens ao mesmo projeto. Se ampliar a coleta de um item, use **Atualizar amostra com a pesquisa atual**; a escolha anterior ficará marcada para reconfirmação.
-13. Use **Importar XLSX** para carregar vários itens pelas colunas A:G, escolher pesos globais e executar a cotação automaticamente; falhas podem ser retomadas. **Exportar Excel** gera a versão simples com `INCISO II`.
+13. Use **Importar XLSX** para carregar vários itens pelas colunas A:G e, opcionalmente, o alvo da cesta em H. H vazia usa 3. A automação interpreta a coluna G como lotes de 50 contratações; falhas podem ser retomadas. **Exportar Excel** gera a versão simples com `INCISO II`.
 14. Para manter uma contratação no cache permanente, selecione-a na segunda aba e use **Buscar/atualizar todos os preços**.
 15. Use **Abrir contratação no PNCP** para acessar a página oficial e baixar documentos manualmente, se houver interesse.
 

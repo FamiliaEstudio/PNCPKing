@@ -61,6 +61,12 @@ public partial class QuotationSampleWindow : Window
                 throw new ArgumentException("A faixa de preço é inválida.");
             }
 
+            if (!int.TryParse(BasketSizeTextBox.Text, NumberStyles.Integer, CultureInfo.CurrentCulture, out var basketSize) ||
+                basketSize is < 3 or > 10)
+            {
+                throw new ArgumentException("Informe de 3 a 10 preços para a cesta automática.");
+            }
+
             NewProjectName = NewProjectNameTextBox.Text.Trim();
             ExistingProjectId = NewProjectName.Length > 0
                 ? null
@@ -72,7 +78,8 @@ public partial class QuotationSampleWindow : Window
 
             Input = new QuotationLineInput(description, quantity, unit, minimum, maximum)
             {
-                Weights = _weights
+                Weights = _weights,
+                RequestedBasketSize = basketSize
             };
             DialogResult = true;
         }

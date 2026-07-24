@@ -29,6 +29,14 @@ public sealed record ItemSearchSession(
     int PageSize = 50,
     long RandomPivot = 0);
 
+public sealed record ItemSearchLocalSummary(
+    long CandidateContracts,
+    long CachedMatchingItems,
+    long CachedItemsWithActivePrices)
+{
+    public bool IsPartial => true;
+}
+
 public sealed record ItemSearchHit(
     ContractRecord Contract,
     ProcurementItem Item);
@@ -71,7 +79,7 @@ public sealed record PriceBatchRequest(
     int BatchCount,
     bool LargeRequestConfirmed = false)
 {
-    public int RequestedItemCalls => checked(BatchCount * 50);
+    public int RequestedContracts => checked(BatchCount * 50);
 }
 
 public sealed record PriceBatchProgress(
@@ -88,7 +96,11 @@ public sealed record PriceBatchProgress(
     int FreshItemListsUsed = 0,
     bool ItemListBudgetExhausted = false,
     string GeographicStage = "",
-    int CachedItemListsReused = 0);
+    int CachedItemListsReused = 0,
+    int RequestedContracts = 0,
+    int ProcessedContracts = 0,
+    int MatchedItems = 0,
+    int RevealedPrices = 0);
 
 /// <summary>
 /// Network measurements isolated to one item-search session. HTTP calls include

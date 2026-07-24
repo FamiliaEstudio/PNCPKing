@@ -92,4 +92,12 @@ public partial class MainWindow : Window
         QueryTextBox.CaretIndex = QueryTextBox.Text.Length;
     }
 
+    private async void CreateManualBasket_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = ItemResultsGrid.SelectedItems
+            .OfType<ItemSearchDisplayRow>()
+            .ToArray();
+        await _viewModel.CreateOrAppendManualBasketAsync(selected).ConfigureAwait(true);
+    }
+
 }

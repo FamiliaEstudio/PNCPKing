@@ -72,6 +72,7 @@ public sealed class SweetCodeAndImportTests
                 sheet.Cell(1, 5).Value = "30,50";
                 sheet.Cell(1, 6).Value = 45m;
                 sheet.Cell(1, 7).Value = 10;
+                sheet.Cell(1, 8).Value = 7;
                 workbook.SaveAs(path);
             }
 
@@ -85,6 +86,40 @@ public sealed class SweetCodeAndImportTests
             Assert.Equal(30.50m, item.MinimumUnitPrice);
             Assert.Equal(45m, item.MaximumUnitPrice);
             Assert.Equal(10, item.BatchCount);
+            Assert.Equal(7, item.RequestedBasketSize);
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public async Task Import_AcceptsLegacyColumnsDefaultsEmptyHAndReportsInvalidHCell()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var legacyPath = Path.Combine(directory, "legacy-a-g.xlsx");
+        var emptyPath = Path.Combine(directory, "empty-h.xlsx");
+        var invalidPath = Path.Combine(directory, "invalid-h.xlsx");
+        try
+        {
+            CreateQuotationInputWorkbook(legacyPath, includeColumnH: false, basketSize: null);
+            CreateQuotationInputWorkbook(emptyPath, includeColumnH: true, basketSize: null);
+            CreateQuotationInputWorkbook(invalidPath, includeColumnH: true, basketSize: 11);
+
+            Assert.Equal(
+                3,
+                Assert.Single((await new QuotationWorkbookImportService().ReadAsync(legacyPath)).Items)
+                    .RequestedBasketSize);
+            Assert.Equal(
+                3,
+                Assert.Single((await new QuotationWorkbookImportService().ReadAsync(emptyPath)).Items)
+                    .RequestedBasketSize);
+            var exception = await Assert.ThrowsAsync<InvalidDataException>(
+                () => new QuotationWorkbookImportService().ReadAsync(invalidPath));
+            Assert.Contains("Itens!H1", exception.Message);
+            Assert.Contains("3 a 10", exception.Message);
         }
         finally
         {
@@ -221,7 +256,7 @@ public sealed class SweetCodeAndImportTests
                 () => new QuotationWorkbookImportService().ReadAsync(path));
 
             Assert.Contains("planilha de resultado", exception.Message, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("colunas A:G", exception.Message);
+            Assert.Contains("colunas A:H", exception.Message);
         }
         finally
         {
@@ -313,6 +348,26 @@ public sealed class SweetCodeAndImportTests
                 Name = "Página1"
             });
         workbookPart.Workbook.Save();
+    }
+
+    private static void CreateQuotationInputWorkbook(
+        string path,
+        bool includeColumnH,
+        int? basketSize)
+    {
+        using var workbook = new XLWorkbook();
+        var sheet = workbook.Worksheets.Add("Itens");
+        sheet.Cell(1, 1).Value = "cafe";
+        sheet.Cell(1, 2).Value = "Café";
+        sheet.Cell(1, 3).Value = 10;
+        sheet.Cell(1, 4).Value = "pacote";
+        sheet.Cell(1, 7).Value = 1;
+        if (includeColumnH && basketSize is not null)
+        {
+            sheet.Cell(1, 8).Value = basketSize.Value;
+        }
+
+        workbook.SaveAs(path);
     }
 
     private static Cell SharedStringCell(string reference, int index) =>

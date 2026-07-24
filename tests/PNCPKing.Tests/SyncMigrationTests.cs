@@ -7,6 +7,88 @@ namespace PNCPKing.Tests;
 public sealed class SyncMigrationTests
 {
     [Fact]
+    public async Task VersionSevenToEightPreservesLinesReferencesChoicesAndAutomation()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "version-seven.db");
+        try
+        {
+            var contracts = new SqliteContractRepository(path);
+            await contracts.InitializeAsync();
+            var quotation = new SqliteQuotationRepository(path);
+            var project = await quotation.CreateProjectAsync("Preservar versão 7");
+            var lineId = Guid.NewGuid();
+            var reference = new QuotationReference
+            {
+                Id = "contrato|1|1",
+                LineId = lineId,
+                ContractId = "contrato",
+                ItemNumber = 1,
+                ResultSequence = 1,
+                SupplierName = "Fornecedor",
+                SupplierTaxId = "11222333000181",
+                UnitPrice = 25m,
+                ItemDescription = "Café",
+                ItemUnit = "pacote",
+                State = QuotationReferenceState.Eligible
+            };
+            await quotation.SaveSampleAsync(
+                project.Id,
+                lineId,
+                new QuotationLineInput("Café", 10m, "pacote", null, null),
+                [reference]);
+            await quotation.ConfirmBasketAsync(lineId, reference.Id);
+            var run = await quotation.CreateAutomationRunAsync(
+                project.Id,
+                Path.Combine(directory, "saida.xlsx"),
+                SearchGeoFilter.All,
+                new DateOnly(2026, 1, 1),
+                new DateOnly(2026, 7, 1),
+                [new QuotationImportItem(1, "acucar", "Açúcar", 5m, "kg", null, null, 4)],
+                AdequacyWeights.Default);
+
+            SqliteConnection.ClearAllPools();
+            await using (var connection = new SqliteConnection($"Data Source={path}"))
+            {
+                await connection.OpenAsync();
+                await using var downgrade = connection.CreateCommand();
+                downgrade.CommandText = """
+                    PRAGMA foreign_keys=OFF;
+                    DROP TABLE quotation_manual_basket_references;
+                    DROP TABLE quotation_manual_baskets;
+                    ALTER TABLE quotation_lines DROP COLUMN requested_basket_size;
+                    UPDATE schema_info SET version = 7 WHERE id = 1;
+                    PRAGMA foreign_keys=ON;
+                    """;
+                await downgrade.ExecuteNonQueryAsync();
+            }
+
+            SqliteConnection.ClearAllPools();
+            await new SqliteContractRepository(path).InitializeAsync();
+            var restoredRepository = new SqliteQuotationRepository(path);
+            var lines = await restoredRepository.GetLinesAsync(project.Id);
+            var restoredManual = lines.Single(line => line.Id == lineId);
+            var restoredAutomation = lines.Single(line => line.AutomationRunId == run.Id);
+
+            Assert.Equal(3, restoredManual.RequestedBasketSize);
+            Assert.True(restoredManual.SelectionConfirmed);
+            Assert.Equal(reference.Id, restoredManual.SelectedBasketKey);
+            Assert.Single(await restoredRepository.GetReferencesAsync(lineId));
+            Assert.Equal(3, restoredAutomation.RequestedBasketSize);
+            Assert.Equal(4, restoredAutomation.RequestedBatchCount);
+            Assert.Equal(run.Id, restoredAutomation.AutomationRunId);
+            Assert.NotNull(await restoredRepository.GetLatestAutomationRunAsync(project.Id));
+            Assert.Empty(await restoredRepository.GetManualBasketsAsync(lineId));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
     public async Task VersionSixMigrationAddsAutomationAndSweetCodesWithoutLosingQuotationLines()
     {
         var directory = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"));
@@ -95,7 +177,8 @@ public sealed class SyncMigrationTests
             await verify.OpenAsync();
             await using var version = verify.CreateCommand();
             version.CommandText = "SELECT version FROM schema_info WHERE id = 1;";
-            Assert.Equal(7, Convert.ToInt32(await version.ExecuteScalarAsync()));
+            Assert.Equal(8, Convert.ToInt32(await version.ExecuteScalarAsync()));
+            Assert.Equal(3, line.RequestedBasketSize);
         }
         finally
         {

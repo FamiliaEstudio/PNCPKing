@@ -64,15 +64,16 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 ? analysis.SelectedBasket
                 : null;
             selectedBasket ??= analysis.Baskets.FirstOrDefault(basket => basket.IsRecommended);
-            var references = selectedBasket?.References
+            var references = (selectedBasket?.References
                 ?? analysis.References
                     .Where(reference => reference.State == QuotationReferenceState.Eligible)
                     .OrderByDescending(reference => reference.Adequacy.Total)
                     .ThenBy(reference => reference.DistanceFromRibeiraoKilometers ?? double.MaxValue)
                     .ThenByDescending(reference => reference.ResultDate)
                     .ThenBy(reference => reference.Id, StringComparer.Ordinal)
-                    .Take(2)
-                    .ToArray();
+                    .Take(analysis.Line.RequestedBasketSize)
+                    .ToArray())
+                .ToArray();
 
             foreach (var reference in references)
             {
@@ -85,12 +86,25 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 row++;
             }
 
-            if (references.Count < 3)
+            var minimumRows = selectedBasket?.IsManual == true
+                ? 3
+                : analysis.Line.RequestedBasketSize;
+            for (var position = references.Length + 1; position <= minimumRows; position++)
+            {
+                sheet.Cell(row, 1).Value = $"Preço {position:N0} não obtido";
+                sheet.Cell(row, 3).Value = "IMPOSSÍVEL OBTER PELO INCISO II";
+                sheet.Range(row, 1, row, 4).Style.Font.FontColor = XLColor.DarkRed;
+                sheet.Range(row, 1, row, 4).Style.Font.Italic = true;
+                row++;
+            }
+
+            if (references.Length < minimumRows || selectedBasket?.VisualState == QuotationBasketVisualState.ManualInvalid)
             {
                 var observation = sheet.Range(row, 1, row, 4);
                 observation.Merge();
-                observation.FirstCell().Value =
-                    $"OBSERVAÇÃO: Não foram encontrados três preços válidos; foram encontrados {references.Count:N0}.";
+                observation.FirstCell().Value = selectedBasket is null
+                    ? $"OBSERVAÇÃO: somente {references.Length:N0} de {minimumRows:N0} preço(s) válido(s) foram encontrados."
+                    : $"OBSERVAÇÃO: {selectedBasket.ValidationMessage}";
                 observation.Style.Font.Italic = true;
                 observation.Style.Font.FontColor = XLColor.DarkRed;
                 observation.Style.Alignment.WrapText = true;
@@ -276,12 +290,12 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             return "Nenhum preço homologado ativo foi coletado para este item.";
         }
 
-        if (analysis.EligibleCount < 3)
+        if (analysis.EligibleCount < 2)
         {
             return $"Somente {analysis.EligibleCount:N0} referência(s) passou/passaram pela faixa de preço e pela compatibilidade descritiva.";
         }
 
-        return "Não foi possível formar uma cesta com três referências únicas.";
+        return $"Não foi possível formar a cesta automática de até {analysis.Line.RequestedBasketSize:N0} referências.";
     }
 
     private static void WriteMethodology(XLWorkbook workbook, QuotationProjectReport report)
@@ -297,7 +311,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             ("Versão das regras", QuotationAnalyzer.RulesVersion),
             ("Origem geográfica", "Ribeirão Preto/SP"),
             ("Fonte de preços", "Resultados unitários homologados ativos já coletados pela pesquisa do PNCP King"),
-            ("Regra da cesta", "Três referências únicas dentro da faixa de preço e com compatibilidade descritiva. CNPJ, origem, unidade, quantidade, desvio e índice são informações para a escolha do usuário, não bloqueios automáticos."),
+            ("Regra da cesta", "Cestas automáticas usam de 3 a 10 referências como alvo e podem ser reduzidas até 2. Cestas manuais preservam qualquer quantidade escolhida. CNPJ, origem, unidade, quantidade, desvio e índice permanecem auditáveis."),
             ("Índice da referência", "Os pesos de descrição, unidade/embalagem, quantidade, proximidade e atualidade são definidos por item e sempre somam 100%. O índice ordena e informa; não determina elegibilidade."),
             ("Adequação descritiva", "Mede a cobertura dos termos e expressões solicitados. Informações adicionais do item encontrado não reduzem a nota."),
             ("Quantidade", "Compara a escala das quantidades por faixas graduais; diferenças grandes reduzem a preferência, mas não anulam uma referência de preço unitário compatível."),

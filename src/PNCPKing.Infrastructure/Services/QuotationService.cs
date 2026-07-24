@@ -90,10 +90,8 @@ public sealed class QuotationService(
             .Where(row => row.PriceState == ItemSearchPriceState.Homologated &&
                           row.Result is { IsActive: true, HomologatedUnitValue: > 0 })
             .Select(row => MapReference(id, row))
-            .Where(reference => IsWithinQuotationPriceRange(reference, input))
             .ToArray();
         var union = existingReferences
-            .Where(reference => IsWithinQuotationPriceRange(reference, input))
             .Concat(currentReferences)
             .GroupBy(reference => reference.Id, StringComparer.Ordinal)
             .Select(group => group.Last())
@@ -108,12 +106,16 @@ public sealed class QuotationService(
             MinimumUnitPrice = input.MinimumUnitPrice,
             MaximumUnitPrice = input.MaximumUnitPrice,
             Weights = input.Weights,
+            RequestedBasketSize = input.RequestedBasketSize,
             SampleVersion = (existingLine?.SampleVersion ?? 0) + 1,
             SampledAt = DateTimeOffset.UtcNow,
             SelectedBasketKey = existingLine?.SelectedBasketKey,
             SelectionConfirmed = false
         };
-        var analysis = analyzer.Analyze(transientLine, union);
+        var manualBaskets = existingLine is null
+            ? []
+            : await repository.GetManualBasketsAsync(id, cancellationToken).ConfigureAwait(false);
+        var analysis = analyzer.Analyze(transientLine, union, manualBaskets);
         var savedLine = await repository.SaveSampleAsync(
                 projectId,
                 id,
@@ -121,7 +123,7 @@ public sealed class QuotationService(
                 analysis.References,
                 cancellationToken)
             .ConfigureAwait(false);
-        return analyzer.Analyze(savedLine, analysis.References);
+        return analyzer.Analyze(savedLine, analysis.References, manualBaskets);
     }
 
     public async Task<IReadOnlyList<QuotationLineAnalysis>> GetAnalysesAsync(
@@ -133,7 +135,8 @@ public sealed class QuotationService(
         foreach (var line in lines)
         {
             var references = await repository.GetReferencesAsync(line.Id, cancellationToken).ConfigureAwait(false);
-            analyses.Add(analyzer.Analyze(line, references));
+            var manualBaskets = await repository.GetManualBasketsAsync(line.Id, cancellationToken).ConfigureAwait(false);
+            analyses.Add(analyzer.Analyze(line, references, manualBaskets));
         }
 
         return analyses;
@@ -157,6 +160,104 @@ public sealed class QuotationService(
         AdequacyWeights weights,
         CancellationToken cancellationToken = default) =>
         repository.UpdateWeightsAsync(lineId, weights, cancellationToken);
+
+    public async Task<(QuotationLineAnalysis Analysis, QuotationManualBasket Basket)> SaveManualBasketAsync(
+        Guid projectId,
+        Guid? lineId,
+        QuotationLineInput input,
+        Guid? basketId,
+        string name,
+        IReadOnlyList<ItemSearchRow> selectedRows,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(selectedRows);
+        var rows = selectedRows
+            .Where(row => row.PriceState == ItemSearchPriceState.Homologated &&
+                          row.Result is { IsActive: true, HomologatedUnitValue: > 0 })
+            .GroupBy(
+                row => $"{row.Contract.PncpId}|{row.Item.ItemNumber}|{row.Result!.ResultSequence}",
+                StringComparer.Ordinal)
+            .Select(group => group.First())
+            .ToArray();
+        if (rows.Length == 0)
+        {
+            throw new ArgumentException(
+                "Selecione pelo menos um resultado homologado ativo com preço positivo.",
+                nameof(selectedRows));
+        }
+
+        var id = lineId ?? Guid.NewGuid();
+        var existingReferences = lineId is null
+            ? []
+            : await repository.GetReferencesAsync(id, cancellationToken).ConfigureAwait(false);
+        var selectedReferences = rows.Select(row => MapReference(id, row)).ToArray();
+        var union = existingReferences
+            .Concat(selectedReferences)
+            .GroupBy(reference => reference.Id, StringComparer.Ordinal)
+            .Select(group => group.Last())
+            .ToArray();
+        var existingManualBaskets = lineId is null
+            ? []
+            : await repository.GetManualBasketsAsync(id, cancellationToken).ConfigureAwait(false);
+        var existingBasket = basketId is null
+            ? null
+            : existingManualBaskets.SingleOrDefault(basket => basket.Id == basketId.Value)
+              ?? throw new InvalidOperationException("A cesta manual selecionada não pertence ao item.");
+        var memberIds = (existingBasket?.ReferenceIds ?? [])
+            .Concat(selectedReferences.Select(reference => reference.Id))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var transientLine = new QuotationLine
+        {
+            Id = id,
+            ProjectId = projectId,
+            Description = input.Description.Trim(),
+            RequestedQuantity = input.RequestedQuantity,
+            RequestedUnit = input.RequestedUnit.Trim(),
+            MinimumUnitPrice = input.MinimumUnitPrice,
+            MaximumUnitPrice = input.MaximumUnitPrice,
+            Weights = input.Weights,
+            RequestedBasketSize = input.RequestedBasketSize,
+            SampleVersion = 1,
+            SampledAt = DateTimeOffset.UtcNow
+        };
+        var scored = analyzer.Analyze(transientLine, union, existingManualBaskets);
+        var savedLine = await repository.SaveSampleAsync(
+                projectId,
+                id,
+                input,
+                scored.References,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var manualBasket = await repository.SaveManualBasketAsync(
+                savedLine.Id,
+                basketId,
+                name,
+                memberIds,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var allManualBaskets = await repository.GetManualBasketsAsync(savedLine.Id, cancellationToken)
+            .ConfigureAwait(false);
+        var analysis = analyzer.Analyze(savedLine, scored.References, allManualBaskets);
+        return (analysis, manualBasket);
+    }
+
+    public Task RenameManualBasketAsync(
+        Guid basketId,
+        string name,
+        CancellationToken cancellationToken = default) =>
+        repository.RenameManualBasketAsync(basketId, name, cancellationToken);
+
+    public Task RemoveManualBasketReferenceAsync(
+        Guid basketId,
+        string referenceId,
+        CancellationToken cancellationToken = default) =>
+        repository.RemoveManualBasketReferenceAsync(basketId, referenceId, cancellationToken);
+
+    public Task DeleteManualBasketAsync(
+        Guid basketId,
+        CancellationToken cancellationToken = default) =>
+        repository.DeleteManualBasketAsync(basketId, cancellationToken);
 
     public async Task<QuotationProjectReport> GetReportAsync(
         Guid projectId,
@@ -214,9 +315,4 @@ public sealed class QuotationService(
         };
     }
 
-    private static bool IsWithinQuotationPriceRange(
-        QuotationReference reference,
-        QuotationLineInput input) =>
-        (input.MinimumUnitPrice is null || reference.UnitPrice >= input.MinimumUnitPrice.Value) &&
-        (input.MaximumUnitPrice is null || reference.UnitPrice <= input.MaximumUnitPrice.Value);
 }

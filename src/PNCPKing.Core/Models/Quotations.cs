@@ -99,6 +99,7 @@ public sealed record QuotationLine
     public bool SelectionConfirmed { get; init; }
     public string SearchText { get; init; } = string.Empty;
     public int RequestedBatchCount { get; init; } = 1;
+    public int RequestedBasketSize { get; init; } = 3;
     public int DisplayOrder { get; init; }
     public Guid? AutomationRunId { get; init; }
     public QuotationAutomationItemState AutomationState { get; init; } = QuotationAutomationItemState.Manual;
@@ -112,7 +113,8 @@ public enum QuotationAutomationItemState
     Running,
     Completed,
     Insufficient,
-    Failed
+    Failed,
+    CompletedWithWarning
 }
 
 public enum QuotationAutomationRunState
@@ -146,7 +148,8 @@ public sealed record QuotationImportItem(
     string Unit,
     decimal? MinimumUnitPrice,
     decimal? MaximumUnitPrice,
-    int BatchCount);
+    int BatchCount,
+    int RequestedBasketSize = 3);
 
 public sealed record QuotationImportDocument(
     string SourcePath,
@@ -214,9 +217,48 @@ public sealed record QuotationBasket
     public required decimal MaximumPrice { get; init; }
     public required decimal MaximumDeviationPercent { get; init; }
     public required decimal Score { get; init; }
+    public QuotationBasketKind Kind { get; init; } = QuotationBasketKind.Automatic;
+    public string Name { get; init; } = string.Empty;
+    public Guid? ManualBasketId { get; init; }
+    public int RequestedSize { get; init; } = 3;
+    public QuotationBasketVisualState VisualState { get; init; } = QuotationBasketVisualState.AutomaticRegular;
+    public string ValidationMessage { get; init; } = string.Empty;
     public bool IsRecommended { get; init; }
     public bool IsCheapest { get; init; }
     public bool IsMostExpensive { get; init; }
+
+    public bool IsManual => Kind == QuotationBasketKind.Manual;
+    public bool IsIncomplete => IsManual ? References.Count < 3 : References.Count < RequestedSize;
+    public bool IsValid => !IsManual ||
+        VisualState == QuotationBasketVisualState.ManualRegular;
+}
+
+public enum QuotationBasketKind
+{
+    Automatic,
+    Manual
+}
+
+public enum QuotationBasketVisualState
+{
+    AutomaticRegular,
+    AutomaticHighDispersion,
+    ManualIncomplete,
+    ManualRegular,
+    ManualInvalid
+}
+
+public sealed record QuotationManualBasket
+{
+    public required Guid Id { get; init; }
+    public required Guid LineId { get; init; }
+    public required string Name { get; init; }
+    public required IReadOnlyList<string> ReferenceIds { get; init; }
+    public int DisplayOrder { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset UpdatedAt { get; init; }
+
+    public string Key => $"manual:{Id:N}";
 }
 
 public sealed record QuotationLineAnalysis(
@@ -242,6 +284,7 @@ public sealed record QuotationLineInput(
     decimal? MaximumUnitPrice)
 {
     public AdequacyWeights Weights { get; init; } = AdequacyWeights.Default;
+    public int RequestedBasketSize { get; init; } = 3;
 }
 
 public sealed record QuotationProjectReport(

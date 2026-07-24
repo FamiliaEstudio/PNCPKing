@@ -96,6 +96,60 @@ public sealed class RepositorySearchTests
         Assert.Empty(first.Results.Select(item => item.PncpId).Intersect(second.Results.Select(item => item.PncpId)));
     }
 
+    [Fact]
+    public async Task LocalItemSummary_CountsExactCandidatesAndLabelsOnlyCachedItemData()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var priced = Contract("priced", "Aquisição de café", "SP", 1);
+        var pending = Contract("pending", "Registro de preços de café", "SP", 2);
+        var unrelated = Contract("unrelated", "Aquisição de açúcar", "SP", 3);
+        await database.Repository.UpsertContractsAsync([priced, pending, unrelated]);
+        await database.Repository.UpsertItemsAsync(priced.PncpId, [
+            new ProcurementItem
+            {
+                ContractId = priced.PncpId,
+                ItemNumber = 1,
+                Description = "Café torrado",
+                Unit = "pacote",
+                HasResult = true,
+                HydrationStatus = ItemHydrationStatus.Complete
+            }
+        ], false);
+        await database.Repository.ReplaceItemResultsAsync(priced.PncpId, 1, [
+            new HomologationResult
+            {
+                ContractId = priced.PncpId,
+                ItemNumber = 1,
+                ResultSequence = 1,
+                SupplierName = "Fornecedor",
+                HomologatedUnitValueScaled = DecimalScale.ToScaled(25m),
+                ResultStatusId = 1,
+                ResultStatusName = "Informado"
+            }
+        ]);
+        await database.Repository.UpsertItemsAsync(pending.PncpId, [
+            new ProcurementItem
+            {
+                ContractId = pending.PncpId,
+                ItemNumber = 1,
+                Description = "Café em grãos",
+                Unit = "pacote",
+                HasResult = true,
+                HydrationStatus = ItemHydrationStatus.NotLoaded
+            }
+        ], false);
+
+        var query = new SearchQuery("cafe", GeoScope.All);
+        var summary = await database.Repository.GetItemSearchLocalSummaryAsync(
+            query,
+            PNCPKing.Core.Search.SearchText.Parse(query.Text));
+
+        Assert.Equal(2, summary.CandidateContracts);
+        Assert.Equal(2, summary.CachedMatchingItems);
+        Assert.Equal(1, summary.CachedItemsWithActivePrices);
+        Assert.True(summary.IsPartial);
+    }
+
     internal static ContractRecord Contract(string id, string objectText, string uf, int sequence) => new()
     {
         PncpId = id,

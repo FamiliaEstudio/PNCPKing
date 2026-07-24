@@ -205,9 +205,9 @@
                      ToolTip="Preço máximo inclusivo" />
             <Button Grid.Column="3" Content="Aplicar faixa" Command="{Binding ApplyPriceFilterCommand}" />
             <TextBox Grid.Column="4" Text="{Binding BatchCount, UpdateSourceTrigger=LostFocus}"
-                     HorizontalContentAlignment="Center" ToolTip="1 a 100 lotes" />
-            <Button Grid.Column="5" Content="Buscar mais com estes disparos" Command="{Binding FireBatchesCommand}"
-                    ToolTip="Acrescenta disparos à pesquisa atual sem apagar os resultados já encontrados." />
+                     HorizontalContentAlignment="Center" ToolTip="1 a 100 lotes de 50 contratações" />
+            <Button Grid.Column="5" Content="Mostrar valores das próximas contratações" Command="{Binding FireBatchesCommand}"
+                    ToolTip="Examina os próximos lotes de 50 contratações e revela todos os itens compatíveis." />
             <Button Grid.Column="6" Content="Parar preços" Command="{Binding StopItemSearchCommand}" />
             <TextBlock Grid.Column="7" Text="{Binding ItemSearchSummary}" TextTrimming="CharacterEllipsis"
                        VerticalAlignment="Center" Margin="8,0" ToolTip="{Binding ItemSearchSummary}" />
@@ -228,7 +228,8 @@
                     </Grid.RowDefinitions>
                     <DataGrid x:Name="ItemResultsGrid" ItemsSource="{Binding ItemSearchRows}"
                               SelectedItem="{Binding SelectedItemSearchRow}"
-                              AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
+                              AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Extended"
+                              SelectionUnit="FullRow"
                               EnableRowVirtualization="True" EnableColumnVirtualization="True"
                               FrozenColumnCount="2"
                               ScrollViewer.HorizontalScrollBarVisibility="Auto"
@@ -280,6 +281,9 @@
                                     ToolTip="Marque as colunas que deseja exibir; a escolha vale durante esta execução." />
                             <Button Content="Usar esta amostra em uma cotação"
                                     Command="{Binding UseQuotationSampleCommand}" />
+                            <Button Content="Criar/adicionar à cesta manual"
+                                    Click="CreateManualBasket_Click"
+                                    ToolTip="Use Ctrl ou Shift para selecionar vários preços homologados." />
                             <Button Content="Abrir contratação no PNCP" Command="{Binding OpenPncpCommand}"
                                     CommandParameter="{Binding SelectedItemSearchRow.Contract}" />
                         </StackPanel>
@@ -412,6 +416,7 @@
                                 <DataGridTextColumn Header="Duplicados" Binding="{Binding DuplicateCount}" Width="72" />
                                 <DataGridTextColumn Header="Descartados" Binding="{Binding RejectedCount}" Width="75" />
                                 <DataGridTextColumn Header="Cestas" Binding="{Binding BasketCount}" Width="62" />
+                                <DataGridTextColumn Header="Alvo auto." Binding="{Binding RequestedBasketSize}" Width="72" />
                                 <DataGridTextColumn Header="Versão" Binding="{Binding SampleVersion}" Width="58" />
                                 <DataGridTextColumn Header="Amostra em" Binding="{Binding SampledAt, StringFormat=dd/MM/yyyy HH:mm}" Width="122" />
                                 <DataGridTextColumn Header="Pesos do índice" Binding="{Binding WeightSummary}" Width="330" />
@@ -425,7 +430,7 @@
                         <GridSplitter Grid.Column="1" Width="8" HorizontalAlignment="Stretch" Background="#DDD" />
 
                         <TabControl Grid.Column="2">
-                            <TabItem Header="Cestas válidas">
+                            <TabItem Header="Cestas automáticas e manuais">
                                 <Grid>
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="*" />
@@ -438,7 +443,17 @@
                                               EnableRowVirtualization="True" EnableColumnVirtualization="True"
                                               ScrollViewer.HorizontalScrollBarVisibility="Auto"
                                               ScrollViewer.VerticalScrollBarVisibility="Auto">
+                                        <DataGrid.RowStyle>
+                                            <Style TargetType="DataGridRow">
+                                                <Setter Property="Background" Value="{Binding Background}" />
+                                                <Setter Property="ToolTip" Value="{Binding ValidationMessage}" />
+                                            </Style>
+                                        </DataGrid.RowStyle>
                                         <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Tipo" Binding="{Binding Type}" Width="78" />
+                                            <DataGridTextColumn Header="Nome" Binding="{Binding Name}" Width="110" />
+                                            <DataGridTextColumn Header="Situação" Binding="{Binding Status}" Width="105" />
+                                            <DataGridTextColumn Header="Preços" Binding="{Binding ReferenceCount}" Width="58" />
                                             <DataGridTextColumn Header="Classificação" Binding="{Binding Tags}" Width="150" />
                                             <DataGridTextColumn Header="Média" Binding="{Binding AveragePrice, StringFormat=C4}" Width="105" />
                                             <DataGridTextColumn Header="Menor" Binding="{Binding MinimumPrice, StringFormat=C4}" Width="100" />
@@ -456,16 +471,27 @@
                                                     Tag="{Binding ElementName=SelectedBasketReferencesGrid}" />
                                             <Button Content="Página anterior" Command="{Binding PreviousQuotationBasketPageCommand}" />
                                             <Button Content="Próxima página" Command="{Binding NextQuotationBasketPageCommand}" />
+                                            <Button Content="Renomear manual" Command="{Binding RenameManualBasketCommand}" />
+                                            <Button Content="Excluir manual" Command="{Binding DeleteManualBasketCommand}" />
                                             <Button Content="Confirmar cesta escolhida" Command="{Binding ConfirmQuotationBasketCommand}" />
                                         </StackPanel>
                                     </DockPanel>
                                     <DataGrid x:Name="SelectedBasketReferencesGrid" Grid.Row="2"
                                               ItemsSource="{Binding SelectedBasketReferences}"
+                                              SelectedItem="{Binding SelectedBasketReference}"
                                               AutoGenerateColumns="False" IsReadOnly="True"
                                               EnableRowVirtualization="True" EnableColumnVirtualization="True"
                                               ScrollViewer.HorizontalScrollBarVisibility="Auto"
                                               ScrollViewer.VerticalScrollBarVisibility="Auto">
                                         <DataGrid.Columns>
+                                            <DataGridTemplateColumn Header="Cesta manual" Width="115">
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <Button Content="Remover da cesta"
+                                                                Command="{Binding DataContext.RemoveManualBasketReferenceCommand, RelativeSource={RelativeSource AncestorType={x:Type DataGrid}}}" />
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
                                             <DataGridTemplateColumn Header="Ação" Width="95">
                                                 <DataGridTemplateColumn.CellTemplate>
                                                     <DataTemplate>

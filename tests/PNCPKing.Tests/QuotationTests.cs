@@ -180,8 +180,105 @@ public sealed class QuotationTests
 
         Assert.Single(exact.Baskets);
         Assert.Equal(25m, exact.Baskets[0].MaximumDeviationPercent);
+        Assert.Equal(QuotationBasketVisualState.AutomaticRegular, exact.Baskets[0].VisualState);
+        Assert.True(exact.Baskets[0].IsValid);
         Assert.Single(above.Baskets);
         Assert.True(above.Baskets[0].MaximumDeviationPercent > 25m);
+        Assert.Equal(QuotationBasketVisualState.AutomaticHighDispersion, above.Baskets[0].VisualState);
+        Assert.True(above.Baskets[0].IsValid);
+    }
+
+    [Fact]
+    public void AutomaticBaskets_UseRequestedTargetReduceToTwoAndStopBelowTwo()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var five = analyzer.Analyze(
+            Line("Café", 100m, "pacote") with { RequestedBasketSize = 5 },
+            Enumerable.Range(1, 7)
+                .Select(number => Reference(
+                    $"r{number}",
+                    $"c{number}",
+                    "11222333000181",
+                    95m + number))
+                .ToArray());
+        var reduced = analyzer.Analyze(
+            Line("Café", 100m, "pacote") with { RequestedBasketSize = 10 },
+            [
+                Reference("a", "ca", "11222333000181", 99m),
+                Reference("b", "cb", "60701190000104", 101m)
+            ]);
+        var insufficient = analyzer.Analyze(
+            Line("Café", 100m, "pacote") with { RequestedBasketSize = 3 },
+            [Reference("only", "co", "11222333000181", 100m)]);
+
+        Assert.NotEmpty(five.Baskets);
+        Assert.All(five.Baskets, basket => Assert.Equal(5, basket.References.Count));
+        var reducedBasket = Assert.Single(reduced.Baskets);
+        Assert.Equal(2, reducedBasket.References.Count);
+        Assert.True(reducedBasket.IsIncomplete);
+        Assert.Contains("reduzida", reducedBasket.ValidationMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(insufficient.Baskets);
+        Assert.Single(insufficient.References);
+    }
+
+    [Fact]
+    public void AutomaticBaskets_AreDeterministicCuratedAndLimitedToOneHundred()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var line = Line("Café", 100m, "pacote") with { RequestedBasketSize = 6 };
+        var references = Enumerable.Range(1, 80)
+            .Select(number => Reference(
+                $"ref-{number:D3}",
+                $"contract-{number:D3}",
+                "11222333000181",
+                70m + number))
+            .ToArray();
+
+        var first = analyzer.Analyze(line, references);
+        var second = analyzer.Analyze(line, references.Reverse().ToArray());
+
+        Assert.InRange(first.Baskets.Count, 3, QuotationAnalyzer.MaximumCuratedBaskets);
+        Assert.Equal(first.Baskets.Select(basket => basket.Key), second.Baskets.Select(basket => basket.Key));
+        Assert.Single(first.Baskets, basket => basket.IsRecommended);
+        Assert.Single(first.Baskets, basket => basket.IsCheapest);
+        Assert.Single(first.Baskets, basket => basket.IsMostExpensive);
+        Assert.Equal(first.Baskets.Max(basket => basket.Score), first.Baskets.Single(basket => basket.IsRecommended).Score);
+        Assert.Equal(QuotationAnalyzer.MaximumBasketPoolSize, first.BasketPoolCount);
+    }
+
+    [Fact]
+    public void ManualBaskets_ClassifyIncompleteRegularAndInvalidStates()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var line = Line("Café", 100m, "pacote") with
+        {
+            MinimumUnitPrice = 70m,
+            MaximumUnitPrice = 120m
+        };
+        var references = new[]
+        {
+            Reference("a", "ca", "11222333000181", 75m),
+            Reference("b", "cb", "60701190000104", 100m),
+            Reference("c", "cc", "33000167000101", 125m),
+            Reference("d", "cd", "00360305000104", 100m)
+        };
+        var definitions = new[]
+        {
+            Manual(line, "Incompleta", "a", "b"),
+            Manual(line, "Regular", "a", "b", "d"),
+            Manual(line, "Inválida", "a", "b", "c")
+        };
+
+        var analysis = analyzer.Analyze(line, references, definitions);
+        var incomplete = analysis.Baskets.Single(basket => basket.Name == "Incompleta");
+        var regular = analysis.Baskets.Single(basket => basket.Name == "Regular");
+        var invalid = analysis.Baskets.Single(basket => basket.Name == "Inválida");
+
+        Assert.Equal(QuotationBasketVisualState.ManualIncomplete, incomplete.VisualState);
+        Assert.Equal(QuotationBasketVisualState.ManualRegular, regular.VisualState);
+        Assert.Equal(QuotationBasketVisualState.ManualInvalid, invalid.VisualState);
+        Assert.StartsWith("manual:", incomplete.Key, StringComparison.Ordinal);
+        Assert.Contains("inelegível", invalid.ValidationMessage, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -286,7 +383,7 @@ public sealed class QuotationTests
     }
 
     [Fact]
-    public async Task PriceRange_LimitsTheSnapshotUsedForComparison()
+    public async Task PriceRange_PreservesTheSnapshotAndMarksOutsideReferencesAsRejected()
     {
         await using var database = await TestDatabase.CreateAsync();
         var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
@@ -304,10 +401,11 @@ public sealed class QuotationTests
             ]);
         var persisted = await repository.GetReferencesAsync(analysis.Line.Id);
 
-        Assert.Equal(1, analysis.CollectedCount);
-        Assert.Single(persisted);
-        Assert.Equal(0, analysis.RejectedCount);
-        Assert.Equal(100m, persisted[0].UnitPrice);
+        Assert.Equal(3, analysis.CollectedCount);
+        Assert.Equal(3, persisted.Count);
+        Assert.Equal(2, analysis.RejectedCount);
+        Assert.Equal(1, analysis.EligibleCount);
+        Assert.Contains(persisted, reference => reference.UnitPrice == 100m);
     }
 
     [Fact]
@@ -336,6 +434,62 @@ public sealed class QuotationTests
         Assert.Equal(customWeights, reopened.Line.Weights);
         Assert.False(reopened.Line.SelectionConfirmed);
         Assert.Equal(analysis.Line.SampleVersion, reopened.Line.SampleVersion);
+    }
+
+    [Fact]
+    public async Task ManualBasket_CrudPersistsCompositionAndReevaluatesAfterRestart()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer(Today));
+        var project = await service.CreateProjectAsync("Cestas manuais");
+        var input = new QuotationLineInput("Café", 100m, "pacote", null, null);
+        var analysis = await service.CaptureSampleAsync(project.Id, null, input, [
+            Row("c1", "11222333000181", 98m),
+            Row("c2", "60701190000104", 100m),
+            Row("c3", "33000167000101", 102m)
+        ]);
+
+        var first = await service.SaveManualBasketAsync(
+            project.Id,
+            analysis.Line.Id,
+            input,
+            null,
+            "Minha seleção",
+            [Row("c1", "11222333000181", 98m), Row("c2", "60701190000104", 100m)]);
+        var incomplete = first.Analysis.Baskets.Single(basket => basket.ManualBasketId == first.Basket.Id);
+        Assert.Equal(QuotationBasketVisualState.ManualIncomplete, incomplete.VisualState);
+        Assert.Equal(2, first.Basket.ReferenceIds.Count);
+
+        var expanded = await service.SaveManualBasketAsync(
+            project.Id,
+            analysis.Line.Id,
+            input,
+            first.Basket.Id,
+            "Minha seleção",
+            [Row("c2", "60701190000104", 100m), Row("c3", "33000167000101", 102m)]);
+        await service.ConfirmBasketAsync(expanded.Analysis, expanded.Basket.Key);
+        await service.UpdateWeightsAsync(analysis.Line.Id, new AdequacyWeights(40, 20, 10, 25, 5));
+
+        var reopened = new QuotationService(
+            new SqliteQuotationRepository(database.Repository.DatabasePath),
+            new QuotationAnalyzer(Today));
+        var restored = Assert.Single(await reopened.GetAnalysesAsync(project.Id));
+        var manual = restored.Baskets.Single(basket => basket.ManualBasketId == first.Basket.Id);
+        Assert.Equal(3, manual.References.Count);
+        Assert.Equal(QuotationBasketVisualState.ManualRegular, manual.VisualState);
+        Assert.False(restored.Line.SelectionConfirmed);
+
+        await reopened.RenameManualBasketAsync(first.Basket.Id, "Renomeada");
+        Assert.Equal(
+            "Renomeada",
+            Assert.Single(await repository.GetManualBasketsAsync(analysis.Line.Id)).Name);
+        await reopened.RemoveManualBasketReferenceAsync(first.Basket.Id, manual.References[0].Id);
+        Assert.Equal(
+            2,
+            Assert.Single(await repository.GetManualBasketsAsync(analysis.Line.Id)).ReferenceIds.Count);
+        await reopened.DeleteManualBasketAsync(first.Basket.Id);
+        Assert.Empty(await repository.GetManualBasketsAsync(analysis.Line.Id));
     }
 
     [Fact]
@@ -387,7 +541,7 @@ public sealed class QuotationTests
             new DateOnly(2026, 1, 1),
             new DateOnly(2026, 7, 1),
             [
-                new QuotationImportItem(1, "cafe -maquina \"pacote", "Café", 100m, "pacote", 30m, 45m, 2),
+                new QuotationImportItem(1, "cafe -maquina \"pacote", "Café", 100m, "pacote", 30m, 45m, 2, 7),
                 new QuotationImportItem(2, "acucar", "Açúcar", 50m, "kg", null, null, 1)
             ],
             AdequacyWeights.Default);
@@ -396,6 +550,8 @@ public sealed class QuotationTests
         Assert.Equal(2, lines.Count);
         Assert.Equal("cafe -maquina \"pacote", lines[0].SearchText);
         Assert.Equal(2, lines[0].RequestedBatchCount);
+        Assert.Equal(7, lines[0].RequestedBasketSize);
+        Assert.Equal(3, lines[1].RequestedBasketSize);
         Assert.Equal(QuotationAutomationItemState.Pending, lines[0].AutomationState);
         Assert.Equal(run.Id, lines[0].AutomationRunId);
         Assert.True(lines[0].DisplayOrder < lines[1].DisplayOrder);
@@ -454,7 +610,9 @@ public sealed class QuotationTests
             Assert.Equal("INCISO II", sheet.Cell(2, 3).GetString());
             Assert.Equal(90m, sheet.Cell(2, 4).GetValue<decimal>());
             Assert.Equal("Açúcar", sheet.Cell(6, 1).GetString());
-            Assert.Contains("Não foram encontrados três preços válidos", sheet.Cell(7, 1).GetString());
+            Assert.Equal("Preço 1 não obtido", sheet.Cell(7, 1).GetString());
+            Assert.Equal("IMPOSSÍVEL OBTER PELO INCISO II", sheet.Cell(7, 3).GetString());
+            Assert.Contains("somente 0 de 3", sheet.Cell(10, 1).GetString());
             Assert.DoesNotContain(sheet.CellsUsed(), cell => cell.GetString() is "Empresa" or "CNPJ" or "Valor");
         }
         finally
@@ -519,7 +677,56 @@ public sealed class QuotationTests
             Assert.Equal("Café", sheet.Cell(1, 1).GetString());
             Assert.Equal("INCISO II", sheet.Cell(2, 3).GetString());
             Assert.Equal("INCISO II", sheet.Cell(3, 3).GetString());
-            Assert.Contains("foram encontrados 2", sheet.Cell(4, 1).GetString());
+            Assert.Equal("Preço 3 não obtido", sheet.Cell(4, 1).GetString());
+            Assert.Equal("IMPOSSÍVEL OBTER PELO INCISO II", sheet.Cell(4, 3).GetString());
+            Assert.Contains("2 de 3", sheet.Cell(5, 1).GetString());
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            var directory = Path.GetDirectoryName(path)!;
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public async Task Workbook_ExportsManualCompositionAndRecordsIncompleteOrInvalidReasons()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var project = new QuotationProject(Guid.NewGuid(), "Manuais", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+        var incompleteLine = Line("Item manual incompleto", 10m, "pacote");
+        var incomplete = analyzer.Analyze(
+            incompleteLine,
+            [Reference("only", "c1", "11222333000181", 100m)],
+            [Manual(incompleteLine, "Manual 1", "only")]);
+        incomplete = Confirm(incomplete, incomplete.Baskets.Single(basket => basket.IsManual));
+
+        var invalidLine = Line("Item manual inválido", 10m, "pacote");
+        var invalid = analyzer.Analyze(
+            invalidLine,
+            [
+                Reference("low", "c2", "60701190000104", 50m),
+                Reference("middle", "c3", "33000167000101", 100m),
+                Reference("high", "c4", "00360305000104", 150m)
+            ],
+            [Manual(invalidLine, "Manual 2", "low", "middle", "high")]);
+        invalid = Confirm(invalid, invalid.Baskets.Single(basket => basket.IsManual));
+
+        var path = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"), "manual.xlsx");
+        try
+        {
+            await new QuotationWorkbookService().ExportAsync(
+                path,
+                new QuotationProjectReport(project, [incomplete, invalid]));
+
+            using var workbook = new XLWorkbook(path);
+            var sheet = workbook.Worksheet("Cotação");
+            Assert.Equal("Preço 2 não obtido", sheet.Cell(3, 1).GetString());
+            Assert.Equal("Preço 3 não obtido", sheet.Cell(4, 1).GetString());
+            Assert.Contains("incompleta", sheet.Cell(5, 1).GetString(), StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("Item manual inválido", sheet.Cell(7, 1).GetString());
+            Assert.Contains("inválida", sheet.Cell(11, 1).GetString(), StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("desvio", sheet.Cell(11, 1).GetString(), StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
@@ -538,6 +745,30 @@ public sealed class QuotationTests
         RequestedUnit = unit,
         SampleVersion = 1,
         SampledAt = DateTimeOffset.UtcNow
+    };
+
+    private static QuotationManualBasket Manual(
+        QuotationLine line,
+        string name,
+        params string[] referenceIds) => new()
+    {
+        Id = Guid.NewGuid(),
+        LineId = line.Id,
+        Name = name,
+        ReferenceIds = referenceIds,
+        CreatedAt = DateTimeOffset.UtcNow,
+        UpdatedAt = DateTimeOffset.UtcNow
+    };
+
+    private static QuotationLineAnalysis Confirm(
+        QuotationLineAnalysis analysis,
+        QuotationBasket basket) => analysis with
+    {
+        Line = analysis.Line with
+        {
+            SelectedBasketKey = basket.Key,
+            SelectionConfirmed = true
+        }
     };
 
     private static QuotationReference Reference(

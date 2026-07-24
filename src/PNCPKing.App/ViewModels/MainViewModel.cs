@@ -36,6 +36,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private CancellationTokenSource? _priceCancellation;
     private CancellationTokenSource? _foregroundCancellation;
     private SearchQuery? _activeSearchQuery;
+    private ItemSearchLocalSummary? _localItemSearchSummary;
     private PncpRequestTelemetrySnapshot? _searchTelemetryBaseline;
     private string _queryText = string.Empty;
     private SearchGeoFilter _selectedGeoFilter = SearchGeoFilter.All;
@@ -672,14 +673,18 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             SelectedResultsTabIndex = 0;
             _searchTelemetryBaseline = _telemetry.GetSnapshot();
             PriceSearchProgress = 0;
+            _localItemSearchSummary = await _repository.GetItemSearchLocalSummaryAsync(
+                    _activeSearchQuery,
+                    SearchText.Parse(_activeSearchQuery.Text),
+                    _priceCancellation.Token)
+                .ConfigureAwait(true);
+            ItemSearchSummary = BuildLocalSearchSummary();
+            StatusText = "Contagem local concluída; iniciando o primeiro lote de 50 contratações.";
             await _itemSearchService.StartAsync(
                 _activeSearchQuery with { Page = 1, PageSize = 200 },
                 _priceCancellation.Token).ConfigureAwait(true);
             SetItemSearchActive(true);
             NotifyCommands();
-            ItemSearchSummary =
-                $"Pesquisa contínua iniciada com {BatchCount:N0} disparo(s), até {BatchCount * ItemPageSize:N0} consultas. " +
-                "O tempo depende também da quantidade de contratos que precisa ser examinada.";
             await RunSelectedBatchesAsync(isAdditional: false, _priceCancellation.Token).ConfigureAwait(true);
         }
         catch (Exception exception)
@@ -807,20 +812,16 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task RunSelectedBatchesAsync(bool isAdditional, CancellationToken cancellationToken)
     {
-        var requestedItems = checked(BatchCount * ItemPageSize);
-        var largeConfirmed = requestedItems <= 500;
+        var effectiveBatchCount = isAdditional ? BatchCount : 1;
+        var requestedContracts = checked(effectiveBatchCount * ItemPageSize);
+        var largeConfirmed = requestedContracts <= 500 || !isAdditional;
         if (!largeConfirmed)
         {
-            var projection = BuildPriceBatchProjection(requestedItems);
             var answer = MessageBox.Show(
-                $"Disparar {BatchCount:N0} lotes (até {requestedItems:N0} itens)?\n\n" +
-                $"Chamadas de resultados: até {requestedItems:N0}.\n" +
-                $"Payload de resultados estimado: {FormatBytes(projection.Bytes)}.\n" +
-                $"Duração estimada com até duas chamadas simultâneas: {FormatDuration(projection.Duration)}.\n" +
-                $"Média usada por resultado: {FormatBytes(projection.AverageBytes)} em {FormatDuration(projection.AverageDuration)}.\n" +
-                "A pesquisa examinará automaticamente quantos contratos forem necessários.\n" +
-                "Ela pode demorar quando poucos contratos contêm itens compatíveis.\n" +
-                "Uma consulta pode retornar zero, um ou vários resultados.",
+                $"Examinar as próximas {requestedContracts:N0} contratações " +
+                $"({effectiveBatchCount:N0} lote(s) de 50)?\n\n" +
+                "Todos os itens compatíveis encontrados serão consultados. Por isso, a quantidade de " +
+                "chamadas de preço pode ser maior que o número de contratações.",
                 "Confirmar lotes de preços",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Question);
@@ -846,7 +847,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             var progress = new Progress<PriceBatchProgress>(UpdateItemSearchProgress);
             var rowProgress = new Progress<IReadOnlyList<ItemSearchRow>>(AppendUniqueRows);
             var result = await _itemSearchService.RunContinuousAsync(
-                new PriceBatchRequest(BatchCount, largeConfirmed),
+                new PriceBatchRequest(effectiveBatchCount, largeConfirmed),
                 minimum,
                 maximum,
                 progress,
@@ -855,8 +856,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             HasMoreItemCandidates = !result.CandidateSetExhausted;
             PriceSearchProgress = 100;
             ItemSearchSummary =
-                $"{result.Message} Etapa {result.GeographicStage}; " +
-                $"{result.ContractsScanned:N0} contrato(s) examinado(s); " +
+                $"{BuildLocalSearchSummary()} {result.Message} Etapa {result.GeographicStage}; " +
+                $"{result.ContractsScanned:N0} contratação(ões) examinada(s) na sessão; " +
+                $"{result.MatchedItems:N0} item(ns) compatível(is); " +
+                $"{result.RevealedPrices:N0} preço(s) homologado(s) revelado(s); " +
                 $"{result.CachedItemListsReused:N0} lista(s) do cache; falhas: {result.FailedItemCalls:N0}. " +
                 BuildSearchTrafficSummary();
         }
@@ -940,15 +943,23 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     {
         PriceSearchProgress = progress.CandidateSetExhausted
             ? 100d
-            : progress.RequestedItemCalls <= 0
+            : progress.RequestedContracts <= 0
                 ? 0d
-                : Math.Min(100d, progress.CompletedItemCalls * 100d / progress.RequestedItemCalls);
+                : Math.Min(100d, progress.ProcessedContracts * 100d / progress.RequestedContracts);
         ItemSearchSummary =
-            $"{progress.Message} Etapa {progress.GeographicStage}; contratos: {progress.ContractsScanned:N0}; " +
+            $"{BuildLocalSearchSummary()} {progress.Message} Etapa {progress.GeographicStage}; " +
+            $"contratações na sessão: {progress.ContractsScanned:N0}; itens: {progress.MatchedItems:N0}; " +
+            $"preços revelados: {progress.RevealedPrices:N0}; " +
             $"cache reutilizado: {progress.CachedItemListsReused:N0}; " +
             $"listas da sessão: {progress.ItemListCalls:N0}; " +
             $"falhas: {progress.FailedItemCalls:N0}. {BuildSearchTrafficSummary()}";
     }
+
+    private string BuildLocalSearchSummary() => _localItemSearchSummary is null
+        ? "Contagem local parcial indisponível."
+        : $"Banco local: {_localItemSearchSummary.CandidateContracts:N0} contratação(ões) candidata(s) (total exato); " +
+          $"{_localItemSearchSummary.CachedMatchingItems:N0} item(ns) compatível(is) no cache (parcial); " +
+          $"{_localItemSearchSummary.CachedItemsWithActivePrices:N0} item(ns) com preço ativo salvo (parcial).";
 
     private string BuildSearchTrafficSummary()
     {
@@ -1640,7 +1651,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      PreviousQuotationBasketPageCommand, NextQuotationBasketPageCommand,
                      NewQuotationCommand, RenameQuotationCommand, DeleteQuotationCommand,
                      DeleteQuotationLineCommand, ImportQuotationCommand,
-                     ResumeQuotationAutomationCommand, CancelQuotationAutomationCommand
+                     ResumeQuotationAutomationCommand, CancelQuotationAutomationCommand,
+                     RenameManualBasketCommand, DeleteManualBasketCommand,
+                     RemoveManualBasketReferenceCommand
                  })
         {
             switch (command)
