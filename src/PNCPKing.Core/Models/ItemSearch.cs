@@ -1,5 +1,11 @@
 namespace PNCPKing.Core.Models;
 
+public static class ItemSearchDefaults
+{
+    public const int InitialBatchCount = 3;
+    public const int ContractsPerBatch = 50;
+}
+
 /// <summary>
 /// Proves that the complete item list of a contract was committed atomically.
 /// </summary>
@@ -26,7 +32,7 @@ public sealed record ItemSearchSession(
     string Text,
     DateTimeOffset StartedAt,
     int CandidateContractCount,
-    int PageSize = 50,
+    int PageSize = ItemSearchDefaults.ContractsPerBatch,
     long RandomPivot = 0);
 
 public sealed record ItemSearchLocalSummary(
@@ -79,7 +85,7 @@ public sealed record PriceBatchRequest(
     int BatchCount,
     bool LargeRequestConfirmed = false)
 {
-    public int RequestedContracts => checked(BatchCount * 50);
+    public int RequestedContracts => checked(BatchCount * ItemSearchDefaults.ContractsPerBatch);
 }
 
 public sealed record PriceBatchProgress(

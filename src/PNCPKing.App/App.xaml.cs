@@ -38,6 +38,7 @@ public partial class App : Application
                 await settingsService.SaveAsync(settings).ConfigureAwait(true);
             }
 
+            var columnLayouts = new DataGridColumnLayoutService(settingsService, settings);
             Directory.CreateDirectory(settings.DataFolder);
             var databasePath = Path.Combine(settings.DataFolder, "pncpking.db");
             var repository = new SqliteContractRepository(databasePath);
@@ -65,6 +66,17 @@ public partial class App : Application
             httpClient.DefaultRequestHeaders.Accept.ParseAdd("application/json");
 
             var client = new PncpClient(httpClient);
+            var documentService = new ContractDocumentService(client, settings.DataFolder);
+            var rasterizer = new PdfPageRasterizer();
+            var ocrService = new EmbeddedTesseractOcrService();
+            var textIndexService = new PdfTextIndexService(rasterizer, ocrService);
+            var relevantPageService = new ContractRelevantPageService(
+                documentService,
+                textIndexService);
+            var evidenceService = new QuotationEvidenceExportService(
+                documentService,
+                textIndexService,
+                rasterizer);
             var syncService = new SyncService(client, repository);
             var autoSyncCoordinator = new AutoSyncCoordinator(client, repository, syncService);
             var itemSearchService = new ItemSearchSessionService(
@@ -85,8 +97,13 @@ public partial class App : Application
                 new QuotationWorkbookImportService(),
                 requestTelemetry,
                 new SqliteSweetCodeRepository(databasePath),
+                documentService,
+                relevantPageService,
+                evidenceService,
+                ocrService,
+                columnLayouts,
                 settings.DataFolder);
-            var mainWindow = new MainWindow(viewModel);
+            var mainWindow = new MainWindow(viewModel, columnLayouts);
             MainWindow = mainWindow;
             mainWindow.Show();
             // During first-run setup the folder dialog is temporarily the only

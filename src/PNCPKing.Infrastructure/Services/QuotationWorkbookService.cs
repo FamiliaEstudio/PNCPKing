@@ -58,6 +58,11 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             descriptionRange.Style.Font.FontSize = 12;
             descriptionRange.Style.Fill.BackgroundColor = XLColor.FromHtml("#D9EAF7");
             descriptionRange.Style.Alignment.WrapText = true;
+            var linkHeader = sheet.Cell(row, 5);
+            linkHeader.Value = "Link PNCP do item";
+            linkHeader.Style.Font.Bold = true;
+            linkHeader.Style.Fill.BackgroundColor = XLColor.FromHtml("#D9EAF7");
+            linkHeader.Style.Alignment.WrapText = true;
             row++;
 
             var selectedBasket = analysis.Line.SelectionConfirmed
@@ -83,6 +88,12 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 sheet.Cell(row, 3).Value = "INCISO II";
                 sheet.Cell(row, 4).Value = reference.UnitPrice;
                 sheet.Cell(row, 4).Style.NumberFormat.Format = "R$ #,##0.0000";
+                if (Uri.TryCreate(reference.PortalUrl, UriKind.Absolute, out _))
+                {
+                    sheet.Cell(row, 5).Value = reference.PortalUrl;
+                    sheet.Cell(row, 5).Style.NumberFormat.Format = "@";
+                }
+
                 row++;
             }
 
@@ -93,14 +104,14 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             {
                 sheet.Cell(row, 1).Value = $"Preço {position:N0} não obtido";
                 sheet.Cell(row, 3).Value = "IMPOSSÍVEL OBTER PELO INCISO II";
-                sheet.Range(row, 1, row, 4).Style.Font.FontColor = XLColor.DarkRed;
-                sheet.Range(row, 1, row, 4).Style.Font.Italic = true;
+                sheet.Range(row, 1, row, 5).Style.Font.FontColor = XLColor.DarkRed;
+                sheet.Range(row, 1, row, 5).Style.Font.Italic = true;
                 row++;
             }
 
             if (references.Length < minimumRows || selectedBasket?.VisualState == QuotationBasketVisualState.ManualInvalid)
             {
-                var observation = sheet.Range(row, 1, row, 4);
+                var observation = sheet.Range(row, 1, row, 5);
                 observation.Merge();
                 observation.FirstCell().Value = selectedBasket is null
                     ? $"OBSERVAÇÃO: somente {references.Length:N0} de {minimumRows:N0} preço(s) válido(s) foram encontrados."
@@ -119,6 +130,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         sheet.Column(3).Width = 15;
         sheet.Column(4).Width = 18;
         sheet.Column(4).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Right;
+        FormatPlainUrlColumn(sheet, 5, minimumWidth: 28);
         sheet.SheetView.FreezeRows(1);
     }
 
@@ -222,8 +234,11 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 sheet.Cell(row, 22).Value = reference.Adequacy.RecencyScore;
                 sheet.Cell(row, 23).Value = basket.AveragePrice;
                 sheet.Cell(row, 24).Value = basket.MaximumDeviationPercent;
-                sheet.Cell(row, 25).Value = "Abrir no PNCP";
-                sheet.Cell(row, 25).SetHyperlink(new XLHyperlink(reference.PortalUrl));
+                if (Uri.TryCreate(reference.PortalUrl, UriKind.Absolute, out _))
+                {
+                    sheet.Cell(row, 25).Value = reference.PortalUrl;
+                    sheet.Cell(row, 25).Style.NumberFormat.Format = "@";
+                }
                 sheet.Cell(row, 26).Value = analysis.Line.Weights.ToString();
                 row++;
             }
@@ -236,6 +251,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         sheet.Range(2, 12, Math.Max(2, row - 1), 12).Style.DateFormat.Format = "dd/mm/yyyy";
         sheet.Range(2, 16, Math.Max(2, row - 1), 24).Style.NumberFormat.Format = "0.00";
         FinishTable(sheet, 1, row - 1, headers.Length);
+        FormatPlainUrlColumn(sheet, 25, minimumWidth: 28);
     }
 
     private static void WritePending(XLWorkbook workbook, QuotationProjectReport report)
@@ -365,6 +381,22 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
 
         return $"{normalized[..2]}.{normalized[2..5]}.{normalized[5..8]}/" +
                $"{normalized[8..12]}-{normalized[12..]}";
+    }
+
+    private static void FormatPlainUrlColumn(
+        IXLWorksheet sheet,
+        int columnNumber,
+        double minimumWidth)
+    {
+        const double maximumExcelWidth = 255;
+        var column = sheet.Column(columnNumber);
+        var longestText = column.CellsUsed()
+            .Select(cell => cell.GetString().Length)
+            .DefaultIfEmpty(0)
+            .Max();
+        var requestedWidth = Math.Max(minimumWidth, longestText + 2d);
+        column.Width = Math.Min(maximumExcelWidth, requestedWidth);
+        column.Style.Alignment.WrapText = requestedWidth > maximumExcelWidth;
     }
 
     private static void FinishTable(IXLWorksheet sheet, int headerRow, int lastRow, int lastColumn)

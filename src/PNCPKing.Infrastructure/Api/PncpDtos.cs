@@ -98,3 +98,14 @@ internal sealed class SupplierLocationDto
     public string? NomeMunicipio { get; set; }
     public string? Uf { get; set; }
 }
+
+internal sealed class DocumentDto
+{
+    public long SequencialDocumento { get; set; }
+    public string? Titulo { get; set; }
+    public string? TipoDocumentoNome { get; set; }
+    public string? DataPublicacaoPncp { get; set; }
+    public string? Uri { get; set; }
+    public string? Url { get; set; }
+    public bool? StatusAtivo { get; set; }
+}

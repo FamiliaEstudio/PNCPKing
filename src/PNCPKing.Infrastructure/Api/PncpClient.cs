@@ -9,8 +9,9 @@ using PNCPKing.Core.Search;
 
 namespace PNCPKing.Infrastructure.Api;
 
-public sealed class PncpClient : IPncpClient
+public sealed class PncpClient : IPncpClient, IPncpDocumentClient
 {
+    private const int MaximumDocumentBytes = 512 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
@@ -195,12 +196,130 @@ public sealed class PncpClient : IPncpClient
         }).ToArray();
     }
 
+    public async Task<IReadOnlyList<PncpDocumentDescriptor>> ListDocumentsAsync(
+        PncpContractKey contract,
+        CancellationToken cancellationToken = default)
+    {
+        using var scope = PncpRequestOptions.BeginScope(
+            PncpRequestPriority.UserSelectedItem,
+            PncpRequestCategory.Other);
+        var result = await GetJsonAsync<List<DocumentDto>>(
+            BuildDocumentUri(contract),
+            cancellationToken).ConfigureAwait(false);
+        return (result.Value ?? [])
+            .Where(item => item.SequencialDocumento > 0 && item.StatusAtivo is not false)
+            .OrderBy(item => item.SequencialDocumento)
+            .Select(item => new PncpDocumentDescriptor
+            {
+                Sequence = item.SequencialDocumento,
+                Title = SearchText.Sanitize(
+                    string.IsNullOrWhiteSpace(item.Titulo)
+                        ? $"Documento {item.SequencialDocumento}"
+                        : item.Titulo),
+                DocumentType = SearchText.Sanitize(item.TipoDocumentoNome),
+                PublishedAt = ParseDateTime(item.DataPublicacaoPncp),
+                DownloadUri = SearchText.Sanitize(
+                    string.IsNullOrWhiteSpace(item.Uri) ? item.Url : item.Uri),
+                Active = item.StatusAtivo is not false
+            })
+            .ToArray();
+    }
+
+    public async Task<PncpDocumentContent> DownloadDocumentAsync(
+        PncpContractKey contract,
+        PncpDocumentDescriptor document,
+        CancellationToken cancellationToken = default)
+    {
+        using var scope = PncpRequestOptions.BeginScope(
+            PncpRequestPriority.UserSelectedItem,
+            PncpRequestCategory.Other);
+        var uri = BuildDocumentUri(contract, document.Sequence);
+        const int maximumAttempts = 7;
+        for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+        {
+            try
+            {
+                using var response = await _httpClient.GetAsync(
+                    uri,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken).ConfigureAwait(false);
+                if (response.IsSuccessStatusCode)
+                {
+                    if (response.Content.Headers.ContentLength is > MaximumDocumentBytes)
+                    {
+                        throw new InvalidDataException(
+                            $"O documento {document.Sequence} excede o limite de 512 MiB.");
+                    }
+
+                    await using var input = await response.Content.ReadAsStreamAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    using var output = new MemoryStream();
+                    var buffer = new byte[81920];
+                    while (true)
+                    {
+                        var read = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                        if (read == 0)
+                        {
+                            break;
+                        }
+
+                        if (output.Length + read > MaximumDocumentBytes)
+                        {
+                            throw new InvalidDataException(
+                                $"O documento {document.Sequence} excede o limite de 512 MiB.");
+                        }
+
+                        await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                    }
+
+                    var fileName = response.Content.Headers.ContentDisposition?.FileNameStar ??
+                                   response.Content.Headers.ContentDisposition?.FileName;
+                    return new PncpDocumentContent(
+                        output.ToArray(),
+                        response.Content.Headers.ContentType?.MediaType,
+                        fileName?.Trim('"'));
+                }
+
+                var isTransient = response.StatusCode == HttpStatusCode.TooManyRequests ||
+                                  (int)response.StatusCode >= 500;
+                if (!isTransient || attempt == maximumAttempts)
+                {
+                    var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                    throw CreateResponseException(response, body, uri);
+                }
+
+                var retryDelay = GetRetryDelay(response, attempt);
+                response.Dispose();
+                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (ShouldRetryTransportFailure(
+                                                   exception,
+                                                   cancellationToken,
+                                                   attempt,
+                                                   maximumAttempts))
+            {
+                await Task.Delay(_backoffDelay(attempt), cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        throw new InvalidOperationException("Falha inesperada ao baixar documento do PNCP.");
+    }
+
     private Uri BuildContractUri(ContractRecord contract, string suffix)
     {
         var cnpj = Uri.EscapeDataString(contract.Cnpj);
         return new Uri(
             _integrationBase,
             $"v1/orgaos/{cnpj}/compras/{contract.PurchaseYear}/{contract.PurchaseSequence}/{suffix}");
+    }
+
+    private Uri BuildDocumentUri(PncpContractKey contract, long? sequence = null)
+    {
+        var cnpj = Uri.EscapeDataString(contract.Cnpj);
+        var suffix = sequence is null ? string.Empty : $"/{sequence.Value}";
+        return new Uri(
+            _integrationBase,
+            $"v1/orgaos/{cnpj}/compras/{contract.PurchaseYear}/{contract.PurchaseSequence}/arquivos{suffix}");
     }
 
     private static ContractRecord? MapContract(ContractDto item)

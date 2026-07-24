@@ -1,10 +1,10 @@
 # PNCP King
 
-Aplicativo desktop Windows para manter um índice local dos últimos 365 dias do PNCP e pesquisar preços homologados por item, sem baixar documentos ou PDFs.
+Aplicativo desktop Windows para manter um índice local dos últimos 365 dias do PNCP, pesquisar preços homologados por item e reunir as evidências documentais das cotações.
 
 ## Executável pronto
 
-A distribuição autocontida mais recente para Windows x64 está em `artifacts\win-x64\PNCPKing.exe`. Ela inclui o runtime do .NET 8 e, portanto, não exige instalação separada do .NET. O executável tem aproximadamente 166 MiB; o banco nacional será criado somente na pasta escolhida pelo usuário.
+A distribuição autocontida mais recente para Windows x64 está em `artifacts\win-x64\PNCPKing.exe`. Ela inclui o runtime do .NET 8, o mecanismo OCR local e o modelo oficial de português, portanto não exige instalação separada. O banco nacional será criado somente na pasta escolhida pelo usuário.
 
 ## O que está implementado
 
@@ -22,8 +22,9 @@ A distribuição autocontida mais recente para Windows x64 está em `artifacts\w
 - catálogo nacional embutido das localidades oficiais de 2022 do IBGE, usado somente para distância e ordem geográfica, sem consultas remotas por município;
 - percurso fixo de candidatos: Ribeirão Preto e os outros 49 municípios mais próximos por distância, restante de SP em amostra aleatória estável e depois cada UF pela proximidade de sua sede municipal mais próxima;
 - sorteio estável durante cada pesquisa, paginação por cursor sem repetição e nova rotação aleatória ao iniciar outra pesquisa;
-- primeiro lote automático de 50 contratações e pesquisa contínua de 1 a 100 disparos adicionais; cada disparo examina 50 contratações e consulta todos os itens compatíveis encontrados nelas;
+- três lotes automáticos de 50 contratações e pesquisa contínua de 1 a 100 lotes adicionais; cada lote examina 50 contratações e consulta todos os itens compatíveis encontrados nelas;
 - resultados acrescentados progressivamente em uma única grade virtualizada, com percentual, contratações solicitadas/processadas, itens compatíveis, preços revelados e chamadas reais de listas/resultados;
+- grade de preços inicialmente enxuta com as nove colunas principais e layouts de visibilidade, ordem e largura persistidos por grade; o seletor permite restaurar o padrão;
 - biblioteca opcional Sweet Code, persistida no backup, com um crivo por linha e autocomplete por prefixo usando setas e `TAB`;
 - banco temporário separado para os preços automáticos, apagado ao pesquisar novamente, fechar ou reabrir após encerramento inesperado;
 - cache permanente separado para a atualização manual de uma contratação;
@@ -37,12 +38,16 @@ A distribuição autocontida mais recente para Windows x64 está em `artifacts\w
 - atualização incremental da amostra com versionamento e reconfirmação da escolha anterior;
 - importação de cotações por `.xlsx` compatível com A:G e alvo opcional em H (`Número de preços na cesta`), fila sequencial retomável e escolha automática da cesta recomendada;
 - gerenciamento para criar, renomear e excluir cotações ou itens, além de cancelar e retomar automações;
-- exportação simplificada em uma única aba `.xlsx`, completando faltas automáticas até o alvo e faltas manuais até três com `IMPOSSÍVEL OBTER PELO INCISO II`, além das ressalvas de cestas manuais;
+- exportação simplificada em uma única aba `.xlsx`, com hyperlink público do PNCP na coluna E, completando faltas automáticas até o alvo e faltas manuais até três com `IMPOSSÍVEL OBTER PELO INCISO II`, além das ressalvas de cestas manuais;
+- acesso aos anexos do PNCP pela grade de preços, pelo cache da contratação e pelas referências das cestas/auditoria, com extração segura de PDF, ZIP, 7z e RAR, deduplicação e consolidação sob demanda em `Downloads`;
+- cache documental separado de até 2 GiB, com manifestos atômicos, remoção LRU e comando próprio de limpeza que não altera o banco nem os arquivos exportados;
+- geração automática de `{planilha}_evidencias.pdf` ao exportar uma cotação, cobrindo todas as referências efetivamente exportadas e registrando ocorrências, ausências e falhas parciais;
+- extração de texto e coordenadas diretamente do PDF sempre que a camada nativa for utilizável; OCR português local é acionado somente nas páginas escaneadas, sem enviar imagens para serviços externos;
 - medição por sessão de chamadas, bytes, duração e médias de listas de itens e resultados;
 - agendador único com no máximo duas chamadas ao PNCP e prioridade para ações visíveis do usuário;
 - distinção entre preço encontrado, resultado cancelado, item sem resultado, pendência e falha;
 - invalidação de listas e preços permanentes quando a contratação muda;
-- link para a página oficial da contratação, sem baixar PDFs ou metadados documentais;
+- link para a página oficial da contratação e comandos explícitos para obter seus documentos quando solicitado;
 - backup/importação validado no formato `.pncpking`, incluindo migração segura de backups antigos do próprio PNCP King.
 
 O aplicativo não fez a carga nacional durante a compilação. A medição atual será feita pela própria interface e nenhum download começará sem a confirmação dos números e da margem adicional de 20% de espaço livre.
@@ -79,15 +84,16 @@ A suíte automatizada cobre pesquisa por objeto e item, geografia, faixa de pre�
 4. Clique em **Baixar/atualizar dados** e confirme os números exibidos.
 5. Digite o objeto, escolha geografia, período e ordenação e clique em **Pesquisar**.
 6. Você pode combinar termos: `café filtro` ou `café + filtro` exigem ambos; `café OU chá` aceita qualquer um; `"café torrado"` busca a frase; `café -cafeteira -"filtro de papel"` exclui descrições; `"pacote "unidade` aceita qualquer uma dessas unidades estruturadas do item.
-7. Ao clicar em **Pesquisar**, confira o resumo local exibido na própria tela. O aplicativo examinará automaticamente as primeiras 50 contratações candidatas e revelará todos os itens compatíveis encontrados.
+7. Ao clicar em **Pesquisar**, confira o resumo local exibido na própria tela. O aplicativo examinará automaticamente os três lotes visíveis — até 150 contratações candidatas — e revelará todos os itens compatíveis encontrados.
 8. Para ampliar a sessão atual sem repetir contratações, informe de 1 a 100 lotes e use **Mostrar valores das próximas contratações**. Cada lote contém 50 contratações. Use **Parar preços** para interromper preservando os resultados concluídos.
 9. Use os campos de preço mínimo/máximo para filtrar o valor unitário homologado ativo.
 10. Para iniciar uma cotação, clique em **Usar esta amostra em uma cotação**, selecione ou crie um projeto e informe quantidade, unidade, alvo automático de 3 a 10 preços e faixa opcional.
 11. Para montar sua própria composição, selecione uma ou mais linhas homologadas com `Ctrl`/`Shift` e use **Criar/adicionar à cesta manual**. Na aba **Cotações**, você pode ampliar, renomear, revisar, confirmar ou excluir essas cestas.
 12. Faça novas pesquisas e adicione outros itens ao mesmo projeto. Se ampliar a coleta de um item, use **Atualizar amostra com a pesquisa atual**; a escolha anterior ficará marcada para reconfirmação.
-13. Use **Importar XLSX** para carregar vários itens pelas colunas A:G e, opcionalmente, o alvo da cesta em H. H vazia usa 3. A automação interpreta a coluna G como lotes de 50 contratações; falhas podem ser retomadas. **Exportar Excel** gera a versão simples com `INCISO II`.
+13. Use **Importar XLSX** para carregar vários itens pelas colunas A:G e, opcionalmente, o alvo da cesta em H. H vazia usa 3. A automação interpreta a coluna G como lotes de 50 contratações; falhas podem ser retomadas. **Exportar Excel** gera a versão simples com `INCISO II`, links do PNCP e o PDF de evidências na mesma pasta.
 14. Para manter uma contratação no cache permanente, selecione-a na segunda aba e use **Buscar/atualizar todos os preços**.
-15. Use **Abrir contratação no PNCP** para acessar a página oficial e baixar documentos manualmente, se houver interesse.
+15. Use **Abrir contratação no PNCP** para acessar a página oficial. Use **Acessar documentos** para baixar, extrair e consolidar os PDFs; o arquivo será salvo em `Downloads` e somente será aberto se você escolher **Abrir PDF** ao final.
+16. Use **Escolher colunas** para ajustar cada grade uma vez. Visibilidade, ordem e largura são restauradas nos usos seguintes; **Restaurar padrão** volta ao layout original.
 
 O total homologado geral mostrado na grade de contratações é apenas um resumo. Os preços dos itens vêm exclusivamente dos campos de resultado homologado do PNCP; valores estimados nunca são usados como substitutos.
 

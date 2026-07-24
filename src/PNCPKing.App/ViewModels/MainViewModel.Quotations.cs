@@ -39,6 +39,7 @@ public sealed partial class MainViewModel
     public ICommand PreviousQuotationBasketPageCommand { get; private set; } = null!;
     public ICommand NextQuotationBasketPageCommand { get; private set; } = null!;
     public ICommand OpenQuotationReferenceCommand { get; private set; } = null!;
+    public ICommand AccessQuotationDocumentsCommand { get; private set; } = null!;
     public ICommand NewQuotationCommand { get; private set; } = null!;
     public ICommand RenameQuotationCommand { get; private set; } = null!;
     public ICommand DeleteQuotationCommand { get; private set; } = null!;
@@ -165,7 +166,8 @@ public sealed partial class MainViewModel
             () => !IsFileBusy && SelectedQuotationLine is not null && SelectedQuotationBasket is not null);
         ExportQuotationCommand = new AsyncRelayCommand(
             ExportQuotationAsync,
-            () => !IsFileBusy && SelectedQuotationProject is not null && QuotationLines.Count > 0);
+            () => !IsFileBusy && !IsDocumentBusy &&
+                  SelectedQuotationProject is not null && QuotationLines.Count > 0);
         PreviousQuotationBasketPageCommand = new RelayCommand(
             () => ChangeQuotationBasketPage(QuotationBasketPage - 1),
             () => QuotationBasketPage > 1);
@@ -176,6 +178,13 @@ public sealed partial class MainViewModel
         OpenQuotationReferenceCommand = new RelayCommand<QuotationReferenceDisplay>(
             OpenQuotationReference,
             reference => reference is not null && Uri.TryCreate(reference.Source.PortalUrl, UriKind.Absolute, out _));
+        AccessQuotationDocumentsCommand = new AsyncRelayCommand<QuotationReferenceDisplay>(
+            AccessQuotationDocumentsAsync,
+            reference => reference is not null && !IsDocumentBusy && !IsFileBusy &&
+                         PncpContractKey.TryParse(
+                             reference.Source.ContractId,
+                             reference.Source.PortalUrl,
+                             out _));
         NewQuotationCommand = new AsyncRelayCommand(NewQuotationAsync, () => !IsFileBusy && !IsPriceBusy);
         RenameQuotationCommand = new AsyncRelayCommand(
             RenameQuotationAsync,
@@ -186,10 +195,13 @@ public sealed partial class MainViewModel
         DeleteQuotationLineCommand = new AsyncRelayCommand(
             DeleteQuotationLineAsync,
             () => !IsFileBusy && !IsPriceBusy && SelectedQuotationLine is not null);
-        ImportQuotationCommand = new AsyncRelayCommand(ImportQuotationAsync, () => !IsFileBusy && !IsPriceBusy);
+        ImportQuotationCommand = new AsyncRelayCommand(
+            ImportQuotationAsync,
+            () => !IsFileBusy && !IsPriceBusy && !IsDocumentBusy);
         ResumeQuotationAutomationCommand = new AsyncRelayCommand(
             ResumeQuotationAutomationAsync,
-            () => !IsFileBusy && !IsPriceBusy && SelectedQuotationProject is not null);
+            () => !IsFileBusy && !IsPriceBusy && !IsDocumentBusy &&
+                  SelectedQuotationProject is not null);
         CancelQuotationAutomationCommand = new RelayCommand(
             () => _quotationAutomationCancellation?.Cancel(),
             () => _quotationAutomationCancellation is not null);
@@ -373,7 +385,8 @@ public sealed partial class MainViewModel
             projects,
             SelectedQuotationProject?.Id,
             weightsWindow.Weights,
-            $"{SelectedGeoFilter}; {startDate:dd/MM/yyyy} a {endDate:dd/MM/yyyy}")
+            $"{SelectedGeoFilter}; {startDate:dd/MM/yyyy} a {endDate:dd/MM/yyyy}",
+            _columnLayouts)
         {
             Owner = Application.Current.MainWindow
         };
@@ -434,6 +447,7 @@ public sealed partial class MainViewModel
         IsFileBusy = true;
         SetPriceBusy(true, usesNetwork: true);
         NotifyCommands();
+        var workbookExported = false;
         try
         {
             await _quotationService.UpdateAutomationRunStateAsync(
@@ -572,13 +586,22 @@ public sealed partial class MainViewModel
                     QuotationAutomationItemState.Failed);
             var report = await _quotationService.GetReportAsync(run.ProjectId).ConfigureAwait(true);
             await _quotationWorkbookService.ExportAsync(run.OutputPath, report, cancellationToken).ConfigureAwait(true);
+            workbookExported = true;
+            var evidence = await ExportEvidenceAsync(
+                GetEvidencePath(run.OutputPath),
+                report,
+                cancellationToken).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            var evidenceSummary = evidence.Warnings.Count == 0
+                ? $" Evidências: {evidence.ReportPath}."
+                : $" Evidências parciais: {evidence.ReportPath} ({evidence.Warnings.Count:N0} aviso(s)).";
             if (remainingFailures == 0)
             {
                 await _quotationService.UpdateAutomationRunStateAsync(
                     run.Id,
                     QuotationAutomationRunState.Completed,
-                    $"Concluída e exportada para {run.OutputPath}.").ConfigureAwait(true);
-                StatusText = $"Cotação automática concluída: {run.OutputPath}.";
+                    $"Concluída e exportada para {run.OutputPath}.{evidenceSummary}").ConfigureAwait(true);
+                StatusText = $"Cotação automática concluída: {run.OutputPath}.{evidenceSummary}";
             }
             else
             {
@@ -599,11 +622,18 @@ public sealed partial class MainViewModel
         }
         catch (Exception exception)
         {
+            var preservedWorkbook = workbookExported
+                ? $" A planilha já gerada foi preservada em {run.OutputPath}."
+                : string.Empty;
             await _quotationService.UpdateAutomationRunStateAsync(
                 run.Id,
                 QuotationAutomationRunState.Failed,
-                exception.Message).ConfigureAwait(true);
-            MessageBox.Show(exception.Message, "Cotação automática", MessageBoxButton.OK, MessageBoxImage.Error);
+                exception.Message + preservedWorkbook).ConfigureAwait(true);
+            MessageBox.Show(
+                exception.Message + preservedWorkbook,
+                "Cotação automática",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
         }
         finally
         {
@@ -1021,15 +1051,36 @@ public sealed partial class MainViewModel
         }
 
         IsFileBusy = true;
+        var workbookExported = false;
         try
         {
             var report = await _quotationService.GetReportAsync(project.Id).ConfigureAwait(true);
             await _quotationWorkbookService.ExportAsync(dialog.FileName, report).ConfigureAwait(true);
-            StatusText = $"Cotação exportada para {dialog.FileName}.";
+            workbookExported = true;
+            var evidence = await ExportEvidenceAsync(
+                GetEvidencePath(dialog.FileName),
+                report,
+                CancellationToken.None).ConfigureAwait(true);
+            StatusText = evidence.Warnings.Count == 0
+                ? $"Cotação e evidências exportadas para {Path.GetDirectoryName(dialog.FileName)}."
+                : $"Cotação e evidências exportadas com {evidence.Warnings.Count:N0} aviso(s).";
+            if (evidence.Warnings.Count > 0)
+            {
+                MessageBox.Show(
+                    $"A planilha foi preservada e o relatório disponível foi gerado.\n\n" +
+                    string.Join("\n", evidence.Warnings.Take(10)),
+                    "Evidências exportadas com avisos",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
         }
         catch (Exception exception)
         {
-            MessageBox.Show(exception.Message, "Exportar cotação", MessageBoxButton.OK, MessageBoxImage.Error);
+            var message = workbookExported
+                ? $"A planilha foi salva em:\n{dialog.FileName}\n\n" +
+                  $"Não foi possível concluir o relatório de evidências: {exception.Message}"
+                : exception.Message;
+            MessageBox.Show(message, "Exportar cotação", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -1101,6 +1152,68 @@ public sealed partial class MainViewModel
             MessageBox.Show(exception.Message, "Abrir PNCP", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
+
+    private Task AccessQuotationDocumentsAsync(QuotationReferenceDisplay? reference)
+    {
+        if (reference is null ||
+            !PncpContractKey.TryParse(
+                reference.Source.ContractId,
+                reference.Source.PortalUrl,
+                out var contract) ||
+            contract is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        var suggestedReference = SelectedQuotationLine?.Line.Description;
+        if (string.IsNullOrWhiteSpace(suggestedReference))
+        {
+            suggestedReference = reference.ItemDescription;
+        }
+
+        return AccessDocumentsAsync(contract, suggestedReference);
+    }
+
+    private async Task<QuotationEvidenceResult> ExportEvidenceAsync(
+        string destinationPath,
+        QuotationProjectReport report,
+        CancellationToken cancellationToken)
+    {
+        if (IsDocumentBusy)
+        {
+            throw new InvalidOperationException("Aguarde a operação de documentos em andamento.");
+        }
+
+        IsDocumentBusy = true;
+        _documentCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        DocumentProgress = 0;
+        DocumentProgressText = "Documentos: preparando relatório de evidências…";
+        try
+        {
+            var result = await _evidenceService.ExportAsync(
+                destinationPath,
+                report,
+                CreateDocumentProgress(),
+                _documentCancellation.Token).ConfigureAwait(true);
+            DocumentProgress = 100;
+            DocumentProgressText =
+                $"Documentos: relatório concluído, {result.Occurrences:N0} ocorrência(s), " +
+                $"{result.Warnings.Count:N0} aviso(s)";
+            return result;
+        }
+        finally
+        {
+            _documentCancellation.Dispose();
+            _documentCancellation = null;
+            IsDocumentBusy = false;
+            NotifyCommands();
+        }
+    }
+
+    private static string GetEvidencePath(string workbookPath) =>
+        Path.Combine(
+            Path.GetDirectoryName(workbookPath) ?? string.Empty,
+            Path.GetFileNameWithoutExtension(workbookPath) + "_evidencias.pdf");
 
     private static string SanitizeFileName(string value)
     {

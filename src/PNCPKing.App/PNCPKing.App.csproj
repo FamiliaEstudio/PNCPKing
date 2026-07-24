@@ -10,5 +10,11 @@
   <ItemGroup>
     <ProjectReference Include="../PNCPKing.Infrastructure/PNCPKing.Infrastructure.csproj"
                       SkipGetTargetFrameworkProperties="true" />
+    <PackageReference Include="Tesseract" />
+    <PackageReference Include="PDFtoImage" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Assets/tessdata/por.traineddata"
+                      LogicalName="PNCPKing.App.Assets.tessdata.por.traineddata" />
   </ItemGroup>
 </Project>

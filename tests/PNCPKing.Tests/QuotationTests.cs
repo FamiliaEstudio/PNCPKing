@@ -605,15 +605,71 @@ public sealed class QuotationTests
             var sheet = Assert.Single(workbook.Worksheets);
             Assert.Equal("Cotação", sheet.Name);
             Assert.Equal("Café torrado", sheet.Cell(1, 1).GetString());
+            Assert.Equal("Link PNCP do item", sheet.Cell(1, 5).GetString());
             Assert.Equal("11.222.333/0001-81", sheet.Cell(2, 2).GetString());
             Assert.Equal(XLDataType.Text, sheet.Cell(2, 2).DataType);
             Assert.Equal("INCISO II", sheet.Cell(2, 3).GetString());
             Assert.Equal(90m, sheet.Cell(2, 4).GetValue<decimal>());
+            const string expectedUrl = "https://pncp.gov.br/app/editais/teste/2026/1";
+            Assert.Equal(expectedUrl, sheet.Cell(2, 5).GetString());
+            Assert.Equal(XLDataType.Text, sheet.Cell(2, 5).DataType);
+            Assert.False(sheet.Hyperlinks.TryGet(sheet.Cell(2, 5).Address, out _));
+            Assert.True(sheet.Column(5).Width >= expectedUrl.Length + 2);
+            Assert.NotEqual(XLColor.Blue, sheet.Cell(2, 5).Style.Font.FontColor);
+            Assert.Equal(
+                XLFontUnderlineValues.None,
+                sheet.Cell(2, 5).Style.Font.Underline);
             Assert.Equal("Açúcar", sheet.Cell(6, 1).GetString());
             Assert.Equal("Preço 1 não obtido", sheet.Cell(7, 1).GetString());
             Assert.Equal("IMPOSSÍVEL OBTER PELO INCISO II", sheet.Cell(7, 3).GetString());
+            Assert.True(sheet.Cell(7, 5).IsEmpty());
             Assert.Contains("somente 0 de 3", sheet.Cell(10, 1).GetString());
             Assert.DoesNotContain(sheet.CellsUsed(), cell => cell.GetString() is "Empresa" or "CNPJ" or "Valor");
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            var directory = Path.GetDirectoryName(path)!;
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public async Task Workbook_PreservesExceptionalLongUrlAndWrapsAtExcelWidthLimit()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var project = new QuotationProject(
+            Guid.NewGuid(),
+            "Cotação URL longa",
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow);
+        var longUrl = "https://pncp.gov.br/app/editais/teste/2026/1?documento=" +
+                      new string('a', 280);
+        var analysis = analyzer.Analyze(
+            Line("Café torrado", 100m, "pacote"),
+            [
+                Reference("a", "c1", "11222333000181", 90m) with { PortalUrl = longUrl },
+                Reference("b", "c2", "60701190000104", 100m),
+                Reference("c", "c3", "33000167000101", 110m)
+            ]);
+        analysis = Confirm(analysis, Assert.Single(analysis.Baskets));
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            "PNCPKing.Tests",
+            Guid.NewGuid().ToString("N"),
+            "url-longa.xlsx");
+        try
+        {
+            await new QuotationWorkbookService().ExportAsync(
+                path,
+                new QuotationProjectReport(project, [analysis]));
+
+            using var workbook = new XLWorkbook(path);
+            var sheet = Assert.Single(workbook.Worksheets);
+            Assert.Equal(longUrl, sheet.Cell(2, 5).GetString());
+            Assert.InRange(sheet.Column(5).Width, 254, 255);
+            Assert.True(sheet.Column(5).Style.Alignment.WrapText);
+            Assert.False(sheet.Hyperlinks.TryGet(sheet.Cell(2, 5).Address, out _));
         }
         finally
         {

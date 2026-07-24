@@ -1,0 +1,38 @@
+<Window x:Class="PNCPKing.App.Views.DocumentResultWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Documentos PNCP" Width="700" Height="390"
+        MinWidth="560" MinHeight="320"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="CanResizeWithGrip">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Text="{Binding Heading, Mode=OneWay}"
+                   FontSize="20" FontWeight="SemiBold" />
+        <StackPanel Grid.Row="1" Margin="0,12,0,10">
+            <TextBlock Text="{Binding Summary}" TextWrapping="Wrap" />
+            <TextBlock Text="Arquivo salvo em:" FontWeight="SemiBold" Margin="0,10,0,3" />
+            <TextBox Text="{Binding FilePath, Mode=OneWay}" IsReadOnly="True"
+                     HorizontalScrollBarVisibility="Auto" />
+        </StackPanel>
+
+        <GroupBox Grid.Row="2" Header="Avisos" Visibility="{Binding WarningVisibility}">
+            <TextBox Text="{Binding Warnings, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap"
+                     VerticalScrollBarVisibility="Auto" BorderThickness="0"
+                     Background="Transparent" />
+        </GroupBox>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal"
+                    HorizontalAlignment="Right" Margin="0,14,0,0">
+            <Button Content="Abrir PDF" MinWidth="110" Click="OpenPdf_Click" />
+            <Button Content="Abrir pasta" MinWidth="110" Click="OpenFolder_Click" />
+            <Button Content="Fechar" MinWidth="90" IsCancel="True" Click="Close_Click" />
+        </StackPanel>
+    </Grid>
+</Window>

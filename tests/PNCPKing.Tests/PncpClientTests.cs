@@ -254,6 +254,63 @@ public sealed class PncpClientTests
         Assert.Equal(500, items.Select(item => item.ItemNumber).Distinct().Count());
     }
 
+    [Fact]
+    public async Task Documents_ListActiveEntriesAndDownloadFromOfficialContractEndpoint()
+    {
+        var expectedBytes = Encoding.UTF8.GetBytes("%PDF-documento");
+        var handler = new SequenceHandler(
+            _ => Json("""
+                [
+                  {
+                    "sequencialDocumento": 2,
+                    "titulo": "Edital",
+                    "tipoDocumentoNome": "Edital",
+                    "dataPublicacaoPncp": "2026-07-20T10:30:00Z",
+                    "url": "https://pncp.gov.br/arquivo/2",
+                    "statusAtivo": true
+                  },
+                  {
+                    "sequencialDocumento": 1,
+                    "titulo": "Revogado",
+                    "statusAtivo": false
+                  }
+                ]
+                """),
+            _ =>
+            {
+                var response = new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(expectedBytes)
+                };
+                response.Content.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
+                response.Content.Headers.ContentDisposition =
+                    new ContentDispositionHeaderValue("attachment") { FileNameStar = "edital.pdf" };
+                return response;
+            });
+        var client = CreateClient(handler);
+        var contract = new PncpContractKey(
+            "11222333000181-1-000123/2026",
+            "11222333000181",
+            2026,
+            123);
+
+        var document = Assert.Single(await client.ListDocumentsAsync(contract));
+        var content = await client.DownloadDocumentAsync(contract, document);
+
+        Assert.Equal(2, document.Sequence);
+        Assert.Equal("Edital", document.Title);
+        Assert.Equal("https://pncp.gov.br/arquivo/2", document.DownloadUri);
+        Assert.Equal("application/pdf", content.ContentType);
+        Assert.Equal("edital.pdf", content.FileName);
+        Assert.Equal(expectedBytes, content.Bytes);
+        Assert.Equal(
+            "https://example.test/pncp/v1/orgaos/11222333000181/compras/2026/123/arquivos",
+            handler.RequestUris[0]);
+        Assert.Equal(
+            "https://example.test/pncp/v1/orgaos/11222333000181/compras/2026/123/arquivos/2",
+            handler.RequestUris[1]);
+    }
+
     private static PncpClient CreateClient(
         HttpMessageHandler handler,
         Func<int, TimeSpan>? backoff = null) => new(

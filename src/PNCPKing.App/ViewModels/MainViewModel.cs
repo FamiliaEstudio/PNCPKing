@@ -7,6 +7,7 @@ using System.Windows;
 using System.Windows.Input;
 using System.Windows.Threading;
 using Microsoft.Win32;
+using PNCPKing.App.Services;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
 using PNCPKing.Core.Search;
@@ -18,7 +19,6 @@ namespace PNCPKing.App.ViewModels;
 public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 {
     private const int ContractPageSize = 20;
-    private const int ItemPageSize = 50;
 
     private readonly IContractRepository _repository;
     private readonly PreflightService _preflightService;
@@ -29,12 +29,18 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private readonly BackupService _backupService;
     private readonly IPncpRequestTelemetry _telemetry;
     private readonly ISweetCodeRepository _sweetCodeRepository;
+    private readonly IContractDocumentService _documentService;
+    private readonly IContractRelevantPageService _relevantPageService;
+    private readonly IQuotationEvidenceExportService _evidenceService;
+    private readonly IDisposable _documentResources;
+    private readonly DataGridColumnLayoutService _columnLayouts;
     private readonly string _dataFolder;
     private readonly DispatcherTimer _maintenanceTimer;
     private readonly SemaphoreSlim _itemPageGate = new(1, 1);
     private CancellationTokenSource? _indexCancellation;
     private CancellationTokenSource? _priceCancellation;
     private CancellationTokenSource? _foregroundCancellation;
+    private CancellationTokenSource? _documentCancellation;
     private SearchQuery? _activeSearchQuery;
     private ItemSearchLocalSummary? _localItemSearchSummary;
     private PncpRequestTelemetrySnapshot? _searchTelemetryBaseline;
@@ -61,13 +67,16 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _priceOperationUsesNetwork;
     private bool _isForegroundBusy;
     private bool _isFileBusy;
+    private bool _isDocumentBusy;
     private double _operationProgress;
     private double _priceSearchProgress;
+    private double _documentProgress;
+    private string _documentProgressText = "Documentos: inativos";
     private int _currentContractPage = 1;
     private long _contractSearchTotal;
     private int _currentItemPage;
     private bool _hasMoreItemCandidates;
-    private int _batchCount = 1;
+    private int _batchCount = ItemSearchDefaults.InitialBatchCount;
     private int _selectedResultsTabIndex = 1;
     private PreflightEstimate? _preflight;
     private bool _automaticMaintenanceRunning;
@@ -90,6 +99,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         IQuotationWorkbookImportService quotationWorkbookImportService,
         IPncpRequestTelemetry telemetry,
         ISweetCodeRepository sweetCodeRepository,
+        IContractDocumentService documentService,
+        IContractRelevantPageService relevantPageService,
+        IQuotationEvidenceExportService evidenceService,
+        IDisposable documentResources,
+        DataGridColumnLayoutService columnLayouts,
         string dataFolder)
     {
         _repository = repository;
@@ -102,6 +116,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         InitializeQuotation(quotationService, quotationWorkbookService, quotationWorkbookImportService);
         _telemetry = telemetry;
         _sweetCodeRepository = sweetCodeRepository;
+        _documentService = documentService;
+        _relevantPageService = relevantPageService;
+        _evidenceService = evidenceService;
+        _documentResources = documentResources;
+        _columnLayouts = columnLayouts;
         _dataFolder = dataFolder;
 
         GeoFilters = BuildGeoFilters();
@@ -156,6 +175,18 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             () => HydrateSelectedAsync(false),
             () => !IsFileBusy && !IsForegroundBusy && SelectedContract is not null);
         OpenPncpCommand = new RelayCommand<ContractRecord>(OpenContract, contract => contract is not null);
+        AccessDocumentsCommand = new AsyncRelayCommand<ContractRecord>(
+            AccessDocumentsAsync,
+            contract => contract is not null && !IsDocumentBusy && !IsFileBusy);
+        AccessItemDocumentsCommand = new AsyncRelayCommand<ItemSearchDisplayRow>(
+            AccessItemDocumentsAsync,
+            row => row is not null && !IsDocumentBusy && !IsFileBusy);
+        ClearDocumentCacheCommand = new AsyncRelayCommand(
+            ClearDocumentCacheAsync,
+            () => !IsDocumentBusy && !IsFileBusy);
+        CancelDocumentOperationCommand = new RelayCommand(
+            () => _documentCancellation?.Cancel(),
+            () => _documentCancellation is not null);
         ExportBackupCommand = new AsyncRelayCommand(ExportBackupAsync, () => !IsFileBusy && !IsIndexBusy);
         ImportBackupCommand = new AsyncRelayCommand(
             ImportBackupAsync,
@@ -192,6 +223,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public ICommand HydrateCommand { get; }
     public ICommand RetryPendingCommand { get; }
     public ICommand OpenPncpCommand { get; }
+    public ICommand AccessDocumentsCommand { get; }
+    public ICommand AccessItemDocumentsCommand { get; }
+    public ICommand ClearDocumentCacheCommand { get; }
+    public ICommand CancelDocumentOperationCommand { get; }
     public ICommand ExportBackupCommand { get; }
     public ICommand ImportBackupCommand { get; }
     public ICommand ClearCacheCommand { get; }
@@ -455,6 +490,30 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         private set => SetProperty(ref _priceSearchProgress, Math.Clamp(value, 0d, 100d));
     }
 
+    public bool IsDocumentBusy
+    {
+        get => _isDocumentBusy;
+        private set
+        {
+            if (SetProperty(ref _isDocumentBusy, value))
+            {
+                NotifyCommands();
+            }
+        }
+    }
+
+    public double DocumentProgress
+    {
+        get => _documentProgress;
+        private set => SetProperty(ref _documentProgress, Math.Clamp(value, 0d, 100d));
+    }
+
+    public string DocumentProgressText
+    {
+        get => _documentProgressText;
+        private set => SetProperty(ref _documentProgressText, value);
+    }
+
     public int CurrentContractPage
     {
         get => _currentContractPage;
@@ -539,9 +598,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _indexCancellation?.Cancel();
         _priceCancellation?.Cancel();
         _foregroundCancellation?.Cancel();
+        _documentCancellation?.Cancel();
         _quotationAutomationCancellation?.Cancel();
         SetItemSearchActive(false);
         await _itemSearchService.DisposeAsync().ConfigureAwait(false);
+        await _columnLayouts.FlushAsync().ConfigureAwait(false);
+        _documentResources.Dispose();
     }
 
     public ValueTask DisposeAsync() => new(ShutdownAsync());
@@ -679,7 +741,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                     _priceCancellation.Token)
                 .ConfigureAwait(true);
             ItemSearchSummary = BuildLocalSearchSummary();
-            StatusText = "Contagem local concluída; iniciando o primeiro lote de 50 contratações.";
+            StatusText = $"Contagem local concluída; iniciando {BatchCount:N0} lote(s) de 50 contratações.";
             await _itemSearchService.StartAsync(
                 _activeSearchQuery with { Page = 1, PageSize = 200 },
                 _priceCancellation.Token).ConfigureAwait(true);
@@ -812,8 +874,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task RunSelectedBatchesAsync(bool isAdditional, CancellationToken cancellationToken)
     {
-        var effectiveBatchCount = isAdditional ? BatchCount : 1;
-        var requestedContracts = checked(effectiveBatchCount * ItemPageSize);
+        var effectiveBatchCount = BatchCount;
+        var requestedContracts = checked(effectiveBatchCount * ItemSearchDefaults.ContractsPerBatch);
         var largeConfirmed = requestedContracts <= 500 || !isAdditional;
         if (!largeConfirmed)
         {
@@ -1536,6 +1598,262 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
+    private Task AccessDocumentsAsync(ContractRecord? contract) =>
+        contract is null
+            ? Task.CompletedTask
+            : AccessDocumentsAsync(PncpContractKey.FromContract(contract));
+
+    private Task AccessItemDocumentsAsync(ItemSearchDisplayRow? row) =>
+        row is null
+            ? Task.CompletedTask
+            : AccessDocumentsAsync(
+                PncpContractKey.FromContract(row.Contract),
+                row.Item.Description);
+
+    private async Task AccessDocumentsAsync(
+        PncpContractKey contract,
+        string? suggestedReference = null)
+    {
+        if (IsDocumentBusy)
+        {
+            return;
+        }
+
+        var accessWindow = new Views.DocumentAccessWindow(suggestedReference)
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (accessWindow.ShowDialog() != true)
+        {
+            return;
+        }
+
+        var downloadsFolder = GetDownloadsFolder();
+        Directory.CreateDirectory(downloadsFolder);
+        var relevantPages = accessWindow.SelectedMode == Views.DocumentAccessMode.RelevantPages;
+        var fileSuffix = relevantPages ? "paginas_relevantes" : "documentos";
+        var destinationPath = GetUniqueFilePath(
+            Path.Combine(
+                downloadsFolder,
+                $"PNCPKing_{SanitizeFileName(contract.PncpId)}_{fileSuffix}.pdf"));
+
+        IsDocumentBusy = true;
+        _documentCancellation = new CancellationTokenSource();
+        DocumentProgress = 0;
+        DocumentProgressText = relevantPages
+            ? "Documentos: procurando páginas relevantes…"
+            : "Documentos: iniciando…";
+        try
+        {
+            string outputPath;
+            string heading;
+            string summary;
+            IReadOnlyList<string> warnings;
+            if (relevantPages)
+            {
+                var result = await _relevantPageService.CreateAsync(
+                    contract,
+                    accessWindow.Expressions,
+                    destinationPath,
+                    CreateDocumentProgress(),
+                    _documentCancellation.Token).ConfigureAwait(true);
+                if (string.IsNullOrWhiteSpace(result.OutputPath))
+                {
+                    var warning = result.Warnings.Count == 0
+                        ? "Nenhuma página relevante foi encontrada."
+                        : string.Join("\n", result.Warnings.Take(8));
+                    MessageBox.Show(
+                        warning,
+                        "Páginas relevantes",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                    DocumentProgressText = "Documentos: nenhuma página relevante encontrada";
+                    return;
+                }
+
+                outputPath = result.OutputPath;
+                heading = "Páginas relevantes concluídas";
+                var foundExpressions = result.Expressions
+                    .Where(expression => expression.OccurrenceCount > 0)
+                    .ToArray();
+                summary =
+                    $"Expressões pesquisadas: {string.Join("; ", result.Expressions.Select(expression => expression.Expression))}\n" +
+                    $"Expressões encontradas: {string.Join("; ", foundExpressions.Select(expression => expression.Expression))}\n" +
+                    $"{foundExpressions.Length:N0} de {result.Expressions.Count:N0} expressão(ões); " +
+                    $"{result.MatchedPageCount:N0} página(s) única(s), " +
+                    $"{result.OccurrenceCount:N0} ocorrência(s) " +
+                    $"em {result.MatchedPdfCount:N0} PDF(s); " +
+                    $"{result.Bundle.DownloadedFiles:N0} arquivo(s) baixado(s) e " +
+                    $"{result.Bundle.ReusedFiles:N0} reutilizado(s) do cache.";
+                warnings = result.Warnings;
+                DocumentProgressText =
+                    $"Documentos: {result.MatchedPageCount:N0} página(s) relevante(s), " +
+                    $"{result.OccurrenceCount:N0} ocorrência(s)";
+            }
+            else
+            {
+                var result = await _documentService.CreateConsolidatedPdfAsync(
+                    contract,
+                    destinationPath,
+                    CreateDocumentProgress(),
+                    _documentCancellation.Token).ConfigureAwait(true);
+                if (result.Pdfs.Count == 0 || string.IsNullOrWhiteSpace(result.ConsolidatedPath))
+                {
+                    var warning = result.Warnings.Count == 0
+                        ? "A contratação não possui arquivos PDF ativos."
+                        : string.Join("\n", result.Warnings.Take(8));
+                    MessageBox.Show(
+                        warning,
+                        "Documentos PNCP",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                    DocumentProgressText = "Documentos: nenhum PDF disponível";
+                    return;
+                }
+
+                outputPath = result.ConsolidatedPath;
+                heading = "PDF consolidado concluído";
+                summary =
+                    $"{result.Pdfs.Count:N0} PDF(s) reunido(s); {result.DownloadedFiles:N0} " +
+                    $"arquivo(s) baixado(s) e {result.ReusedFiles:N0} reutilizado(s) do cache.";
+                warnings = result.Warnings;
+                DocumentProgressText =
+                    $"Documentos: {result.Pdfs.Count:N0} PDF(s), {result.DownloadedFiles:N0} baixado(s), " +
+                    $"{result.ReusedFiles:N0} reutilizado(s)";
+            }
+
+            DocumentProgress = 100;
+            var resultWindow = new Views.DocumentResultWindow(outputPath, heading, summary, warnings)
+            {
+                Owner = Application.Current.MainWindow
+            };
+            resultWindow.ShowDialog();
+            if (resultWindow.SelectedAction == Views.DocumentResultAction.OpenPdf)
+            {
+                OpenWithWindowsShell(outputPath);
+            }
+            else if (resultWindow.SelectedAction == Views.DocumentResultAction.OpenFolder)
+            {
+                OpenWithWindowsShell(Path.GetDirectoryName(outputPath) ?? downloadsFolder);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            DocumentProgressText = "Documentos: operação cancelada";
+            StatusText = "Processamento de documentos cancelado; o cache concluído foi preservado.";
+        }
+        catch (Exception exception)
+        {
+            DocumentProgressText = "Documentos: falha";
+            MessageBox.Show(exception.Message, "Documentos PNCP", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            _documentCancellation.Dispose();
+            _documentCancellation = null;
+            IsDocumentBusy = false;
+            NotifyCommands();
+        }
+    }
+
+    private async Task ClearDocumentCacheAsync()
+    {
+        if (MessageBox.Show(
+                "Limpar o cache de documentos, PDFs extraídos e índices de texto?\n\n" +
+                "O banco de dados, as planilhas, os relatórios e os PDFs consolidados em Downloads serão preservados.",
+                "Limpar cache de documentos",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        IsDocumentBusy = true;
+        _documentCancellation = new CancellationTokenSource();
+        DocumentProgressText = "Documentos: limpando cache…";
+        try
+        {
+            var removedBytes = await _documentService.ClearCacheAsync(_documentCancellation.Token).ConfigureAwait(true);
+            DocumentProgress = 0;
+            DocumentProgressText = $"Documentos: cache limpo ({FormatBytes(removedBytes)})";
+            StatusText = "Cache de documentos limpo; o cache permanente do banco não foi alterado.";
+        }
+        catch (OperationCanceledException)
+        {
+            DocumentProgressText = "Documentos: limpeza cancelada";
+        }
+        catch (Exception exception)
+        {
+            DocumentProgressText = "Documentos: falha ao limpar o cache";
+            MessageBox.Show(exception.Message, "Limpar cache de documentos", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            _documentCancellation.Dispose();
+            _documentCancellation = null;
+            IsDocumentBusy = false;
+            NotifyCommands();
+        }
+    }
+
+    private IProgress<DocumentProcessingProgress> CreateDocumentProgress() =>
+        new Progress<DocumentProcessingProgress>(progress =>
+        {
+            DocumentProgress = progress.Total <= 0
+                ? 0
+                : progress.Completed * 100d / progress.Total;
+            DocumentProgressText = $"Documentos: {progress.Message}";
+        });
+
+    private static string GetUniqueFilePath(string desiredPath)
+    {
+        if (!File.Exists(desiredPath))
+        {
+            return desiredPath;
+        }
+
+        var directory = Path.GetDirectoryName(desiredPath) ?? string.Empty;
+        var stem = Path.GetFileNameWithoutExtension(desiredPath);
+        var extension = Path.GetExtension(desiredPath);
+        for (var suffix = 2; suffix < int.MaxValue; suffix++)
+        {
+            var candidate = Path.Combine(directory, $"{stem}_{suffix}{extension}");
+            if (!File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        throw new IOException("Não foi possível reservar um nome para o PDF consolidado.");
+    }
+
+    private static string GetDownloadsFolder()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            const string shellFolders =
+                @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders";
+            const string downloadsFolderId = "{374DE290-123F-4565-9164-39C4925E467B}";
+            if (Registry.GetValue(shellFolders, downloadsFolderId, null) is string configured &&
+                !string.IsNullOrWhiteSpace(configured))
+            {
+                return Environment.ExpandEnvironmentVariables(configured);
+            }
+        }
+
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return string.IsNullOrWhiteSpace(userProfile)
+            ? Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)
+            : Path.Combine(userProfile, "Downloads");
+    }
+
+    private static void OpenWithWindowsShell(string path) =>
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = path,
+            UseShellExecute = true
+        });
+
     private void TogglePause()
     {
         if (_syncService.IsPaused)
@@ -1643,7 +1961,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      LoadNextItemPageCommand, FireBatchesCommand, ApplyPriceFilterCommand,
                      StopItemSearchCommand, CalculatePreflightCommand, StartSyncCommand,
                      PauseSyncCommand, CancelIndexCommand, HydrateCommand, RetryPendingCommand,
-                     OpenPncpCommand, ExportBackupCommand, ImportBackupCommand, ClearCacheCommand,
+                     OpenPncpCommand, AccessDocumentsCommand, AccessItemDocumentsCommand,
+                     ClearDocumentCacheCommand,
+                     CancelDocumentOperationCommand,
+                     ExportBackupCommand, ImportBackupCommand, ClearCacheCommand,
                      ManageSweetCodesCommand,
                      UseQuotationSampleCommand, UpdateQuotationSampleCommand,
                      AdjustQuotationWeightsCommand,
@@ -1653,13 +1974,22 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      DeleteQuotationLineCommand, ImportQuotationCommand,
                      ResumeQuotationAutomationCommand, CancelQuotationAutomationCommand,
                      RenameManualBasketCommand, DeleteManualBasketCommand,
-                     RemoveManualBasketReferenceCommand
+                     RemoveManualBasketReferenceCommand, AccessQuotationDocumentsCommand
                  })
         {
             switch (command)
             {
                 case AsyncRelayCommand asyncCommand:
                     asyncCommand.NotifyCanExecuteChanged();
+                    break;
+                case AsyncRelayCommand<ContractRecord> asyncContractCommand:
+                    asyncContractCommand.NotifyCanExecuteChanged();
+                    break;
+                case AsyncRelayCommand<ItemSearchDisplayRow> asyncItemSearchCommand:
+                    asyncItemSearchCommand.NotifyCanExecuteChanged();
+                    break;
+                case AsyncRelayCommand<QuotationReferenceDisplay> asyncReferenceCommand:
+                    asyncReferenceCommand.NotifyCanExecuteChanged();
                     break;
                 case RelayCommand relayCommand:
                     relayCommand.NotifyCanExecuteChanged();

@@ -1,0 +1,51 @@
+<Window x:Class="PNCPKing.App.Views.DocumentAccessWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Acessar documentos PNCP"
+        Width="720" Height="430"
+        MinWidth="580" MinHeight="360"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="CanResizeWithGrip">
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel>
+            <TextBlock Text="Como deseja acessar os documentos?"
+                       FontSize="20" FontWeight="SemiBold" />
+            <TextBlock Margin="0,7,0,0" TextWrapping="Wrap"
+                       Text="O arquivo completo reúne todos os PDFs. A opção de páginas relevantes pesquisa o texto abaixo e preserva somente as páginas em que ele aparece." />
+        </StackPanel>
+
+        <GroupBox Grid.Row="1" Header="Expressões a localizar — uma por linha" Margin="0,16,0,0">
+            <StackPanel Margin="10,7">
+                <TextBox x:Name="ReferenceTextBox"
+                         MinHeight="120"
+                         Padding="5,3"
+                         TextWrapping="Wrap"
+                         AcceptsReturn="True"
+                         AcceptsTab="False"
+                         VerticalScrollBarVisibility="Auto" />
+                <TextBlock Margin="0,6,0,0" Foreground="#555" TextWrapping="Wrap"
+                           Text="Cada linha é pesquisada como uma frase flexível. A página será incluída quando qualquer expressão aparecer; linhas vazias e expressões repetidas serão ignoradas." />
+            </StackPanel>
+        </GroupBox>
+
+        <TextBlock Grid.Row="2" Margin="0,12,0,0" Foreground="#555" TextWrapping="Wrap"
+                   Text="As páginas relevantes são copiadas diretamente dos arquivos originais, sem conversão em imagem, para manter a melhor qualidade disponível." />
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal"
+                    HorizontalAlignment="Right" Margin="0,18,0,0">
+            <Button Content="Todos os documentos"
+                    MinWidth="145" Click="AllDocuments_Click" />
+            <Button Content="Acessar páginas relevantes"
+                    MinWidth="190" Click="RelevantPages_Click" />
+            <Button Content="Cancelar"
+                    MinWidth="90" IsCancel="True" Click="Cancel_Click" />
+        </StackPanel>
+    </Grid>
+</Window>

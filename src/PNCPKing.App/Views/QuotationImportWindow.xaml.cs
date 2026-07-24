@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using Microsoft.Win32;
+using PNCPKing.App.Services;
 using PNCPKing.Core.Models;
 
 namespace PNCPKing.App.Views;
@@ -8,15 +9,20 @@ namespace PNCPKing.App.Views;
 public partial class QuotationImportWindow : Window
 {
     private readonly string _defaultOutputName;
+    private readonly DataGridColumnLayoutService _columnLayouts;
 
     public QuotationImportWindow(
         QuotationImportDocument document,
         IReadOnlyList<QuotationProject> projects,
         Guid? selectedProjectId,
         AdequacyWeights weights,
-        string filterSummary)
+        string filterSummary,
+        DataGridColumnLayoutService columnLayouts)
     {
+        _columnLayouts = columnLayouts;
         InitializeComponent();
+        columnLayouts.Register("quotation-import-preview", ImportItemsGrid);
+        Closed += (_, _) => _columnLayouts.Unregister(ImportItemsGrid);
         Items = document.Items;
         Projects = projects;
         DataContext = this;
@@ -25,11 +31,12 @@ public partial class QuotationImportWindow : Window
         var baseName = Path.GetFileNameWithoutExtension(document.SourcePath);
         NewProjectNameTextBox.Text = projects.Count == 0 ? baseName : string.Empty;
         _defaultOutputName = baseName + "-cotação.xlsx";
-        var contracts = document.Items.Sum(item => checked(item.BatchCount * 50));
+        var contracts = document.Items.Sum(item =>
+            checked(item.BatchCount * ItemSearchDefaults.ContractsPerBatch));
         SummaryTextBlock.Text =
             $"{document.Items.Count:N0} item(ns), até {contracts:N0} contratações candidatas examinadas. " +
             $"Filtros: {filterSummary}. Pesos: {weights}. " +
-            "Cada disparo examina 50 contratações e revela todos os itens compatíveis encontrados.";
+            "Cada lote examina 50 contratações e revela todos os itens compatíveis encontrados.";
     }
 
     public IReadOnlyList<QuotationImportItem> Items { get; }
@@ -42,7 +49,7 @@ public partial class QuotationImportWindow : Window
     {
         if (sender is Button button)
         {
-            DataGridColumnChooser.Show(button, ImportItemsGrid);
+            _columnLayouts.ShowChooser(button, ImportItemsGrid);
         }
     }
 

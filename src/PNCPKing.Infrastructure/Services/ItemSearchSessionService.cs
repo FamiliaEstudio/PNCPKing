@@ -14,9 +14,9 @@ namespace PNCPKing.Infrastructure.Services;
 /// </summary>
 public sealed class ItemSearchSessionService : IAsyncDisposable
 {
-    public const int DefaultPageSize = 50;
+    public const int DefaultPageSize = ItemSearchDefaults.ContractsPerBatch;
     public const int MaximumBatchCount = 100;
-    public const int MaximumFreshItemListsPerAction = 50;
+    public const int MaximumFreshItemListsPerAction = ItemSearchDefaults.ContractsPerBatch;
 
     private readonly IPncpClient _client;
     private readonly IContractRepository _repository;

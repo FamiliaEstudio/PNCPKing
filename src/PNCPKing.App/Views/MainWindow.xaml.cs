@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using PNCPKing.App.Services;
 using PNCPKing.App.ViewModels;
 
 namespace PNCPKing.App.Views;
@@ -9,14 +10,21 @@ namespace PNCPKing.App.Views;
 public partial class MainWindow : Window
 {
     private readonly MainViewModel _viewModel;
+    private readonly DataGridColumnLayoutService _columnLayouts;
     private bool _shutdownInProgress;
     private bool _shutdownComplete;
 
-    public MainWindow(MainViewModel viewModel)
+    public MainWindow(MainViewModel viewModel, DataGridColumnLayoutService columnLayouts)
     {
         _viewModel = viewModel;
+        _columnLayouts = columnLayouts;
         InitializeComponent();
         DataContext = viewModel;
+        _columnLayouts.Register("item-results", ItemResultsGrid);
+        _columnLayouts.Register("quotation-lines", QuotationLinesGrid);
+        _columnLayouts.Register("quotation-baskets", QuotationBasketsGrid);
+        _columnLayouts.Register("quotation-selected-references", SelectedBasketReferencesGrid);
+        _columnLayouts.Register("quotation-audit-references", QuotationReferencesGrid);
     }
 
     protected override async void OnClosing(CancelEventArgs e)
@@ -54,7 +62,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        DataGridColumnChooser.Show(button, dataGrid);
+        _columnLayouts.ShowChooser(button, dataGrid);
     }
 
     private void QueryTextBox_PreviewKeyDown(object sender, KeyEventArgs e)

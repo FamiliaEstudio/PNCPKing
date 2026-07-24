@@ -8,5 +8,9 @@
     <PackageReference Include="ClosedXML" />
     <PackageReference Include="DocumentFormat.OpenXml" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="PdfPig" />
+    <PackageReference Include="PDFsharp" />
+    <PackageReference Include="SharpCompress" />
+    <PackageReference Include="SkiaSharp" />
   </ItemGroup>
 </Project>
