@@ -1,3 +1,5 @@
+using PNCPKing.Core.Quotations;
+
 namespace PNCPKing.Core.Models;
 
 public enum AdequacyWeightComponent
@@ -104,6 +106,12 @@ public sealed record QuotationLine
     public Guid? AutomationRunId { get; init; }
     public QuotationAutomationItemState AutomationState { get; init; } = QuotationAutomationItemState.Manual;
     public string AutomationMessage { get; init; } = string.Empty;
+    public decimal? EstimatedUnitPrice { get; init; }
+    public decimal? EstimatedTotalPrice { get; init; }
+    public bool UseEstimatedPrice { get; init; }
+    public EstimateResolutionStage EstimateStage { get; init; } = EstimateResolutionStage.NotApplicable;
+    public ItemSearchCheckpoint SearchCheckpoint { get; init; } = new();
+    public ItemSearchPromptSet? PromptSet { get; init; }
 }
 
 public enum QuotationAutomationItemState
@@ -114,7 +122,8 @@ public enum QuotationAutomationItemState
     Completed,
     Insufficient,
     Failed,
-    CompletedWithWarning
+    CompletedWithWarning,
+    TimeExpired
 }
 
 public enum QuotationAutomationRunState
@@ -123,7 +132,8 @@ public enum QuotationAutomationRunState
     Running,
     Completed,
     Cancelled,
-    Failed
+    Failed,
+    TimeExpired
 }
 
 public sealed record QuotationAutomationRun
@@ -138,6 +148,20 @@ public sealed record QuotationAutomationRun
     public string Message { get; init; } = string.Empty;
     public DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }
+    public QuotationAutomationMode Mode { get; init; } = QuotationAutomationMode.FixedBatches;
+    public TimeSpan TimeBudget { get; init; }
+    public TimeSpan ActiveElapsed { get; init; }
+    public Guid? SourceDraftId { get; init; }
+    public string SourcePdfSha256 { get; init; } = string.Empty;
+    public int StrategyVersion { get; init; }
+    public int UniqueContractsProcessed { get; init; }
+    public int MatchedItems { get; init; }
+    public int RevealedPrices { get; init; }
+    public int ItemListCacheHits { get; init; }
+    public int ItemListApiCalls { get; init; }
+    public int ItemResultApiCalls { get; init; }
+    public int FailedCalls { get; init; }
+    public int ConsecutiveContractsWithoutResult { get; init; }
 }
 
 public sealed record QuotationImportItem(
@@ -149,7 +173,13 @@ public sealed record QuotationImportItem(
     decimal? MinimumUnitPrice,
     decimal? MaximumUnitPrice,
     int BatchCount,
-    int RequestedBasketSize = 3);
+    int RequestedBasketSize = 3,
+    decimal? EstimatedUnitPrice = null,
+    decimal? EstimatedTotalPrice = null,
+    bool UseEstimatedPrice = false,
+    string IntermediateSearchText = "",
+    string BroadSearchText = "",
+    SearchPromptOrigin PromptOrigin = SearchPromptOrigin.Ai);
 
 public sealed record QuotationImportDocument(
     string SourcePath,
@@ -160,6 +190,12 @@ public enum QuotationReferenceState
     Eligible,
     Duplicate,
     Rejected
+}
+
+public enum QuotationReferenceSource
+{
+    PncpIncisoII,
+    InternetIncisoIII
 }
 
 public sealed record AdequacyBreakdown(
@@ -206,7 +242,68 @@ public sealed record QuotationReference
     public QuotationReferenceState State { get; init; } = QuotationReferenceState.Rejected;
     public string StateReason { get; init; } = string.Empty;
     public string? DuplicateOfReferenceId { get; init; }
+    public PromptMatchLevel? MatchedPromptLevel { get; init; }
+    public string MatchedSearchText { get; init; } = string.Empty;
+    public QuotationReferenceSource Source { get; init; } = QuotationReferenceSource.PncpIncisoII;
 }
+
+public sealed record EvidenceImageDescriptor
+{
+    public required string Sha256 { get; init; }
+    public required string RelativePath { get; init; }
+    public string MimeType { get; init; } = "image/png";
+    public long ByteLength { get; init; }
+    public int PixelWidth { get; init; }
+    public int PixelHeight { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
+}
+
+public sealed record InternetPriceDraft
+{
+    public required Guid Id { get; init; }
+    public required Guid LineId { get; init; }
+    public Guid? BasketId { get; init; }
+    public string SourceUrl { get; init; } = string.Empty;
+    public decimal? UnitPrice { get; init; }
+    public string Description { get; init; } = string.Empty;
+    public string SupplierName { get; init; } = string.Empty;
+    public string SupplierTaxId { get; init; } = string.Empty;
+    public EvidenceImageDescriptor? PriceImage { get; init; }
+    public EvidenceImageDescriptor? TaxIdImage { get; init; }
+    public DateTimeOffset CapturedAt { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset UpdatedAt { get; init; }
+
+    public bool HasPriceImage => PriceImage is not null;
+    public bool HasTaxIdImage => TaxIdImage is not null;
+    public bool IsComplete =>
+        Uri.TryCreate(SourceUrl, UriKind.Absolute, out var uri) &&
+        uri.Scheme is "http" or "https" &&
+        UnitPrice > 0 &&
+        !string.IsNullOrWhiteSpace(Description) &&
+        !string.IsNullOrWhiteSpace(SupplierName) &&
+        QuotationAnalyzer.IsValidCnpj(SupplierTaxId) &&
+        PriceImage is not null &&
+        TaxIdImage is not null;
+}
+
+public sealed record InternetPriceEvidence
+{
+    public required Guid LineId { get; init; }
+    public required string ReferenceId { get; init; }
+    public required string SourceUrl { get; init; }
+    public required DateTimeOffset CapturedAt { get; init; }
+    public required EvidenceImageDescriptor PriceImage { get; init; }
+    public required EvidenceImageDescriptor TaxIdImage { get; init; }
+}
+
+public sealed record InternetPriceInput(
+    string SourceUrl,
+    decimal UnitPrice,
+    string Description,
+    string SupplierName,
+    string SupplierTaxId,
+    DateTimeOffset CapturedAt);
 
 public sealed record QuotationBasket
 {

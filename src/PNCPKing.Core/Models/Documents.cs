@@ -75,6 +75,7 @@ public sealed record CachedPdfDocument
     public required long DocumentSequence { get; init; }
     public required string DocumentTitle { get; init; }
     public string ArchivePath { get; init; } = string.Empty;
+    public string? IndexCachePath { get; init; }
 }
 
 public sealed record DocumentBundleResult

@@ -7,6 +7,259 @@ namespace PNCPKing.Tests;
 public sealed class SyncMigrationTests
 {
     [Fact]
+    public async Task VersionElevenToTwelvePreservesQuotationAndCreatesIndependentItemSearchWorkspaces()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "version-eleven.db");
+        try
+        {
+            await new SqliteContractRepository(path).InitializeAsync();
+            var quotation = new SqliteQuotationRepository(path);
+            var project = await quotation.CreateProjectAsync("Migrar para 12");
+            var lineId = Guid.NewGuid();
+            await quotation.SaveSampleAsync(
+                project.Id,
+                lineId,
+                new QuotationLineInput("Agulha para bordado", 12, "unidade", null, null),
+                [
+                    new QuotationReference
+                    {
+                        Id = "referencia-v11",
+                        LineId = lineId,
+                        ContractId = "contrato-v11",
+                        ItemNumber = 7,
+                        ResultSequence = 1,
+                        SupplierName = "Fornecedor",
+                        UnitPrice = 8.5m,
+                        ItemDescription = "Agulha",
+                        ItemUnit = "unidade"
+                    }
+                ]);
+
+            SqliteConnection.ClearAllPools();
+            await using (var connection = new SqliteConnection($"Data Source={path}"))
+            {
+                await connection.OpenAsync();
+                await using var downgrade = connection.CreateCommand();
+                downgrade.CommandText = """
+                    PRAGMA foreign_keys=OFF;
+                    DROP TABLE quotation_item_search_hits;
+                    DROP TABLE quotation_item_search_workspaces;
+                    UPDATE schema_info SET version = 11 WHERE id = 1;
+                    PRAGMA foreign_keys=ON;
+                    """;
+                await downgrade.ExecuteNonQueryAsync();
+            }
+
+            SqliteConnection.ClearAllPools();
+            await new SqliteContractRepository(path).InitializeAsync();
+            var restored = new SqliteQuotationRepository(path);
+            Assert.Single(await restored.GetLinesAsync(project.Id));
+            Assert.Single(await restored.GetReferencesAsync(lineId));
+            Assert.Null(await restored.GetWorkspaceAsync(lineId, ItemSearchPromptSlot.Restrictive));
+
+            var workspace = new QuotationItemSearchWorkspace
+            {
+                LineId = lineId,
+                Slot = ItemSearchPromptSlot.Restrictive,
+                SearchText = "agulha",
+                StartDate = new DateOnly(2025, 7, 26),
+                EndDate = new DateOnly(2026, 7, 25)
+            };
+            await restored.SaveWorkspaceAsync(workspace);
+            Assert.Equal(
+                "agulha",
+                (await restored.GetWorkspaceAsync(lineId, ItemSearchPromptSlot.Restrictive))!.SearchText);
+
+            await using var verify = new SqliteConnection($"Data Source={path}");
+            await verify.OpenAsync();
+            await using var version = verify.CreateCommand();
+            version.CommandText = "SELECT version FROM schema_info WHERE id = 1;";
+            Assert.Equal(
+                SqliteContractRepository.CurrentSchemaVersion,
+                Convert.ToInt32(await version.ExecuteScalarAsync()));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task VersionTenMigratesToCurrentAndPreservesReferencesAsIncisoIi()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "version-ten.db");
+        try
+        {
+            var contracts = new SqliteContractRepository(path);
+            await contracts.InitializeAsync();
+            var quotation = new SqliteQuotationRepository(path);
+            var project = await quotation.CreateProjectAsync("Migrar para 11");
+            var lineId = Guid.NewGuid();
+            await quotation.SaveSampleAsync(
+                project.Id,
+                lineId,
+                new QuotationLineInput("Tesoura", 1, "unidade", null, null),
+                [
+                    new QuotationReference
+                    {
+                        Id = "referencia-antiga",
+                        LineId = lineId,
+                        ContractId = "contrato",
+                        ItemNumber = 1,
+                        ResultSequence = 1,
+                        SupplierName = "Fornecedor",
+                        SupplierTaxId = "11222333000181",
+                        UnitPrice = 20,
+                        ItemDescription = "Tesoura",
+                        ItemUnit = "unidade"
+                    }
+                ]);
+
+            SqliteConnection.ClearAllPools();
+            await using (var connection = new SqliteConnection($"Data Source={path}"))
+            {
+                await connection.OpenAsync();
+                await using var downgrade = connection.CreateCommand();
+                downgrade.CommandText = """
+                    PRAGMA foreign_keys=OFF;
+                    DROP TABLE quotation_internet_price_evidence;
+                    DROP TABLE quotation_internet_price_drafts;
+                    DROP TABLE quotation_internet_evidence_assets;
+                    ALTER TABLE quotation_references DROP COLUMN source_kind;
+                    UPDATE schema_info SET version = 10 WHERE id = 1;
+                    PRAGMA foreign_keys=ON;
+                    """;
+                await downgrade.ExecuteNonQueryAsync();
+            }
+
+            SqliteConnection.ClearAllPools();
+            await new SqliteContractRepository(path).InitializeAsync();
+            var restored = new SqliteQuotationRepository(path);
+            var reference = Assert.Single(await restored.GetReferencesAsync(lineId));
+            Assert.Equal(QuotationReferenceSource.PncpIncisoII, reference.Source);
+            Assert.Empty(await restored.GetInternetPriceDraftsAsync(lineId));
+            Assert.Empty(await restored.GetInternetPriceEvidenceAsync(lineId));
+            await using var verify = new SqliteConnection($"Data Source={path}");
+            await verify.OpenAsync();
+            await using var version = verify.CreateCommand();
+            version.CommandText = "SELECT version FROM schema_info WHERE id = 1;";
+            Assert.Equal(
+                SqliteContractRepository.CurrentSchemaVersion,
+                Convert.ToInt32(await version.ExecuteScalarAsync()));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task VersionNineMigratesToCurrentAndPreservesContractsLinesReferencesAndRun()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "version-nine.db");
+        try
+        {
+            var contracts = new SqliteContractRepository(path);
+            await contracts.InitializeAsync();
+            var records = Enumerable.Range(1, 75).Select(index => new ContractRecord
+            {
+                PncpId = $"migration-{index:000}",
+                Cnpj = "12345678000199",
+                PurchaseYear = 2026,
+                PurchaseSequence = index,
+                Object = "Materiais de terapia ocupacional"
+            }).ToArray();
+            await contracts.UpsertContractsAsync(records);
+            var quotation = new SqliteQuotationRepository(path);
+            var project = await quotation.CreateProjectAsync("Migrar");
+            var manualLineId = Guid.NewGuid();
+            await quotation.SaveSampleAsync(
+                project.Id,
+                manualLineId,
+                new QuotationLineInput("Pincel", 1, "unidade", null, null),
+                [
+                    new QuotationReference
+                    {
+                        Id = "migration-001|1|1",
+                        LineId = manualLineId,
+                        ContractId = "migration-001",
+                        ItemNumber = 1,
+                        ResultSequence = 1,
+                        SupplierName = "Fornecedor",
+                        UnitPrice = 10,
+                        ItemDescription = "Pincel",
+                        ItemUnit = "unidade"
+                    }
+                ]);
+            var run = await quotation.CreateTimedAutomationRunAsync(
+                project.Id,
+                SearchGeoFilter.All,
+                new DateOnly(2026, 1, 1),
+                new DateOnly(2026, 12, 31),
+                [new QuotationImportItem(1, "linha bordado", "Linha", 1, "unidade", null, null, 1)],
+                AdequacyWeights.Default,
+                TimeSpan.FromMinutes(30));
+
+            SqliteConnection.ClearAllPools();
+            await using (var connection = new SqliteConnection($"Data Source={path}"))
+            {
+                await connection.OpenAsync();
+                await using var downgrade = connection.CreateCommand();
+                downgrade.CommandText = """
+                    PRAGMA foreign_keys=OFF;
+                    DROP TRIGGER quotation_lines_create_prompt_set;
+                    DROP TABLE quotation_prompt_revalidations;
+                    DROP TABLE quotation_processed_contracts;
+                    DROP TABLE quotation_contract_search_prompts;
+                    DROP TABLE quotation_line_search_prompts;
+                    UPDATE schema_info SET version = 9 WHERE id = 1;
+                    PRAGMA foreign_keys=ON;
+                    """;
+                await downgrade.ExecuteNonQueryAsync();
+            }
+
+            SqliteConnection.ClearAllPools();
+            await new SqliteContractRepository(path).InitializeAsync();
+            var restored = new SqliteQuotationRepository(path);
+            Assert.Equal(75, (await contracts.GetCountsAsync()).Contracts);
+            Assert.Equal(2, (await restored.GetLinesAsync(project.Id)).Count);
+            Assert.Single(await restored.GetReferencesAsync(manualLineId));
+            Assert.Equal(run.Id, (await restored.GetLatestAutomationRunAsync(project.Id))!.Id);
+            Assert.All(await restored.GetLinesAsync(project.Id), line =>
+            {
+                Assert.NotNull(line.PromptSet);
+                Assert.Equal(line.SearchText, line.PromptSet!.RestrictiveText);
+            });
+            await using var verify = new SqliteConnection($"Data Source={path}");
+            await verify.OpenAsync();
+            await using var version = verify.CreateCommand();
+            version.CommandText = "SELECT version FROM schema_info WHERE id = 1;";
+            Assert.Equal(
+                SqliteContractRepository.CurrentSchemaVersion,
+                Convert.ToInt32(await version.ExecuteScalarAsync()));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
     public async Task VersionSevenToEightPreservesLinesReferencesChoicesAndAutomation()
     {
         var directory = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"));
@@ -120,6 +373,11 @@ public sealed class SyncMigrationTests
                 await using var command = connection.CreateCommand();
                 command.CommandText = $"""
                     PRAGMA foreign_keys=OFF;
+                    DROP TRIGGER IF EXISTS quotation_lines_create_prompt_set;
+                    DROP TABLE quotation_prompt_revalidations;
+                    DROP TABLE quotation_processed_contracts;
+                    DROP TABLE quotation_contract_search_prompts;
+                    DROP TABLE quotation_line_search_prompts;
                     DROP TABLE quotation_references;
                     DROP TABLE quotation_automation_runs;
                     DROP TABLE sweet_codes;
@@ -177,7 +435,7 @@ public sealed class SyncMigrationTests
             await verify.OpenAsync();
             await using var version = verify.CreateCommand();
             version.CommandText = "SELECT version FROM schema_info WHERE id = 1;";
-            Assert.Equal(8, Convert.ToInt32(await version.ExecuteScalarAsync()));
+            Assert.Equal(SqliteContractRepository.CurrentSchemaVersion, Convert.ToInt32(await version.ExecuteScalarAsync()));
             Assert.Equal(3, line.RequestedBasketSize);
         }
         finally

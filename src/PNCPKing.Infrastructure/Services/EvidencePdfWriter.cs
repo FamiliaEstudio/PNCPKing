@@ -83,6 +83,29 @@ internal sealed class EvidencePdfWriter : IDisposable
         AddBitmapPage(bitmap, portalUrl);
     }
 
+    public void AddImageEvidencePage(
+        string heading,
+        IReadOnlyList<string> lines,
+        string sourceUrl,
+        ReadOnlyMemory<byte> pngBytes,
+        string caption)
+    {
+        using var bitmap = CreateCanvas();
+        using var canvas = new SKCanvas(bitmap);
+        canvas.Scale(OutputScale);
+        var contentTop = DrawPageHeader(
+            canvas,
+            heading,
+            lines.Append(caption).ToArray());
+        using var source = SKBitmap.Decode(pngBytes.Span)
+                           ?? throw new InvalidDataException("O print não pôde ser lido.");
+        var sourceRectangle = new SKRect(0, 0, source.Width, source.Height);
+        var available = new SKRect(55, contentTop + 25, CanvasWidth - 55, CanvasHeight - 110);
+        var fitted = Fit(sourceRectangle, available);
+        canvas.DrawBitmap(source, sourceRectangle, fitted);
+        AddBitmapPage(bitmap, sourceUrl);
+    }
+
     public void Save(string destinationPath)
     {
         if (_document.PageCount == 0)
@@ -108,7 +131,8 @@ internal sealed class EvidencePdfWriter : IDisposable
         y += 8;
         foreach (var line in lines)
         {
-            var paint = line.StartsWith("PNCP:", StringComparison.OrdinalIgnoreCase)
+            var paint = line.StartsWith("PNCP:", StringComparison.OrdinalIgnoreCase) ||
+                        line.StartsWith("Fonte:", StringComparison.OrdinalIgnoreCase)
                 ? linkPaint
                 : textPaint;
             y = DrawWrapped(canvas, line, 55, y, CanvasWidth - 110, paint, 7);

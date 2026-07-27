@@ -13,4 +13,9 @@
     <PackageReference Include="SharpCompress" />
     <PackageReference Include="SkiaSharp" />
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../Planilha de Avaliação de Preços.xlsx"
+                      Link="Assets/QuotationWorkbookTemplate.xlsx"
+                      LogicalName="PNCPKing.Infrastructure.Assets.QuotationWorkbookTemplate.xlsx" />
+  </ItemGroup>
 </Project>

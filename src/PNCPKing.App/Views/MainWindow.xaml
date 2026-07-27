@@ -389,14 +389,26 @@
                             <Button Content="Renomear" Command="{Binding RenameQuotationCommand}" />
                             <Button Content="Excluir cotação" Command="{Binding DeleteQuotationCommand}" />
                             <Button Content="Excluir item" Command="{Binding DeleteQuotationLineCommand}" />
+                            <Button Content="Abrir item" Command="{Binding OpenQuotationItemCommand}" />
                             <Button Content="Importar XLSX" Command="{Binding ImportQuotationCommand}" />
+                            <Button Content="Automação com IA" Command="{Binding AiQuotationCommand}" />
+                            <Button Content="Retrabalhar prompts com IA" Command="{Binding RefineQuotationPromptsCommand}" />
                             <Button Content="Retomar automação" Command="{Binding ResumeQuotationAutomationCommand}" />
                             <Button Content="Cancelar automação" Command="{Binding CancelQuotationAutomationCommand}" />
+                            <Button Content="Pesquisar restritivo" Command="{Binding OpenRestrictiveQuotationSearchCommand}" />
+                            <Button Content="Pesquisar intermediário" Command="{Binding OpenIntermediateQuotationSearchCommand}" />
+                            <Button Content="Pesquisar amplo" Command="{Binding OpenBroadQuotationSearchCommand}" />
                             <Button Content="Atualizar amostra com a pesquisa atual"
                                     Command="{Binding UpdateQuotationSampleCommand}" />
                             <Button Content="Ajustar pesos do índice"
                                     Command="{Binding AdjustQuotationWeightsCommand}" />
                             <Button Content="Exportar Excel" Command="{Binding ExportQuotationCommand}" />
+                            <Button Content="Exportar pacote"
+                                    Command="{Binding ExportQuotationPackageCommand}"
+                                    ToolTip="Salva a cotação selecionada com preços, cestas, pesquisas e prints." />
+                            <Button Content="Importar pacote"
+                                    Command="{Binding ImportQuotationPackageCommand}"
+                                    ToolTip="Importa um arquivo portátil .pncpcotacao sem substituir o banco inteiro." />
                             <Button Content="Escolher colunas — itens" Click="ChooseColumns_Click"
                                     Tag="{Binding ElementName=QuotationLinesGrid}"
                                     ToolTip="Personalize visibilidade, ordem e largura; o layout será mantido nos próximos usos." />
@@ -414,12 +426,17 @@
                         <DataGrid x:Name="QuotationLinesGrid" ItemsSource="{Binding QuotationLines}"
                                   SelectedItem="{Binding SelectedQuotationLine}"
                                   AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
+                                  MouseDoubleClick="QuotationLinesGrid_MouseDoubleClick"
                                   EnableRowVirtualization="True" EnableColumnVirtualization="True"
                                   ScrollViewer.HorizontalScrollBarVisibility="Auto"
                                   ScrollViewer.VerticalScrollBarVisibility="Auto">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="Descrição" Binding="{Binding Description}" Width="230" MinWidth="180" />
-                                <DataGridTextColumn Header="Pesquisa" Binding="{Binding SearchText}" Width="220" />
+                                <DataGridTextColumn Header="Restritivo" Binding="{Binding RestrictiveSearchText}" Width="220" />
+                                <DataGridTextColumn Header="Intermediário" Binding="{Binding IntermediateSearchText}" Width="200" />
+                                <DataGridTextColumn Header="Amplo" Binding="{Binding BroadSearchText}" Width="180" />
+                                <DataGridTextColumn Header="Nível ativo" Binding="{Binding ActivePromptLevel}" Width="95" />
+                                <DataGridTextColumn Header="Contratos no nível" Binding="{Binding ContractsAtActiveLevel}" Width="105" />
                                 <DataGridTextColumn Header="Qtd." Binding="{Binding RequestedQuantity, StringFormat=N4}" Width="72" />
                                 <DataGridTextColumn Header="Unidade" Binding="{Binding RequestedUnit}" Width="75" />
                                 <DataGridTextColumn Header="Amostra" Binding="{Binding CollectedCount}" Width="66" />
@@ -428,6 +445,11 @@
                                 <DataGridTextColumn Header="Descartados" Binding="{Binding RejectedCount}" Width="75" />
                                 <DataGridTextColumn Header="Cestas" Binding="{Binding BasketCount}" Width="62" />
                                 <DataGridTextColumn Header="Alvo auto." Binding="{Binding RequestedBasketSize}" Width="72" />
+                                <DataGridTextColumn Header="Estimativa unit." Binding="{Binding EstimatedUnitPrice, StringFormat=C4}" Width="105" />
+                                <DataGridTextColumn Header="Estimativa total" Binding="{Binding EstimatedTotalPrice, StringFormat=C4}" Width="105" />
+                                <DataGridTextColumn Header="Faixa estimada" Binding="{Binding EstimateStage}" Width="115" />
+                                <DataGridTextColumn Header="Contratos exam." Binding="{Binding ContractsExamined}" Width="95" />
+                                <DataGridTextColumn Header="Lotes feitos" Binding="{Binding BatchesCompleted}" Width="78" />
                                 <DataGridTextColumn Header="Versão" Binding="{Binding SampleVersion}" Width="58" />
                                 <DataGridTextColumn Header="Amostra em" Binding="{Binding SampledAt, StringFormat=dd/MM/yyyy HH:mm}" Width="122" />
                                 <DataGridTextColumn Header="Pesos do índice" Binding="{Binding WeightSummary}" Width="330" />
@@ -440,14 +462,13 @@
 
                         <GridSplitter Grid.Column="1" Width="8" HorizontalAlignment="Stretch" Background="#DDD" />
 
-                        <TabControl Grid.Column="2">
-                            <TabItem Header="Cestas automáticas e manuais">
-                                <Grid>
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="*" />
-                                        <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="145" />
-                                    </Grid.RowDefinitions>
+                        <Grid Grid.Column="2">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="180" />
+                            </Grid.RowDefinitions>
                                     <DataGrid x:Name="QuotationBasketsGrid" ItemsSource="{Binding QuotationBaskets}"
                                               SelectedItem="{Binding SelectedQuotationBasket}"
                                               AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
@@ -487,111 +508,90 @@
                                             <Button Content="Confirmar cesta escolhida" Command="{Binding ConfirmQuotationBasketCommand}" />
                                         </StackPanel>
                                     </DockPanel>
-                                    <DataGrid x:Name="SelectedBasketReferencesGrid" Grid.Row="2"
-                                              ItemsSource="{Binding SelectedBasketReferences}"
-                                              SelectedItem="{Binding SelectedBasketReference}"
+
+                                    <DockPanel Grid.Row="2" Margin="0,2,0,4">
+                                        <TextBlock Text="Preços:" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                        <Button Content="Na cesta" Click="MainScopeInBasket_Click" />
+                                        <Button Content="Elegíveis fora" Click="MainScopeOutside_Click" />
+                                        <Button Content="Descartados/duplicados" Click="MainScopeRejected_Click" />
+                                        <Button Content="Todos" Click="MainScopeAll_Click" />
+                                        <TextBlock Text="{Binding QuotationReferenceScopeSummary}"
+                                                   VerticalAlignment="Center" Margin="8,0" />
+                                    </DockPanel>
+
+                                    <DataGrid x:Name="SelectedBasketReferencesGrid" Grid.Row="3"
+                                              ItemsSource="{Binding VisibleQuotationReferences}"
+                                              SelectedItem="{Binding SelectedVisibleQuotationReference}"
                                               AutoGenerateColumns="False" IsReadOnly="True"
                                               EnableRowVirtualization="True" EnableColumnVirtualization="True"
+                                              PreviewMouseRightButtonDown="MainReferences_PreviewMouseRightButtonDown"
+                                              MouseDoubleClick="MainReferences_MouseDoubleClick"
                                               ScrollViewer.HorizontalScrollBarVisibility="Auto"
                                               ScrollViewer.VerticalScrollBarVisibility="Auto">
+                                        <DataGrid.ContextMenu>
+                                            <ContextMenu x:Name="MainReferenceContextMenu">
+                                                <MenuItem Header="Abrir PNCP/site" Click="MainReferenceOpen_Click" />
+                                                <MenuItem Header="Acessar documentos" Click="MainReferenceDocuments_Click" />
+                                                <MenuItem Header="Ver páginas relevantes" Click="MainReferenceRelevant_Click" />
+                                                <Separator />
+                                                <MenuItem Header="Adicionar/retirar da cesta" Click="MainReferenceToggle_Click" />
+                                                <MenuItem Header="Abrir item detalhado" Click="MainReferenceOpenItem_Click" />
+                                            </ContextMenu>
+                                        </DataGrid.ContextMenu>
                                         <DataGrid.Columns>
-                                            <DataGridTemplateColumn Header="Cesta manual" Width="115"
-                                                                    services:DataGridColumnLayoutService.Key="manual-basket-action">
+                                            <DataGridTemplateColumn Header="Na cesta" Width="72"
+                                                                    services:DataGridColumnLayoutService.Key="in-basket">
                                                 <DataGridTemplateColumn.CellTemplate>
                                                     <DataTemplate>
-                                                        <Button Content="Remover da cesta"
-                                                                Command="{Binding DataContext.RemoveManualBasketReferenceCommand, RelativeSource={RelativeSource AncestorType={x:Type DataGrid}}}" />
+                                                        <CheckBox IsChecked="{Binding IsInSelectedBasket, Mode=OneWay}"
+                                                                  HorizontalAlignment="Center"
+                                                                  Click="MainMembership_Click" />
                                                     </DataTemplate>
                                                 </DataGridTemplateColumn.CellTemplate>
                                             </DataGridTemplateColumn>
-                                            <DataGridTemplateColumn Header="Ação" Width="205"
+                                            <DataGridTextColumn Header="Fonte" Binding="{Binding SourceLabel}" Width="82" />
+                                            <DataGridTextColumn Header="Publicação/captura"
+                                                                Binding="{Binding PublicationDate, StringFormat=dd/MM/yyyy}"
+                                                                Width="120" />
+                                            <DataGridTextColumn Header="UF" Binding="{Binding Uf}" Width="42" />
+                                            <DataGridTextColumn Header="Descrição" Binding="{Binding Description}"
+                                                                Width="260" MinWidth="180" />
+                                            <DataGridTextColumn Header="Unidade" Binding="{Binding Unit}" Width="78" />
+                                            <DataGridTextColumn Header="Quantidade" Binding="{Binding Quantity, StringFormat=N4}"
+                                                                Width="105" />
+                                            <DataGridTextColumn Header="CNPJ/NI" Binding="{Binding SupplierTaxId}" Width="135" />
+                                            <DataGridTextColumn Header="Empresa" Binding="{Binding SupplierName}" Width="180" />
+                                            <DataGridTextColumn Header="Unitário" Binding="{Binding UnitPrice, StringFormat=C4}" Width="105" />
+                                            <DataGridTextColumn Header="Situação" Binding="{Binding State}" Width="90" />
+                                            <DataGridTemplateColumn Header="Ações" Width="82"
                                                                     services:DataGridColumnLayoutService.Key="actions">
                                                 <DataGridTemplateColumn.CellTemplate>
                                                     <DataTemplate>
-                                                        <StackPanel Orientation="Horizontal">
-                                                            <Button Content="Abrir PNCP"
-                                                                    Command="{Binding DataContext.OpenQuotationReferenceCommand, RelativeSource={RelativeSource AncestorType={x:Type DataGrid}}}"
-                                                                    CommandParameter="{Binding}" />
-                                                            <Button Content="Documentos"
-                                                                    Command="{Binding DataContext.AccessQuotationDocumentsCommand, RelativeSource={RelativeSource AncestorType={x:Type DataGrid}}}"
-                                                                    CommandParameter="{Binding}" />
-                                                        </StackPanel>
+                                                        <Button Content="Ações ▾" Click="MainReferenceActions_Click" />
                                                     </DataTemplate>
                                                 </DataGridTemplateColumn.CellTemplate>
                                             </DataGridTemplateColumn>
-                                            <DataGridTextColumn Header="Empresa" Binding="{Binding SupplierName}" Width="180" MinWidth="150" />
-                                            <DataGridTextColumn Header="CNPJ" Binding="{Binding SupplierTaxId}" Width="135" />
-                                            <DataGridTextColumn Header="Preço" Binding="{Binding UnitPrice, StringFormat=C4}" Width="105" />
-                                            <DataGridTextColumn Header="Descrição encontrada" Binding="{Binding ItemDescription}" Width="260" MinWidth="180" />
-                                            <DataGridTextColumn Header="Unidade" Binding="{Binding ItemUnit}" Width="78" />
-                                            <DataGridTextColumn Header="Qtd. homologada" Binding="{Binding HomologatedQuantity, StringFormat=N4}" Width="110" />
-                                            <DataGridTextColumn Header="Município/UF" Binding="{Binding MunicipalityRegion}" Width="125" />
-                                            <DataGridTextColumn Header="Índice" Binding="{Binding AdequacyTotal, StringFormat=N2}" Width="70" />
-                                            <DataGridTextColumn Header="Descrição" Binding="{Binding DescriptionScore, StringFormat=N2}" Width="72" />
-                                            <DataGridTextColumn Header="Unid./emb." Binding="{Binding UnitScore, StringFormat=N2}" Width="72" />
-                                            <DataGridTextColumn Header="Quantidade" Binding="{Binding QuantityScore, StringFormat=N2}" Width="76" />
-                                            <DataGridTextColumn Header="Proximidade" Binding="{Binding ProximityScore, StringFormat=N2}" Width="80" />
-                                            <DataGridTextColumn Header="Atualidade" Binding="{Binding RecencyScore, StringFormat=N2}" Width="72" />
-                                            <DataGridTextColumn Header="Como corresponde" Binding="{Binding Explanation}" Width="360" MinWidth="320" />
+                                            <DataGridTextColumn Header="Município" Binding="{Binding Municipality}"
+                                                                Width="130" Visibility="Collapsed" />
+                                            <DataGridTextColumn Header="Índice" Binding="{Binding AdequacyTotal, StringFormat=N2}"
+                                                                Width="70" Visibility="Collapsed" />
+                                            <DataGridTextColumn Header="Descrição — índice" Binding="{Binding DescriptionScore, StringFormat=N2}"
+                                                                Width="110" Visibility="Collapsed" />
+                                            <DataGridTextColumn Header="Unidade — índice" Binding="{Binding UnitScore, StringFormat=N2}"
+                                                                Width="105" Visibility="Collapsed" />
+                                            <DataGridTextColumn Header="Quantidade — índice" Binding="{Binding QuantityScore, StringFormat=N2}"
+                                                                Width="120" Visibility="Collapsed" />
+                                            <DataGridTextColumn Header="Proximidade — índice" Binding="{Binding ProximityScore, StringFormat=N2}"
+                                                                Width="120" Visibility="Collapsed" />
+                                            <DataGridTextColumn Header="Atualidade — índice" Binding="{Binding RecencyScore, StringFormat=N2}"
+                                                                Width="110" Visibility="Collapsed" />
+                                            <DataGridTextColumn Header="Nível do prompt" Binding="{Binding PromptLevel}"
+                                                                Width="105" Visibility="Collapsed" />
+                                            <DataGridTextColumn Header="Motivo/explicação" Binding="{Binding Explanation}"
+                                                                Width="400" Visibility="Collapsed" />
                                         </DataGrid.Columns>
                                     </DataGrid>
-                                </Grid>
-                            </TabItem>
-
-                            <TabItem Header="Referências e auditoria">
-                                <Grid>
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="*" />
-                                        <RowDefinition Height="Auto" />
-                                    </Grid.RowDefinitions>
-                                    <DataGrid x:Name="QuotationReferencesGrid"
-                                              ItemsSource="{Binding QuotationReferences}"
-                                              AutoGenerateColumns="False" IsReadOnly="True"
-                                              EnableRowVirtualization="True" EnableColumnVirtualization="True"
-                                              ScrollViewer.HorizontalScrollBarVisibility="Auto"
-                                              ScrollViewer.VerticalScrollBarVisibility="Auto">
-                                        <DataGrid.Columns>
-                                        <DataGridTemplateColumn Header="Ação" Width="205"
-                                                                services:DataGridColumnLayoutService.Key="actions">
-                                            <DataGridTemplateColumn.CellTemplate>
-                                                <DataTemplate>
-                                                    <StackPanel Orientation="Horizontal">
-                                                        <Button Content="Abrir PNCP"
-                                                                Command="{Binding DataContext.OpenQuotationReferenceCommand, RelativeSource={RelativeSource AncestorType={x:Type DataGrid}}}"
-                                                                CommandParameter="{Binding}" />
-                                                        <Button Content="Documentos"
-                                                                Command="{Binding DataContext.AccessQuotationDocumentsCommand, RelativeSource={RelativeSource AncestorType={x:Type DataGrid}}}"
-                                                                CommandParameter="{Binding}" />
-                                                    </StackPanel>
-                                                </DataTemplate>
-                                            </DataGridTemplateColumn.CellTemplate>
-                                        </DataGridTemplateColumn>
-                                        <DataGridTextColumn Header="Estado" Binding="{Binding State}" Width="85" />
-                                        <DataGridTextColumn Header="Empresa" Binding="{Binding SupplierName}" Width="170" />
-                                        <DataGridTextColumn Header="CNPJ" Binding="{Binding SupplierTaxId}" Width="135" />
-                                        <DataGridTextColumn Header="Preço" Binding="{Binding UnitPrice, StringFormat=C4}" Width="105" />
-                                        <DataGridTextColumn Header="Descrição encontrada" Binding="{Binding ItemDescription}" Width="280" MinWidth="220" />
-                                        <DataGridTextColumn Header="Unidade" Binding="{Binding ItemUnit}" Width="80" />
-                                        <DataGridTextColumn Header="Qtd. homologada" Binding="{Binding HomologatedQuantity, StringFormat=N4}" Width="115" />
-                                        <DataGridTextColumn Header="Município" Binding="{Binding Municipality}" Width="130" />
-                                        <DataGridTextColumn Header="UF" Binding="{Binding Uf}" Width="40" />
-                                        <DataGridTextColumn Header="Data" Binding="{Binding ResultDate, StringFormat=dd/MM/yyyy}" Width="90" />
-                                        <DataGridTextColumn Header="Índice" Binding="{Binding AdequacyTotal, StringFormat=N2}" Width="70" />
-                                        <DataGridTextColumn Header="Descrição" Binding="{Binding DescriptionScore, StringFormat=N2}" Width="75" />
-                                        <DataGridTextColumn Header="Unidade" Binding="{Binding UnitScore, StringFormat=N2}" Width="68" />
-                                        <DataGridTextColumn Header="Quantidade" Binding="{Binding QuantityScore, StringFormat=N2}" Width="78" />
-                                        <DataGridTextColumn Header="Proximidade" Binding="{Binding ProximityScore, StringFormat=N2}" Width="82" />
-                                        <DataGridTextColumn Header="Atualidade" Binding="{Binding RecencyScore, StringFormat=N2}" Width="72" />
-                                        <DataGridTextColumn Header="Explicação" Binding="{Binding Explanation}" Width="400" MinWidth="350" />
-                                        </DataGrid.Columns>
-                                    </DataGrid>
-                                    <Button Grid.Row="1" Content="Escolher colunas — auditoria"
-                                            HorizontalAlignment="Right" Margin="0,5,0,0"
-                                            Click="ChooseColumns_Click"
-                                            Tag="{Binding ElementName=QuotationReferencesGrid}" />
-                                </Grid>
-                            </TabItem>
-                        </TabControl>
+                        </Grid>
                     </Grid>
                 </Grid>
             </TabItem>

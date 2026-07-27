@@ -15,6 +15,16 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis)
     public QuotationLine Line => Analysis.Line;
     public string Description => Line.Description;
     public string SearchText => Line.SearchText;
+    public string RestrictiveSearchText => Line.PromptSet?.RestrictiveText ?? Line.SearchText;
+    public string IntermediateSearchText => Line.PromptSet?.IntermediateText ?? string.Empty;
+    public string BroadSearchText => Line.PromptSet?.BroadText ?? string.Empty;
+    public string ActivePromptLevel => Line.PromptSet?.ActiveLevel switch
+    {
+        PromptMatchLevel.Intermediate => "Intermediário",
+        PromptMatchLevel.Broad => "Amplo",
+        _ => "Restritivo"
+    };
+    public int ContractsAtActiveLevel => Line.PromptSet?.ContractsAtActiveLevel ?? 0;
     public decimal RequestedQuantity => Line.RequestedQuantity;
     public string RequestedUnit => Line.RequestedUnit;
     public int CollectedCount => Analysis.CollectedCount;
@@ -24,6 +34,17 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis)
     public int BasketCount => Analysis.Baskets.Count;
     public int BasketPoolCount => Analysis.BasketPoolCount;
     public int RequestedBasketSize => Line.RequestedBasketSize;
+    public decimal? EstimatedUnitPrice => Line.EstimatedUnitPrice;
+    public decimal? EstimatedTotalPrice => Line.EstimatedTotalPrice;
+    public string EstimateStage => Line.EstimateStage switch
+    {
+        EstimateResolutionStage.Within25Percent => "Estimativa ±25%",
+        EstimateResolutionStage.Within50Percent => "Estimativa ±50%",
+        EstimateResolutionStage.Unrestricted => "Sem faixa",
+        _ => "Não utilizada"
+    };
+    public int ContractsExamined => Line.SearchCheckpoint.ContractsExamined;
+    public int BatchesCompleted => Line.SearchCheckpoint.BatchesCompleted;
     public int SampleVersion => Line.SampleVersion;
     public DateTimeOffset SampledAt => Line.SampledAt;
     public string WeightSummary => Line.Weights.ToString();
@@ -48,6 +69,7 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis)
         QuotationAutomationItemState.Insufficient => "Insuficiente",
         QuotationAutomationItemState.Failed => "Falha",
         QuotationAutomationItemState.CompletedWithWarning => "Concluído com ressalva",
+        QuotationAutomationItemState.TimeExpired => "Prazo encerrado",
         _ => Line.AutomationState.ToString()
     };
     public string AutomationMessage => Line.AutomationMessage;
@@ -114,6 +136,8 @@ public sealed class QuotationReferenceDisplay(QuotationReference source)
     public decimal? HomologatedQuantity => Source.HomologatedQuantity;
     public string Municipality => Source.Municipality;
     public string Uf => Source.Uf;
+    public DateTimeOffset? PublicationDate => Source.PublicationDate;
+    public string PortalUrl => Source.PortalUrl;
     public string MunicipalityRegion => string.IsNullOrWhiteSpace(Source.Uf)
         ? Source.Municipality
         : $"{Source.Municipality}/{Source.Uf}";
@@ -131,4 +155,67 @@ public sealed class QuotationReferenceDisplay(QuotationReference source)
         _ => "Descartada"
     };
     public string Explanation => $"{Source.StateReason} {Source.Adequacy.Explanation}";
+    public string PromptLevel => Source.MatchedPromptLevel switch
+    {
+        PromptMatchLevel.Restrictive => "Restritivo",
+        PromptMatchLevel.Intermediate => "Intermediário",
+        PromptMatchLevel.Broad => "Amplo",
+        _ => string.Empty
+    };
+    public string SourceLabel => Source.Source == QuotationReferenceSource.InternetIncisoIII
+        ? "Inciso III"
+        : "Inciso II";
+    public string DisplayTitle =>
+        $"{SourceLabel} · {SupplierName} · {UnitPrice:C4} · {ItemDescription}";
+}
+
+public sealed class QuotationPriceDisplayRow(
+    QuotationReference source,
+    bool isInSelectedBasket) : ObservableObject
+{
+    private bool _isInSelectedBasket = isInSelectedBasket;
+
+    public QuotationReference Source { get; } = source;
+    public QuotationReferenceDisplay ReferenceDisplay => new(Source);
+    public string Id => Source.Id;
+    public string SourceLabel => Source.Source == QuotationReferenceSource.InternetIncisoIII
+        ? "Inciso III"
+        : "Inciso II";
+    public DateTimeOffset? PublicationDate => Source.PublicationDate;
+    public string Uf => Source.Uf;
+    public string Description => Source.ItemDescription;
+    public string Unit => Source.ItemUnit;
+    public decimal? Quantity => Source.HomologatedQuantity ?? Source.ItemRequestedQuantity;
+    public string SupplierTaxId => Source.SupplierTaxId;
+    public string SupplierName => Source.SupplierName;
+    public decimal UnitPrice => Source.UnitPrice;
+    public string State => Source.State switch
+    {
+        QuotationReferenceState.Eligible => "Elegível",
+        QuotationReferenceState.Duplicate => "Duplicada",
+        _ => "Descartada"
+    };
+    public QuotationReferenceState StateKind => Source.State;
+    public decimal AdequacyTotal => Source.Adequacy.Total;
+    public decimal DescriptionScore => Source.Adequacy.DescriptionScore;
+    public decimal UnitScore => Source.Adequacy.UnitScore;
+    public decimal QuantityScore => Source.Adequacy.QuantityScore;
+    public decimal ProximityScore => Source.Adequacy.ProximityScore;
+    public decimal RecencyScore => Source.Adequacy.RecencyScore;
+    public string PromptLevel => Source.MatchedPromptLevel switch
+    {
+        PromptMatchLevel.Restrictive => "Restritivo",
+        PromptMatchLevel.Intermediate => "Intermediário",
+        PromptMatchLevel.Broad => "Amplo",
+        _ => "Personalizado"
+    };
+    public string Explanation => $"{Source.StateReason} {Source.Adequacy.Explanation}".Trim();
+    public string Municipality => Source.Municipality;
+    public string PortalUrl => Source.PortalUrl;
+
+    public bool IsInSelectedBasket
+    {
+        get => _isInSelectedBasket;
+        set => SetProperty(ref _isInSelectedBasket, value);
+    }
 }

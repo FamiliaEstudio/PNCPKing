@@ -247,6 +247,36 @@ public sealed class QuotationTests
     }
 
     [Fact]
+    public void AutomaticBaskets_UsePromptLevelOnlyAsTieBreaker()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var line = Line("Café", 100m, "pacote");
+        var references = new[]
+        {
+            Reference("strict", "contract-1", "11222333000181", 100m) with
+            {
+                MatchedPromptLevel = PromptMatchLevel.Restrictive
+            },
+            Reference("intermediate", "contract-2", "60701190000104", 100m) with
+            {
+                MatchedPromptLevel = PromptMatchLevel.Intermediate
+            },
+            Reference("broad", "contract-3", "33000167000101", 100m) with
+            {
+                MatchedPromptLevel = PromptMatchLevel.Broad
+            },
+            Reference("legacy", "contract-4", "00360305000104", 100m)
+        };
+
+        var result = analyzer.Analyze(line, references);
+        var recommended = Assert.Single(result.Baskets, basket => basket.IsRecommended);
+
+        Assert.Equal(
+            ["broad", "intermediate", "strict"],
+            recommended.References.Select(reference => reference.Id).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
     public void ManualBaskets_ClassifyIncompleteRegularAndInvalidStates()
     {
         var analyzer = new QuotationAnalyzer(Today);
@@ -575,7 +605,7 @@ public sealed class QuotationTests
     }
 
     [Fact]
-    public async Task Workbook_ExportsOneSimpleSheetWithIncisoIiAndPendingObservation()
+    public async Task Workbook_PreservesTemplateAndBuildsConsecutiveDynamicBlocks()
     {
         var analyzer = new QuotationAnalyzer(Today);
         var project = new QuotationProject(Guid.NewGuid(), "Cotação teste", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
@@ -603,28 +633,73 @@ public sealed class QuotationTests
 
             using var workbook = new XLWorkbook(path);
             var sheet = Assert.Single(workbook.Worksheets);
-            Assert.Equal("Cotação", sheet.Name);
-            Assert.Equal("Café torrado", sheet.Cell(1, 1).GetString());
-            Assert.Equal("Link PNCP do item", sheet.Cell(1, 5).GetString());
-            Assert.Equal("11.222.333/0001-81", sheet.Cell(2, 2).GetString());
-            Assert.Equal(XLDataType.Text, sheet.Cell(2, 2).DataType);
-            Assert.Equal("INCISO II", sheet.Cell(2, 3).GetString());
-            Assert.Equal(90m, sheet.Cell(2, 4).GetValue<decimal>());
-            const string expectedUrl = "https://pncp.gov.br/app/editais/teste/2026/1";
-            Assert.Equal(expectedUrl, sheet.Cell(2, 5).GetString());
-            Assert.Equal(XLDataType.Text, sheet.Cell(2, 5).DataType);
-            Assert.False(sheet.Hyperlinks.TryGet(sheet.Cell(2, 5).Address, out _));
-            Assert.True(sheet.Column(5).Width >= expectedUrl.Length + 2);
-            Assert.NotEqual(XLColor.Blue, sheet.Cell(2, 5).Style.Font.FontColor);
+            Assert.Equal(" Análise 1 a 5", sheet.Name);
+            Assert.Equal("PLANILHA DE AVALIAÇÃO DE PREÇOS", sheet.Cell("B2").GetString());
+            var picture = Assert.Single(sheet.Pictures);
+            Assert.Equal(2, picture.TopLeftCell.Address.ColumnNumber);
+            Assert.Equal(2, picture.TopLeftCell.Address.RowNumber);
+            Assert.True(picture.Width <= Math.Floor((sheet.Column(2).Width * 7d) + 5d));
+            Assert.True(picture.Height <= sheet.Row(2).Height * 96d / 72d);
+            Assert.InRange(
+                Math.Abs(
+                    picture.Width / (double)picture.Height -
+                    picture.OriginalWidth / (double)picture.OriginalHeight),
+                0,
+                0.01);
+            Assert.True(sheet.Cell("B2").IsMerged());
+            Assert.True(sheet.Cell("I2").IsMerged());
+            Assert.Equal(180d, sheet.Row(2).Height);
+            Assert.True(sheet.Column(6).IsHidden);
+            Assert.True(sheet.Column(7).IsHidden);
+            Assert.True(sheet.Column(10).IsHidden);
+            Assert.False(sheet.ShowGridLines);
+
+            Assert.Equal("Item 1 - Café torrado", sheet.Cell("B4").GetString());
+            Assert.True(sheet.Cell("B4").IsMerged());
+            Assert.Equal("EMPRESA", sheet.Cell("B5").GetString());
+            Assert.Equal("CNPJ", sheet.Cell("C5").GetString());
+            Assert.Equal("LINK PNCP", sheet.Cell("D5").GetString());
+            Assert.Equal("VALOR DA COTAÇÃO", sheet.Cell("E5").GetString());
+            Assert.Equal("Fornecedor a", sheet.Cell("B6").GetString());
+            Assert.Equal(90m, sheet.Cell("E6").GetValue<decimal>());
             Assert.Equal(
-                XLFontUnderlineValues.None,
-                sheet.Cell(2, 5).Style.Font.Underline);
-            Assert.Equal("Açúcar", sheet.Cell(6, 1).GetString());
-            Assert.Equal("Preço 1 não obtido", sheet.Cell(7, 1).GetString());
-            Assert.Equal("IMPOSSÍVEL OBTER PELO INCISO II", sheet.Cell(7, 3).GetString());
-            Assert.True(sheet.Cell(7, 5).IsEmpty());
-            Assert.Contains("somente 0 de 3", sheet.Cell(10, 1).GetString());
-            Assert.DoesNotContain(sheet.CellsUsed(), cell => cell.GetString() is "Empresa" or "CNPJ" or "Valor");
+                "IF(E6=\"\",\"\",IFERROR(AVERAGE(E7:E8),\"\"))",
+                sheet.Cell("F6").FormulaA1);
+            Assert.Equal(
+                "IF(OR(E6=\"\",F6=\"\"),\"\",E6/F6-1)",
+                sheet.Cell("G6").FormulaA1);
+            Assert.Equal(
+                "IF(E6=\"\",\"\",IF(OR(H6=\"EXCESSIVO\",I6=\"INEXEQUÍVEL\"),\"\",E6))",
+                sheet.Cell("J6").FormulaA1);
+            Assert.Equal(
+                "IFERROR(SUM(J6:J8)/COUNTIF(J6:J8,\">0\"),\"\")",
+                sheet.Cell("C9").FormulaA1);
+            Assert.True(sheet.Cell("C9").IsMerged());
+            Assert.True(sheet.Cell("E9").IsMerged());
+
+            Assert.All(sheet.Range("A10:J10").Cells(), cell => Assert.True(cell.IsEmpty()));
+            Assert.DoesNotContain(sheet.MergedRanges, range =>
+                range.RangeAddress.FirstAddress.RowNumber == 10);
+            Assert.Equal("Item 2 - Açúcar", sheet.Cell("B11").GetString());
+            Assert.Equal("Preço 1 não obtido", sheet.Cell("B13").GetString());
+            Assert.Equal("Preço 2 não obtido", sheet.Cell("B14").GetString());
+            Assert.Equal("Preço 3 não obtido", sheet.Cell("B15").GetString());
+            Assert.True(sheet.Cell("E13").IsEmpty());
+            Assert.Equal(
+                "IF(E13=\"\",\"\",IFERROR(AVERAGE(E14:E15),\"\"))",
+                sheet.Cell("F13").FormulaA1);
+            Assert.Equal(
+                "IFERROR(SUM(J13:J15)/COUNTIF(J13:J15,\">0\"),\"\")",
+                sheet.Cell("C16").FormulaA1);
+            Assert.True(sheet.Cell("C16").IsMerged());
+            Assert.Equal(
+                16,
+                sheet.LastCellUsed(XLCellsUsedOptions.Contents)!.Address.RowNumber);
+            Assert.Equal(6, sheet.ConditionalFormats.Count());
+            Assert.Equal(XLCalculateMode.Auto, workbook.CalculateMode);
+            Assert.True(workbook.CalculationOnSave);
+            Assert.True(workbook.ForceFullCalculation);
+            Assert.True(workbook.FullCalculationOnLoad);
         }
         finally
         {
@@ -635,29 +710,26 @@ public sealed class QuotationTests
     }
 
     [Fact]
-    public async Task Workbook_PreservesExceptionalLongUrlAndWrapsAtExcelWidthLimit()
+    public async Task Workbook_WritesLinksAndCnpjsAsTextWithoutChangingTemplateColumns()
     {
         var analyzer = new QuotationAnalyzer(Today);
         var project = new QuotationProject(
-            Guid.NewGuid(),
-            "Cotação URL longa",
-            DateTimeOffset.UtcNow,
-            DateTimeOffset.UtcNow);
+            Guid.NewGuid(), "CNPJ e URL", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
         var longUrl = "https://pncp.gov.br/app/editais/teste/2026/1?documento=" +
                       new string('a', 280);
         var analysis = analyzer.Analyze(
-            Line("Café torrado", 100m, "pacote"),
+            Line("Café", 10m, "pacote"),
             [
-                Reference("a", "c1", "11222333000181", 90m) with { PortalUrl = longUrl },
-                Reference("b", "c2", "60701190000104", 100m),
-                Reference("c", "c3", "33000167000101", 110m)
+                Reference("numeric", "c1", "03370573000103", 40m) with { PortalUrl = longUrl },
+                Reference("alpha", "c2", "12ABC34501DE35", 41m),
+                Reference("other", "c3", "NI-123", 42m)
             ]);
-        analysis = Confirm(analysis, Assert.Single(analysis.Baskets));
+        analysis = Confirm(analysis, analysis.Baskets.Single(basket => basket.IsRecommended));
         var path = Path.Combine(
             Path.GetTempPath(),
             "PNCPKing.Tests",
             Guid.NewGuid().ToString("N"),
-            "url-longa.xlsx");
+            "cnpj-url.xlsx");
         try
         {
             await new QuotationWorkbookService().ExportAsync(
@@ -666,43 +738,16 @@ public sealed class QuotationTests
 
             using var workbook = new XLWorkbook(path);
             var sheet = Assert.Single(workbook.Worksheets);
-            Assert.Equal(longUrl, sheet.Cell(2, 5).GetString());
-            Assert.InRange(sheet.Column(5).Width, 254, 255);
-            Assert.True(sheet.Column(5).Style.Alignment.WrapText);
-            Assert.False(sheet.Hyperlinks.TryGet(sheet.Cell(2, 5).Address, out _));
-        }
-        finally
-        {
-            if (File.Exists(path)) File.Delete(path);
-            var directory = Path.GetDirectoryName(path)!;
-            if (Directory.Exists(directory)) Directory.Delete(directory, true);
-        }
-    }
-
-    [Fact]
-    public async Task Workbook_FormatsNumericAndAlphanumericCnpjAndPreservesOtherIdentifiersAsText()
-    {
-        var analyzer = new QuotationAnalyzer(Today);
-        var project = new QuotationProject(Guid.NewGuid(), "CNPJ", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
-        var analysis = analyzer.Analyze(Line("Café", 10m, "pacote"), [
-            Reference("numeric", "c1", "03370573000103", 40m),
-            Reference("alpha", "c2", "12ABC34501DE35", 41m),
-            Reference("other", "c3", "NI-123", 42m)
-        ]);
-        var path = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"), "cnpj.xlsx");
-        try
-        {
-            await new QuotationWorkbookService().ExportAsync(
-                path,
-                new QuotationProjectReport(project, [analysis]));
-
-            using var workbook = new XLWorkbook(path);
-            var sheet = workbook.Worksheet("Cotação");
-            var taxIds = sheet.Range(2, 2, 4, 2).Cells().Select(cell => cell.GetString()).ToArray();
+            var taxIds = sheet.Range("C6:C8").Cells().Select(cell => cell.GetString()).ToArray();
             Assert.Contains("03.370.573/0001-03", taxIds);
             Assert.Contains("12.ABC.345/01DE-35", taxIds);
             Assert.Contains("NI123", taxIds);
-            Assert.All(sheet.Range(2, 2, 4, 2).Cells(), cell => Assert.Equal(XLDataType.Text, cell.DataType));
+            Assert.All(sheet.Range("C6:C8").Cells(), cell => Assert.Equal(XLDataType.Text, cell.DataType));
+            Assert.Equal(longUrl, sheet.Cell("D6").GetString());
+            Assert.Equal(XLDataType.Text, sheet.Cell("D6").DataType);
+            Assert.False(sheet.Hyperlinks.TryGet(sheet.Cell("D6").Address, out _));
+            Assert.InRange(sheet.Column(4).Width, 44.8, 45.0);
+            Assert.Equal("\"R$\"\\ #,##0.0000;\\-\"R$\"\\ #,##0.0000", sheet.Cell("E6").Style.NumberFormat.Format);
         }
         finally
         {
@@ -713,7 +758,7 @@ public sealed class QuotationTests
     }
 
     [Fact]
-    public async Task Workbook_ExportsTwoBestEligibleReferencesAndInsufficiencyObservation()
+    public async Task Workbook_CompletesAShortBasketToThreePriceRows()
     {
         var analyzer = new QuotationAnalyzer(Today);
         var project = new QuotationProject(Guid.NewGuid(), "Cotação curta", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
@@ -729,13 +774,22 @@ public sealed class QuotationTests
                 new QuotationProjectReport(project, [analysis]));
 
             using var workbook = new XLWorkbook(path);
-            var sheet = workbook.Worksheet("Cotação");
-            Assert.Equal("Café", sheet.Cell(1, 1).GetString());
-            Assert.Equal("INCISO II", sheet.Cell(2, 3).GetString());
-            Assert.Equal("INCISO II", sheet.Cell(3, 3).GetString());
-            Assert.Equal("Preço 3 não obtido", sheet.Cell(4, 1).GetString());
-            Assert.Equal("IMPOSSÍVEL OBTER PELO INCISO II", sheet.Cell(4, 3).GetString());
-            Assert.Contains("2 de 3", sheet.Cell(5, 1).GetString());
+            var sheet = Assert.Single(workbook.Worksheets);
+            Assert.Equal("Item 1 - Café", sheet.Cell("B4").GetString());
+            Assert.Equal("Fornecedor melhor", sheet.Cell("B6").GetString());
+            Assert.Equal("Fornecedor segunda", sheet.Cell("B7").GetString());
+            Assert.Equal("Preço 3 não obtido", sheet.Cell("B8").GetString());
+            Assert.True(sheet.Cell("C8").IsEmpty());
+            Assert.True(sheet.Cell("D8").IsEmpty());
+            Assert.True(sheet.Cell("E8").IsEmpty());
+            Assert.True(sheet.Cell("B8").Style.Font.Italic);
+            Assert.Equal(XLColor.DarkRed, sheet.Cell("B8").Style.Font.FontColor);
+            Assert.Equal(
+                "IF(E8=\"\",\"\",IFERROR(AVERAGE(E6:E7),\"\"))",
+                sheet.Cell("F8").FormulaA1);
+            Assert.Equal(
+                "IFERROR(SUM(J6:J8)/COUNTIF(J6:J8,\">0\"),\"\")",
+                sheet.Cell("C9").FormulaA1);
         }
         finally
         {
@@ -746,43 +800,49 @@ public sealed class QuotationTests
     }
 
     [Fact]
-    public async Task Workbook_ExportsManualCompositionAndRecordsIncompleteOrInvalidReasons()
+    public async Task Workbook_ExpandsAManualBasketBeyondSeventeenPrices()
     {
         var analyzer = new QuotationAnalyzer(Today);
-        var project = new QuotationProject(Guid.NewGuid(), "Manuais", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
-        var incompleteLine = Line("Item manual incompleto", 10m, "pacote");
-        var incomplete = analyzer.Analyze(
-            incompleteLine,
-            [Reference("only", "c1", "11222333000181", 100m)],
-            [Manual(incompleteLine, "Manual 1", "only")]);
-        incomplete = Confirm(incomplete, incomplete.Baskets.Single(basket => basket.IsManual));
+        var project = new QuotationProject(
+            Guid.NewGuid(), "Cesta manual extensa", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+        var line = Line("Item com vinte preços", 10m, "pacote");
+        var references = Enumerable.Range(1, 20)
+            .Select(number => Reference(
+                $"manual-{number:D2}",
+                $"contract-{number:D2}",
+                "11222333000181",
+                80m + number))
+            .ToArray();
+        var analysis = analyzer.Analyze(
+            line,
+            references,
+            [Manual(line, "Manual extensa", references.Select(reference => reference.Id).ToArray())]);
+        analysis = Confirm(analysis, analysis.Baskets.Single(basket => basket.IsManual));
 
-        var invalidLine = Line("Item manual inválido", 10m, "pacote");
-        var invalid = analyzer.Analyze(
-            invalidLine,
-            [
-                Reference("low", "c2", "60701190000104", 50m),
-                Reference("middle", "c3", "33000167000101", 100m),
-                Reference("high", "c4", "00360305000104", 150m)
-            ],
-            [Manual(invalidLine, "Manual 2", "low", "middle", "high")]);
-        invalid = Confirm(invalid, invalid.Baskets.Single(basket => basket.IsManual));
-
-        var path = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"), "manual.xlsx");
+        var path = Path.Combine(
+            Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"), "manual.xlsx");
         try
         {
             await new QuotationWorkbookService().ExportAsync(
                 path,
-                new QuotationProjectReport(project, [incomplete, invalid]));
+                new QuotationProjectReport(project, [analysis]));
 
             using var workbook = new XLWorkbook(path);
-            var sheet = workbook.Worksheet("Cotação");
-            Assert.Equal("Preço 2 não obtido", sheet.Cell(3, 1).GetString());
-            Assert.Equal("Preço 3 não obtido", sheet.Cell(4, 1).GetString());
-            Assert.Contains("incompleta", sheet.Cell(5, 1).GetString(), StringComparison.OrdinalIgnoreCase);
-            Assert.Equal("Item manual inválido", sheet.Cell(7, 1).GetString());
-            Assert.Contains("inválida", sheet.Cell(11, 1).GetString(), StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("desvio", sheet.Cell(11, 1).GetString(), StringComparison.OrdinalIgnoreCase);
+            var sheet = Assert.Single(workbook.Worksheets);
+            Assert.Equal("Item 1 - Item com vinte preços", sheet.Cell("B4").GetString());
+            Assert.Equal(81m, sheet.Cell("E6").GetValue<decimal>());
+            Assert.Equal(100m, sheet.Cell("E25").GetValue<decimal>());
+            Assert.Equal(
+                "IF(E6=\"\",\"\",IFERROR(AVERAGE(E7:E25),\"\"))",
+                sheet.Cell("F6").FormulaA1);
+            Assert.Equal(
+                "IF(E25=\"\",\"\",IFERROR(AVERAGE(E6:E24),\"\"))",
+                sheet.Cell("F25").FormulaA1);
+            Assert.Equal(
+                "IFERROR(SUM(J6:J25)/COUNTIF(J6:J25,\">0\"),\"\")",
+                sheet.Cell("C26").FormulaA1);
+            Assert.True(sheet.Cell("C26").IsMerged());
+            Assert.Equal(3, sheet.ConditionalFormats.Count());
         }
         finally
         {

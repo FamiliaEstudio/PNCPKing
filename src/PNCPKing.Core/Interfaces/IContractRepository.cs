@@ -16,6 +16,13 @@ public interface IContractRepository
         ItemCandidateCursor? cursor,
         int pageSize = 200,
         CancellationToken cancellationToken = default);
+    Task<ItemCandidatePage> SearchContractCandidatesAsync(
+        SearchQuery filters,
+        string contractPrompt,
+        long randomPivot,
+        ItemCandidateCursor? cursor,
+        int pageSize = 200,
+        CancellationToken cancellationToken = default);
     Task<ItemSearchLocalSummary> GetItemSearchLocalSummaryAsync(
         SearchQuery filters,
         SearchExpression expression,
@@ -23,6 +30,10 @@ public interface IContractRepository
     Task<ContractRecord?> GetContractAsync(string pncpId, CancellationToken cancellationToken = default);
     Task UpsertItemsAsync(string contractId, IReadOnlyList<ProcurementItem> items, bool forceRefresh, CancellationToken cancellationToken = default);
     Task<ContractItemSnapshot?> GetItemSnapshotAsync(string contractId, CancellationToken cancellationToken = default);
+    Task<ProcurementItem?> GetItemAsync(
+        string contractId,
+        long itemNumber,
+        CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ProcurementItem>> SearchItemsAsync(string contractId, string text, CancellationToken cancellationToken = default);
     Task<CachedItemResults?> GetCachedItemResultsAsync(string contractId, long itemNumber, CancellationToken cancellationToken = default);
     Task ReplaceItemResultsAsync(string contractId, long itemNumber, IReadOnlyList<HomologationResult> results, CancellationToken cancellationToken = default);

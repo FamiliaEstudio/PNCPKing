@@ -7,6 +7,7 @@ namespace PNCPKing.Core.Quotations;
 
 public sealed partial class QuotationAnalyzer
 {
+    public const int BasketAlgorithmVersion = 1;
     public const string RulesVersion = "2.0";
     public const int MaximumBasketPoolSize = 60;
     public const int MaximumCuratedBaskets = 100;
@@ -61,7 +62,9 @@ public sealed partial class QuotationAnalyzer
             .ToArray();
         var scored = exactlyUnique.Select(reference => ScoreReference(line, reference)).ToArray();
         var eligible = scored.Where(reference => reference.State == QuotationReferenceState.Eligible).ToArray();
-        var pool = BuildBasketPool(eligible);
+        var pool = BuildBasketPool(
+            eligible.Where(reference =>
+                reference.Source == QuotationReferenceSource.PncpIncisoII).ToArray());
         var automaticBaskets = BuildAutomaticBaskets(pool, line.RequestedBasketSize);
         var persistedManualBaskets = BuildManualBaskets(scored, manualBaskets ?? []);
         var baskets = persistedManualBaskets.Concat(automaticBaskets).ToArray();
@@ -79,6 +82,11 @@ public sealed partial class QuotationAnalyzer
 
     public QuotationReference ScoreReference(QuotationLine line, QuotationReference reference)
     {
+        if (reference.Source == QuotationReferenceSource.InternetIncisoIII)
+        {
+            return ScoreInternetReference(line, reference);
+        }
+
         var requestedDescriptor = line.Description;
         var foundDescriptor = string.Join(' ', new[]
         {
@@ -156,6 +164,70 @@ public sealed partial class QuotationAnalyzer
         };
     }
 
+    private static QuotationReference ScoreInternetReference(
+        QuotationLine line,
+        QuotationReference reference)
+    {
+        var normalizedTaxId = NormalizeTaxId(reference.SupplierTaxId);
+        var problems = new List<string>();
+        if (reference.UnitPrice <= 0)
+        {
+            problems.Add("preço unitário não positivo");
+        }
+
+        if (line.MinimumUnitPrice is not null && reference.UnitPrice < line.MinimumUnitPrice)
+        {
+            problems.Add("preço abaixo do mínimo definido");
+        }
+
+        if (line.MaximumUnitPrice is not null && reference.UnitPrice > line.MaximumUnitPrice)
+        {
+            problems.Add("preço acima do máximo definido");
+        }
+
+        if (!Uri.TryCreate(reference.PortalUrl, UriKind.Absolute, out var uri) ||
+            uri.Scheme is not ("http" or "https"))
+        {
+            problems.Add("URL da fonte inválida");
+        }
+
+        if (string.IsNullOrWhiteSpace(reference.ItemDescription))
+        {
+            problems.Add("descrição ausente");
+        }
+
+        if (string.IsNullOrWhiteSpace(reference.SupplierName))
+        {
+            problems.Add("empresa ausente");
+        }
+
+        if (!IsValidCnpj(normalizedTaxId))
+        {
+            problems.Add("CNPJ inválido");
+        }
+
+        return reference with
+        {
+            SupplierTaxId = normalizedTaxId,
+            Adequacy = new AdequacyBreakdown(
+                0m,
+                0m,
+                0m,
+                0m,
+                0m,
+                "Referência do Inciso III incluída manualmente com evidências de preço e CNPJ."),
+            State = problems.Count == 0
+                ? QuotationReferenceState.Eligible
+                : QuotationReferenceState.Rejected,
+            StateReason = problems.Count == 0
+                ? "Referência manual do Inciso III com cadastro e evidências completos."
+                : $"Referência do Inciso III inválida: {string.Join("; ", problems)}.",
+            DuplicateOfReferenceId = null,
+            MatchedPromptLevel = null,
+            MatchedSearchText = string.Empty
+        };
+    }
+
     public static bool IsValidCnpj(string? value)
     {
         var normalized = NormalizeTaxId(value);
@@ -185,6 +257,7 @@ public sealed partial class QuotationAnalyzer
                      .OrderByDescending(reference => reference.Adequacy.Total)
                      .ThenBy(reference => reference.DistanceFromRibeiraoKilometers ?? double.MaxValue)
                      .ThenByDescending(reference => reference.ResultDate)
+                     .ThenBy(PromptRank)
                      .ThenBy(reference => reference.Id, StringComparer.Ordinal))
         {
             var duplicateOf = accepted.FirstOrDefault(existing => IsProbableDuplicate(existing, candidate));
@@ -235,10 +308,10 @@ public sealed partial class QuotationAnalyzer
     private static IReadOnlyList<QuotationReference> BuildBasketPool(IReadOnlyList<QuotationReference> eligible)
     {
         var selected = new Dictionary<string, QuotationReference>(StringComparer.Ordinal);
-        Add(selected, eligible.OrderByDescending(reference => reference.Adequacy.Total).ThenBy(reference => reference.Id), 40);
-        Add(selected, eligible.OrderBy(reference => reference.UnitPrice).ThenByDescending(reference => reference.Adequacy.Total), 10);
-        Add(selected, eligible.OrderByDescending(reference => reference.UnitPrice).ThenByDescending(reference => reference.Adequacy.Total), 10);
-        Fill(selected, eligible.OrderByDescending(reference => reference.Adequacy.Total).ThenBy(reference => reference.Id), MaximumBasketPoolSize);
+        Add(selected, eligible.OrderByDescending(reference => reference.Adequacy.Total).ThenBy(PromptRank).ThenBy(reference => reference.Id), 40);
+        Add(selected, eligible.OrderBy(reference => reference.UnitPrice).ThenByDescending(reference => reference.Adequacy.Total).ThenBy(PromptRank), 10);
+        Add(selected, eligible.OrderByDescending(reference => reference.UnitPrice).ThenByDescending(reference => reference.Adequacy.Total).ThenBy(PromptRank), 10);
+        Fill(selected, eligible.OrderByDescending(reference => reference.Adequacy.Total).ThenBy(PromptRank).ThenBy(reference => reference.Id), MaximumBasketPoolSize);
         return selected.Values.Take(MaximumBasketPoolSize).ToArray();
     }
 
@@ -282,12 +355,15 @@ public sealed partial class QuotationAnalyzer
         var rankings = new[]
         {
             pool.OrderByDescending(reference => reference.Adequacy.Total)
+                .ThenBy(PromptRank)
                 .ThenBy(reference => reference.Id, StringComparer.Ordinal).ToArray(),
             pool.OrderBy(reference => reference.UnitPrice)
                 .ThenByDescending(reference => reference.Adequacy.Total)
+                .ThenBy(PromptRank)
                 .ThenBy(reference => reference.Id, StringComparer.Ordinal).ToArray(),
             pool.OrderByDescending(reference => reference.UnitPrice)
                 .ThenByDescending(reference => reference.Adequacy.Total)
+                .ThenBy(PromptRank)
                 .ThenBy(reference => reference.Id, StringComparer.Ordinal).ToArray()
         };
 
@@ -321,6 +397,8 @@ public sealed partial class QuotationAnalyzer
                             requestedSize)
                     })
                     .OrderByDescending(candidate => candidate.Basket.Score)
+                    .ThenBy(candidate => BasketPromptRank(candidate.Basket))
+                    .ThenBy(candidate => PromptRank(candidate.Reference))
                     .ThenBy(candidate => candidate.Reference.Id, StringComparer.Ordinal)
                     .First()
                     .Reference;
@@ -333,16 +411,19 @@ public sealed partial class QuotationAnalyzer
         var baskets = candidates.Values.ToArray();
         var recommended = baskets
             .OrderByDescending(basket => basket.Score)
+            .ThenBy(BasketPromptRank)
             .ThenBy(basket => basket.Key, StringComparer.Ordinal)
             .First();
         var cheapest = baskets
             .OrderBy(basket => basket.AveragePrice)
             .ThenByDescending(basket => basket.Score)
+            .ThenBy(BasketPromptRank)
             .ThenBy(basket => basket.Key, StringComparer.Ordinal)
             .First();
         var mostExpensive = baskets
             .OrderByDescending(basket => basket.AveragePrice)
             .ThenByDescending(basket => basket.Score)
+            .ThenBy(BasketPromptRank)
             .ThenBy(basket => basket.Key, StringComparer.Ordinal)
             .First();
         var marked = baskets
@@ -353,6 +434,7 @@ public sealed partial class QuotationAnalyzer
                 IsMostExpensive = basket.Key == mostExpensive.Key
             })
             .OrderByDescending(basket => basket.Score)
+            .ThenBy(BasketPromptRank)
             .ThenBy(basket => basket.Key, StringComparer.Ordinal)
             .ToList();
         var selectedBaskets = marked.Take(MaximumCuratedBaskets).ToDictionary(basket => basket.Key, StringComparer.Ordinal);
@@ -375,6 +457,7 @@ public sealed partial class QuotationAnalyzer
         return selectedBaskets.Values
             .OrderByDescending(basket => basket.IsRecommended)
             .ThenByDescending(basket => basket.Score)
+            .ThenBy(BasketPromptRank)
             .ThenBy(basket => basket.Key, StringComparer.Ordinal)
             .ToArray();
     }
@@ -482,6 +565,20 @@ public sealed partial class QuotationAnalyzer
             VisualState = visualState,
             ValidationMessage = validationMessage
         };
+    }
+
+    private static int PromptRank(QuotationReference reference)
+    {
+        return reference.MatchedPromptLevel is null
+            ? 3
+            : (int)reference.MatchedPromptLevel.Value;
+    }
+
+    private static decimal BasketPromptRank(QuotationBasket basket)
+    {
+        return basket.References.Count == 0
+            ? 3m
+            : basket.References.Average(reference => (decimal)PromptRank(reference));
     }
 
     private static string BuildManualValidationMessage(

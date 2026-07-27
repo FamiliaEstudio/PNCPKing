@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 8;
+    public const int CurrentSchemaVersion = 12;
 
     private const string GeographicGroupExpression = "CASE WHEN COALESCE(c.geo_layer, 1) = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -190,7 +190,394 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             updateVersion.CommandText = "UPDATE schema_info SET version = 8 WHERE id = 1;";
             await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 8;
         }
+
+        if (version < 9)
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await ApplySchemaV9Async(
+                connection,
+                (SqliteTransaction)transaction,
+                cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 9 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 9;
+        }
+
+        if (version < 10)
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await ApplySchemaV10Async(
+                connection,
+                (SqliteTransaction)transaction,
+                cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 10 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 10;
+        }
+
+        if (version < 11)
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await ApplySchemaV11Async(
+                connection,
+                (SqliteTransaction)transaction,
+                cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 11 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 11;
+        }
+
+        if (version < 12)
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await ApplySchemaV12Async(
+                connection,
+                (SqliteTransaction)transaction,
+                cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 12 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task ApplySchemaV12Async(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        await using var schema = connection.CreateCommand();
+        schema.Transaction = transaction;
+        schema.CommandText = """
+            CREATE TABLE IF NOT EXISTS quotation_item_search_workspaces(
+                line_id TEXT NOT NULL REFERENCES quotation_lines(id) ON DELETE CASCADE,
+                prompt_slot INTEGER NOT NULL,
+                search_text TEXT NOT NULL DEFAULT '',
+                geo_filter_kind INTEGER NOT NULL DEFAULT 0,
+                geo_filter_uf TEXT,
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                sort_kind INTEGER NOT NULL DEFAULT 2,
+                minimum_unit_price_scaled INTEGER,
+                maximum_unit_price_scaled INTEGER,
+                batch_count INTEGER NOT NULL DEFAULT 3,
+                random_pivot INTEGER NOT NULL DEFAULT 0,
+                cursor_geo_layer INTEGER,
+                cursor_group_rank INTEGER,
+                cursor_rotation_band INTEGER,
+                cursor_random_key INTEGER,
+                cursor_pncp_id TEXT,
+                contracts_examined INTEGER NOT NULL DEFAULT 0,
+                batches_completed INTEGER NOT NULL DEFAULT 0,
+                candidate_set_exhausted INTEGER NOT NULL DEFAULT 0,
+                matched_items INTEGER NOT NULL DEFAULT 0,
+                revealed_prices INTEGER NOT NULL DEFAULT 0,
+                item_lists_from_cache INTEGER NOT NULL DEFAULT 0,
+                item_lists_from_api INTEGER NOT NULL DEFAULT 0,
+                item_result_api_calls INTEGER NOT NULL DEFAULT 0,
+                failed_calls INTEGER NOT NULL DEFAULT 0,
+                status_message TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(line_id, prompt_slot)
+            );
+
+            CREATE TABLE IF NOT EXISTS quotation_item_search_hits(
+                line_id TEXT NOT NULL,
+                prompt_slot INTEGER NOT NULL,
+                contract_id TEXT NOT NULL,
+                item_number INTEGER NOT NULL,
+                matched_prompt_level INTEGER,
+                matched_search_text TEXT NOT NULL DEFAULT '',
+                discovered_order INTEGER NOT NULL,
+                PRIMARY KEY(line_id, prompt_slot, contract_id, item_number),
+                FOREIGN KEY(line_id, prompt_slot)
+                    REFERENCES quotation_item_search_workspaces(line_id, prompt_slot)
+                    ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_quotation_item_search_hits_order
+                ON quotation_item_search_hits(line_id, prompt_slot, discovered_order);
+            """;
+        await schema.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplySchemaV11Async(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        if (!await HasColumnAsync(
+                connection,
+                transaction,
+                "quotation_references",
+                "source_kind",
+                cancellationToken).ConfigureAwait(false))
+        {
+            await using var addSource = connection.CreateCommand();
+            addSource.Transaction = transaction;
+            addSource.CommandText =
+                "ALTER TABLE quotation_references ADD COLUMN source_kind INTEGER NOT NULL DEFAULT 0;";
+            await addSource.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using var schema = connection.CreateCommand();
+        schema.Transaction = transaction;
+        schema.CommandText = """
+            CREATE TABLE IF NOT EXISTS quotation_internet_evidence_assets(
+                sha256 TEXT PRIMARY KEY,
+                relative_path TEXT NOT NULL,
+                mime_type TEXT NOT NULL DEFAULT 'image/png',
+                byte_length INTEGER NOT NULL,
+                pixel_width INTEGER NOT NULL,
+                pixel_height INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS quotation_internet_price_drafts(
+                id TEXT PRIMARY KEY,
+                line_id TEXT NOT NULL REFERENCES quotation_lines(id) ON DELETE CASCADE,
+                basket_id TEXT REFERENCES quotation_manual_baskets(id) ON DELETE SET NULL,
+                source_url TEXT NOT NULL DEFAULT '',
+                unit_price_scaled INTEGER,
+                description TEXT NOT NULL DEFAULT '',
+                supplier_name TEXT NOT NULL DEFAULT '',
+                supplier_tax_id TEXT NOT NULL DEFAULT '',
+                price_image_sha256 TEXT REFERENCES quotation_internet_evidence_assets(sha256),
+                tax_id_image_sha256 TEXT REFERENCES quotation_internet_evidence_assets(sha256),
+                captured_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_internet_price_drafts_line
+                ON quotation_internet_price_drafts(line_id, updated_at);
+
+            CREATE TABLE IF NOT EXISTS quotation_internet_price_evidence(
+                line_id TEXT NOT NULL,
+                reference_id TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                captured_at TEXT NOT NULL,
+                price_image_sha256 TEXT NOT NULL
+                    REFERENCES quotation_internet_evidence_assets(sha256),
+                tax_id_image_sha256 TEXT NOT NULL
+                    REFERENCES quotation_internet_evidence_assets(sha256),
+                PRIMARY KEY(line_id, reference_id),
+                FOREIGN KEY(line_id, reference_id)
+                    REFERENCES quotation_references(line_id, id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_internet_evidence_reference
+                ON quotation_internet_price_evidence(reference_id);
+            """;
+        await schema.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplySchemaV10Async(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        foreach (var (table, column, definition) in new[]
+                 {
+                     ("quotation_automation_runs", "source_draft_id", "TEXT"),
+                     ("quotation_automation_runs", "source_pdf_sha256", "TEXT NOT NULL DEFAULT ''"),
+                     ("quotation_automation_runs", "strategy_version", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_automation_runs", "unique_contracts_processed", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_automation_runs", "matched_items", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_automation_runs", "revealed_prices", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_automation_runs", "item_list_cache_hits", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_automation_runs", "item_list_api_calls", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_automation_runs", "item_result_api_calls", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_automation_runs", "failed_calls", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_automation_runs", "consecutive_no_results", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_references", "prompt_match_level", "INTEGER"),
+                     ("quotation_references", "matched_search_text", "TEXT NOT NULL DEFAULT ''")
+                 })
+        {
+            if (await HasColumnAsync(connection, transaction, table, column, cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            await using var add = connection.CreateCommand();
+            add.Transaction = transaction;
+            add.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition};";
+            await add.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using var schema = connection.CreateCommand();
+        schema.Transaction = transaction;
+        schema.CommandText = """
+            CREATE TABLE IF NOT EXISTS quotation_line_search_prompts(
+                line_id TEXT NOT NULL REFERENCES quotation_lines(id) ON DELETE CASCADE,
+                version INTEGER NOT NULL,
+                restrictive_text TEXT NOT NULL,
+                intermediate_text TEXT NOT NULL DEFAULT '',
+                broad_text TEXT NOT NULL DEFAULT '',
+                origin INTEGER NOT NULL DEFAULT 2,
+                validation_state INTEGER NOT NULL DEFAULT 0,
+                active_level INTEGER NOT NULL DEFAULT 0,
+                contracts_at_level INTEGER NOT NULL DEFAULT 0,
+                matched_items INTEGER NOT NULL DEFAULT 0,
+                revealed_prices INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                is_current INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY(line_id, version)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_line_search_prompts_current
+                ON quotation_line_search_prompts(line_id) WHERE is_current = 1;
+
+            CREATE TRIGGER IF NOT EXISTS quotation_lines_create_prompt_set
+            AFTER INSERT ON quotation_lines
+            BEGIN
+                INSERT OR IGNORE INTO quotation_line_search_prompts(
+                    line_id, version, restrictive_text, intermediate_text, broad_text,
+                    origin, validation_state, active_level, contracts_at_level,
+                    matched_items, revealed_prices, updated_at, is_current)
+                VALUES(new.id, 1, new.search_text, '', '', 2, 0, 0, 0, 0, 0, new.sampled_at, 1);
+            END;
+
+            CREATE TABLE IF NOT EXISTS quotation_contract_search_prompts(
+                run_id TEXT NOT NULL REFERENCES quotation_automation_runs(id) ON DELETE CASCADE,
+                display_order INTEGER NOT NULL,
+                prompt_text TEXT NOT NULL,
+                random_pivot INTEGER NOT NULL,
+                cursor_geo_layer INTEGER,
+                cursor_group_rank INTEGER,
+                cursor_rotation_band INTEGER,
+                cursor_random_key INTEGER,
+                cursor_pncp_id TEXT,
+                candidate_exhausted INTEGER NOT NULL DEFAULT 0,
+                contracts_examined INTEGER NOT NULL DEFAULT 0,
+                is_fallback INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(run_id, display_order)
+            );
+
+            CREATE TABLE IF NOT EXISTS quotation_processed_contracts(
+                run_id TEXT NOT NULL REFERENCES quotation_automation_runs(id) ON DELETE CASCADE,
+                contract_id TEXT NOT NULL REFERENCES contracts(pncp_id) ON DELETE CASCADE,
+                prompt_order INTEGER NOT NULL,
+                processed_at TEXT NOT NULL,
+                matched_items INTEGER NOT NULL DEFAULT 0,
+                revealed_prices INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(run_id, contract_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_processed_contracts_run_time
+                ON quotation_processed_contracts(run_id, processed_at, contract_id);
+
+            CREATE TABLE IF NOT EXISTS quotation_prompt_revalidations(
+                run_id TEXT NOT NULL REFERENCES quotation_automation_runs(id) ON DELETE CASCADE,
+                line_id TEXT NOT NULL REFERENCES quotation_lines(id) ON DELETE CASCADE,
+                prompt_version INTEGER NOT NULL,
+                completed_at TEXT NOT NULL,
+                PRIMARY KEY(run_id, line_id, prompt_version)
+            );
+
+            INSERT OR IGNORE INTO quotation_line_search_prompts(
+                line_id, version, restrictive_text, intermediate_text, broad_text,
+                origin, validation_state, active_level, contracts_at_level,
+                matched_items, revealed_prices, updated_at, is_current)
+            SELECT id, 1, search_text, '', '', 2, 0,
+                   CASE
+                       WHEN search_contracts_examined >= 100 THEN 2
+                       WHEN search_contracts_examined >= 50 THEN 1
+                       ELSE 0
+                   END,
+                   search_contracts_examined % 50, 0, 0, sampled_at, 1
+              FROM quotation_lines;
+            """;
+        await schema.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplySchemaV9Async(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        foreach (var (table, column, definition) in new[]
+                 {
+                     ("quotation_automation_runs", "automation_mode", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_automation_runs", "time_budget_seconds", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_automation_runs", "active_elapsed_seconds", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_lines", "estimated_unit_price_scaled", "INTEGER"),
+                     ("quotation_lines", "estimated_total_price_scaled", "INTEGER"),
+                     ("quotation_lines", "use_estimated_price", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_lines", "estimate_stage", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_lines", "search_random_pivot", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_lines", "search_cursor_geo_layer", "INTEGER"),
+                     ("quotation_lines", "search_cursor_group_rank", "INTEGER"),
+                     ("quotation_lines", "search_cursor_rotation_band", "INTEGER"),
+                     ("quotation_lines", "search_cursor_random_key", "INTEGER"),
+                     ("quotation_lines", "search_cursor_pncp_id", "TEXT"),
+                     ("quotation_lines", "search_contracts_examined", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_lines", "search_batches_completed", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quotation_lines", "search_candidate_exhausted", "INTEGER NOT NULL DEFAULT 0")
+                 })
+        {
+            if (await HasColumnAsync(connection, transaction, table, column, cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            await using var add = connection.CreateCommand();
+            add.Transaction = transaction;
+            add.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition};";
+            await add.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using var index = connection.CreateCommand();
+        index.Transaction = transaction;
+        index.CommandText = """
+            CREATE INDEX IF NOT EXISTS idx_quotation_lines_timed_automation
+                ON quotation_lines(
+                    automation_run_id,
+                    automation_state,
+                    search_batches_completed,
+                    display_order);
+            """;
+        await index.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<bool> HasColumnAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string table,
+        string column,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"PRAGMA table_info({table});";
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public async Task UpsertContractsAsync(
@@ -388,6 +775,117 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         {
             command.Parameters.AddWithValue("$candidateMatch", candidateMatch);
         }
+        command.Parameters.AddWithValue("$randomPivot", randomPivot);
+        command.Parameters.AddWithValue("$limit", pageSize + 1);
+        AddFilterParameters(command, filters);
+        if (cursor is not null)
+        {
+            command.Parameters.AddWithValue("$cursorLayer", cursor.GeographicLayer);
+            command.Parameters.AddWithValue("$cursorGroup", cursor.GroupRank);
+            command.Parameters.AddWithValue("$cursorBand", cursor.RotationBand);
+            command.Parameters.AddWithValue("$cursorRandom", cursor.RandomOrderKey);
+            command.Parameters.AddWithValue("$cursorId", cursor.PncpId);
+        }
+
+        var candidates = new List<ItemContractCandidate>(pageSize + 1);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var candidateCursor = new ItemCandidateCursor(
+                reader.GetInt32(19),
+                reader.GetInt32(20),
+                reader.GetInt32(21),
+                reader.GetInt64(22),
+                reader.GetString(0));
+            candidates.Add(new ItemContractCandidate(ReadContract(reader), candidateCursor));
+        }
+
+        var hasMore = candidates.Count > pageSize;
+        if (hasMore)
+        {
+            candidates.RemoveAt(candidates.Count - 1);
+        }
+
+        return new ItemCandidatePage(
+            candidates,
+            candidates.Count == 0 ? cursor : candidates[^1].Cursor,
+            hasMore);
+    }
+
+    public async Task<ItemCandidatePage> SearchContractCandidatesAsync(
+        SearchQuery filters,
+        string contractPrompt,
+        long randomPivot,
+        ItemCandidateCursor? cursor,
+        int pageSize = 200,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(filters);
+        var expression = SearchText.Parse(contractPrompt);
+        var contractMatch = expression.ContractMatchQuery;
+        if (string.IsNullOrWhiteSpace(contractMatch))
+        {
+            return new ItemCandidatePage([], cursor, false);
+        }
+
+        pageSize = Math.Clamp(pageSize, 1, 500);
+        randomPivot = Math.Clamp(randomPivot, 0, long.MaxValue - 1);
+        var conditions = new List<string> { "contracts_fts MATCH $contractMatch" };
+        var geographicPriorityExpression = filters.EffectiveGeoFilter.Kind switch
+        {
+            SearchGeoFilterKind.Southeast =>
+                "CASE WHEN c.uf IN ('ES','MG','RJ','SP') THEN 0 ELSE 1 END",
+            SearchGeoFilterKind.State =>
+                "CASE WHEN c.uf = $uf THEN 0 ELSE 1 END",
+            _ => "COALESCE(c.geo_layer, 1)"
+        };
+
+        if (filters.StartDate is not null)
+        {
+            conditions.Add("date(c.publication_date) >= date($startDate)");
+        }
+
+        if (filters.EndDate is not null)
+        {
+            conditions.Add("date(c.publication_date) <= date($endDate)");
+        }
+
+        var where = " WHERE " + string.Join(" AND ", conditions);
+        var cursorWhere = cursor is null
+            ? string.Empty
+            : """
+               WHERE geographic_layer > $cursorLayer
+                  OR (geographic_layer = $cursorLayer AND group_rank > $cursorGroup)
+                  OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band > $cursorBand)
+                  OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band = $cursorBand
+                      AND random_order_key > $cursorRandom)
+                  OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band = $cursorBand
+                      AND random_order_key = $cursorRandom AND pncp_id > $cursorId)
+              """;
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            WITH ranked AS (
+                SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
+                       c.additional_information, c.process, c.organization, c.unit, c.municipality,
+                       c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
+                       c.publication_date, c.global_updated_at, c.total_homologated_scaled,
+                       c.distance_from_ribeirao_km,
+                       {geographicPriorityExpression} AS geographic_layer,
+                       {GeographicGroupExpression} AS group_rank,
+                       CASE WHEN COALESCE(c.random_order_key, 0) >= $randomPivot THEN 0 ELSE 1 END AS rotation_band,
+                       COALESCE(c.random_order_key, 0) AS random_order_key
+                  FROM contracts c
+                  JOIN contracts_fts ON contracts_fts.rowid = c.rowid
+                  {where}
+            )
+            SELECT * FROM ranked
+            {cursorWhere}
+             ORDER BY geographic_layer, group_rank, rotation_band, random_order_key, pncp_id
+             LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$contractMatch", contractMatch);
         command.Parameters.AddWithValue("$randomPivot", randomPivot);
         command.Parameters.AddWithValue("$limit", pageSize + 1);
         AddFilterParameters(command, filters);
@@ -764,6 +1262,29 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             fetchedAt,
             reader.GetInt32(2),
             ParseDateTime(reader, 3));
+    }
+
+    public async Task<ProcurementItem?> GetItemAsync(
+        string contractId,
+        long itemNumber,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT contract_id, item_number, description, unit, requested_quantity_scaled,
+                   additional_information, item_category, ncm_nbs_code, ncm_nbs_description,
+                   catalog_code, catalog_name, catalog_category, status, has_result,
+                   source_updated_at, hydration_status, last_error
+              FROM items
+             WHERE contract_id = $contractId AND item_number = $itemNumber;
+            """;
+        command.Parameters.AddWithValue("$contractId", contractId);
+        command.Parameters.AddWithValue("$itemNumber", itemNumber);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            ? ReadItem(reader)
+            : null;
     }
 
     public async Task<IReadOnlyList<ProcurementItem>> SearchItemsAsync(
@@ -2665,4 +3186,5 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         CREATE INDEX idx_quotation_manual_basket_references_order
             ON quotation_manual_basket_references(basket_id, display_order);
         """;
+
 }

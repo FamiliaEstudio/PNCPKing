@@ -264,6 +264,37 @@ public sealed class SweetCodeAndImportTests
         }
     }
 
+    [Fact]
+    public async Task Import_IdentifiesTheEvaluationTemplateAsAResultWorkbook()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "avaliacao-de-precos.xlsx");
+        try
+        {
+            using (var workbook = new XLWorkbook())
+            {
+                var sheet = workbook.Worksheets.Add(" Análise 1 a 5");
+                sheet.Cell("B2").Value = "PLANILHA DE AVALIAÇÃO DE PREÇOS";
+                sheet.Cell("B5").Value = "EMPRESA";
+                sheet.Cell("C5").Value = "CNPJ";
+                sheet.Cell("D5").Value = "LINK PNCP";
+                sheet.Cell("E5").Value = "VALOR DA COTAÇÃO";
+                workbook.SaveAs(path);
+            }
+
+            var exception = await Assert.ThrowsAsync<InvalidDataException>(
+                () => new QuotationWorkbookImportService().ReadAsync(path));
+
+            Assert.Contains("planilha de resultado", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("colunas A:H", exception.Message);
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
     private static void CreateProducerStyleWorkbook(string path, bool useCachedFormula = false)
     {
         using var document = SpreadsheetDocument.Create(path, SpreadsheetDocumentType.Workbook);

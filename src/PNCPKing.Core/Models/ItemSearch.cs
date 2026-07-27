@@ -62,7 +62,9 @@ public sealed record ItemSearchRow(
     HomologationResult? Result,
     ItemSearchPriceState PriceState,
     string DisplayStatus,
-    bool IsTemporary)
+    bool IsTemporary,
+    PromptMatchLevel? MatchedPromptLevel = null,
+    string MatchedSearchText = "")
 {
     public decimal? HomologatedQuantity => Result?.HomologatedQuantity;
     public decimal? HomologatedUnitValue => Result?.HomologatedUnitValue;
@@ -107,6 +109,26 @@ public sealed record PriceBatchProgress(
     int ProcessedContracts = 0,
     int MatchedItems = 0,
     int RevealedPrices = 0);
+
+public sealed record TimedPriceBatchResult(
+    IReadOnlyList<ItemSearchRow> Rows,
+    ItemSearchCheckpoint Checkpoint,
+    PriceBatchProgress Progress);
+
+public sealed record ContractItemPrompt(
+    Guid LineId,
+    PromptMatchLevel Level,
+    string Text);
+
+public sealed record ContractEvaluationResult(
+    ContractRecord Contract,
+    IReadOnlyDictionary<Guid, IReadOnlyList<ItemSearchRow>> RowsByLine,
+    int MatchedItems,
+    int RevealedPrices,
+    int ItemListsFromCache,
+    int ItemListsFromApi,
+    int ItemResultApiCalls,
+    int FailedCalls);
 
 /// <summary>
 /// Network measurements isolated to one item-search session. HTTP calls include

@@ -36,6 +36,10 @@ public sealed class ItemSearchDisplayRow
     public ContractRecord Contract => Source.Contract;
     public ProcurementItem Item => Source.Item;
     public HomologationResult? Result => Source.Result;
+    public DateTimeOffset? PublicationDate => Source.Contract.PublicationDate;
+    public string Uf => Source.Contract.Uf;
+    public string Description => Source.Item.Description;
+    public string Unit => Source.Item.Unit;
     public decimal? HomologatedQuantity => Source.HomologatedQuantity;
     public decimal? HomologatedUnitValue => Source.HomologatedUnitValue;
     public decimal? HomologatedTotalValue => Source.HomologatedTotalValue;
@@ -44,5 +48,6 @@ public sealed class ItemSearchDisplayRow
     public DateOnly? ResultDate => Source.Result?.ResultDate;
     public string DisplayStatus => Source.DisplayStatus;
     public bool IsCancelled => Source.PriceState == ItemSearchPriceState.Cancelled;
+    public string PortalUrl => Source.Contract.PortalUri.AbsoluteUri;
     public double? DistanceFromRibeiraoKilometers { get; }
 }

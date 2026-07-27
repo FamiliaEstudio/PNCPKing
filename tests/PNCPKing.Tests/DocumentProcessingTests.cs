@@ -720,6 +720,48 @@ public sealed class DocumentProcessingTests
     }
 
     [Fact]
+    public async Task EvidenceReport_FallsBackToBasicItemIdentityWhenFullDescriptionsAreAbsent()
+    {
+        var root = CreateTemporaryFolder();
+        try
+        {
+            var destination = Path.Combine(root, "evidencias-basicas.pdf");
+            var sourcePdf = Path.Combine(root, "documento.pdf");
+            await File.WriteAllBytesAsync(sourcePdf, BuildPdf("tesoura"));
+            var reference = Reference() with
+            {
+                ItemDescription = "Tesoura profissional de aço inoxidável com cabo anatômico"
+            };
+            var index = new DocumentTextIndex
+            {
+                PdfSha256 = Cached(sourcePdf).Sha256,
+                SourcePath = sourcePdf,
+                Pages = [IndexedPage(1, "tesoura")]
+            };
+            var service = new QuotationEvidenceExportService(
+                new FakeContractDocumentService(Cached(sourcePdf)),
+                new StaticTextIndexService(index),
+                new EvidenceRasterizer());
+
+            var result = await service.ExportAsync(
+                destination,
+                Report(
+                    reference,
+                    "Tesoura escolar sem ponta, lâmina de 13 centímetros e cabo em polipropileno"));
+
+            Assert.Equal(1, result.References);
+            Assert.Equal(1, result.Occurrences);
+            Assert.True(File.Exists(destination));
+            using var pdf = UglyToad.PdfPig.PdfDocument.Open(destination);
+            Assert.Equal(2, pdf.NumberOfPages);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [Fact]
     public async Task EvidenceReport_PreservesPartialPdfWhenCancelled()
     {
         var root = CreateTemporaryFolder();
@@ -882,14 +924,16 @@ public sealed class DocumentProcessingTests
             State = QuotationReferenceState.Eligible
         };
 
-    private static QuotationProjectReport Report(QuotationReference reference)
+    private static QuotationProjectReport Report(
+        QuotationReference reference,
+        string description = "cafe torrado")
     {
         var projectId = Guid.NewGuid();
         var line = new QuotationLine
         {
             Id = reference.LineId,
             ProjectId = projectId,
-            Description = "cafe torrado",
+            Description = description,
             RequestedQuantity = 1,
             RequestedUnit = "pacote",
             SelectedBasketKey = "automatic:test",

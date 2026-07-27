@@ -322,12 +322,26 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
             $"o valor \"{EscapeValue(cell.Text)}\" não é um número válido.");
     }
 
-    private static bool LooksLikeResultWorkbook(string sheetName, IReadOnlyList<SpreadsheetRow> rows) =>
-        string.Equals(NormalizeCellText(sheetName), "Cotação", StringComparison.OrdinalIgnoreCase) &&
-        rows.Any(row => string.Equals(
-            row.Cells[2].Text,
-            "INCISO II",
-            StringComparison.OrdinalIgnoreCase));
+    private static bool LooksLikeResultWorkbook(string sheetName, IReadOnlyList<SpreadsheetRow> rows)
+    {
+        var isLegacyResult =
+            string.Equals(NormalizeCellText(sheetName), "Cotação", StringComparison.OrdinalIgnoreCase) &&
+            rows.Any(row => string.Equals(
+                row.Cells[2].Text,
+                "INCISO II",
+                StringComparison.OrdinalIgnoreCase));
+        var isEvaluationTemplate =
+            rows.Any(row => string.Equals(
+                row.Cells[1].Text,
+                "PLANILHA DE AVALIAÇÃO DE PREÇOS",
+                StringComparison.OrdinalIgnoreCase)) &&
+            rows.Any(row =>
+                string.Equals(row.Cells[1].Text, "EMPRESA", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(row.Cells[2].Text, "CNPJ", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(row.Cells[4].Text, "VALOR DA COTAÇÃO", StringComparison.OrdinalIgnoreCase));
+
+        return isLegacyResult || isEvaluationTemplate;
+    }
 
     private static CellValidationException CellError(
         SpreadsheetRow row,

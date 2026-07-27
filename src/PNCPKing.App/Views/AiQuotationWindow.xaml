@@ -1,0 +1,285 @@
+<Window x:Class="PNCPKing.App.Views.AiQuotationWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Automação de cotação com IA" Height="900" Width="1480"
+        MinHeight="700" MinWidth="1100" WindowStartupLocation="CenterOwner">
+    <Grid Margin="14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <TabControl x:Name="StepsTab">
+            <TabItem Header="1 — PDF, provedor e custo">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <Grid Margin="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="190" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Text="Arquivo PDF" VerticalAlignment="Center" />
+                        <TextBox x:Name="PdfPathTextBox" Grid.Column="1" IsReadOnly="True" />
+                        <Button x:Name="BrowsePdfButton" Grid.Column="2" Content="Escolher PDF…" Click="BrowsePdf_Click" />
+
+                        <TextBlock Grid.Row="1" Text="Provedor / perfil" VerticalAlignment="Center" />
+                        <ComboBox x:Name="ProviderComboBox" Grid.Row="1" Grid.Column="1"
+                                  SelectionChanged="ProviderComboBox_SelectionChanged" />
+                        <TextBlock Grid.Row="1" Grid.Column="2" x:Name="CatalogTextBlock"
+                                   VerticalAlignment="Center" Margin="8,0,0,0" />
+
+                        <TextBlock Grid.Row="2" Text="Endpoint compatível" VerticalAlignment="Center" />
+                        <TextBox x:Name="EndpointTextBox" Grid.Row="2" Grid.Column="1"
+                                 ToolTip="HTTPS obrigatório; HTTP é aceito apenas em localhost." />
+                        <TextBlock Grid.Row="2" Grid.Column="2" Text="O domínio exibido aqui receberá o Markdown."
+                                   VerticalAlignment="Center" Margin="8,0,0,0" />
+
+                        <TextBlock Grid.Row="3" Text="Modelo" VerticalAlignment="Center" />
+                        <TextBox x:Name="ModelTextBox" Grid.Row="3" Grid.Column="1" />
+                        <StackPanel Grid.Row="3" Grid.Column="2" Orientation="Horizontal">
+                            <ComboBox x:Name="ProtocolComboBox" Width="145" Margin="4,0"
+                                      ItemsSource="{Binding ProtocolOptions}" />
+                            <ComboBox x:Name="OutputModeComboBox" Width="180" Margin="4,0"
+                                      ItemsSource="{Binding OutputModeOptions}" />
+                        </StackPanel>
+
+                        <TextBlock Grid.Row="4" Text="Preço do endpoint" VerticalAlignment="Center" />
+                        <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal">
+                            <CheckBox x:Name="FreeProviderCheckBox" Content="Serviço gratuito" VerticalAlignment="Center" />
+                            <TextBlock Text=" Entrada R$/milhão:" VerticalAlignment="Center" Margin="12,0,0,0" />
+                            <TextBox x:Name="InputCostTextBox" Width="85" Text="0" />
+                            <TextBlock Text=" Saída R$/milhão:" VerticalAlignment="Center" />
+                            <TextBox x:Name="OutputCostTextBox" Width="85" Text="0" />
+                            <TextBlock Text=" Contexto:" VerticalAlignment="Center" Margin="12,0,0,0" />
+                            <TextBox x:Name="ContextTextBox" Width="90" Text="128000" />
+                            <TextBlock Text=" Saída máx.:" VerticalAlignment="Center" />
+                            <TextBox x:Name="ProviderMaxOutputTextBox" Width="90" Text="32768" />
+                        </StackPanel>
+
+                        <TextBlock Grid.Row="5" Text="Chave da API" VerticalAlignment="Center" />
+                        <PasswordBox x:Name="ApiKeyPasswordBox" Grid.Row="5" Grid.Column="1" />
+                        <Button Grid.Row="5" Grid.Column="2" Content="Excluir chave salva"
+                                Click="DeleteCredential_Click" />
+
+                        <TextBlock Grid.Row="6" Text="Tratamento da chave" VerticalAlignment="Center" />
+                        <ComboBox x:Name="CredentialModeComboBox" Grid.Row="6" Grid.Column="1"
+                                  ItemsSource="{Binding CredentialModes}" SelectedIndex="1" />
+                        <TextBlock Grid.Row="6" Grid.Column="2"
+                                   Text="A chave nunca é gravada no banco, cache, configuração ou log."
+                                   VerticalAlignment="Center" Margin="8,0,0,0" />
+
+                        <TextBlock Grid.Row="7" Text="Margem de custo" VerticalAlignment="Center" />
+                        <StackPanel Grid.Row="7" Grid.Column="1" Orientation="Horizontal">
+                            <TextBox x:Name="SafetyMarginTextBox" Width="90" Text="10" />
+                            <TextBlock Text="%" VerticalAlignment="Center" />
+                            <Button x:Name="PrepareButton" Content="Preparar Markdown e estimar" Click="Prepare_Click" Margin="18,0,0,0" />
+                            <Button Content="Salvar cópia .md" Click="SaveMarkdown_Click"
+                                    x:Name="SaveMarkdownButton" IsEnabled="False" />
+                        </StackPanel>
+
+                        <TextBlock Grid.Row="8" Text="Estimativa e teto" VerticalAlignment="Top" />
+                        <StackPanel Grid.Row="8" Grid.Column="1" Grid.ColumnSpan="2">
+                            <TextBlock x:Name="CostTextBlock" TextWrapping="Wrap"
+                                       Text="Prepare o documento para calcular tokens, câmbio e custo." />
+                            <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
+                                <TextBlock Text="Teto autorizado (R$):" VerticalAlignment="Center" />
+                                <TextBox x:Name="CostCeilingTextBox" Width="100" Margin="6,0" />
+                                <CheckBox x:Name="ForceRefreshCheckBox"
+                                          Content="Fazer nova análise, ignorando resultado estruturado em cache"
+                                          VerticalAlignment="Center" Margin="12,0,0,0" />
+                            </StackPanel>
+                        </StackPanel>
+
+                        <TextBlock Grid.Row="9" Text="Processamento" VerticalAlignment="Center" />
+                        <StackPanel Grid.Row="9" Grid.Column="1" Grid.ColumnSpan="2">
+                            <ProgressBar x:Name="AnalysisProgressBar" Height="16" Minimum="0" Maximum="1" />
+                            <TextBlock x:Name="AnalysisStatusTextBlock" Text="Aguardando." TextWrapping="Wrap" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Row="10" Grid.Column="1" Grid.ColumnSpan="2"
+                                    Orientation="Horizontal" Margin="0,10,0,0">
+                            <Button x:Name="AnalyzeButton" Content="Analisar com IA" Click="Analyze_Click"
+                                    IsEnabled="False" MinWidth="135" />
+                            <Button x:Name="CancelAnalysisButton" Content="Cancelar" Click="CancelAnalysis_Click"
+                                    IsEnabled="False" />
+                            <Button x:Name="DeleteDraftButton" Content="Excluir rascunho deste PDF" Click="DeleteDraft_Click" />
+                            <Button x:Name="ClearDraftsButton" Content="Limpar rascunhos de IA" Click="ClearDrafts_Click" />
+                        </StackPanel>
+
+                        <Border Grid.Row="11" Grid.ColumnSpan="3" Margin="0,14,0,0" Padding="10"
+                                Background="#FFF7E8" BorderBrush="#E7C778" BorderThickness="1">
+                            <TextBlock TextWrapping="Wrap">
+                                A IA recebe somente o Markdown e serve apenas para estruturar itens e critérios.
+                                Ela não consulta o PNCP e não executa instruções encontradas no documento.
+                                O texto nativo é usado primeiro; OCR local entra somente nas páginas necessárias.
+                            </TextBlock>
+                        </Border>
+                    </Grid>
+                </ScrollViewer>
+            </TabItem>
+
+            <TabItem Header="2 — Revisão dos itens">
+                <Grid Margin="10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <WrapPanel>
+                        <TextBlock Text="Estimativas:" VerticalAlignment="Center" />
+                        <ComboBox x:Name="EstimateChoiceComboBox" Width="210" Margin="5,0"
+                                  SelectionChanged="EstimateChoiceComboBox_SelectionChanged">
+                            <ComboBoxItem Content="Escolha obrigatória…" />
+                            <ComboBoxItem Content="Usar estimativas disponíveis" />
+                            <ComboBoxItem Content="Não usar estimativas" />
+                        </ComboBox>
+                        <CheckBox x:Name="AcceptInferencesCheckBox"
+                                  Content="Aceito os campos marcados como Inferido"
+                                  VerticalAlignment="Center" Margin="12,0" />
+                        <CheckBox x:Name="AddSweetCodesCheckBox"
+                                  Content="Adicionar prompts selecionados aos Sweet Codes"
+                                  VerticalAlignment="Center" Margin="12,0" />
+                        <Button Content="Validar prompts no banco local" Click="ValidatePrompts_Click" />
+                        <Button Content="Retrabalhar prompts com IA" Click="RefinePrompts_Click"
+                                ToolTip="Usa uma única nova geração e não altera descrição, quantidade, unidade, estimativas nem o prompt restritivo." />
+                    </WrapPanel>
+                    <DataGrid x:Name="DraftItemsGrid" Grid.Row="1" Margin="0,8,0,0"
+                              ItemsSource="{Binding DraftItems}" AutoGenerateColumns="False"
+                              CanUserDeleteRows="False" EnableRowVirtualization="True"
+                              EnableColumnVirtualization="True" ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                        <DataGrid.Columns>
+                            <DataGridCheckBoxColumn Header="Usar" Binding="{Binding IsSelected}" Width="48" />
+                            <DataGridTextColumn Header="Ordem" Binding="{Binding SourceOrder}" IsReadOnly="True" Width="55" />
+                            <DataGridTextColumn Header="Nº" Binding="{Binding SourceNumber}" IsReadOnly="True" Width="55" />
+                            <DataGridTextColumn Header="Páginas" Binding="{Binding Pages}" IsReadOnly="True" Width="80" />
+                            <DataGridTextColumn Header="Descrição" Binding="{Binding Description}" Width="260" />
+                            <DataGridTextColumn Header="Quantidade" Binding="{Binding Quantity}" Width="90" />
+                            <DataGridTextColumn Header="Unidade" Binding="{Binding Unit}" Width="90" />
+                            <DataGridTextColumn Header="Estimativa unitária" Binding="{Binding EstimatedUnitPrice}" Width="115" />
+                            <DataGridTextColumn Header="Estimativa total" Binding="{Binding EstimatedTotalPrice}" Width="115" />
+                            <DataGridCheckBoxColumn Header="Usar estim." Binding="{Binding UseEstimate}" Width="85" />
+                            <DataGridTextColumn Header="Positivos / alternativas" Binding="{Binding PositiveTerms}" IsReadOnly="True" Width="240" />
+                            <DataGridTextColumn Header="Negativos" Binding="{Binding NegativeTerms}" IsReadOnly="True" Width="160" />
+                            <DataGridTextColumn Header="Unidades aceitas" Binding="{Binding AcceptedUnits}" IsReadOnly="True" Width="140" />
+                            <DataGridTextColumn Header="Restritivo" Binding="{Binding SearchText}" Width="300" />
+                            <DataGridTextColumn Header="Intermediário" Binding="{Binding IntermediateSearchText}" Width="280" />
+                            <DataGridTextColumn Header="Amplo" Binding="{Binding BroadSearchText}" Width="240" />
+                            <DataGridTextColumn Header="Cesta" Binding="{Binding RequestedBasketSize}" Width="55" />
+                            <DataGridTextColumn Header="Origem" Binding="{Binding Origin}" IsReadOnly="True" Width="90" />
+                            <DataGridTextColumn Header="Confiança" Binding="{Binding Confidence, StringFormat=P0}" IsReadOnly="True" Width="80" />
+                            <DataGridTextColumn Header="Evidência" Binding="{Binding Evidence}" IsReadOnly="True" Width="260" />
+                            <DataGridTextColumn Header="Situação" Binding="{Binding Status}" IsReadOnly="True" Width="220" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <StackPanel Grid.Row="2" Margin="0,8,0,0">
+                        <TextBlock Text="Prompts globais de contratações — um por linha, na ordem (1 a 10):" />
+                        <TextBox x:Name="ContractPromptsTextBox" MinHeight="80" MaxHeight="145"
+                                 AcceptsReturn="True" VerticalScrollBarVisibility="Auto"
+                                 TextWrapping="Wrap" />
+                    </StackPanel>
+                    <TextBlock x:Name="ReviewSummaryTextBlock" Grid.Row="3" Margin="0,8,0,0"
+                               TextWrapping="Wrap" Text="Analise o PDF para carregar a prévia editável." />
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="3 — Cotação e pesquisa temporal">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <Grid Margin="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="205" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="205" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <TextBlock Text="Cotação existente" VerticalAlignment="Center" />
+                        <ComboBox x:Name="ProjectComboBox" Grid.Column="1" DisplayMemberPath="Name"
+                                  SelectionChanged="ProjectComboBox_SelectionChanged" />
+                        <TextBlock Grid.Column="2" Text="Ou nome da nova cotação" VerticalAlignment="Center" />
+                        <TextBox x:Name="NewProjectNameTextBox" Grid.Column="3"
+                                 TextChanged="NewProjectNameTextBox_TextChanged" />
+
+                        <TextBlock Grid.Row="1" Text="Filtro geográfico" VerticalAlignment="Center" />
+                        <ComboBox x:Name="GeoFilterComboBox" Grid.Row="1" Grid.Column="1"
+                                  DisplayMemberPath="DisplayName" />
+                        <TextBlock Grid.Row="1" Grid.Column="2" Text="Período" VerticalAlignment="Center" />
+                        <StackPanel Grid.Row="1" Grid.Column="3" Orientation="Horizontal">
+                            <DatePicker x:Name="StartDatePicker" Width="125" />
+                            <TextBlock Text=" até " VerticalAlignment="Center" />
+                            <DatePicker x:Name="EndDatePicker" Width="125" />
+                        </StackPanel>
+
+                        <TextBlock Grid.Row="2" Text="Pesos do índice (%)" VerticalAlignment="Center" />
+                        <StackPanel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="3" Orientation="Horizontal">
+                            <TextBlock Text="Descrição" VerticalAlignment="Center" />
+                            <TextBox x:Name="DescriptionWeightTextBox" Width="45" Text="50" />
+                            <TextBlock Text=" Unidade" VerticalAlignment="Center" />
+                            <TextBox x:Name="UnitWeightTextBox" Width="45" Text="20" />
+                            <TextBlock Text=" Quantidade" VerticalAlignment="Center" />
+                            <TextBox x:Name="QuantityWeightTextBox" Width="45" Text="10" />
+                            <TextBlock Text=" Proximidade" VerticalAlignment="Center" />
+                            <TextBox x:Name="ProximityWeightTextBox" Width="45" Text="15" />
+                            <TextBlock Text=" Atualidade" VerticalAlignment="Center" />
+                            <TextBox x:Name="RecencyWeightTextBox" Width="45" Text="5" />
+                        </StackPanel>
+
+                        <TextBlock Grid.Row="3" Text="Tempo total de pesquisa" VerticalAlignment="Center" />
+                        <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal">
+                            <TextBox x:Name="TimeMinutesTextBox" Width="80" Text="30" />
+                            <TextBlock Text=" minutos (5 a 1.440)" VerticalAlignment="Center" />
+                        </StackPanel>
+                        <TextBlock Grid.Row="3" Grid.Column="2" Text="Alvo padrão de preços" VerticalAlignment="Center" />
+                        <TextBox x:Name="DefaultBasketSizeTextBox" Grid.Row="3" Grid.Column="3"
+                                 Width="80" HorizontalAlignment="Left" Text="3"
+                                 TextChanged="DefaultBasketSizeTextBox_TextChanged" />
+
+                        <Border Grid.Row="4" Grid.ColumnSpan="4" Margin="0,14,0,0" Padding="10"
+                                Background="#EAF2FF" BorderBrush="#A9C5F2" BorderThickness="1">
+                            <TextBlock TextWrapping="Wrap">
+                                Cada lote abre 50 contratações únicas e compara seus itens com todas as linhas
+                                pendentes. Após 50 contratos sem cesta, o item ativa o nível intermediário;
+                                após mais 50, o amplo. Listas já abertas são reavaliadas localmente. Pausar ou
+                                fechar não consome o tempo parado.
+                            </TextBlock>
+                        </Border>
+                    </Grid>
+                </ScrollViewer>
+            </TabItem>
+        </TabControl>
+
+        <DockPanel Grid.Row="1" Margin="0,12,0,0">
+            <TextBlock x:Name="BottomStatusTextBlock" DockPanel.Dock="Left"
+                       VerticalAlignment="Center" Text="Selecione um PDF para começar." />
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="Fechar" IsCancel="True" MinWidth="95" />
+                <Button x:Name="StartAutomationButton" Content="Criar e iniciar pesquisa"
+                        MinWidth="155" IsDefault="True" Click="StartAutomation_Click" />
+            </StackPanel>
+        </DockPanel>
+    </Grid>
+</Window>

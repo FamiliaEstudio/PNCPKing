@@ -138,6 +138,39 @@ public sealed class ItemSearchRepositoryTests
     }
 
     [Fact]
+    public async Task ContractCandidate_GeographyPrioritizesButDoesNotExcludeTheRestOfBrazil()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await database.Repository.UpsertContractsAsync([
+            LocatedContract("ribeirao-artesanato", "Ribeirão Preto", "3543402", "SP", 1) with
+            {
+                Object = "Aquisição de materiais para artesanato"
+            },
+            LocatedContract("salvador-artesanato", "Salvador", "2927408", "BA", 2) with
+            {
+                Object = "Aquisição de materiais para artesanato"
+            }
+        ]);
+        var query = new SearchQuery(
+            "artesanato",
+            SearchGeoFilter.NearRibeirao,
+            Sort: SearchSort.Nearest);
+
+        var page = await database.Repository.SearchContractCandidatesAsync(
+            query,
+            "artesanato",
+            0,
+            null,
+            10);
+
+        Assert.Equal(
+            ["ribeirao-artesanato", "salvador-artesanato"],
+            page.Results.Select(value => value.Contract.PncpId));
+        Assert.Equal(0, page.Results[0].Cursor.GeographicLayer);
+        Assert.Equal(1, page.Results[1].Cursor.GeographicLayer);
+    }
+
+    [Fact]
     public async Task VersionOneMigration_PreservesItemsAndBackfillsNearbyMunicipalityCode()
     {
         var directory = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"));

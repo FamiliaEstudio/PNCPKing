@@ -26,7 +26,9 @@ public sealed class PdfTextIndexService : IPdfTextIndexService
         IProgress<DocumentProcessingProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        var indexPath = pdf.LocalPath + ".index.json";
+        var indexPath = string.IsNullOrWhiteSpace(pdf.IndexCachePath)
+            ? pdf.LocalPath + ".index.json"
+            : Path.GetFullPath(pdf.IndexCachePath);
         var cached = await TryLoadAsync(indexPath, pdf, cancellationToken).ConfigureAwait(false);
         if (cached is not null)
         {

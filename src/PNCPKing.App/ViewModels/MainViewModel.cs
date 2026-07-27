@@ -26,15 +26,27 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private readonly AutoSyncCoordinator _autoSyncCoordinator;
     private readonly ItemHydrationService _hydrationService;
     private readonly ItemSearchSessionService _itemSearchService;
+    private readonly IQuotationItemSearchService _quotationItemSearchService;
     private readonly BackupService _backupService;
     private readonly IPncpRequestTelemetry _telemetry;
     private readonly ISweetCodeRepository _sweetCodeRepository;
     private readonly IContractDocumentService _documentService;
     private readonly IContractRelevantPageService _relevantPageService;
     private readonly IQuotationEvidenceExportService _evidenceService;
+    private readonly IInternetPriceService _internetPriceService;
+    private readonly IInternetEvidenceStore _internetEvidenceStore;
+    private readonly IWindowCaptureService _windowCaptureService;
+    private readonly IPdfPageRasterizer _pdfPageRasterizer;
     private readonly IDisposable _documentResources;
     private readonly DataGridColumnLayoutService _columnLayouts;
     private readonly string _dataFolder;
+    private readonly IAiQuotationDraftService _aiDraftService;
+    private readonly IAiCostEstimator _aiCostEstimator;
+    private readonly IAiCredentialStore _aiCredentialStore;
+    private readonly IAiDraftCache _aiDraftCache;
+    private readonly IAiPromptRefinementService _aiPromptRefinementService;
+    private readonly ITimedQuotationAutomationService _timedQuotationAutomation;
+    private readonly AppSettingsService _settingsService;
     private readonly DispatcherTimer _maintenanceTimer;
     private readonly SemaphoreSlim _itemPageGate = new(1, 1);
     private CancellationTokenSource? _indexCancellation;
@@ -93,17 +105,30 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         AutoSyncCoordinator autoSyncCoordinator,
         ItemHydrationService hydrationService,
         ItemSearchSessionService itemSearchService,
+        IQuotationItemSearchService quotationItemSearchService,
         BackupService backupService,
         QuotationService quotationService,
         IQuotationWorkbookService quotationWorkbookService,
         IQuotationWorkbookImportService quotationWorkbookImportService,
+        IQuotationPackageService quotationPackageService,
         IPncpRequestTelemetry telemetry,
         ISweetCodeRepository sweetCodeRepository,
         IContractDocumentService documentService,
         IContractRelevantPageService relevantPageService,
         IQuotationEvidenceExportService evidenceService,
+        IInternetPriceService internetPriceService,
+        IInternetEvidenceStore internetEvidenceStore,
+        IWindowCaptureService windowCaptureService,
+        IPdfPageRasterizer pdfPageRasterizer,
         IDisposable documentResources,
         DataGridColumnLayoutService columnLayouts,
+        IAiQuotationDraftService aiDraftService,
+        IAiCostEstimator aiCostEstimator,
+        IAiCredentialStore aiCredentialStore,
+        IAiDraftCache aiDraftCache,
+        IAiPromptRefinementService aiPromptRefinementService,
+        ITimedQuotationAutomationService timedQuotationAutomation,
+        AppSettingsService settingsService,
         string dataFolder)
     {
         _repository = repository;
@@ -112,15 +137,31 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _autoSyncCoordinator = autoSyncCoordinator;
         _hydrationService = hydrationService;
         _itemSearchService = itemSearchService;
+        _quotationItemSearchService = quotationItemSearchService;
         _backupService = backupService;
-        InitializeQuotation(quotationService, quotationWorkbookService, quotationWorkbookImportService);
+        InitializeQuotation(
+            quotationService,
+            quotationWorkbookService,
+            quotationWorkbookImportService,
+            quotationPackageService);
         _telemetry = telemetry;
         _sweetCodeRepository = sweetCodeRepository;
         _documentService = documentService;
         _relevantPageService = relevantPageService;
         _evidenceService = evidenceService;
+        _internetPriceService = internetPriceService;
+        _internetEvidenceStore = internetEvidenceStore;
+        _windowCaptureService = windowCaptureService;
+        _pdfPageRasterizer = pdfPageRasterizer;
         _documentResources = documentResources;
         _columnLayouts = columnLayouts;
+        _aiDraftService = aiDraftService;
+        _aiCostEstimator = aiCostEstimator;
+        _aiCredentialStore = aiCredentialStore;
+        _aiDraftCache = aiDraftCache;
+        _aiPromptRefinementService = aiPromptRefinementService;
+        _timedQuotationAutomation = timedQuotationAutomation;
+        _settingsService = settingsService;
         _dataFolder = dataFolder;
 
         GeoFilters = BuildGeoFilters();
@@ -600,6 +641,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _foregroundCancellation?.Cancel();
         _documentCancellation?.Cancel();
         _quotationAutomationCancellation?.Cancel();
+        if (_quotationAutomationCompletion is { } quotationCompletion)
+        {
+            await quotationCompletion.Task.ConfigureAwait(true);
+        }
+
         SetItemSearchActive(false);
         await _itemSearchService.DisposeAsync().ConfigureAwait(false);
         await _columnLayouts.FlushAsync().ConfigureAwait(false);
@@ -1969,12 +2015,17 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      UseQuotationSampleCommand, UpdateQuotationSampleCommand,
                      AdjustQuotationWeightsCommand,
                      ConfirmQuotationBasketCommand, ExportQuotationCommand,
+                     ExportQuotationPackageCommand, ImportQuotationPackageCommand,
                      PreviousQuotationBasketPageCommand, NextQuotationBasketPageCommand,
                      NewQuotationCommand, RenameQuotationCommand, DeleteQuotationCommand,
-                     DeleteQuotationLineCommand, ImportQuotationCommand,
+                     DeleteQuotationLineCommand, ImportQuotationCommand, AiQuotationCommand,
                      ResumeQuotationAutomationCommand, CancelQuotationAutomationCommand,
+                     RefineQuotationPromptsCommand,
+                     OpenRestrictiveQuotationSearchCommand,
+                     OpenIntermediateQuotationSearchCommand, OpenBroadQuotationSearchCommand,
                      RenameManualBasketCommand, DeleteManualBasketCommand,
-                     RemoveManualBasketReferenceCommand, AccessQuotationDocumentsCommand
+                     RemoveManualBasketReferenceCommand, AccessQuotationDocumentsCommand,
+                     OpenQuotationItemCommand
                  })
         {
             switch (command)

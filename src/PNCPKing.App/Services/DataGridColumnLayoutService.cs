@@ -28,7 +28,7 @@ public sealed class DataGridColumnLayoutService
         _settingsService = settingsService;
         _settings = settings with
         {
-            SettingsVersion = 2,
+            SettingsVersion = Math.Max(3, settings.SettingsVersion),
             ColumnLayouts = settings.ColumnLayouts is null
                 ? new Dictionary<string, List<ColumnLayoutSetting>>(StringComparer.Ordinal)
                 : new Dictionary<string, List<ColumnLayoutSetting>>(settings.ColumnLayouts, StringComparer.Ordinal)
@@ -126,7 +126,7 @@ public sealed class DataGridColumnLayoutService
         var layouts = _settings.ColumnLayouts ??
                       new Dictionary<string, List<ColumnLayoutSetting>>(StringComparer.Ordinal);
         layouts[registration.GridKey] = Capture(registration.Columns);
-        _settings = _settings with { SettingsVersion = 2, ColumnLayouts = layouts };
+        _settings = _settings with { SettingsVersion = Math.Max(3, _settings.SettingsVersion), ColumnLayouts = layouts };
         foreach (var keyedColumn in registration.Columns)
         {
             WidthDescriptor.RemoveValueChanged(keyedColumn.Column, ColumnLayoutChanged);
@@ -246,7 +246,7 @@ public sealed class DataGridColumnLayoutService
             layouts[registration.GridKey] = Capture(registration.Columns);
         }
 
-        _settings = _settings with { SettingsVersion = 2, ColumnLayouts = layouts };
+        _settings = _settings with { SettingsVersion = Math.Max(3, _settings.SettingsVersion), ColumnLayouts = layouts };
     }
 
     private void ScheduleSave()
@@ -260,7 +260,11 @@ public sealed class DataGridColumnLayoutService
         await _saveGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            await _settingsService.SaveAsync(_settings).ConfigureAwait(false);
+            _settings = await _settingsService.UpdateAsync(latest => latest with
+            {
+                SettingsVersion = Math.Max(3, latest.SettingsVersion),
+                ColumnLayouts = _settings.ColumnLayouts
+            }).ConfigureAwait(false);
         }
         finally
         {

@@ -1,0 +1,371 @@
+<Window x:Class="PNCPKing.App.Views.QuotationItemWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:services="clr-namespace:PNCPKing.App.Services"
+        Title="{Binding Header}" Width="1420" Height="900"
+        MinWidth="1080" MinHeight="720" WindowStartupLocation="CenterOwner">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <DockPanel>
+            <StackPanel>
+                <TextBlock Text="{Binding Header}" FontSize="20" FontWeight="SemiBold"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{Binding ItemSummary}" Margin="0,4,0,0" TextWrapping="Wrap" />
+            </StackPanel>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
+                <Button Content="Atualizar" Click="Refresh_Click" />
+                <Button Content="Pausar automação" Click="Pause_Click" />
+                <Button Content="Retomar automação" Click="Resume_Click" />
+            </StackPanel>
+        </DockPanel>
+
+        <Border Grid.Row="1" Background="#F4F7FA" BorderBrush="#C7D2DE" BorderThickness="1"
+                CornerRadius="4" Padding="8" Margin="0,8,0,8">
+            <TextBlock Text="{Binding ProgressText}" TextWrapping="Wrap" />
+        </Border>
+
+        <TabControl x:Name="WorkspaceTabs" Grid.Row="2">
+            <TabItem Header="Cestas e preços">
+                <Grid Margin="4">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="36*" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="64*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <DataGrid ItemsSource="{Binding Baskets}" SelectedItem="{Binding SelectedBasket}"
+                              AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single">
+                        <DataGrid.RowStyle>
+                            <Style TargetType="DataGridRow">
+                                <Setter Property="Background" Value="{Binding Background}" />
+                                <Setter Property="ToolTip" Value="{Binding ValidationMessage}" />
+                            </Style>
+                        </DataGrid.RowStyle>
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Tipo" Binding="{Binding Type}" Width="80" />
+                            <DataGridTextColumn Header="Nome" Binding="{Binding Name}" Width="150" />
+                            <DataGridTextColumn Header="Situação" Binding="{Binding Status}" Width="125" />
+                            <DataGridTextColumn Header="Preços" Binding="{Binding ReferenceCount}" Width="65" />
+                            <DataGridTextColumn Header="Média" Binding="{Binding AveragePrice, StringFormat=C4}" Width="115" />
+                            <DataGridTextColumn Header="Menor" Binding="{Binding MinimumPrice, StringFormat=C4}" Width="110" />
+                            <DataGridTextColumn Header="Maior" Binding="{Binding MaximumPrice, StringFormat=C4}" Width="110" />
+                            <DataGridTextColumn Header="Desvio máximo" Binding="{Binding MaximumDeviationPercent, StringFormat={}{0:N2}%}" Width="105" />
+                            <DataGridTextColumn Header="Classificação" Binding="{Binding Tags}" Width="*" MinWidth="180" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <DockPanel Grid.Row="1" Margin="0,6">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="Mostrar:" VerticalAlignment="Center" FontWeight="SemiBold" />
+                            <Button Content="Na cesta" Click="ScopeInBasket_Click" />
+                            <Button Content="Elegíveis fora" Click="ScopeOutside_Click" />
+                            <Button Content="Descartados/duplicados" Click="ScopeRejected_Click" />
+                            <Button Content="Todos" Click="ScopeAll_Click" />
+                            <TextBlock Text="{Binding ReferenceScopeSummary}" VerticalAlignment="Center"
+                                       Margin="10,0" Foreground="#5F6871" />
+                        </StackPanel>
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <Button Content="Confirmar cesta" Click="ConfirmBasket_Click" />
+                            <Button Content="Inserir preço da internet" Click="NewInternetPrice_Click" />
+                        </StackPanel>
+                    </DockPanel>
+
+                    <DataGrid x:Name="PriceGrid" Grid.Row="2"
+                              ItemsSource="{Binding VisibleReferences}"
+                              SelectedItem="{Binding SelectedPrice}"
+                              AutoGenerateColumns="False" IsReadOnly="True"
+                              SelectionMode="Single" SelectionUnit="FullRow"
+                              PreviewMouseRightButtonDown="PriceGrid_PreviewMouseRightButtonDown"
+                              MouseDoubleClick="PriceGrid_MouseDoubleClick"
+                              ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                        <DataGrid.ContextMenu>
+                            <ContextMenu x:Name="PriceContextMenu">
+                                <MenuItem Header="Abrir PNCP/site" Click="PriceOpenSource_Click" />
+                                <MenuItem Header="Acessar documentos completos" Click="PriceFullDocuments_Click" />
+                                <MenuItem Header="Ver páginas relevantes" Click="PriceRelevantPages_Click" />
+                                <Separator />
+                                <MenuItem Header="Adicionar/retirar da cesta" Click="PriceToggleBasket_Click" />
+                                <MenuItem Header="Editar preço da internet" Click="EditInternetReference_Click" />
+                                <MenuItem Header="Excluir preço da internet" Click="DeleteInternetReference_Click" />
+                            </ContextMenu>
+                        </DataGrid.ContextMenu>
+                        <DataGrid.Columns>
+                            <DataGridTemplateColumn Header="Na cesta" Width="72"
+                                                    services:DataGridColumnLayoutService.Key="in-basket">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <CheckBox IsChecked="{Binding IsInSelectedBasket, Mode=OneWay}"
+                                                  HorizontalAlignment="Center"
+                                                  Click="Membership_Click" />
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn Header="Fonte" Binding="{Binding SourceLabel}" Width="82" />
+                            <DataGridTextColumn Header="Publicação/captura"
+                                                Binding="{Binding PublicationDate, StringFormat=dd/MM/yyyy}"
+                                                Width="125" />
+                            <DataGridTextColumn Header="UF" Binding="{Binding Uf}" Width="42" />
+                            <DataGridTextColumn Header="Descrição" Binding="{Binding Description}" Width="320" MinWidth="220" />
+                            <DataGridTextColumn Header="Unidade" Binding="{Binding Unit}" Width="90" />
+                            <DataGridTextColumn Header="Quantidade" Binding="{Binding Quantity, StringFormat=N4}" Width="105" />
+                            <DataGridTextColumn Header="CNPJ/NI" Binding="{Binding SupplierTaxId}" Width="145" />
+                            <DataGridTextColumn Header="Empresa" Binding="{Binding SupplierName}" Width="210" />
+                            <DataGridTextColumn Header="Unitário" Binding="{Binding UnitPrice, StringFormat=C4}" Width="115" />
+                            <DataGridTextColumn Header="Situação" Binding="{Binding State}" Width="90" />
+                            <DataGridTemplateColumn Header="Ações" Width="82"
+                                                    services:DataGridColumnLayoutService.Key="actions">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <Button Content="Ações ▾" Click="PriceActions_Click" Padding="5,2" />
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn Header="Índice" Binding="{Binding AdequacyTotal, StringFormat=N2}"
+                                                Width="75" Visibility="Collapsed" />
+                            <DataGridTextColumn Header="Nível do prompt" Binding="{Binding PromptLevel}"
+                                                Width="105" Visibility="Collapsed" />
+                            <DataGridTextColumn Header="Município" Binding="{Binding Municipality}"
+                                                Width="130" Visibility="Collapsed" />
+                            <DataGridTextColumn Header="Descrição — índice" Binding="{Binding DescriptionScore, StringFormat=N2}"
+                                                Width="110" Visibility="Collapsed" />
+                            <DataGridTextColumn Header="Unidade — índice" Binding="{Binding UnitScore, StringFormat=N2}"
+                                                Width="105" Visibility="Collapsed" />
+                            <DataGridTextColumn Header="Quantidade — índice" Binding="{Binding QuantityScore, StringFormat=N2}"
+                                                Width="120" Visibility="Collapsed" />
+                            <DataGridTextColumn Header="Proximidade — índice" Binding="{Binding ProximityScore, StringFormat=N2}"
+                                                Width="120" Visibility="Collapsed" />
+                            <DataGridTextColumn Header="Atualidade — índice" Binding="{Binding RecencyScore, StringFormat=N2}"
+                                                Width="110" Visibility="Collapsed" />
+                            <DataGridTextColumn Header="Motivo/explicação" Binding="{Binding Explanation}"
+                                                Width="400" Visibility="Collapsed" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <DockPanel Grid.Row="3" Margin="0,6,0,0">
+                        <TextBlock Text="{Binding BasketCalculation}" VerticalAlignment="Center"
+                                   FontWeight="SemiBold" />
+                        <Button DockPanel.Dock="Right" Content="Escolher colunas"
+                                Click="ChooseColumns_Click" Tag="{Binding ElementName=PriceGrid}" />
+                    </DockPanel>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="Pesquisar e complementar">
+                <Grid Margin="4">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <WrapPanel>
+                        <TextBlock Text="Prompt:" FontWeight="SemiBold" VerticalAlignment="Center" />
+                        <Button Content="Restritivo" Click="RestrictivePrompt_Click" />
+                        <Button Content="Intermediário" Click="IntermediatePrompt_Click" />
+                        <Button Content="Amplo" Click="BroadPrompt_Click" />
+                        <Button Content="Personalizado" Click="CustomPrompt_Click" />
+                        <TextBlock Text="{Binding PromptSlotLabel, StringFormat=Área ativa: {0}}"
+                                   VerticalAlignment="Center" Margin="12,0" />
+                    </WrapPanel>
+
+                    <Grid Grid.Row="1" Margin="0,6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
+                                 AcceptsReturn="True" TextWrapping="Wrap" MinHeight="58"
+                                 ToolTip="Use E, OU, exclusões com -, frases e aproximações numéricas com %." />
+                        <StackPanel Grid.Column="1" Margin="8,0,0,0">
+                            <CheckBox Content="Sweet Codes" IsChecked="{Binding SweetCodeEnabled}" />
+                            <ComboBox Width="260" ItemsSource="{Binding SweetCodeExpressions}"
+                                      SelectedItem="{Binding SelectedSweetCode}" />
+                            <Button Content="Inserir Sweet Code" Click="InsertSweetCode_Click" />
+                        </StackPanel>
+                    </Grid>
+
+                    <WrapPanel Grid.Row="2">
+                        <TextBlock Text="Geografia" VerticalAlignment="Center" />
+                        <ComboBox Width="170" ItemsSource="{Binding GeoFilters}"
+                                  SelectedItem="{Binding SelectedGeoFilter}" />
+                        <TextBlock Text="Período" VerticalAlignment="Center" Margin="10,0,0,0" />
+                        <ComboBox Width="170" ItemsSource="{Binding DateRanges}"
+                                  SelectedItem="{Binding SelectedDateRange}" />
+                        <TextBlock Text="Ordenação" VerticalAlignment="Center" Margin="10,0,0,0" />
+                        <ComboBox Width="150" ItemsSource="{Binding SortOptions}"
+                                  SelectedItem="{Binding SelectedSortOption}" />
+                        <TextBlock Text="De" VerticalAlignment="Center" Margin="10,0,0,0" />
+                        <DatePicker Width="125" SelectedDate="{Binding CustomStartDate}"
+                                    IsEnabled="{Binding IsCustomDateRange}" />
+                        <TextBlock Text="até" VerticalAlignment="Center" />
+                        <DatePicker Width="125" SelectedDate="{Binding CustomEndDate}"
+                                    IsEnabled="{Binding IsCustomDateRange}" />
+                    </WrapPanel>
+
+                    <WrapPanel Grid.Row="3" Margin="0,5">
+                        <TextBlock Text="Preço mínimo" VerticalAlignment="Center" />
+                        <TextBox Width="105" Text="{Binding MinimumPriceText, UpdateSourceTrigger=PropertyChanged}" />
+                        <TextBlock Text="Preço máximo" VerticalAlignment="Center" Margin="10,0,0,0" />
+                        <TextBox Width="105" Text="{Binding MaximumPriceText, UpdateSourceTrigger=PropertyChanged}" />
+                        <Button Content="Aplicar faixa" Click="ApplyPriceFilter_Click" />
+                        <TextBlock Text="Lotes de 50" VerticalAlignment="Center" Margin="16,0,0,0" />
+                        <TextBox Width="55" Text="{Binding BatchCount, UpdateSourceTrigger=LostFocus}"
+                                 HorizontalContentAlignment="Center" />
+                        <Button Content="Pesquisar" Click="Search_Click" MinWidth="95" />
+                        <Button Content="Continuar" Click="ContinueSearch_Click" MinWidth="95" />
+                        <Button Content="Parar" Click="StopSearch_Click" />
+                    </WrapPanel>
+
+                    <Grid Grid.Row="4" Margin="0,2,0,6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="230" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="{Binding SearchSummary}" TextWrapping="Wrap"
+                                   VerticalAlignment="Center" />
+                        <ProgressBar Grid.Column="1" Height="12" Minimum="0" Maximum="100"
+                                     Value="{Binding SearchProgress, Mode=OneWay}" VerticalAlignment="Center" />
+                    </Grid>
+
+                    <DataGrid x:Name="SearchResultsGrid" Grid.Row="5"
+                              ItemsSource="{Binding SearchRows}"
+                              SelectedItem="{Binding SelectedSearchRow}"
+                              AutoGenerateColumns="False" IsReadOnly="True"
+                              SelectionMode="Extended" SelectionUnit="FullRow"
+                              PreviewMouseRightButtonDown="SearchGrid_PreviewMouseRightButtonDown"
+                              MouseDoubleClick="SearchGrid_MouseDoubleClick"
+                              ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                        <DataGrid.ContextMenu>
+                            <ContextMenu x:Name="SearchContextMenu">
+                                <MenuItem Header="Abrir no PNCP" Click="SearchOpenSource_Click" />
+                                <MenuItem Header="Acessar documentos completos" Click="SearchFullDocuments_Click" />
+                                <MenuItem Header="Ver páginas relevantes" Click="SearchRelevantPages_Click" />
+                                <Separator />
+                                <MenuItem Header="Adicionar à cesta selecionada" Click="SearchAddToBasket_Click" />
+                            </ContextMenu>
+                        </DataGrid.ContextMenu>
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Publicação" Binding="{Binding PublicationDate, StringFormat=dd/MM/yyyy}" Width="95" />
+                            <DataGridTextColumn Header="UF" Binding="{Binding Uf}" Width="45" />
+                            <DataGridTextColumn Header="Descrição" Binding="{Binding Description}" Width="*" MinWidth="320" />
+                            <DataGridTextColumn Header="Unidade" Binding="{Binding Unit}" Width="90" />
+                            <DataGridTextColumn Header="Quantidade" Binding="{Binding HomologatedQuantity, StringFormat=N4}" Width="105" />
+                            <DataGridTextColumn Header="CNPJ/NI" Binding="{Binding SupplierTaxId}" Width="145" />
+                            <DataGridTextColumn Header="Empresa" Binding="{Binding Supplier}" Width="190" />
+                            <DataGridTextColumn Header="Unitário homologado" Binding="{Binding HomologatedUnitValue, StringFormat=C4}" Width="145" />
+                            <DataGridTemplateColumn Header="Ações" Width="82"
+                                                    services:DataGridColumnLayoutService.Key="actions">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <Button Content="Ações ▾" Click="SearchActions_Click" Padding="5,2" />
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn Header="Contratação PNCP" Binding="{Binding Contract.PncpId}"
+                                                Width="175" Visibility="Collapsed" />
+                            <DataGridTextColumn Header="Item" Binding="{Binding Item.ItemNumber}"
+                                                Width="58" Visibility="Collapsed" />
+                            <DataGridTextColumn Header="Objeto da contratação" Binding="{Binding Contract.Object}"
+                                                Width="380" Visibility="Collapsed" />
+                            <DataGridTextColumn Header="Órgão" Binding="{Binding Contract.Organization}"
+                                                Width="190" Visibility="Collapsed" />
+                            <DataGridTextColumn Header="Município" Binding="{Binding Contract.Municipality}"
+                                                Width="150" Visibility="Collapsed" />
+                            <DataGridTextColumn Header="Resultado" Binding="{Binding ResultDate, StringFormat=dd/MM/yyyy}"
+                                                Width="90" Visibility="Collapsed" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <DockPanel Grid.Row="6" Margin="0,6,0,0">
+                        <TextBlock Text="{Binding SearchRows.Count, StringFormat=Linhas visíveis: {0:N0}}"
+                                   VerticalAlignment="Center" />
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <Button Content="Escolher colunas" Click="ChooseColumns_Click"
+                                    Tag="{Binding ElementName=SearchResultsGrid}" />
+                            <Button Content="Adicionar selecionados à cesta manual"
+                                    Click="AddSearchResults_Click" />
+                        </StackPanel>
+                    </DockPanel>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="Documentos">
+                <Grid Margin="4">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <DockPanel>
+                        <ComboBox Width="650" ItemsSource="{Binding References}"
+                                  SelectedItem="{Binding SelectedReference}"
+                                  DisplayMemberPath="DisplayTitle" />
+                        <Button Content="Preparar páginas relevantes" Click="PrepareDocuments_Click" />
+                        <Button Content="Abrir PDF relevante" Click="OpenRelevantPdf_Click"
+                                IsEnabled="{Binding CanOpenRelevantPdf}" />
+                    </DockPanel>
+                    <TextBlock Grid.Row="1" Text="{Binding DocumentSummary}" Margin="0,8"
+                               TextWrapping="Wrap" />
+                    <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+                        <ItemsControl ItemsSource="{Binding DocumentThumbnails}">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border BorderBrush="#BBB" BorderThickness="1" Margin="5" Padding="5"
+                                            Width="350">
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding Caption}" FontWeight="SemiBold" Margin="0,0,0,5" />
+                                            <Image Source="{Binding Image}" Stretch="Uniform" MaxHeight="430" />
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="Preços da internet">
+                <Grid Margin="4">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <TextBlock Text="Rascunhos podem ficar incompletos. A referência só entra na cesta após os dois prints."
+                               TextWrapping="Wrap" />
+                    <DataGrid Grid.Row="1" ItemsSource="{Binding Drafts}" SelectedItem="{Binding SelectedDraft}"
+                              AutoGenerateColumns="False" IsReadOnly="True" Margin="0,8">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Empresa" Binding="{Binding SupplierName}" Width="190" />
+                            <DataGridTextColumn Header="CNPJ" Binding="{Binding SupplierTaxId}" Width="145" />
+                            <DataGridTextColumn Header="Preço" Binding="{Binding UnitPrice, StringFormat=C4}" Width="115" />
+                            <DataGridTextColumn Header="Descrição" Binding="{Binding Description}" Width="*" MinWidth="280" />
+                            <DataGridTextColumn Header="URL" Binding="{Binding SourceUrl}" Width="280" />
+                            <DataGridCheckBoxColumn Header="Preço capturado" Binding="{Binding HasPriceImage}" Width="105" />
+                            <DataGridCheckBoxColumn Header="CNPJ capturado" Binding="{Binding HasTaxIdImage}" Width="105" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button Content="Novo preço da internet" Click="NewInternetPrice_Click" />
+                        <Button Content="Continuar rascunho" Click="EditDraft_Click" />
+                        <Button Content="Excluir rascunho" Click="DeleteDraft_Click" />
+                    </StackPanel>
+                </Grid>
+            </TabItem>
+        </TabControl>
+    </Grid>
+</Window>

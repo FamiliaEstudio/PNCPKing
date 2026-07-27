@@ -44,6 +44,7 @@ public partial class App : Application
             var repository = new SqliteContractRepository(databasePath);
             await repository.InitializeAsync().ConfigureAwait(true);
             var quotationRepository = new SqliteQuotationRepository(databasePath);
+            var internetEvidenceStore = new InternetEvidenceStore(settings.DataFolder);
 
             var socketsHandler = new SocketsHttpHandler
             {
@@ -76,7 +77,9 @@ public partial class App : Application
             var evidenceService = new QuotationEvidenceExportService(
                 documentService,
                 textIndexService,
-                rasterizer);
+                rasterizer,
+                quotationRepository,
+                internetEvidenceStore);
             var syncService = new SyncService(client, repository);
             var autoSyncCoordinator = new AutoSyncCoordinator(client, repository, syncService);
             var itemSearchService = new ItemSearchSessionService(
@@ -84,6 +87,43 @@ public partial class App : Application
                 repository,
                 Path.Combine(settings.DataFolder, "pncpking-search-session.db"),
                 requestTelemetry);
+            var quotationItemSearchService = new QuotationItemSearchService(
+                repository,
+                quotationRepository,
+                itemSearchService);
+            var quotationService = new QuotationService(quotationRepository, new QuotationAnalyzer());
+            var sweetCodeRepository = new SqliteSweetCodeRepository(databasePath);
+            var internetPriceService = new InternetPriceService(
+                quotationRepository,
+                quotationService,
+                internetEvidenceStore);
+            var windowCaptureService = new WindowsForegroundWindowCaptureService();
+            var aiHttpClient = new HttpClient(new SocketsHttpHandler
+            {
+                AutomaticDecompression = DecompressionMethods.All,
+                ConnectTimeout = TimeSpan.FromSeconds(30),
+                PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+                MaxConnectionsPerServer = 2
+            })
+            {
+                Timeout = TimeSpan.FromMinutes(30)
+            };
+            aiHttpClient.DefaultRequestHeaders.UserAgent.ParseAdd("PNCPKing/1.0");
+            var aiDraftCache = new AiDraftCache(settings.DataFolder);
+            var aiProvider = new OpenAiCompatibleQuotationProvider(aiHttpClient);
+            var aiDraftService = new AiQuotationDraftService(
+                textIndexService,
+                new PdfToMarkdownConverter(),
+                aiProvider,
+                aiDraftCache,
+                settings.DataFolder);
+            var aiPromptRefinementService = new AiPromptRefinementService(aiProvider);
+            var aiCostEstimator = new AiCostEstimator(
+                new BcbExchangeRateClient(aiHttpClient, settings.DataFolder));
+            var timedAutomation = new TimedQuotationAutomationService(
+                repository,
+                itemSearchService,
+                quotationService);
             var viewModel = new MainViewModel(
                 repository,
                 new PreflightService(client),
@@ -91,17 +131,30 @@ public partial class App : Application
                 autoSyncCoordinator,
                 new ItemHydrationService(client, repository),
                 itemSearchService,
+                quotationItemSearchService,
                 new BackupService(repository),
-                new QuotationService(quotationRepository, new QuotationAnalyzer()),
+                quotationService,
                 new QuotationWorkbookService(),
                 new QuotationWorkbookImportService(),
+                new QuotationPackageService(databasePath, settings.DataFolder),
                 requestTelemetry,
-                new SqliteSweetCodeRepository(databasePath),
+                sweetCodeRepository,
                 documentService,
                 relevantPageService,
                 evidenceService,
+                internetPriceService,
+                internetEvidenceStore,
+                windowCaptureService,
+                rasterizer,
                 ocrService,
                 columnLayouts,
+                aiDraftService,
+                aiCostEstimator,
+                new WindowsCredentialStore(),
+                aiDraftCache,
+                aiPromptRefinementService,
+                timedAutomation,
+                settingsService,
                 settings.DataFolder);
             var mainWindow = new MainWindow(viewModel, columnLayouts);
             MainWindow = mainWindow;

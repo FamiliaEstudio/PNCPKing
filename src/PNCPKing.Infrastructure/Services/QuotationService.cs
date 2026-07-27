@@ -43,6 +43,31 @@ public sealed class QuotationService(
             weights,
             cancellationToken);
 
+    public Task<QuotationAutomationRun> CreateTimedAutomationRunAsync(
+        Guid projectId,
+        SearchGeoFilter geoFilter,
+        DateOnly startDate,
+        DateOnly endDate,
+        IReadOnlyList<QuotationImportItem> items,
+        AdequacyWeights weights,
+        TimeSpan timeBudget,
+        IReadOnlyList<string>? contractSearchPrompts = null,
+        Guid? sourceDraftId = null,
+        string? sourcePdfSha256 = null,
+        CancellationToken cancellationToken = default) =>
+        repository.CreateTimedAutomationRunAsync(
+            projectId,
+            geoFilter,
+            startDate,
+            endDate,
+            items,
+            weights,
+            timeBudget,
+            contractSearchPrompts,
+            sourceDraftId,
+            sourcePdfSha256,
+            cancellationToken);
+
     public Task<QuotationAutomationRun?> GetLatestAutomationRunAsync(
         Guid projectId,
         CancellationToken cancellationToken = default) =>
@@ -64,6 +89,103 @@ public sealed class QuotationService(
         string message,
         CancellationToken cancellationToken = default) =>
         repository.UpdateAutomationRunStateAsync(runId, state, message, cancellationToken);
+
+    public Task SaveSearchCheckpointAsync(
+        Guid lineId,
+        ItemSearchCheckpoint checkpoint,
+        CancellationToken cancellationToken = default) =>
+        repository.SaveSearchCheckpointAsync(lineId, checkpoint, cancellationToken);
+
+    public Task UpdateAutomationTimingAsync(
+        Guid runId,
+        TimeSpan activeElapsed,
+        TimeSpan? newTimeBudget = null,
+        CancellationToken cancellationToken = default) =>
+        repository.UpdateAutomationTimingAsync(
+            runId,
+            activeElapsed,
+            newTimeBudget,
+            cancellationToken);
+
+    public Task UpdateAutomationOutputPathAsync(
+        Guid runId,
+        string outputPath,
+        CancellationToken cancellationToken = default) =>
+        repository.UpdateAutomationOutputPathAsync(runId, outputPath, cancellationToken);
+
+    public Task UpgradeContractSearchStrategyAsync(
+        Guid runId,
+        int strategyVersion,
+        CancellationToken cancellationToken = default) =>
+        repository.UpgradeContractSearchStrategyAsync(
+            runId,
+            strategyVersion,
+            cancellationToken);
+
+    public Task LinkAutomationDraftAsync(
+        Guid runId,
+        Guid draftId,
+        string pdfSha256,
+        CancellationToken cancellationToken = default) =>
+        repository.LinkAutomationDraftAsync(runId, draftId, pdfSha256, cancellationToken);
+
+    public Task<ItemSearchPromptSet> GetItemSearchPromptSetAsync(
+        Guid lineId,
+        CancellationToken cancellationToken = default) =>
+        repository.GetItemSearchPromptSetAsync(lineId, cancellationToken);
+
+    public Task SaveItemSearchPromptSetAsync(
+        ItemSearchPromptSet promptSet,
+        CancellationToken cancellationToken = default) =>
+        repository.SaveItemSearchPromptSetAsync(promptSet, cancellationToken);
+
+    public Task UpdateItemSearchPromptProgressAsync(
+        Guid lineId,
+        PromptMatchLevel activeLevel,
+        int contractsAtActiveLevel,
+        int matchedItems,
+        int revealedPrices,
+        CancellationToken cancellationToken = default) =>
+        repository.UpdateItemSearchPromptProgressAsync(
+            lineId,
+            activeLevel,
+            contractsAtActiveLevel,
+            matchedItems,
+            revealedPrices,
+            cancellationToken);
+
+    public Task<IReadOnlyList<ContractSearchPrompt>> GetContractSearchPromptsAsync(
+        Guid runId,
+        CancellationToken cancellationToken = default) =>
+        repository.GetContractSearchPromptsAsync(runId, cancellationToken);
+
+    public Task SaveContractSearchPromptAsync(
+        ContractSearchPrompt prompt,
+        CancellationToken cancellationToken = default) =>
+        repository.SaveContractSearchPromptAsync(prompt, cancellationToken);
+
+    public Task<IReadOnlyList<ContractSearchCheckpoint>> GetProcessedContractsAsync(
+        Guid runId,
+        CancellationToken cancellationToken = default) =>
+        repository.GetProcessedContractsAsync(runId, cancellationToken);
+
+    public Task SaveProcessedContractAsync(
+        ContractSearchCheckpoint checkpoint,
+        TimedQuotationProgress progress,
+        CancellationToken cancellationToken = default) =>
+        repository.SaveProcessedContractAsync(checkpoint, progress, cancellationToken);
+
+    public Task<IReadOnlyList<ItemSearchPromptSet>> GetPendingPromptRevalidationsAsync(
+        Guid runId,
+        CancellationToken cancellationToken = default) =>
+        repository.GetPendingPromptRevalidationsAsync(runId, cancellationToken);
+
+    public Task MarkPromptRevalidatedAsync(
+        Guid runId,
+        Guid lineId,
+        int promptVersion,
+        CancellationToken cancellationToken = default) =>
+        repository.MarkPromptRevalidatedAsync(runId, lineId, promptVersion, cancellationToken);
 
     public async Task<QuotationLineAnalysis> CaptureSampleAsync(
         Guid projectId,
@@ -110,7 +232,19 @@ public sealed class QuotationService(
             SampleVersion = (existingLine?.SampleVersion ?? 0) + 1,
             SampledAt = DateTimeOffset.UtcNow,
             SelectedBasketKey = existingLine?.SelectedBasketKey,
-            SelectionConfirmed = false
+            SelectionConfirmed = false,
+            SearchText = existingLine?.SearchText ?? input.Description.Trim(),
+            RequestedBatchCount = existingLine?.RequestedBatchCount ?? 1,
+            DisplayOrder = existingLine?.DisplayOrder ?? 0,
+            AutomationRunId = existingLine?.AutomationRunId,
+            AutomationState = existingLine?.AutomationState ?? QuotationAutomationItemState.Manual,
+            AutomationMessage = existingLine?.AutomationMessage ?? string.Empty,
+            EstimatedUnitPrice = existingLine?.EstimatedUnitPrice,
+            EstimatedTotalPrice = existingLine?.EstimatedTotalPrice,
+            UseEstimatedPrice = existingLine?.UseEstimatedPrice ?? false,
+            EstimateStage = existingLine?.EstimateStage ?? EstimateResolutionStage.NotApplicable,
+            SearchCheckpoint = existingLine?.SearchCheckpoint ?? new ItemSearchCheckpoint(),
+            PromptSet = existingLine?.PromptSet
         };
         var manualBaskets = existingLine is null
             ? []
@@ -254,10 +388,133 @@ public sealed class QuotationService(
         CancellationToken cancellationToken = default) =>
         repository.RemoveManualBasketReferenceAsync(basketId, referenceId, cancellationToken);
 
+    public async Task<QuotationManualBasket> AddManualBasketReferenceAsync(
+        Guid lineId,
+        Guid basketId,
+        string referenceId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(referenceId);
+        var references = await repository.GetReferencesAsync(lineId, cancellationToken)
+            .ConfigureAwait(false);
+        if (references.All(reference =>
+                !string.Equals(reference.Id, referenceId, StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException("A referência não pertence ao item da cotação.");
+        }
+
+        var basket = (await repository.GetManualBasketsAsync(lineId, cancellationToken)
+                .ConfigureAwait(false))
+            .SingleOrDefault(value => value.Id == basketId)
+            ?? throw new InvalidOperationException("A cesta manual não pertence ao item.");
+        return await repository.SaveManualBasketAsync(
+                lineId,
+                basket.Id,
+                basket.Name,
+                basket.ReferenceIds
+                    .Append(referenceId)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray(),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<QuotationManualBasket> CreateManualBasketAsync(
+        Guid lineId,
+        string name,
+        IReadOnlyList<string> referenceIds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentNullException.ThrowIfNull(referenceIds);
+        var available = (await repository.GetReferencesAsync(lineId, cancellationToken)
+                .ConfigureAwait(false))
+            .Select(reference => reference.Id)
+            .ToHashSet(StringComparer.Ordinal);
+        var members = referenceIds
+            .Where(available.Contains)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (members.Length == 0)
+        {
+            throw new InvalidOperationException(
+                "Selecione ao menos uma referência pertencente ao item.");
+        }
+
+        return await repository.SaveManualBasketAsync(
+                lineId,
+                null,
+                name.Trim(),
+                members,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public Task DeleteManualBasketAsync(
         Guid basketId,
         CancellationToken cancellationToken = default) =>
         repository.DeleteManualBasketAsync(basketId, cancellationToken);
+
+    public async Task<QuotationManualBasket> CreateManualCopyAsync(
+        QuotationLineAnalysis analysis,
+        QuotationBasket source,
+        string? name = null,
+        string? excludedReferenceId = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(analysis);
+        ArgumentNullException.ThrowIfNull(source);
+        if (analysis.Baskets.All(basket => basket.Key != source.Key))
+        {
+            throw new InvalidOperationException("A cesta não pertence ao item informado.");
+        }
+
+        if (source.IsManual && source.ManualBasketId is { } existingId &&
+            string.IsNullOrWhiteSpace(excludedReferenceId))
+        {
+            return (await repository.GetManualBasketsAsync(
+                    analysis.Line.Id,
+                    cancellationToken).ConfigureAwait(false))
+                .Single(basket => basket.Id == existingId);
+        }
+
+        var references = source.References
+            .Where(reference =>
+                !string.Equals(reference.Id, excludedReferenceId, StringComparison.Ordinal))
+            .Select(reference => reference.Id)
+            .ToArray();
+        if (references.Length == 0)
+        {
+            throw new InvalidOperationException("A cópia manual ficaria sem preços.");
+        }
+
+        var manualBaskets = await repository.GetManualBasketsAsync(
+            analysis.Line.Id,
+            cancellationToken).ConfigureAwait(false);
+        var effectiveName = string.IsNullOrWhiteSpace(name)
+            ? NextManualBasketName(manualBaskets)
+            : name.Trim();
+        return await repository.SaveManualBasketAsync(
+            analysis.Line.Id,
+            null,
+            effectiveName,
+            references,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static string NextManualBasketName(IReadOnlyList<QuotationManualBasket> baskets)
+    {
+        var names = baskets.Select(basket => basket.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        for (var number = 1; ; number++)
+        {
+            var candidate = $"Manual {number:N0}";
+            if (!names.Contains(candidate))
+            {
+                return candidate;
+            }
+        }
+    }
 
     public async Task<QuotationProjectReport> GetReportAsync(
         Guid projectId,
@@ -311,7 +568,9 @@ public sealed class QuotationService(
             Uf = row.Contract.Uf,
             DistanceFromRibeiraoKilometers = distance,
             PublicationDate = row.Contract.PublicationDate,
-            PortalUrl = row.Contract.PortalUri.AbsoluteUri
+            PortalUrl = row.Contract.PortalUri.AbsoluteUri,
+            MatchedPromptLevel = row.MatchedPromptLevel,
+            MatchedSearchText = row.MatchedSearchText
         };
     }
 

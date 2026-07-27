@@ -130,6 +130,7 @@ public static partial class SearchText
         var tokens = Tokenize(sanitized);
         var groups = new List<SearchConjunction>();
         var current = new List<SearchTerm>();
+        var currentApproximateNumbers = new List<ApproximateNumberConstraint>();
         var exclusions = new List<SearchTerm>();
         var acceptedUnits = new List<string>();
         var requiresPositiveTerm = false;
@@ -163,8 +164,13 @@ public static partial class SearchText
                     acceptedUnits.Add(token.Term!.Words.Single());
                     break;
 
+                case SearchTokenKind.ApproximateNumber:
+                    currentApproximateNumbers.Add(token.ApproximateNumber!);
+                    requiresPositiveTerm = false;
+                    break;
+
                 case SearchTokenKind.And:
-                    if (current.Count == 0 || requiresPositiveTerm)
+                    if (current.Count == 0 && currentApproximateNumbers.Count == 0 || requiresPositiveTerm)
                     {
                         throw new SearchQueryException("O operador '+' precisa ficar entre dois termos positivos.");
                     }
@@ -173,13 +179,16 @@ public static partial class SearchText
                     break;
 
                 case SearchTokenKind.Or:
-                    if (current.Count == 0 || requiresPositiveTerm)
+                    if (current.Count == 0 && currentApproximateNumbers.Count == 0 || requiresPositiveTerm)
                     {
                         throw new SearchQueryException("O operador OU precisa ficar entre duas expressões positivas.");
                     }
 
-                    groups.Add(new SearchConjunction(current.ToArray()));
+                    groups.Add(new SearchConjunction(
+                        current.ToArray(),
+                        currentApproximateNumbers.ToArray()));
                     current.Clear();
+                    currentApproximateNumbers.Clear();
                     requiresPositiveTerm = true;
                     break;
 
@@ -193,9 +202,11 @@ public static partial class SearchText
             throw new SearchQueryException("A expressão não pode terminar com um operador.");
         }
 
-        if (current.Count > 0)
+        if (current.Count > 0 || currentApproximateNumbers.Count > 0)
         {
-            groups.Add(new SearchConjunction(current.ToArray()));
+            groups.Add(new SearchConjunction(
+                current.ToArray(),
+                currentApproximateNumbers.ToArray()));
         }
 
         if (groups.Count == 0 && acceptedUnits.Count == 0)
@@ -246,6 +257,12 @@ public static partial class SearchText
 
                 tokens.Add(new SearchToken(SearchTokenKind.Exclude));
                 index++;
+                continue;
+            }
+
+            if (character == '%')
+            {
+                tokens.Add(ParseApproximateNumber(text, ref index));
                 continue;
             }
 
@@ -323,6 +340,86 @@ public static partial class SearchText
         return tokens;
     }
 
+    private static SearchToken ParseApproximateNumber(string text, ref int index)
+    {
+        var markerIndex = index++;
+        if (index >= text.Length || !char.IsDigit(text[index]))
+        {
+            throw new SearchQueryException(
+                "Use '%' imediatamente antes de um número positivo, por exemplo: %600 g.");
+        }
+
+        var numberStart = index;
+        var separatorFound = false;
+        while (index < text.Length)
+        {
+            var character = text[index];
+            if (char.IsDigit(character))
+            {
+                index++;
+                continue;
+            }
+
+            if (character is '.' or ',')
+            {
+                if (separatorFound || index + 1 >= text.Length || !char.IsDigit(text[index + 1]))
+                {
+                    throw new SearchQueryException(
+                        "O número aproximado possui um separador decimal inválido.");
+                }
+
+                separatorFound = true;
+                index++;
+                continue;
+            }
+
+            break;
+        }
+
+        var afterNumber = index;
+        var rawNumber = text[numberStart..afterNumber].Replace(',', '.');
+        if (!decimal.TryParse(
+                rawNumber,
+                NumberStyles.AllowDecimalPoint,
+                CultureInfo.InvariantCulture,
+                out var value) ||
+            value <= 0)
+        {
+            throw new SearchQueryException("O número após '%' deve ser maior que zero.");
+        }
+
+        while (index < text.Length && char.IsWhiteSpace(text[index]))
+        {
+            index++;
+        }
+
+        var unitStart = index;
+        while (index < text.Length && char.IsLetter(text[index]))
+        {
+            index++;
+        }
+
+        var rawUnit = unitStart == index ? string.Empty : Normalize(text[unitStart..index]);
+        if (!ApproximateNumberConstraint.TryResolveUnit(rawUnit, out var unit))
+        {
+            if (unitStart == afterNumber && rawUnit.Length > 0)
+            {
+                throw new SearchQueryException(
+                    $"A unidade '{rawUnit}' colada ao número aproximado não é reconhecida.");
+            }
+
+            index = afterNumber;
+            unit = null;
+        }
+
+        return new SearchToken(
+            SearchTokenKind.ApproximateNumber,
+            ApproximateNumber: ApproximateNumberConstraint.Create(
+                value,
+                unit,
+                text[markerIndex..afterNumber]));
+    }
+
     private static SearchTerm CreateTerm(string text, bool isPhrase)
     {
         var words = WordRegex().Matches(Normalize(text)).Select(match => match.Value).ToArray();
@@ -346,10 +443,14 @@ public static partial class SearchText
         And,
         Or,
         Exclude,
-        Unit
+        Unit,
+        ApproximateNumber
     }
 
-    private sealed record SearchToken(SearchTokenKind Kind, SearchTerm? Term = null);
+    private sealed record SearchToken(
+        SearchTokenKind Kind,
+        SearchTerm? Term = null,
+        ApproximateNumberConstraint? ApproximateNumber = null);
 }
 
 public sealed class SearchQueryException(string message) : FormatException(message);
@@ -396,16 +497,141 @@ public sealed record SearchTerm(IReadOnlyList<string> Words, bool IsPhrase)
     }
 }
 
-public sealed record SearchConjunction(IReadOnlyList<SearchTerm> Terms)
+public sealed record SearchConjunction(
+    IReadOnlyList<SearchTerm> Terms,
+    IReadOnlyList<ApproximateNumberConstraint>? ApproximateNumbers = null)
 {
     internal string ToFtsQuery()
     {
+        if (Terms.Count == 0)
+        {
+            return string.Empty;
+        }
+
         var value = string.Join(" AND ", Terms.Select(term => term.ToFtsQuery()));
         return Terms.Count > 1 ? $"({value})" : value;
     }
 
-    internal bool Matches(IReadOnlyList<string> foundWords) =>
-        Terms.All(term => term.Matches(foundWords));
+    internal bool Matches(IReadOnlyList<string> foundWords, string searchableText) =>
+        Terms.All(term => term.Matches(foundWords)) &&
+        (ApproximateNumbers ?? []).All(number => number.Matches(searchableText));
+}
+
+public sealed partial record ApproximateNumberConstraint
+{
+    private static readonly IReadOnlyDictionary<string, MeasurementUnit> UnitAliases =
+        new Dictionary<string, MeasurementUnit>(StringComparer.Ordinal)
+        {
+            ["mg"] = new("mass", 0.001m),
+            ["miligrama"] = new("mass", 0.001m),
+            ["miligramas"] = new("mass", 0.001m),
+            ["g"] = new("mass", 1m),
+            ["grama"] = new("mass", 1m),
+            ["gramas"] = new("mass", 1m),
+            ["kg"] = new("mass", 1000m),
+            ["quilo"] = new("mass", 1000m),
+            ["quilos"] = new("mass", 1000m),
+            ["quilograma"] = new("mass", 1000m),
+            ["quilogramas"] = new("mass", 1000m),
+            ["mm"] = new("length", 0.1m),
+            ["milimetro"] = new("length", 0.1m),
+            ["milimetros"] = new("length", 0.1m),
+            ["cm"] = new("length", 1m),
+            ["centimetro"] = new("length", 1m),
+            ["centimetros"] = new("length", 1m),
+            ["m"] = new("length", 100m),
+            ["metro"] = new("length", 100m),
+            ["metros"] = new("length", 100m),
+            ["ml"] = new("volume", 1m),
+            ["mililitro"] = new("volume", 1m),
+            ["mililitros"] = new("volume", 1m),
+            ["l"] = new("volume", 1000m),
+            ["litro"] = new("volume", 1000m),
+            ["litros"] = new("volume", 1000m)
+        };
+
+    public required decimal RequestedValue { get; init; }
+    public required decimal MinimumValue { get; init; }
+    public required decimal MaximumValue { get; init; }
+    public string? UnitDimension { get; init; }
+    public string OriginalText { get; init; } = string.Empty;
+
+    public static ApproximateNumberConstraint Create(
+        decimal value,
+        MeasurementUnit? unit,
+        string originalText)
+    {
+        var multiplier = unit?.Multiplier ?? 1m;
+        var normalizedValue = value * multiplier;
+        var tolerance = value >= 20m
+            ? normalizedValue * 0.25m
+            : value >= 4m
+                ? 3m * multiplier
+                : 1m * multiplier;
+        return new ApproximateNumberConstraint
+        {
+            RequestedValue = normalizedValue,
+            MinimumValue = Math.Max(0.000001m, normalizedValue - tolerance),
+            MaximumValue = normalizedValue + tolerance,
+            UnitDimension = unit?.Dimension,
+            OriginalText = originalText
+        };
+    }
+
+    public static bool TryResolveUnit(string value, out MeasurementUnit? unit)
+    {
+        if (value.Length > 0 && UnitAliases.TryGetValue(value, out var resolved))
+        {
+            unit = resolved;
+            return true;
+        }
+
+        unit = null;
+        return value.Length == 0;
+    }
+
+    public bool Matches(string searchableText)
+    {
+        foreach (Match match in NumericMeasurementRegex().Matches(SearchText.Normalize(searchableText)))
+        {
+            var raw = match.Groups["number"].Value.Replace(',', '.');
+            if (!decimal.TryParse(
+                    raw,
+                    NumberStyles.AllowDecimalPoint,
+                    CultureInfo.InvariantCulture,
+                    out var found))
+            {
+                continue;
+            }
+
+            var rawUnit = match.Groups["unit"].Value;
+            if (UnitDimension is not null)
+            {
+                if (!TryResolveUnit(rawUnit, out var foundUnit) ||
+                    foundUnit is null ||
+                    !string.Equals(foundUnit.Dimension, UnitDimension, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                found *= foundUnit.Multiplier;
+            }
+
+            if (found >= MinimumValue && found <= MaximumValue)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    [GeneratedRegex(
+        @"(?<![\p{L}\p{N}])(?<number>\d+(?:[.,]\d+)?)(?:\s*(?<unit>miligrama(?:s)?|mg|quilograma(?:s)?|quilo(?:s)?|kg|grama(?:s)?|g|milimetro(?:s)?|mm|centimetro(?:s)?|cm|metro(?:s)?|m|mililitro(?:s)?|ml|litro(?:s)?|l))?\b",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex NumericMeasurementRegex();
+
+    public sealed record MeasurementUnit(string Dimension, decimal Multiplier);
 }
 
 public sealed record SearchExpression(
@@ -448,7 +674,9 @@ public sealed record SearchExpression(
     public bool MatchesItem(string? description, string? unit)
     {
         var descriptionWords = Words(description);
-        var matchesPositive = PositiveGroups.Count == 0 || PositiveGroups.Any(group => group.Matches(descriptionWords));
+        var searchableText = $"{description} {unit}";
+        var matchesPositive = PositiveGroups.Count == 0 ||
+                              PositiveGroups.Any(group => group.Matches(descriptionWords, searchableText));
         if (!matchesPositive || Exclusions.Any(exclusion => exclusion.Matches(descriptionWords)))
         {
             return false;
@@ -484,8 +712,12 @@ public sealed record SearchExpression(
             return string.Empty;
         }
 
-        var value = string.Join(" OR ", PositiveGroups.Select(group => group.ToFtsQuery()));
-        return PositiveGroups.Count > 1 ? $"({value})" : value;
+        var queries = PositiveGroups
+            .Select(group => group.ToFtsQuery())
+            .Where(value => value.Length > 0)
+            .ToArray();
+        var value = string.Join(" OR ", queries);
+        return queries.Length > 1 ? $"({value})" : value;
     }
 
     private static IReadOnlyList<string> Words(string? text) => Regex

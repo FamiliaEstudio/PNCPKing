@@ -36,6 +36,30 @@ public interface IQuotationRepository
         string referenceId,
         CancellationToken cancellationToken = default);
     Task DeleteManualBasketAsync(Guid basketId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<InternetPriceDraft>> GetInternetPriceDraftsAsync(
+        Guid lineId,
+        CancellationToken cancellationToken = default);
+    Task<InternetPriceDraft> SaveInternetPriceDraftAsync(
+        InternetPriceDraft draft,
+        CancellationToken cancellationToken = default);
+    Task DeleteInternetPriceDraftAsync(
+        Guid draftId,
+        CancellationToken cancellationToken = default);
+    Task<IReadOnlyDictionary<string, InternetPriceEvidence>> GetInternetPriceEvidenceAsync(
+        Guid lineId,
+        CancellationToken cancellationToken = default);
+    Task<QuotationManualBasket> SaveInternetPriceReferenceAsync(
+        QuotationReference reference,
+        InternetPriceEvidence evidence,
+        Guid basketId,
+        string basketName,
+        CancellationToken cancellationToken = default);
+    Task DeleteInternetPriceReferenceAsync(
+        Guid lineId,
+        string referenceId,
+        CancellationToken cancellationToken = default);
+    Task<IReadOnlySet<string>> GetReferencedInternetEvidenceHashesAsync(
+        CancellationToken cancellationToken = default);
     Task UpdateWeightsAsync(Guid lineId, AdequacyWeights weights, CancellationToken cancellationToken = default);
     Task<QuotationAutomationRun> CreateAutomationRunAsync(
         Guid projectId,
@@ -45,6 +69,18 @@ public interface IQuotationRepository
         DateOnly endDate,
         IReadOnlyList<QuotationImportItem> items,
         AdequacyWeights weights,
+        CancellationToken cancellationToken = default);
+    Task<QuotationAutomationRun> CreateTimedAutomationRunAsync(
+        Guid projectId,
+        SearchGeoFilter geoFilter,
+        DateOnly startDate,
+        DateOnly endDate,
+        IReadOnlyList<QuotationImportItem> items,
+        AdequacyWeights weights,
+        TimeSpan timeBudget,
+        IReadOnlyList<string>? contractSearchPrompts = null,
+        Guid? sourceDraftId = null,
+        string? sourcePdfSha256 = null,
         CancellationToken cancellationToken = default);
     Task<QuotationAutomationRun?> GetLatestAutomationRunAsync(
         Guid projectId,
@@ -59,6 +95,62 @@ public interface IQuotationRepository
         Guid runId,
         QuotationAutomationRunState state,
         string message,
+        CancellationToken cancellationToken = default);
+    Task SaveSearchCheckpointAsync(
+        Guid lineId,
+        ItemSearchCheckpoint checkpoint,
+        CancellationToken cancellationToken = default);
+    Task UpdateAutomationTimingAsync(
+        Guid runId,
+        TimeSpan activeElapsed,
+        TimeSpan? newTimeBudget = null,
+        CancellationToken cancellationToken = default);
+    Task UpdateAutomationOutputPathAsync(
+        Guid runId,
+        string outputPath,
+        CancellationToken cancellationToken = default);
+    Task UpgradeContractSearchStrategyAsync(
+        Guid runId,
+        int strategyVersion,
+        CancellationToken cancellationToken = default);
+    Task LinkAutomationDraftAsync(
+        Guid runId,
+        Guid draftId,
+        string pdfSha256,
+        CancellationToken cancellationToken = default);
+    Task<ItemSearchPromptSet> GetItemSearchPromptSetAsync(
+        Guid lineId,
+        CancellationToken cancellationToken = default);
+    Task SaveItemSearchPromptSetAsync(
+        ItemSearchPromptSet promptSet,
+        CancellationToken cancellationToken = default);
+    Task UpdateItemSearchPromptProgressAsync(
+        Guid lineId,
+        PromptMatchLevel activeLevel,
+        int contractsAtActiveLevel,
+        int matchedItems,
+        int revealedPrices,
+        CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ContractSearchPrompt>> GetContractSearchPromptsAsync(
+        Guid runId,
+        CancellationToken cancellationToken = default);
+    Task SaveContractSearchPromptAsync(
+        ContractSearchPrompt prompt,
+        CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ContractSearchCheckpoint>> GetProcessedContractsAsync(
+        Guid runId,
+        CancellationToken cancellationToken = default);
+    Task SaveProcessedContractAsync(
+        ContractSearchCheckpoint checkpoint,
+        TimedQuotationProgress progress,
+        CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ItemSearchPromptSet>> GetPendingPromptRevalidationsAsync(
+        Guid runId,
+        CancellationToken cancellationToken = default);
+    Task MarkPromptRevalidatedAsync(
+        Guid runId,
+        Guid lineId,
+        int promptVersion,
         CancellationToken cancellationToken = default);
 }
 

@@ -9,16 +9,33 @@ public sealed record ColumnLayoutSetting(
     double Width,
     string WidthUnit);
 
+public sealed record AiProviderSetting(
+    string Id,
+    string DisplayName,
+    string Endpoint,
+    string Model,
+    string Protocol,
+    string OutputMode,
+    bool IsFree,
+    int ContextWindow,
+    int MaximumOutputTokens,
+    decimal InputCostBrlPerMillion,
+    decimal OutputCostBrlPerMillion);
+
 public sealed record AppSettings(
     string DataFolder,
     bool IsConfigured,
-    int SettingsVersion = 2,
-    Dictionary<string, List<ColumnLayoutSetting>>? ColumnLayouts = null);
+    int SettingsVersion = 3,
+    Dictionary<string, List<ColumnLayoutSetting>>? ColumnLayouts = null,
+    List<AiProviderSetting>? AiProviders = null,
+    string? LastAiProviderId = null,
+    decimal AiSafetyMarginPercent = 10m);
 
 public sealed class AppSettingsService
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly string _settingsPath;
+    private readonly SemaphoreSlim _saveGate = new(1, 1);
 
     public AppSettingsService()
     {
@@ -51,6 +68,36 @@ public sealed class AppSettingsService
     }
 
     public async Task SaveAsync(AppSettings settings)
+    {
+        await _saveGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await SaveCoreAsync(settings).ConfigureAwait(false);
+        }
+        finally
+        {
+            _saveGate.Release();
+        }
+    }
+
+    public async Task<AppSettings> UpdateAsync(Func<AppSettings, AppSettings> update)
+    {
+        ArgumentNullException.ThrowIfNull(update);
+        await _saveGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            var current = await LoadAsync().ConfigureAwait(false);
+            var updated = update(current);
+            await SaveCoreAsync(updated).ConfigureAwait(false);
+            return updated;
+        }
+        finally
+        {
+            _saveGate.Release();
+        }
+    }
+
+    private async Task SaveCoreAsync(AppSettings settings)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(_settingsPath)!);
         var temporaryPath = _settingsPath + ".tmp";

@@ -18,4 +18,9 @@
     <ProjectReference Include="../../src/PNCPKing.Infrastructure/PNCPKing.Infrastructure.csproj"
                       SkipGetTargetFrameworkProperties="true" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="../../src/PNCPKing.App/Views/QuotationItemWindow.xaml"
+          Link="Views/QuotationItemWindow.xaml"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

@@ -1,0 +1,110 @@
+<Window x:Class="PNCPKing.App.Views.InternetPriceWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Preço da internet — Inciso III"
+        Width="1040" Height="760" MinWidth="820" MinHeight="620"
+        WindowStartupLocation="CenterOwner">
+    <Grid Margin="14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Border Background="#EAF2FF" BorderBrush="#9CBCE8" BorderThickness="1"
+                CornerRadius="4" Padding="10" Margin="0,0,0,10">
+            <TextBlock TextWrapping="Wrap">
+                Com a página da internet em primeiro plano, pressione Alt+1 para capturar o preço
+                e Alt+2 para capturar o CNPJ. O PNCP King capturará a janela inteira sem trazê-la
+                automaticamente para a frente.
+            </TextBlock>
+        </Border>
+
+        <Grid Grid.Row="1" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="145" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="130" />
+                <ColumnDefinition Width="180" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <TextBlock Text="URL da fonte:" VerticalAlignment="Center" Margin="0,4" />
+            <TextBox x:Name="SourceUrlTextBox" Grid.Column="1" Grid.ColumnSpan="3" Margin="4"
+                     TextChanged="Input_Changed" />
+            <TextBlock Grid.Row="1" Text="Preço unitário:" VerticalAlignment="Center" Margin="0,4" />
+            <TextBox x:Name="UnitPriceTextBox" Grid.Row="1" Grid.Column="1" Margin="4"
+                     TextChanged="Input_Changed" />
+            <TextBlock Grid.Row="1" Grid.Column="2" Text="CNPJ:" VerticalAlignment="Center" Margin="8,4" />
+            <TextBox x:Name="TaxIdTextBox" Grid.Row="1" Grid.Column="3" Margin="4"
+                     TextChanged="Input_Changed" />
+            <TextBlock Grid.Row="2" Text="Empresa:" VerticalAlignment="Center" Margin="0,4" />
+            <TextBox x:Name="SupplierTextBox" Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="3"
+                     Margin="4" TextChanged="Input_Changed" />
+            <TextBlock Grid.Row="3" Text="Descrição anunciada:" VerticalAlignment="Top" Margin="0,8" />
+            <TextBox x:Name="DescriptionTextBox" Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="3"
+                     Height="58" AcceptsReturn="True" TextWrapping="Wrap" Margin="4"
+                     TextChanged="Input_Changed" />
+        </Grid>
+
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="10" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <GroupBox Header="Alt+1 — print do preço">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Border BorderBrush="#C8C8C8" BorderThickness="1" Background="#F7F7F7">
+                        <Image x:Name="PriceImagePreview" Stretch="Uniform" />
+                    </Border>
+                    <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                        <TextBlock x:Name="PriceImageStatus" VerticalAlignment="Center" Margin="5" />
+                        <Button Content="Apagar print" Click="DeletePriceImage_Click" />
+                    </StackPanel>
+                </Grid>
+            </GroupBox>
+            <GroupBox Grid.Column="2" Header="Alt+2 — print do CNPJ">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Border BorderBrush="#C8C8C8" BorderThickness="1" Background="#F7F7F7">
+                        <Image x:Name="TaxIdImagePreview" Stretch="Uniform" />
+                    </Border>
+                    <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                        <TextBlock x:Name="TaxIdImageStatus" VerticalAlignment="Center" Margin="5" />
+                        <Button Content="Apagar print" Click="DeleteTaxIdImage_Click" />
+                    </StackPanel>
+                </Grid>
+            </GroupBox>
+        </Grid>
+
+        <Grid Grid.Row="3" Margin="0,10,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock x:Name="AverageText" FontWeight="SemiBold" />
+                <TextBlock x:Name="ValidationText" TextWrapping="Wrap" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                <Button Content="Salvar rascunho" Click="SaveDraft_Click" />
+                <Button x:Name="CompleteButton" Content="Inserir na cesta" Click="Complete_Click"
+                        IsDefault="True" />
+                <Button Content="Cancelar" Click="Cancel_Click" IsCancel="True" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

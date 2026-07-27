@@ -63,6 +63,240 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
 
     public ItemSearchSession? CurrentSession => _session;
 
+    /// <summary>
+    /// Opens one contract once, compares its cached item list with every pending
+    /// quotation line and reveals only the prices of distinct matching items.
+    /// The permanent cache makes later prompt re-evaluation network-free whenever
+    /// the list and result snapshots are still current.
+    /// </summary>
+    public async Task<ContractEvaluationResult> EvaluateContractAsync(
+        ContractRecord contract,
+        IReadOnlyList<ContractItemPrompt> prompts,
+        CancellationToken cancellationToken = default,
+        PncpRequestPriority priority = PncpRequestPriority.AdditionalBatches)
+    {
+        ArgumentNullException.ThrowIfNull(contract);
+        ArgumentNullException.ThrowIfNull(prompts);
+        var listFromCache = 0;
+        var listFromApi = 0;
+        var resultCalls = 0;
+        var failedCalls = 0;
+        var telemetryBefore = _telemetry?.GetSnapshot();
+
+        var snapshot = await _repository.GetItemSnapshotAsync(contract.PncpId, cancellationToken)
+            .ConfigureAwait(false);
+        if (snapshot?.IsCurrentFor(contract) == true)
+        {
+            listFromCache = 1;
+        }
+        else
+        {
+            try
+            {
+                using var requestScope = PncpRequestOptions.BeginScope(
+                    priority,
+                    PncpRequestCategory.ItemLists);
+                var items = await _client.GetItemsAsync(contract, cancellationToken).ConfigureAwait(false);
+                await _repository.UpsertItemsAsync(
+                    contract.PncpId,
+                    items,
+                    false,
+                    cancellationToken).ConfigureAwait(false);
+                listFromApi = 1;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                failedCalls = 1;
+                var actual = GetActualCallDelta(
+                    telemetryBefore,
+                    listFromApi,
+                    resultCalls,
+                    failedCalls);
+                return new ContractEvaluationResult(
+                    contract,
+                    new Dictionary<Guid, IReadOnlyList<ItemSearchRow>>(),
+                    0,
+                    0,
+                    listFromCache,
+                    actual.ItemListCalls,
+                    actual.ItemResultCalls,
+                    actual.FailedCalls);
+            }
+        }
+
+        var matches = new Dictionary<(Guid LineId, long ItemNumber), MatchedContractItem>();
+        foreach (var lineGroup in prompts
+                     .Where(prompt => !string.IsNullOrWhiteSpace(prompt.Text))
+                     .GroupBy(prompt => prompt.LineId))
+        {
+            foreach (var prompt in lineGroup.OrderBy(value => value.Level))
+            {
+                var items = await _repository.SearchItemsAsync(
+                        contract.PncpId,
+                        prompt.Text,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                foreach (var item in items)
+                {
+                    var key = (prompt.LineId, item.ItemNumber);
+                    if (!matches.ContainsKey(key))
+                    {
+                        matches[key] = new MatchedContractItem(
+                            prompt.LineId,
+                            prompt.Level,
+                            prompt.Text,
+                            item);
+                    }
+                }
+            }
+        }
+
+        var resultByItem = new ConcurrentDictionary<long, CachedItemResults>();
+        var itemsToHydrate = matches.Values
+            .Select(value => value.Item)
+            .Where(item => item.HasResult)
+            .GroupBy(item => item.ItemNumber)
+            .Select(group => group.First())
+            .ToArray();
+        using var semaphore = new SemaphoreSlim(2, 2);
+        var hydrationTasks = itemsToHydrate.Select(async item =>
+        {
+            var cached = await _repository.GetCachedItemResultsAsync(
+                    contract.PncpId,
+                    item.ItemNumber,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (cached?.IsCurrent == true)
+            {
+                resultByItem[item.ItemNumber] = cached;
+                return;
+            }
+
+            await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                Interlocked.Increment(ref resultCalls);
+                using var requestScope = PncpRequestOptions.BeginScope(
+                    priority,
+                    PncpRequestCategory.ItemResults);
+                var results = await _client.GetItemResultsAsync(
+                        contract,
+                        item.ItemNumber,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                await _repository.ReplaceItemResultsAsync(
+                    contract.PncpId,
+                    item.ItemNumber,
+                    results,
+                    cancellationToken).ConfigureAwait(false);
+                resultByItem[item.ItemNumber] = new CachedItemResults(
+                    item with { HydrationStatus = ItemHydrationStatus.Complete },
+                    results);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                Interlocked.Increment(ref failedCalls);
+                await _repository.SetItemHydrationStatusAsync(
+                    contract.PncpId,
+                    item.ItemNumber,
+                    ItemHydrationStatus.Failed,
+                    exception.Message,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        });
+        await Task.WhenAll(hydrationTasks).ConfigureAwait(false);
+
+        var byLine = new Dictionary<Guid, IReadOnlyList<ItemSearchRow>>();
+        var revealedPrices = 0;
+        foreach (var lineGroup in matches.Values.GroupBy(value => value.LineId))
+        {
+            var rows = new List<ItemSearchRow>();
+            foreach (var match in lineGroup.OrderBy(value => value.Item.ItemNumber))
+            {
+                if (!match.Item.HasResult ||
+                    !resultByItem.TryGetValue(match.Item.ItemNumber, out var cached))
+                {
+                    continue;
+                }
+
+                foreach (var result in cached.Results)
+                {
+                    var state = result.IsActive
+                        ? ItemSearchPriceState.Homologated
+                        : ItemSearchPriceState.Cancelled;
+                    if (result.IsActive && result.HomologatedUnitValue is > 0)
+                    {
+                        revealedPrices++;
+                    }
+
+                    rows.Add(new ItemSearchRow(
+                        contract,
+                        match.Item,
+                        result,
+                        state,
+                        result.IsActive ? "Preço homologado encontrado" : "Resultado cancelado",
+                        false,
+                        match.Level,
+                        match.Text));
+                }
+            }
+
+            byLine[lineGroup.Key] = rows;
+        }
+
+        var actualCalls = GetActualCallDelta(
+            telemetryBefore,
+            listFromApi,
+            resultCalls,
+            failedCalls);
+        return new ContractEvaluationResult(
+            contract,
+            byLine,
+            matches.Count,
+            revealedPrices,
+            listFromCache,
+            actualCalls.ItemListCalls,
+            actualCalls.ItemResultCalls,
+            actualCalls.FailedCalls);
+    }
+
+    private (int ItemListCalls, int ItemResultCalls, int FailedCalls) GetActualCallDelta(
+        PncpRequestTelemetrySnapshot? before,
+        int logicalListCalls,
+        int logicalResultCalls,
+        int logicalFailures)
+    {
+        if (_telemetry is null || before is null)
+        {
+            return (logicalListCalls, logicalResultCalls, logicalFailures);
+        }
+
+        var after = _telemetry.GetSnapshot();
+        var listsBefore = before[PncpRequestCategory.ItemLists];
+        var listsAfter = after[PncpRequestCategory.ItemLists];
+        var resultsBefore = before[PncpRequestCategory.ItemResults];
+        var resultsAfter = after[PncpRequestCategory.ItemResults];
+        return (
+            checked((int)Math.Max(0, listsAfter.Calls - listsBefore.Calls)),
+            checked((int)Math.Max(0, resultsAfter.Calls - resultsBefore.Calls)),
+            checked((int)Math.Max(
+                0,
+                listsAfter.Failed - listsBefore.Failed +
+                resultsAfter.Failed - resultsBefore.Failed)));
+    }
+
     public async Task<ItemSearchSession> StartAsync(
         string text,
         IReadOnlyList<ContractRecord> candidateContracts,
@@ -277,6 +511,96 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 progress: progress,
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
+
+    /// <summary>
+    /// Executes exactly one resumable batch for the timed quotation automation.
+    /// The geographic/random cursor belongs to the quotation line, so switching
+    /// between items never restarts or repeats their candidate sequence.
+    /// </summary>
+    public async Task<TimedPriceBatchResult> RunTimedBatchAsync(
+        SearchQuery query,
+        ItemSearchCheckpoint checkpoint,
+        IProgress<PriceBatchProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        var expression = SearchText.Parse(query.Text);
+        var pivot = checkpoint.RandomPivot == 0
+            ? Random.Shared.NextInt64(1, long.MaxValue)
+            : checkpoint.RandomPivot;
+        var candidatePage = await _repository.SearchItemCandidatesAsync(
+                query with { Page = 1, PageSize = ItemSearchDefaults.ContractsPerBatch },
+                expression,
+                pivot,
+                checkpoint.Cursor,
+                ItemSearchDefaults.ContractsPerBatch,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await StartAsync(
+                query.Text,
+                candidatePage.Results.Select(candidate => candidate.Contract).ToArray(),
+                cancellationToken)
+            .ConfigureAwait(false);
+        PriceBatchProgress? latestProgress = null;
+        var forwardingProgress = new InlineProgress<PriceBatchProgress>(value =>
+        {
+            latestProgress = value;
+            progress?.Report(value);
+        });
+        PriceBatchProgress batchProgress;
+        try
+        {
+            batchProgress = await RunContinuousAsync(
+                    new PriceBatchRequest(1),
+                    progress: forwardingProgress,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception)
+        {
+            var processed = Math.Clamp(
+                latestProgress?.ProcessedContracts ?? 0,
+                0,
+                candidatePage.Results.Count);
+            var partialRows = await GetDiscoveredRowsAsync(cancellationToken: CancellationToken.None)
+                .ConfigureAwait(false);
+            var partialProgress = latestProgress ?? new PriceBatchProgress(
+                0,
+                0,
+                0,
+                0,
+                0,
+                TimeSpan.Zero,
+                false,
+                "Lote interrompido; resultados concluídos foram preservados.",
+                RequestedContracts: ItemSearchDefaults.ContractsPerBatch,
+                ProcessedContracts: processed);
+            var partialCheckpoint = checkpoint with
+            {
+                RandomPivot = pivot,
+                Cursor = processed == 0
+                    ? checkpoint.Cursor
+                    : candidatePage.Results[processed - 1].Cursor,
+                ContractsExamined = checked(checkpoint.ContractsExamined + processed),
+                CandidateSetExhausted = !candidatePage.HasMore && processed == candidatePage.Results.Count
+            };
+            throw new TimedPriceBatchInterruptedException(
+                new TimedPriceBatchResult(partialRows, partialCheckpoint, partialProgress),
+                exception,
+                cancellationToken);
+        }
+        var rows = await GetDiscoveredRowsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+        var nextCheckpoint = checkpoint with
+        {
+            RandomPivot = pivot,
+            Cursor = candidatePage.NextCursor,
+            ContractsExamined = checked(checkpoint.ContractsExamined + batchProgress.ProcessedContracts),
+            BatchesCompleted = checked(checkpoint.BatchesCompleted + 1),
+            CandidateSetExhausted = !candidatePage.HasMore
+        };
+        return new TimedPriceBatchResult(rows, nextCheckpoint, batchProgress);
+    }
 
     /// <summary>
     /// Examines the next user-selected batches of fifty candidate contracts. Every
@@ -1106,6 +1430,12 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         public static DiscoveryAttempt BudgetLimit { get; } = new(false, false, true);
     }
 
+    private sealed record MatchedContractItem(
+        Guid LineId,
+        PromptMatchLevel Level,
+        string Text,
+        ProcurementItem Item);
+
     private sealed record PriceAvailability(
         PriceAvailabilityKind Kind,
         CachedItemResults? Permanent,
@@ -1125,4 +1455,23 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 null,
                 value);
     }
+
+    private sealed class InlineProgress<T>(Action<T> callback) : IProgress<T>
+    {
+        public void Report(T value) => callback(value);
+    }
+}
+
+public sealed class TimedPriceBatchInterruptedException : OperationCanceledException
+{
+    public TimedPriceBatchInterruptedException(
+        TimedPriceBatchResult partialResult,
+        Exception innerException,
+        CancellationToken cancellationToken)
+        : base("O lote temporal foi interrompido.", innerException, cancellationToken)
+    {
+        PartialResult = partialResult;
+    }
+
+    public TimedPriceBatchResult PartialResult { get; }
 }

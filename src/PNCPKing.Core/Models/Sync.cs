@@ -110,4 +110,12 @@ public sealed record DatasetManifest
     public long ResultCount { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
     public string DatabaseSha256 { get; init; } = string.Empty;
+    public IReadOnlyList<EvidenceAssetManifest> EvidenceAssets { get; init; } = [];
+}
+
+public sealed record EvidenceAssetManifest
+{
+    public required string Sha256 { get; init; }
+    public required string ArchivePath { get; init; }
+    public long ByteLength { get; init; }
 }
