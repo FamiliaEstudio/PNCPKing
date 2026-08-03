@@ -746,7 +746,7 @@ public sealed class QuotationTests
             Assert.Equal("LINK PNCP", sheet.Cell("D5").GetString());
             Assert.Equal("VALOR DA COTAÇÃO", sheet.Cell("E5").GetString());
             Assert.Equal(
-                "Fornecedor a (da cidade de Ribeirão Preto, Estado de São Paulo)",
+                "Fornecedor a (Ribeirão Preto/SP)",
                 sheet.Cell("B6").GetString());
             Assert.True(sheet.Row(5).Height >= 64.5d);
             Assert.True(sheet.Row(12).Height >= 64.5d);
@@ -852,10 +852,8 @@ public sealed class QuotationTests
 
             using var workbook = new XLWorkbook(path);
             var sheet = Assert.Single(workbook.Worksheets);
-            var expectedComplete =
-                $"{longSupplierName} (da cidade de Ribeirão Preto, Estado de São Paulo)";
-            const string expectedBuyerFallback =
-                "Fornecedor missing (unidade compradora da cidade de Ribeirão Preto, Estado de São Paulo)";
+            var expectedComplete = $"{longSupplierName} (Ribeirão Preto/SP)";
+            const string expectedBuyerFallback = "Fornecedor missing (Ribeirão Preto/SP)";
             var supplierCells = sheet.Range("B6:B8").Cells().ToArray();
             Assert.Contains(supplierCells, cell => cell.GetString() == expectedComplete);
             Assert.Contains(supplierCells, cell => cell.GetString() == expectedBuyerFallback);
@@ -942,10 +940,10 @@ public sealed class QuotationTests
             var sheet = Assert.Single(workbook.Worksheets);
             Assert.Equal("Item 1 - Café", sheet.Cell("B4").GetString());
             Assert.Equal(
-                "Fornecedor melhor (unidade compradora da cidade de Ribeirão Preto, Estado de São Paulo)",
+                "Fornecedor melhor (Ribeirão Preto/SP)",
                 sheet.Cell("B6").GetString());
             Assert.Equal(
-                "Fornecedor segunda (unidade compradora da cidade de Ribeirão Preto, Estado de São Paulo)",
+                "Fornecedor segunda (Ribeirão Preto/SP)",
                 sheet.Cell("B7").GetString());
             Assert.Equal("Preço 3 não obtido", sheet.Cell("B8").GetString());
             Assert.True(sheet.Cell("C8").IsEmpty());

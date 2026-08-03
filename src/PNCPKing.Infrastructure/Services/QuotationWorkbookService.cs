@@ -341,11 +341,11 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
 
         if (TryFormatLocation(reference.SupplierMunicipality, reference.SupplierUf, out var supplierLocation))
         {
-            return $"{supplierName} (da cidade de {supplierLocation})";
+            return $"{supplierName} ({supplierLocation})";
         }
 
         return TryFormatLocation(reference.Municipality, reference.Uf, out var buyerLocation)
-            ? $"{supplierName} (unidade compradora da cidade de {buyerLocation})"
+            ? $"{supplierName} ({buyerLocation})"
             : supplierName;
     }
 
@@ -355,13 +355,13 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         var normalizedUf = uf?.Trim() ?? string.Empty;
         if (normalizedMunicipality.Length == 0 ||
             normalizedUf.Length == 0 ||
-            !StatePhrases.TryGetValue(normalizedUf, out var statePhrase))
+            !StatePhrases.ContainsKey(normalizedUf))
         {
             location = string.Empty;
             return false;
         }
 
-        location = $"{normalizedMunicipality}, {statePhrase}";
+        location = $"{normalizedMunicipality}/{normalizedUf.ToUpperInvariant()}";
         return true;
     }
 
