@@ -138,6 +138,61 @@ public sealed class ItemSearchRepositoryTests
     }
 
     [Fact]
+    public async Task ExplicitContractCandidates_ArePrioritizedDeduplicatedAndDoNotMatchItems()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var explicitOnly = RepositorySearchTests.Contract(
+            "explicit-only",
+            "Aquisição de materiais de expediente",
+            "SP",
+            1);
+        var both = RepositorySearchTests.Contract(
+            "explicit-and-fallback",
+            "Materiais de expediente para uso com fita",
+            "SP",
+            2);
+        var fallbackOnly = RepositorySearchTests.Contract(
+            "fallback-only",
+            "Aquisição de fita adesiva",
+            "SP",
+            3);
+        await database.Repository.UpsertContractsAsync([fallbackOnly, both, explicitOnly]);
+        await database.Repository.UpsertItemsAsync(explicitOnly.PncpId, [
+            Item(explicitOnly.PncpId, 1, "Fita crepe branca", false),
+            Item(explicitOnly.PncpId, 2, "Papel sulfite", false)
+        ], false);
+        await database.Repository.UpsertItemsAsync(both.PncpId, [
+            Item(both.PncpId, 1, "Fita isolante", false)
+        ], false);
+
+        const string text = "fita + crepe C:(materiais de expediente)";
+        var query = new SearchQuery(text, GeoScope.All, Sort: SearchSort.Nearest);
+        var expression = PNCPKing.Core.Search.SearchText.Parse(text);
+        var candidates = await ReadAllCandidatesAsync(
+            database.Repository,
+            query,
+            expression,
+            0,
+            2);
+        var matchingItems = await database.Repository.SearchItemsAsync(explicitOnly.PncpId, text);
+        var summary = await database.Repository.GetItemSearchLocalSummaryAsync(query, expression);
+        var visibleContracts = await database.Repository.SearchAsync(query with { PageSize = 10 });
+
+        Assert.Equal(
+            ["explicit-and-fallback", "explicit-only"],
+            candidates.Take(2).Select(value => value.Contract.PncpId).Order());
+        Assert.Equal("fallback-only", candidates[2].Contract.PncpId);
+        Assert.All(candidates.Take(2), value => Assert.Equal(-1, value.Cursor.GeographicLayer));
+        Assert.Equal(3, candidates.Select(value => value.Contract.PncpId).Distinct().Count());
+        Assert.Equal([1L], matchingItems.Select(value => value.ItemNumber));
+        Assert.Equal(3, summary.CandidateContracts);
+        Assert.Equal(1, summary.CachedMatchingItems);
+        Assert.Equal(
+            ["explicit-and-fallback", "explicit-only"],
+            visibleContracts.Results.Take(2).Select(value => value.PncpId).Order());
+    }
+
+    [Fact]
     public async Task ContractCandidate_GeographyPrioritizesButDoesNotExcludeTheRestOfBrazil()
     {
         await using var database = await TestDatabase.CreateAsync();

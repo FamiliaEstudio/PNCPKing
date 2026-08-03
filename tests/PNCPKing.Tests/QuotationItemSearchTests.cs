@@ -89,6 +89,67 @@ public sealed class QuotationItemSearchTests
     }
 
     [Fact]
+    public async Task ChangingOnlyContractCandidates_RestartsCursorAndPreservesCollectedHits()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var quotation = new SqliteQuotationRepository(Path.Combine(database.Directory, "test.db"));
+        var project = await quotation.CreateProjectAsync("Crivos");
+        var lineId = Guid.NewGuid();
+        await quotation.SaveSampleAsync(
+            project.Id,
+            lineId,
+            new QuotationLineInput("Fita crepe", 10, "rolo", null, null),
+            []);
+        var stored = Workspace(
+            lineId,
+            ItemSearchPromptSlot.Restrictive,
+            "fita crepe C:(material escolar)") with
+        {
+            Checkpoint = new QuotationItemSearchCheckpoint
+            {
+                RandomPivot = 123,
+                Cursor = new ItemCandidateCursor(-1, 2, 0, 456, "contrato-9"),
+                ContractsExamined = 9,
+                BatchesCompleted = 1,
+                CandidateSetExhausted = true
+            },
+            MatchedItems = 4,
+            RevealedPrices = 3
+        };
+        await quotation.SaveProcessedContractAsync(stored, [
+            new QuotationItemSearchHit
+            {
+                LineId = lineId,
+                Slot = ItemSearchPromptSlot.Restrictive,
+                ContractId = "contrato-9",
+                ItemNumber = 2,
+                MatchedSearchText = stored.SearchText,
+                DiscoveredOrder = 9_000_002
+            }
+        ]);
+        await using var itemSearch = new ItemSearchSessionService(
+            new CountingClient(),
+            database.Repository,
+            Path.Combine(database.Directory, "candidate-reset.db"));
+        var service = new QuotationItemSearchService(database.Repository, quotation, itemSearch);
+
+        await service.SavePreferencesAsync(stored with
+        {
+            SearchText = "fita crepe C:(materiais de expediente)"
+        });
+
+        var updated = Assert.IsType<QuotationItemSearchWorkspace>(
+            await quotation.GetWorkspaceAsync(lineId, ItemSearchPromptSlot.Restrictive));
+        Assert.Null(updated.Checkpoint.Cursor);
+        Assert.False(updated.Checkpoint.CandidateSetExhausted);
+        Assert.Equal(0, updated.Checkpoint.ContractsExamined);
+        Assert.NotEqual(123, updated.Checkpoint.RandomPivot);
+        Assert.Equal(4, updated.MatchedItems);
+        Assert.Equal(3, updated.RevealedPrices);
+        Assert.Single(await quotation.GetWorkspaceHitsAsync(lineId, ItemSearchPromptSlot.Restrictive));
+    }
+
+    [Fact]
     public async Task IndependentSearch_CheckpointsEveryContractAndResumesWithoutRepeatingAfterCancellation()
     {
         await using var database = await TestDatabase.CreateAsync();

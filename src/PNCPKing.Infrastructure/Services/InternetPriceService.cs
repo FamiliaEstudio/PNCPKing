@@ -147,7 +147,7 @@ public sealed class InternetPriceService(
             {
                 if (!stored.TryGetValue(reference.Id, out var evidence))
                 {
-                    failures.Add($"{analysis.Line.Description} / {reference.SupplierName}: prints ausentes");
+                    failures.Add($"{analysis.Line.EffectiveDisplayName} / {reference.SupplierName}: prints ausentes");
                     continue;
                 }
 
@@ -160,7 +160,7 @@ public sealed class InternetPriceService(
                 if (!priceValid || !taxIdValid)
                 {
                     failures.Add(
-                        $"{analysis.Line.Description} / {reference.SupplierName}: " +
+                        $"{analysis.Line.EffectiveDisplayName} / {reference.SupplierName}: " +
                         (!priceValid && !taxIdValid
                             ? "prints do preço e do CNPJ ausentes ou alterados"
                             : !priceValid

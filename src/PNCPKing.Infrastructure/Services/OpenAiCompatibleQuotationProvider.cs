@@ -34,9 +34,11 @@ public sealed class OpenAiCompatibleQuotationProvider : IAiQuotationProvider
         salvo quando distinguem o produto. Evite palavras administrativas genéricas.
         Não mescle itens numerados semelhantes.
 
-        Produza também de um a dez contract_search_prompts, editáveis e ordenados, para
-        pesquisar exclusivamente títulos/objetos de contratações relacionadas ao conjunto,
-        por exemplo a finalidade geral, famílias de materiais e ofícios envolvidos.
+        Produza exatamente dez contract_search_prompts distintos, editáveis e ordenados,
+        para pesquisar exclusivamente títulos/objetos de contratações relacionadas ao
+        conjunto. Cada entrada deve ser um fragmento simples de título, sem operadores,
+        cobrindo com diversidade a finalidade geral, famílias de materiais e ofícios
+        envolvidos; evite duplicatas próximas e expressões administrativas genéricas.
 
         Responda somente no formato solicitado, sem explicações fora da estrutura.
         """;
@@ -49,7 +51,7 @@ public sealed class OpenAiCompatibleQuotationProvider : IAiQuotationProvider
             "warnings": { "type": "array", "items": { "type": "string" } },
             "contract_search_prompts": {
               "type": "array",
-              "minItems": 1,
+              "minItems": 10,
               "maxItems": 10,
               "items": { "type": "string" }
             },
@@ -150,9 +152,11 @@ public sealed class OpenAiCompatibleQuotationProvider : IAiQuotationProvider
         O intermediário mantém identidade e características importantes e pode usar
         %número para tolerância. O amplo usa uma ou duas identidades essenciais.
         Use a sintaxe: OU para alternativas, - para exclusão, aspas para frase/unidade
-        e % apenas antes de número positivo. Produza também de um a dez prompts globais
-        de títulos/objetos de contratações relacionadas ao documento. Não altere nenhum
-        outro dado estruturado. Responda somente no esquema solicitado.
+        e % apenas antes de número positivo. Produza também exatamente dez prompts globais
+        distintos de títulos/objetos de contratações relacionadas ao documento. Cada um
+        deve ser um fragmento simples de título, sem operadores, com diversidade e sem
+        duplicatas próximas. Não altere nenhum outro dado estruturado. Responda somente
+        no esquema solicitado.
         """;
 
     private const string RefinementSchemaJson = """
@@ -162,7 +166,7 @@ public sealed class OpenAiCompatibleQuotationProvider : IAiQuotationProvider
             "warnings": { "type": "array", "items": { "type": "string" } },
             "contract_search_prompts": {
               "type": "array",
-              "minItems": 1,
+              "minItems": 10,
               "maxItems": 10,
               "items": { "type": "string" }
             },

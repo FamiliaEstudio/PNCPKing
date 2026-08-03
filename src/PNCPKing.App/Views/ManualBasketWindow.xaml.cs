@@ -81,7 +81,7 @@ public partial class ManualBasketWindow : Window
         var choices = new List<LineChoice> { new("Novo item", null) };
         if (project is not null && _analysesByProject.TryGetValue(project.Id, out var analyses))
         {
-            choices.AddRange(analyses.Select(analysis => new LineChoice(analysis.Line.Description, analysis)));
+            choices.AddRange(analyses.Select(analysis => new LineChoice(analysis.Line.EffectiveDisplayName, analysis)));
         }
 
         LineComboBox.ItemsSource = choices;

@@ -63,6 +63,7 @@ public sealed partial class MainViewModel
     public ICommand RenameQuotationCommand { get; private set; } = null!;
     public ICommand DeleteQuotationCommand { get; private set; } = null!;
     public ICommand DeleteQuotationLineCommand { get; private set; } = null!;
+    public ICommand RenameQuotationLineCommand { get; private set; } = null!;
     public ICommand ImportQuotationCommand { get; private set; } = null!;
     public ICommand AiQuotationCommand { get; private set; } = null!;
     public ICommand ResumeQuotationAutomationCommand { get; private set; } = null!;
@@ -257,6 +258,10 @@ public sealed partial class MainViewModel
         DeleteQuotationLineCommand = new AsyncRelayCommand(
             DeleteQuotationLineAsync,
             () => !IsFileBusy && !IsPriceBusy && SelectedQuotationLine is not null);
+        RenameQuotationLineCommand = new AsyncRelayCommand(
+            RenameQuotationLineAsync,
+            () => !IsFileBusy && !IsPriceBusy && SelectedQuotationLine is not null &&
+                  SelectedQuotationProject is not null);
         ImportQuotationCommand = new AsyncRelayCommand(
             ImportQuotationAsync,
             () => !IsFileBusy && !IsPriceBusy && !IsDocumentBusy);
@@ -530,7 +535,7 @@ public sealed partial class MainViewModel
                           await _quotationService.GetItemSearchPromptSetAsync(line.Id).ConfigureAwait(true);
             await _quotationService.SaveItemSearchPromptSetAsync(current with
             {
-                RestrictiveText = current.RestrictiveText,
+                RestrictiveText = item.SearchText,
                 IntermediateText = item.IntermediateSearchText,
                 BroadText = item.BroadSearchText,
                 Origin = window.UserEditedPromptStableIds.Contains(item.StableId)
@@ -624,6 +629,9 @@ public sealed partial class MainViewModel
         }
     }
 
+    internal Task RefreshQuotationItemAsync(Guid projectId, Guid lineId) =>
+        LoadQuotationProjectAsync(projectId, lineId);
+
     private async Task NewQuotationAsync()
     {
         var window = new TextPromptWindow(
@@ -665,6 +673,24 @@ public sealed partial class MainViewModel
         StatusText = "Cotação renomeada.";
     }
 
+    private async Task RenameQuotationLineAsync()
+    {
+        var project = SelectedQuotationProject;
+        var line = SelectedQuotationLine?.Line;
+        if (project is null || line is null) return;
+        var window = new TextPromptWindow(
+            "Editar nome do item",
+            "Nome visível nas telas e exportações (o descritor técnico das pesquisas será preservado):",
+            line.EffectiveDisplayName)
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (window.ShowDialog() != true) return;
+        await _quotationService.RenameLineDisplayNameAsync(line.Id, window.Value).ConfigureAwait(true);
+        await LoadQuotationProjectAsync(project.Id, line.Id).ConfigureAwait(true);
+        StatusText = "Nome visível do item atualizado sem recalcular amostra ou cestas.";
+    }
+
     private async Task DeleteQuotationAsync()
     {
         var project = SelectedQuotationProject;
@@ -687,7 +713,7 @@ public sealed partial class MainViewModel
         var project = SelectedQuotationProject;
         var line = SelectedQuotationLine;
         if (project is null || line is null || MessageBox.Show(
-                $"Excluir o item '{line.Description}' desta cotação?",
+                $"Excluir o item '{line.Line.EffectiveDisplayName}' desta cotação?",
                 "Excluir item",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Warning) != MessageBoxResult.Yes)
@@ -1120,7 +1146,7 @@ public sealed partial class MainViewModel
                         automationQuery,
                         cancellationToken).ConfigureAwait(true);
                     SetItemSearchActive(true);
-                    var prefix = $"Item {index + 1:N0}/{pending.Length:N0} — {line.Description}. ";
+                    var prefix = $"Item {index + 1:N0}/{pending.Length:N0} — {line.EffectiveDisplayName}. ";
                     var progress = new Progress<PriceBatchProgress>(value =>
                     {
                         UpdateItemSearchProgress(value);
@@ -1209,9 +1235,6 @@ public sealed partial class MainViewModel
                 analysis.Line.AutomationState is QuotationAutomationItemState.Pending or
                     QuotationAutomationItemState.Failed);
             var report = await _quotationService.GetReportAsync(run.ProjectId).ConfigureAwait(true);
-            await _internetPriceService.ValidateReportEvidenceAsync(
-                report,
-                cancellationToken).ConfigureAwait(true);
             await _quotationWorkbookService.ExportAsync(run.OutputPath, report, cancellationToken).ConfigureAwait(true);
             workbookExported = true;
             var evidence = await ExportEvidenceAsync(
@@ -1219,9 +1242,12 @@ public sealed partial class MainViewModel
                 report,
                 cancellationToken).ConfigureAwait(true);
             cancellationToken.ThrowIfCancellationRequested();
-            var evidenceSummary = evidence.Warnings.Count == 0
-                ? $" Evidências: {evidence.ReportPath}."
-                : $" Evidências parciais: {evidence.ReportPath} ({evidence.Warnings.Count:N0} aviso(s)).";
+            var evidenceFolder = Path.GetDirectoryName(evidence.ReportPath) ?? evidence.ReportPath;
+            var evidenceSummary =
+                $" Evidências: {evidence.ReportPaths.Count:N0} arquivo(s) em {evidenceFolder}" +
+                (evidence.Warnings.Count == 0
+                    ? "."
+                    : $" ({evidence.Warnings.Count:N0} aviso(s)).");
             if (remainingFailures == 0)
             {
                 await _quotationService.UpdateAutomationRunStateAsync(
@@ -1544,7 +1570,7 @@ public sealed partial class MainViewModel
         {
             await _quotationService.ConfirmBasketAsync(line.Analysis, basket.Key).ConfigureAwait(true);
             await LoadQuotationProjectAsync(project.Id, line.Line.Id).ConfigureAwait(true);
-            StatusText = $"Cesta confirmada para {line.Description}.";
+            StatusText = $"Cesta confirmada para {line.Line.EffectiveDisplayName}.";
         }
         catch (Exception exception)
         {
@@ -1684,16 +1710,17 @@ public sealed partial class MainViewModel
         try
         {
             var report = await _quotationService.GetReportAsync(project.Id).ConfigureAwait(true);
-            await _internetPriceService.ValidateReportEvidenceAsync(report).ConfigureAwait(true);
             await _quotationWorkbookService.ExportAsync(dialog.FileName, report).ConfigureAwait(true);
             workbookExported = true;
             var evidence = await ExportEvidenceAsync(
                 GetEvidencePath(dialog.FileName),
                 report,
                 CancellationToken.None).ConfigureAwait(true);
-            StatusText = evidence.Warnings.Count == 0
-                ? $"Cotação e evidências exportadas para {Path.GetDirectoryName(dialog.FileName)}."
-                : $"Cotação e evidências exportadas com {evidence.Warnings.Count:N0} aviso(s).";
+            StatusText = $"Cotação exportada; {evidence.ReportPaths.Count:N0} PDF(s) de evidências em " +
+                         $"{Path.GetDirectoryName(evidence.ReportPath)}" +
+                         (evidence.Warnings.Count == 0
+                             ? "."
+                             : $", com {evidence.Warnings.Count:N0} aviso(s).");
             if (evidence.Warnings.Count > 0)
             {
                 MessageBox.Show(
@@ -2120,7 +2147,8 @@ public sealed partial class MainViewModel
                 _documentCancellation.Token).ConfigureAwait(true);
             DocumentProgress = 100;
             DocumentProgressText =
-                $"Documentos: relatório concluído, {result.Occurrences:N0} ocorrência(s), " +
+                $"Documentos: {result.ReportPaths.Count:N0} arquivo(s) concluído(s), " +
+                $"{result.Occurrences:N0} ocorrência(s), " +
                 $"{result.Warnings.Count:N0} aviso(s)";
             return result;
         }

@@ -55,6 +55,59 @@ public sealed class SearchTextTests
     }
 
     [Fact]
+    public void Parse_SeparatesPrioritizedContractCandidatesFromItemExpression()
+    {
+        var expression = SearchText.Parse(
+            "fita + crepe -isolante C:(\"Aquisição, de materiais\", material escolar)");
+
+        Assert.Equal("fita + crepe -isolante", expression.ItemText);
+        Assert.Equal(["aquisicao de materiais", "material escolar"],
+            expression.ContractCandidates.Select(value => value.Text));
+        Assert.Equal(
+            "((\"aquisicao\"* AND \"de\"* AND \"materiais\"*) OR (\"material\"* AND \"escolar\"*))",
+            expression.ExplicitContractMatchQuery);
+        Assert.Equal("((\"fita\"* AND \"crepe\"*)) NOT \"isolante\"*", expression.ItemMatchQuery);
+        Assert.True(expression.MatchesItem("Fita crepe automotiva", "rolo"));
+        Assert.False(expression.MatchesItem("Material escolar variado", "kit"));
+    }
+
+    [Fact]
+    public void ContractCandidates_ReplaceAndRemoveCanonicalBlockWithoutChangingItemCriteria()
+    {
+        var synchronized = SearchText.ReplaceContractCandidates(
+            "fita crepe C:(lista antiga)",
+            ["Materiais de expediente", "Material escolar", "material escolar"]);
+
+        Assert.Equal(
+            "fita crepe C:(materiais de expediente, material escolar)",
+            synchronized);
+        Assert.Equal("fita crepe", SearchText.RemoveContractCandidates(synchronized));
+        Assert.Equal(2, SearchText.Parse(synchronized).ContractCandidates.Count);
+    }
+
+    [Theory]
+    [InlineData("C:(material escolar)")]
+    [InlineData("fita C:material escolar")]
+    [InlineData("fita C:(material escolar")]
+    [InlineData("fita C:(material,, expediente)")]
+    [InlineData("fita C:(material) C:(expediente)")]
+    [InlineData("fita C:(a,b,c,d,e,f,g,h,i,j,k)")]
+    public void ContractCandidates_RejectInvalidOrUnsafeSyntax(string text)
+    {
+        Assert.Throws<SearchQueryException>(() => SearchText.Parse(text));
+    }
+
+    [Theory]
+    [InlineData("material escolar OU expediente")]
+    [InlineData("material escolar -mobiliario")]
+    [InlineData("material escolar C:(expediente)")]
+    [InlineData("material %20")]
+    public void ContractCandidatePrompt_RejectsOperatorsReservedForItemSearch(string text)
+    {
+        Assert.Throws<SearchQueryException>(() => SearchText.NormalizeContractCandidatePrompt(text));
+    }
+
+    [Fact]
     public void Parse_SeparatesObjectTextFromOneOrMoreAcceptedUnits()
     {
         var expression = SearchText.Parse(

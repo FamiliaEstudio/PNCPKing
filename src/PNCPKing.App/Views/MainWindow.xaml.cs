@@ -65,6 +65,16 @@ public partial class MainWindow : Window
         _columnLayouts.ShowChooser(button, dataGrid);
     }
 
+    private void CatalogDictionary_Click(object sender, RoutedEventArgs e) =>
+        _viewModel.OpenCatalogDictionary();
+
+    private void QuotationLinesGrid_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.F2) return;
+        _viewModel.RenameQuotationLineCommand.Execute(null);
+        e.Handled = true;
+    }
+
     private void QueryTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (!SweetCodePopup.IsOpen || SweetCodeList.Items.Count == 0)

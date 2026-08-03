@@ -18,6 +18,39 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
     private const int SummaryTemplateRow = 23;
     private const int SpacerTemplateRow = 24;
     private const int MinimumPriceRows = 3;
+    private const double MinimumHeaderRowHeight = 64.5d;
+
+    private static readonly IReadOnlyDictionary<string, string> StatePhrases =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["AC"] = "Estado do Acre",
+            ["AL"] = "Estado de Alagoas",
+            ["AP"] = "Estado do Amapá",
+            ["AM"] = "Estado do Amazonas",
+            ["BA"] = "Estado da Bahia",
+            ["CE"] = "Estado do Ceará",
+            ["DF"] = "Distrito Federal",
+            ["ES"] = "Estado do Espírito Santo",
+            ["GO"] = "Estado de Goiás",
+            ["MA"] = "Estado do Maranhão",
+            ["MT"] = "Estado de Mato Grosso",
+            ["MS"] = "Estado de Mato Grosso do Sul",
+            ["MG"] = "Estado de Minas Gerais",
+            ["PA"] = "Estado do Pará",
+            ["PB"] = "Estado da Paraíba",
+            ["PR"] = "Estado do Paraná",
+            ["PE"] = "Estado de Pernambuco",
+            ["PI"] = "Estado do Piauí",
+            ["RJ"] = "Estado do Rio de Janeiro",
+            ["RN"] = "Estado do Rio Grande do Norte",
+            ["RS"] = "Estado do Rio Grande do Sul",
+            ["RO"] = "Estado de Rondônia",
+            ["RR"] = "Estado de Roraima",
+            ["SC"] = "Estado de Santa Catarina",
+            ["SP"] = "Estado de São Paulo",
+            ["SE"] = "Estado de Sergipe",
+            ["TO"] = "Estado do Tocantins"
+        };
 
     public Task ExportAsync(
         string destinationPath,
@@ -124,7 +157,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 clearContents: true);
             var itemRange = sheet.Range(row, 2, row, 9);
             itemRange.Merge();
-            itemRange.FirstCell().Value = $"Item {itemIndex + 1} - {analysis.Line.Description}";
+            itemRange.FirstCell().Value = $"Item {itemIndex + 1} - {FormatLineName(analysis.Line)}";
             row++;
 
             CopyTemplateRow(
@@ -259,7 +292,16 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
     {
         prototype.Range(sourceRow - FirstBlockRow + 1, 1, sourceRow - FirstBlockRow + 1, 10)
             .CopyTo(destination.Cell(destinationRow, 1));
-        destination.Row(destinationRow).Height = templateRowHeights[sourceRow];
+        destination.Row(destinationRow).Height = sourceRow == 5
+            ? Math.Max(templateRowHeights[sourceRow], MinimumHeaderRowHeight)
+            : templateRowHeights[sourceRow];
+        if (sourceRow == 5)
+        {
+            var header = destination.Range(destinationRow, 2, destinationRow, 9);
+            header.Style.Alignment.WrapText = true;
+            header.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
+        }
+
         if (clearContents)
         {
             destination.Range(destinationRow, 1, destinationRow, 10)
@@ -272,7 +314,12 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         int row,
         QuotationReference reference)
     {
-        sheet.Cell(row, 2).Value = reference.SupplierName;
+        var supplierCell = sheet.Cell(row, 2);
+        supplierCell.Value = FormatSupplierName(reference);
+        supplierCell.Style.Alignment.WrapText = true;
+        var minimumHeight = sheet.Row(row).Height;
+        sheet.Row(row).AdjustToContents(2, 2);
+        sheet.Row(row).Height = Math.Max(minimumHeight, sheet.Row(row).Height);
         sheet.Cell(row, 3).Value = FormatBrazilianTaxId(reference.SupplierTaxId);
         sheet.Cell(row, 3).Style.NumberFormat.Format = "@";
         if (Uri.TryCreate(reference.PortalUrl, UriKind.Absolute, out _))
@@ -282,6 +329,22 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         }
 
         sheet.Cell(row, 5).Value = reference.UnitPrice;
+    }
+
+    private static string FormatSupplierName(QuotationReference reference)
+    {
+        var supplierName = reference.SupplierName.Trim();
+        var municipality = reference.SupplierMunicipality.Trim();
+        var uf = reference.SupplierUf.Trim();
+        if (supplierName.Length == 0 ||
+            municipality.Length == 0 ||
+            uf.Length == 0 ||
+            !StatePhrases.TryGetValue(uf, out var statePhrase))
+        {
+            return supplierName;
+        }
+
+        return $"{supplierName} (da cidade de {municipality}, {statePhrase})";
     }
 
     private static void WritePriceFormulas(
@@ -353,7 +416,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         {
             var basket = analysis.Line.SelectionConfirmed ? analysis.SelectedBasket : null;
             sheet.Cell(row, 1).Value = itemNumber++;
-            sheet.Cell(row, 2).Value = analysis.Line.Description;
+            sheet.Cell(row, 2).Value = FormatLineName(analysis.Line);
             sheet.Cell(row, 3).Value = analysis.Line.RequestedQuantity;
             sheet.Cell(row, 4).Value = analysis.Line.RequestedUnit;
             sheet.Cell(row, 5).Value = basket is not null
@@ -409,7 +472,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             foreach (var reference in basket.References)
             {
                 sheet.Cell(row, 1).Value = itemNumber;
-                sheet.Cell(row, 2).Value = analysis.Line.Description;
+                sheet.Cell(row, 2).Value = FormatLineName(analysis.Line);
                 sheet.Cell(row, 3).Value = analysis.Line.RequestedQuantity;
                 sheet.Cell(row, 4).Value = analysis.Line.RequestedUnit;
                 sheet.Cell(row, 5).Value = reference.SupplierName;
@@ -474,7 +537,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             }
 
             sheet.Cell(row, 1).Value = itemNumber;
-            sheet.Cell(row, 2).Value = analysis.Line.Description;
+            sheet.Cell(row, 2).Value = FormatLineName(analysis.Line);
             sheet.Cell(row, 3).Value = analysis.Baskets.Count == 0 ? "Sem cesta válida" : "Aguardando confirmação";
             sheet.Cell(row, 4).Value = GetPendingReason(analysis);
             sheet.Cell(row, 5).Value = analysis.CollectedCount;
@@ -490,6 +553,14 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
 
         sheet.Range(2, 11, Math.Max(2, row - 1), 11).Style.DateFormat.Format = "dd/mm/yyyy hh:mm";
         FinishTable(sheet, 1, row - 1, headers.Length);
+    }
+
+    private static string FormatLineName(QuotationLine line)
+    {
+        var suffix = line.CatalogSelection is null
+            ? string.Empty
+            : $" ({line.CatalogSelection.Label})";
+        return line.EffectiveDisplayName + suffix;
     }
 
     private static string GetPendingReason(QuotationLineAnalysis analysis)

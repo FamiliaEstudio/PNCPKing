@@ -1,6 +1,7 @@
 using PdfSharp.Drawing;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.Annotations;
+using PdfSharp.Pdf.IO;
 using PNCPKing.Core.Models;
 using SkiaSharp;
 
@@ -10,10 +11,12 @@ internal sealed class EvidencePdfWriter : IDisposable
 {
     private const int CanvasWidth = 1240;
     private const int CanvasHeight = 1754;
-    private const int OutputScale = 2;
+    private const int OutputScale = 1;
 
     private readonly PdfDocument _document = new();
     private int _pageNumber;
+
+    public int PageCount => _pageNumber;
 
     public void AddTextPage(
         string heading,
@@ -33,7 +36,7 @@ internal sealed class EvidencePdfWriter : IDisposable
         string portalUrl,
         RenderedPdfPage rendered,
         DocumentPageIndex pageIndex,
-        TextOccurrence occurrence)
+        IReadOnlyList<TextOccurrence> occurrences)
     {
         using var bitmap = CreateCanvas();
         using var canvas = new SKCanvas(bitmap);
@@ -72,7 +75,9 @@ internal sealed class EvidencePdfWriter : IDisposable
             StrokeWidth = EvidenceHighlightStyle.BorderWidthCanvas,
             IsAntialias = true
         };
-        foreach (var wordIndex in occurrence.WordIndexes)
+        foreach (var wordIndex in occurrences
+                     .SelectMany(value => value.WordIndexes)
+                     .Distinct())
         {
             var word = pageIndex.Words[wordIndex].Bounds;
             var rectangle = MapToDestination(word, fullPage, fitted);
@@ -114,6 +119,16 @@ internal sealed class EvidencePdfWriter : IDisposable
         }
 
         _document.Save(destinationPath);
+    }
+
+    public void AppendPdf(string sourcePath)
+    {
+        using var source = PdfReader.Open(sourcePath, PdfDocumentOpenMode.Import);
+        foreach (var page in source.Pages)
+        {
+            _document.AddPage(page);
+            _pageNumber++;
+        }
     }
 
     public void Dispose() => _document.Dispose();
@@ -159,7 +174,7 @@ internal sealed class EvidencePdfWriter : IDisposable
                 footerPaint.Paint);
         }
 
-        using var data = bitmap.Encode(SKEncodedImageFormat.Png, 100);
+        using var data = bitmap.Encode(SKEncodedImageFormat.Jpeg, 88);
         using var memory = new MemoryStream(data.ToArray());
         using var image = XImage.FromStream(memory);
         var page = _document.AddPage();

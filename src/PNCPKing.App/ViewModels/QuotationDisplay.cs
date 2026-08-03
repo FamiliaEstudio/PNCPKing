@@ -13,7 +13,12 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis)
 {
     public QuotationLineAnalysis Analysis { get; } = analysis;
     public QuotationLine Line => Analysis.Line;
-    public string Description => Line.Description;
+    public string Description => Line.EffectiveDisplayName;
+    public string TechnicalDescription => Line.Description;
+    public string CatalogCode => Line.CatalogSelection?.Label ?? string.Empty;
+    public string CatalogStatus => Line.CatalogSelection is { IsActive: false }
+        ? "Código inativo — substitua a seleção"
+        : Line.CatalogSelection?.Description ?? "Sem código atribuído";
     public string SearchText => Line.SearchText;
     public string RestrictiveSearchText => Line.PromptSet?.RestrictiveText ?? Line.SearchText;
     public string IntermediateSearchText => Line.PromptSet?.IntermediateText ?? string.Empty;

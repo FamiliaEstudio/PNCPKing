@@ -90,6 +90,8 @@ public sealed record QuotationLine
     public required Guid Id { get; init; }
     public required Guid ProjectId { get; init; }
     public required string Description { get; init; }
+    public string DisplayName { get; init; } = string.Empty;
+    public QuotationCatalogSelection? CatalogSelection { get; init; }
     public required decimal RequestedQuantity { get; init; }
     public required string RequestedUnit { get; init; }
     public decimal? MinimumUnitPrice { get; init; }
@@ -112,6 +114,10 @@ public sealed record QuotationLine
     public EstimateResolutionStage EstimateStage { get; init; } = EstimateResolutionStage.NotApplicable;
     public ItemSearchCheckpoint SearchCheckpoint { get; init; } = new();
     public ItemSearchPromptSet? PromptSet { get; init; }
+
+    public string EffectiveDisplayName => string.IsNullOrWhiteSpace(DisplayName)
+        ? Description
+        : DisplayName;
 }
 
 public enum QuotationAutomationItemState
@@ -219,6 +225,8 @@ public sealed record QuotationReference
     public string SupplierName { get; init; } = string.Empty;
     public string SupplierTaxId { get; init; } = string.Empty;
     public string SupplierType { get; init; } = string.Empty;
+    public string SupplierMunicipality { get; init; } = string.Empty;
+    public string SupplierUf { get; init; } = string.Empty;
     public decimal? HomologatedQuantity { get; init; }
     public decimal UnitPrice { get; init; }
     public DateOnly? ResultDate { get; init; }

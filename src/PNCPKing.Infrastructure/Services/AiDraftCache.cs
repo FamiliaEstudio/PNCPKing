@@ -47,7 +47,12 @@ public sealed class AiDraftCache : IAiDraftCache
                 return draft;
             }
 
-            return draft?.AnalyzerVersion == 1 ? UpgradeVersionOne(draft) : null;
+            return draft?.AnalyzerVersion switch
+            {
+                1 => UpgradeVersionTwo(UpgradeVersionOne(draft)),
+                2 => UpgradeVersionTwo(draft),
+                _ => null
+            };
         }
         catch (Exception exception) when (
             exception is JsonException or IOException or UnauthorizedAccessException)
@@ -238,12 +243,78 @@ public sealed class AiDraftCache : IAiDraftCache
         {
             Items = items,
             ContractSearchPrompts = contractPrompts,
-            AnalyzerVersion = AiQuotationDraft.CurrentAnalyzerVersion,
+            AnalyzerVersion = 2,
             Warnings = draft.Warnings
                 .Append("Rascunho anterior atualizado localmente; use Retrabalhar prompts com IA para gerar os níveis novos.")
                 .Distinct()
                 .ToArray()
         };
+    }
+
+    private static AiQuotationDraft UpgradeVersionTwo(AiQuotationDraft draft)
+    {
+        var prompts = new List<string>(10);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var value in draft.ContractSearchPrompts)
+        {
+            try
+            {
+                var expression = SearchText.Parse(value);
+                var normalized = expression.PositiveText.Trim();
+                if (!expression.HasExplicitContractCandidates &&
+                    normalized.Length > 0 &&
+                    seen.Add(normalized))
+                {
+                    prompts.Add(normalized);
+                }
+            }
+            catch (SearchQueryException)
+            {
+                // Rascunhos antigos continuam recuperáveis; o aviso abaixo pede
+                // refinamento quando não for possível formar a lista completa.
+            }
+
+            if (prompts.Count == 10)
+            {
+                break;
+            }
+        }
+
+        var items = prompts.Count == 0
+            ? draft.Items
+            : draft.Items.Select(item => item with
+            {
+                SearchText = TrySynchronize(item.SearchText, prompts),
+                IntermediateSearchText = TrySynchronize(item.IntermediateSearchText, prompts),
+                BroadSearchText = TrySynchronize(item.BroadSearchText, prompts)
+            }).ToArray();
+        var warnings = draft.Warnings.AsEnumerable();
+        if (prompts.Count != 10)
+        {
+            warnings = warnings.Append(
+                $"Rascunho anterior preservado com {prompts.Count:N0} crivo(s) de contratação; " +
+                "use Retrabalhar prompts com IA para gerar exatamente 10.");
+        }
+
+        return draft with
+        {
+            Items = items,
+            ContractSearchPrompts = prompts,
+            AnalyzerVersion = AiQuotationDraft.CurrentAnalyzerVersion,
+            Warnings = warnings.Distinct(StringComparer.Ordinal).ToArray()
+        };
+    }
+
+    private static string TrySynchronize(string prompt, IReadOnlyList<string> contractPrompts)
+    {
+        try
+        {
+            return SearchText.ReplaceContractCandidates(prompt, contractPrompts);
+        }
+        catch (SearchQueryException)
+        {
+            return prompt;
+        }
     }
 
     private static async Task WriteAtomicAsync(

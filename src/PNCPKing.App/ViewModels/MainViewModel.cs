@@ -111,6 +111,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         IQuotationWorkbookService quotationWorkbookService,
         IQuotationWorkbookImportService quotationWorkbookImportService,
         IQuotationPackageService quotationPackageService,
+        ICatalogRepository catalogRepository,
+        CatalogSyncService catalogSyncService,
+        ICatalogSearchService catalogSearchService,
         IPncpRequestTelemetry telemetry,
         ISweetCodeRepository sweetCodeRepository,
         IContractDocumentService documentService,
@@ -144,6 +147,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             quotationWorkbookService,
             quotationWorkbookImportService,
             quotationPackageService);
+        InitializeCatalog(catalogRepository, catalogSyncService, catalogSearchService);
         _telemetry = telemetry;
         _sweetCodeRepository = sweetCodeRepository;
         _documentService = documentService;
@@ -206,7 +210,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             () => !IsFileBusy && !IsPriceBusy && _itemSearchService.CurrentSession is not null);
         StopItemSearchCommand = new RelayCommand(StopItemSearch, () => _isItemSearchActive);
         CalculatePreflightCommand = new AsyncRelayCommand(CalculatePreflightAsync, () => !IsFileBusy && !IsIndexBusy);
-        StartSyncCommand = new AsyncRelayCommand(StartSyncAsync, () => !IsFileBusy && !IsIndexBusy);
+        StartSyncCommand = new AsyncRelayCommand(
+            StartSyncAsync,
+            () => !IsFileBusy && !IsIndexBusy && !IsCatalogBusy);
         PauseSyncCommand = new RelayCommand(TogglePause, () => _canPauseIndex && _indexCancellation is not null);
         CancelIndexCommand = new RelayCommand(() => _indexCancellation?.Cancel(), () => _indexCancellation is not null);
         HydrateCommand = new AsyncRelayCommand(
@@ -238,7 +244,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         ManageSweetCodesCommand = new AsyncRelayCommand(ManageSweetCodesAsync, () => !IsFileBusy);
 
         _maintenanceTimer = new DispatcherTimer { Interval = SyncService.AutomaticRetryDelay };
-        _maintenanceTimer.Tick += async (_, _) => await TryRunAutomaticMaintenanceAsync().ConfigureAwait(true);
+        _maintenanceTimer.Tick += async (_, _) => await RunAutomaticMaintenanceCycleAsync().ConfigureAwait(true);
     }
 
     public ObservableCollection<ContractRecord> ContractResults { get; } = [];
@@ -622,9 +628,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         await RefreshQuotationProjectsAsync().ConfigureAwait(true);
         await RefreshDatasetSummaryAsync().ConfigureAwait(true);
         await RefreshCoverageAsync().ConfigureAwait(true);
+        await RefreshCatalogCoverageAsync().ConfigureAwait(true);
         await SearchAsync(resetSession: false).ConfigureAwait(true);
         _maintenanceTimer.Start();
-        _ = TryRunAutomaticMaintenanceAsync();
+        _ = RunAutomaticMaintenanceCycleAsync();
     }
 
     public async Task ShutdownAsync()
@@ -640,6 +647,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _priceCancellation?.Cancel();
         _foregroundCancellation?.Cancel();
         _documentCancellation?.Cancel();
+        _catalogCancellation?.Cancel();
         _quotationAutomationCancellation?.Cancel();
         if (_quotationAutomationCompletion is { } quotationCompletion)
         {
@@ -1266,7 +1274,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task TryRunAutomaticMaintenanceAsync()
     {
-        if (IsIndexBusy || IsFileBusy || _automaticMaintenanceRunning || _disposed)
+        if (IsIndexBusy || IsCatalogBusy || IsFileBusy || _automaticMaintenanceRunning || _disposed)
         {
             return;
         }
@@ -2012,6 +2020,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      CancelDocumentOperationCommand,
                      ExportBackupCommand, ImportBackupCommand, ClearCacheCommand,
                      ManageSweetCodesCommand,
+                     UpdateCatalogCommand, PauseCatalogCommand, CancelCatalogCommand,
                      UseQuotationSampleCommand, UpdateQuotationSampleCommand,
                      AdjustQuotationWeightsCommand,
                      ConfirmQuotationBasketCommand, ExportQuotationCommand,
@@ -2019,6 +2028,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      PreviousQuotationBasketPageCommand, NextQuotationBasketPageCommand,
                      NewQuotationCommand, RenameQuotationCommand, DeleteQuotationCommand,
                      DeleteQuotationLineCommand, ImportQuotationCommand, AiQuotationCommand,
+                     RenameQuotationLineCommand,
                      ResumeQuotationAutomationCommand, CancelQuotationAutomationCommand,
                      RefineQuotationPromptsCommand,
                      OpenRestrictiveQuotationSearchCommand,

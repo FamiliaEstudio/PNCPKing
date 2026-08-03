@@ -191,4 +191,7 @@ public sealed record QuotationEvidenceResult(
     int Items,
     int References,
     int Occurrences,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings)
+{
+    public IReadOnlyList<string> ReportPaths { get; init; } = [ReportPath];
+}

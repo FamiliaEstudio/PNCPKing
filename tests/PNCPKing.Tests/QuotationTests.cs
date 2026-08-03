@@ -399,6 +399,11 @@ public sealed class QuotationTests
             new QuotationAnalyzer(Today));
         var restored = (await reopened.GetAnalysesAsync(project.Id)).Single();
         Assert.True(restored.Line.SelectionConfirmed);
+        Assert.All(restored.References, reference =>
+        {
+            Assert.Equal("Sertãozinho", reference.SupplierMunicipality);
+            Assert.Equal("SP", reference.SupplierUf);
+        });
 
         var updated = await reopened.CaptureSampleAsync(project.Id, restored.Line.Id, input, [
             Row("c1", "11222333000181", 95m),
@@ -605,13 +610,93 @@ public sealed class QuotationTests
     }
 
     [Fact]
+    public async Task RenameAndCatalogSelection_DoNotChangeTechnicalSampleOrBasketState()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var project = await repository.CreateProjectAsync("Nomes");
+        var lineId = Guid.NewGuid();
+        await repository.SaveSampleAsync(
+            project.Id,
+            lineId,
+            new QuotationLineInput("Café torrado técnico", 10m, "pacote", null, null),
+            [
+                Reference("rename-a", "c1", "11222333000181", 90m) with { LineId = lineId },
+                Reference("rename-b", "c2", "60701190000104", 100m) with { LineId = lineId },
+                Reference("rename-c", "c3", "33000167000101", 110m) with { LineId = lineId }
+            ]);
+        var service = new QuotationService(repository, new QuotationAnalyzer(Today));
+        var before = Assert.Single(await service.GetAnalysesAsync(project.Id));
+        await repository.ConfirmBasketAsync(lineId, before.Baskets.Single().Key);
+        var confirmed = Assert.Single(await repository.GetLinesAsync(project.Id));
+
+        await repository.RenameLineDisplayNameAsync(lineId, "  Café   premium  ");
+        await repository.SetLineCatalogSelectionAsync(lineId, new QuotationCatalogSelection
+        {
+            Kind = CatalogKind.Catmat,
+            Code = "123456",
+            Description = "CAFÉ TORRADO",
+            SelectedAt = DateTimeOffset.UtcNow
+        });
+
+        var after = Assert.Single(await repository.GetLinesAsync(project.Id));
+        Assert.Equal("Café premium", after.DisplayName);
+        Assert.Equal(confirmed.Description, after.Description);
+        Assert.Equal(confirmed.SampleVersion, after.SampleVersion);
+        Assert.Equal(confirmed.SampledAt, after.SampledAt);
+        Assert.Equal(confirmed.SearchText, after.SearchText);
+        Assert.Equal(confirmed.SelectedBasketKey, after.SelectedBasketKey);
+        Assert.Equal(confirmed.SelectionConfirmed, after.SelectionConfirmed);
+        Assert.Equal("CATMAT 123456", after.CatalogSelection?.Label);
+    }
+
+    [Fact]
+    public async Task Workbook_UsesDisplayNameAndCatalogCodeInItemTitle()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var line = Line("Descrição técnica", 1m, "unidade") with
+        {
+            DisplayName = "Nome amigável",
+            CatalogSelection = new QuotationCatalogSelection
+            {
+                Kind = CatalogKind.Catser,
+                Code = "9876",
+                Description = "SERVIÇO",
+                SelectedAt = DateTimeOffset.UtcNow
+            }
+        };
+        var analysis = analyzer.Analyze(line, []);
+        var path = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"), "catalog-title.xlsx");
+        try
+        {
+            await new QuotationWorkbookService().ExportAsync(
+                path,
+                new QuotationProjectReport(
+                    new QuotationProject(Guid.NewGuid(), "Catálogo", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
+                    [analysis]));
+            using var workbook = new XLWorkbook(path);
+            Assert.Equal("Item 1 - Nome amigável (CATSER 9876)", workbook.Worksheet(1).Cell("B4").GetString());
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            var folder = Path.GetDirectoryName(path)!;
+            if (Directory.Exists(folder)) Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
     public async Task Workbook_PreservesTemplateAndBuildsConsecutiveDynamicBlocks()
     {
         var analyzer = new QuotationAnalyzer(Today);
         var project = new QuotationProject(Guid.NewGuid(), "Cotação teste", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
         var resolvedLine = Line("Café torrado", 100m, "pacote");
         var resolved = analyzer.Analyze(resolvedLine, [
-            Reference("a", "c1", "11222333000181", 90m),
+            Reference("a", "c1", "11222333000181", 90m) with
+            {
+                SupplierMunicipality = "Ribeirão Preto",
+                SupplierUf = "SP"
+            },
             Reference("b", "c2", "60701190000104", 100m),
             Reference("c", "c3", "33000167000101", 110m)
         ]);
@@ -660,7 +745,19 @@ public sealed class QuotationTests
             Assert.Equal("CNPJ", sheet.Cell("C5").GetString());
             Assert.Equal("LINK PNCP", sheet.Cell("D5").GetString());
             Assert.Equal("VALOR DA COTAÇÃO", sheet.Cell("E5").GetString());
-            Assert.Equal("Fornecedor a", sheet.Cell("B6").GetString());
+            Assert.Equal(
+                "Fornecedor a (da cidade de Ribeirão Preto, Estado de São Paulo)",
+                sheet.Cell("B6").GetString());
+            Assert.True(sheet.Row(5).Height >= 64.5d);
+            Assert.True(sheet.Row(12).Height >= 64.5d);
+            Assert.True(sheet.Cell("E5").Style.Alignment.WrapText);
+            Assert.True(sheet.Cell("H12").Style.Alignment.WrapText);
+            Assert.Equal(
+                "UTILIZAÇÃO DO MÉTODO DE IDENTIFICAÇÃO DE PREÇO EXCESSIVO",
+                sheet.Cell("H12").GetString());
+            Assert.Equal(
+                "UTILIZAÇÃO DO MÉTODO DE IDENTIFICAÇÃO DE PREÇO INEXEQUÍVEL",
+                sheet.Cell("I12").GetString());
             Assert.Equal(90m, sheet.Cell("E6").GetValue<decimal>());
             Assert.Equal(
                 "IF(E6=\"\",\"\",IFERROR(AVERAGE(E7:E8),\"\"))",
@@ -700,6 +797,70 @@ public sealed class QuotationTests
             Assert.True(workbook.CalculationOnSave);
             Assert.True(workbook.ForceFullCalculation);
             Assert.True(workbook.FullCalculationOnLoad);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            var directory = Path.GetDirectoryName(path)!;
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public async Task Workbook_FormatsSupplierLocationAndExpandsLongSupplierRows()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var project = new QuotationProject(
+            Guid.NewGuid(),
+            "Localidade do fornecedor",
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow);
+        var line = Line("Café torrado", 100m, "pacote");
+        var longSupplierName = string.Join(
+            " ",
+            Enumerable.Repeat("EMPRESA FORNECEDORA COM RAZÃO SOCIAL EXTENSA", 8));
+        var analysis = analyzer.Analyze(line, [
+            Reference("complete", "c1", "11222333000181", 90m) with
+            {
+                SupplierName = longSupplierName,
+                SupplierMunicipality = "Ribeirão Preto",
+                SupplierUf = "sp"
+            },
+            Reference("missing", "c2", "60701190000104", 100m) with
+            {
+                SupplierMunicipality = "Sertãozinho"
+            },
+            Reference("invalid", "c3", "33000167000101", 110m) with
+            {
+                SupplierMunicipality = "Franca",
+                SupplierUf = "XX"
+            }
+        ]);
+        analysis = Confirm(analysis, analysis.Baskets.Single(basket => basket.IsRecommended));
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            "PNCPKing.Tests",
+            Guid.NewGuid().ToString("N"),
+            "supplier-location.xlsx");
+        try
+        {
+            await new QuotationWorkbookService().ExportAsync(
+                path,
+                new QuotationProjectReport(project, [analysis]));
+
+            using var workbook = new XLWorkbook(path);
+            var sheet = Assert.Single(workbook.Worksheets);
+            var expectedComplete =
+                $"{longSupplierName} (da cidade de Ribeirão Preto, Estado de São Paulo)";
+            var supplierCells = sheet.Range("B6:B8").Cells().ToArray();
+            Assert.Contains(supplierCells, cell => cell.GetString() == expectedComplete);
+            Assert.Contains(supplierCells, cell => cell.GetString() == "Fornecedor missing");
+            Assert.Contains(supplierCells, cell => cell.GetString() == "Fornecedor invalid");
+            var longSupplierCell = supplierCells.Single(cell => cell.GetString() == expectedComplete);
+            Assert.True(longSupplierCell.Style.Alignment.WrapText);
+            Assert.True(sheet.Row(longSupplierCell.Address.RowNumber).Height > 12.75d);
+            Assert.All(supplierCells, cell =>
+                Assert.DoesNotContain("{{", cell.GetString(), StringComparison.Ordinal));
         }
         finally
         {
@@ -943,6 +1104,8 @@ public sealed class QuotationTests
             ResultSequence = 1,
             SupplierName = $"Fornecedor {contractId}",
             SupplierTaxId = cnpj,
+            SupplierMunicipality = "Sertãozinho",
+            SupplierUf = "SP",
             HomologatedQuantityScaled = DecimalScale.ToScaled(100m),
             HomologatedUnitValueScaled = DecimalScale.ToScaled(price),
             ResultDate = Today.AddDays(-20),

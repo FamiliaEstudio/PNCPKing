@@ -271,7 +271,11 @@ public sealed class BackupService(IContractRepository repository)
         var destinationConnectionString = new SqliteConnectionStringBuilder
         {
             DataSource = destinationPath,
-            Mode = SqliteOpenMode.ReadWriteCreate
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            // This database lives in a short-lived staging directory. Pooling
+            // would keep data.db open on Windows after Dispose and make the
+            // successful export look like a failure during cleanup.
+            Pooling = false
         }.ToString();
         await using var source = new SqliteConnection(sourceConnectionString);
         await using var destination = new SqliteConnection(destinationConnectionString);
@@ -288,7 +292,8 @@ public sealed class BackupService(IContractRepository repository)
         var connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = path,
-            Mode = SqliteOpenMode.ReadOnly
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false
         }.ToString();
         await using var connection = new SqliteConnection(connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -328,7 +333,8 @@ public sealed class BackupService(IContractRepository repository)
         var connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = databasePath,
-            Mode = SqliteOpenMode.ReadOnly
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false
         }.ToString();
         await using var connection = new SqliteConnection(connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);

@@ -1,0 +1,49 @@
+<Window x:Class="PNCPKing.App.Views.CatalogDictionaryWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:System="clr-namespace:System;assembly=System.Runtime"
+        xmlns:models="clr-namespace:PNCPKing.Core.Models;assembly=PNCPKing.Core"
+        Title="Equivalências CATMAT/CATSER" Width="980" Height="650"
+        MinWidth="760" MinHeight="480" WindowStartupLocation="CenterOwner">
+    <Window.Resources>
+        <ObjectDataProvider x:Key="RuleKinds" MethodName="GetValues"
+                            ObjectType="{x:Type System:Enum}">
+            <ObjectDataProvider.MethodParameters>
+                <x:Type TypeName="models:CatalogRuleKind" />
+            </ObjectDataProvider.MethodParameters>
+        </ObjectDataProvider>
+    </Window.Resources>
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <TextBlock Text="Aliases normalizam termos de pesquisa. Conversões usam a unidade canônica e o fator informado. Um alias não pode pertencer a dois grupos."
+                   TextWrapping="Wrap" Margin="0,0,0,8" />
+        <DataGrid x:Name="RulesGrid" Grid.Row="1" ItemsSource="{Binding Rules}"
+                  SelectedItem="{Binding SelectedRule}" AutoGenerateColumns="False"
+                  CanUserAddRows="False" SelectionMode="Single">
+            <DataGrid.Columns>
+                <DataGridComboBoxColumn Header="Tipo" Width="125"
+                                        SelectedItemBinding="{Binding Kind}"
+                                        ItemsSource="{Binding Source={StaticResource RuleKinds}}" />
+                <DataGridTextColumn Header="Canônico" Binding="{Binding Canonical}" Width="150" />
+                <DataGridTextColumn Header="Alias" Binding="{Binding Alias}" Width="150" />
+                <DataGridTextColumn Header="Dimensão" Binding="{Binding Dimension}" Width="130" />
+                <DataGridTextColumn Header="Fator" Binding="{Binding Factor}" Width="110" />
+                <DataGridCheckBoxColumn Header="Padrão" Binding="{Binding IsDefault}" IsReadOnly="True" Width="70" />
+            </DataGrid.Columns>
+        </DataGrid>
+        <DockPanel Grid.Row="2" Margin="0,8,0,0">
+            <TextBlock Text="{Binding Status}" VerticalAlignment="Center" TextWrapping="Wrap" />
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <Button Content="Nova regra" Click="Add_Click" />
+                <Button Content="Salvar selecionada" Click="Save_Click" />
+                <Button Content="Excluir selecionada" Click="Delete_Click" />
+                <Button Content="Restaurar padrões" Click="Reset_Click" />
+                <Button Content="Fechar" IsCancel="True" />
+            </StackPanel>
+        </DockPanel>
+    </Grid>
+</Window>

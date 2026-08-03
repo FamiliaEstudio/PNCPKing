@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 12;
+    public const int CurrentSchemaVersion = 14;
 
     private const string GeographicGroupExpression = "CASE WHEN COALESCE(c.geo_layer, 1) = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -254,7 +254,115 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             updateVersion.CommandText = "UPDATE schema_info SET version = 12 WHERE id = 1;";
             await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 12;
         }
+
+        if (version < 13)
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await ApplySchemaV13Async(
+                connection,
+                (SqliteTransaction)transaction,
+                cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 13 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 13;
+        }
+
+        if (version < 14)
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await ApplySchemaV14Async(
+                connection,
+                (SqliteTransaction)transaction,
+                cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 14 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task ApplySchemaV14Async(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        if (!await HasColumnAsync(
+                connection,
+                transaction,
+                "quotation_lines",
+                "display_name",
+                cancellationToken).ConfigureAwait(false))
+        {
+            await using var displayName = connection.CreateCommand();
+            displayName.Transaction = transaction;
+            displayName.CommandText = "ALTER TABLE quotation_lines ADD COLUMN display_name TEXT NOT NULL DEFAULT '';";
+            await displayName.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using var schema = connection.CreateCommand();
+        schema.Transaction = transaction;
+        schema.CommandText = SchemaV14Sql;
+        await schema.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplySchemaV13Async(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        foreach (var (column, definition) in new[]
+                 {
+                     ("supplier_municipality", "TEXT NOT NULL DEFAULT ''"),
+                     ("supplier_uf", "TEXT NOT NULL DEFAULT ''")
+                 })
+        {
+            if (await HasColumnAsync(
+                    connection,
+                    transaction,
+                    "quotation_references",
+                    column,
+                    cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            await using var add = connection.CreateCommand();
+            add.Transaction = transaction;
+            add.CommandText = $"ALTER TABLE quotation_references ADD COLUMN {column} {definition};";
+            await add.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using var backfill = connection.CreateCommand();
+        backfill.Transaction = transaction;
+        backfill.CommandText = """
+            UPDATE quotation_references
+               SET supplier_municipality = COALESCE(
+                       NULLIF(supplier_municipality, ''),
+                       (SELECT NULLIF(item_results.supplier_municipality, '')
+                          FROM item_results
+                         WHERE item_results.contract_id = quotation_references.contract_id
+                           AND item_results.item_number = quotation_references.item_number
+                           AND item_results.result_sequence = quotation_references.result_sequence),
+                       ''),
+                   supplier_uf = COALESCE(
+                       NULLIF(supplier_uf, ''),
+                       (SELECT NULLIF(item_results.supplier_uf, '')
+                          FROM item_results
+                         WHERE item_results.contract_id = quotation_references.contract_id
+                           AND item_results.item_number = quotation_references.item_number
+                           AND item_results.result_sequence = quotation_references.result_sequence),
+                       '')
+             WHERE supplier_municipality = '' OR supplier_uf = '';
+            """;
+        await backfill.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task ApplySchemaV12Async(
@@ -610,7 +718,8 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         var page = Math.Max(1, query.Page);
         var pageSize = Math.Clamp(query.PageSize, 1, 200);
         var expression = SearchText.Parse(query.Text);
-        var match = expression.ContractMatchQuery;
+        var explicitMatch = expression.ExplicitContractMatchQuery;
+        var match = CombineFtsQueries(expression.ContractMatchQuery, explicitMatch);
         var joinsFts = match.Length > 0;
         var conditions = new List<string>();
         if (joinsFts)
@@ -646,14 +755,23 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             ? "contracts c JOIN contracts_fts ON contracts_fts.rowid = c.rowid"
             : "contracts c";
         var where = conditions.Count == 0 ? string.Empty : " WHERE " + string.Join(" AND ", conditions);
+        var explicitPriority = explicitMatch.Length > 0
+            ? """
+               CASE WHEN c.rowid IN (
+                   SELECT rowid FROM contracts_fts
+                    WHERE contracts_fts MATCH $explicitMatch
+               ) THEN 0 ELSE 1 END,
+              """
+            : string.Empty;
         var order = query.Sort switch
         {
             SearchSort.Nearest =>
-                $" ORDER BY COALESCE(c.geo_layer, 1), {GeographicGroupExpression}, " +
+                $" ORDER BY {explicitPriority} COALESCE(c.geo_layer, 1), {GeographicGroupExpression}, " +
                 "c.publication_date DESC, c.pncp_id",
-            SearchSort.Newest => " ORDER BY c.publication_date DESC, c.pncp_id",
-            _ when joinsFts => " ORDER BY bm25(contracts_fts), c.publication_date DESC, c.pncp_id",
-            _ => " ORDER BY c.publication_date DESC, c.pncp_id"
+            SearchSort.Newest => $" ORDER BY {explicitPriority} c.publication_date DESC, c.pncp_id",
+            _ when joinsFts =>
+                $" ORDER BY {explicitPriority} bm25(contracts_fts), c.publication_date DESC, c.pncp_id",
+            _ => $" ORDER BY {explicitPriority} c.publication_date DESC, c.pncp_id"
         };
 
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -672,6 +790,10 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
              LIMIT $limit OFFSET $offset;
             """;
         AddSearchParameters(command, query, match);
+        if (explicitMatch.Length > 0)
+        {
+            command.Parameters.AddWithValue("$explicitMatch", explicitMatch);
+        }
         command.Parameters.AddWithValue("$limit", pageSize);
         command.Parameters.AddWithValue("$offset", (page - 1) * pageSize);
 
@@ -703,11 +825,13 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         pageSize = Math.Clamp(pageSize, 1, 500);
         randomPivot = Math.Clamp(randomPivot, 0, long.MaxValue - 1);
         var candidateMatch = expression.CandidateMatchQuery;
+        var explicitMatch = expression.ExplicitContractMatchQuery;
+        var combinedCandidateMatch = CombineFtsQueries(candidateMatch, explicitMatch);
         var joinsFts = candidateMatch.Length > 0;
         var conditions = new List<string>();
         if (joinsFts)
         {
-            conditions.Add("contracts_fts MATCH $candidateMatch");
+            conditions.Add("contracts_fts MATCH $combinedCandidateMatch");
         }
         var geoFilter = filters.EffectiveGeoFilter;
         switch (geoFilter.Kind)
@@ -737,6 +861,14 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         var ftsJoin = joinsFts
             ? "JOIN contracts_fts ON contracts_fts.rowid = c.rowid"
             : string.Empty;
+        var geographicLayerExpression = explicitMatch.Length > 0
+            ? """
+              CASE WHEN c.rowid IN (
+                  SELECT rowid FROM contracts_fts
+                   WHERE contracts_fts MATCH $explicitMatch
+              ) THEN -1 ELSE COALESCE(c.geo_layer, 1) END
+              """
+            : "COALESCE(c.geo_layer, 1)";
         var cursorWhere = cursor is null
             ? string.Empty
             : """
@@ -758,7 +890,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                        c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
                        c.publication_date, c.global_updated_at, c.total_homologated_scaled,
                        c.distance_from_ribeirao_km,
-                       COALESCE(c.geo_layer, 1) AS geographic_layer,
+                       {geographicLayerExpression} AS geographic_layer,
                        {GeographicGroupExpression} AS group_rank,
                        CASE WHEN COALESCE(c.random_order_key, 0) >= $randomPivot THEN 0 ELSE 1 END AS rotation_band,
                        COALESCE(c.random_order_key, 0) AS random_order_key
@@ -773,7 +905,11 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             """;
         if (joinsFts)
         {
-            command.Parameters.AddWithValue("$candidateMatch", candidateMatch);
+            command.Parameters.AddWithValue("$combinedCandidateMatch", combinedCandidateMatch);
+        }
+        if (explicitMatch.Length > 0)
+        {
+            command.Parameters.AddWithValue("$explicitMatch", explicitMatch);
         }
         command.Parameters.AddWithValue("$randomPivot", randomPivot);
         command.Parameters.AddWithValue("$limit", pageSize + 1);
@@ -936,10 +1072,12 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         }
 
         var candidateMatch = expression.CandidateMatchQuery;
+        var explicitMatch = expression.ExplicitContractMatchQuery;
+        var combinedCandidateMatch = CombineFtsQueries(candidateMatch, explicitMatch);
         var candidateConditions = new List<string>();
         if (candidateMatch.Length > 0)
         {
-            candidateConditions.Add("contracts_fts MATCH $candidateMatch");
+            candidateConditions.Add("contracts_fts MATCH $combinedCandidateMatch");
         }
 
         switch (filters.EffectiveGeoFilter.Kind)
@@ -991,7 +1129,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                 """;
             if (candidateMatch.Length > 0)
             {
-                count.Parameters.AddWithValue("$candidateMatch", candidateMatch);
+                count.Parameters.AddWithValue("$combinedCandidateMatch", combinedCandidateMatch);
             }
 
             AddFilterParameters(count, filters);
@@ -1028,7 +1166,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                 """;
             if (candidateMatch.Length > 0)
             {
-                cached.Parameters.AddWithValue("$candidateMatch", candidateMatch);
+                cached.Parameters.AddWithValue("$combinedCandidateMatch", combinedCandidateMatch);
             }
 
             if (itemMatch.Length > 0)
@@ -2213,6 +2351,21 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         AddFilterParameters(command, query);
     }
 
+    private static string CombineFtsQueries(string first, string second)
+    {
+        if (first.Length == 0)
+        {
+            return second;
+        }
+
+        if (second.Length == 0)
+        {
+            return first;
+        }
+
+        return $"({first}) OR ({second})";
+    }
+
     private static void AddFilterParameters(SqliteCommand command, SearchQuery query)
     {
         var geoFilter = query.EffectiveGeoFilter;
@@ -3185,6 +3338,146 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
 
         CREATE INDEX idx_quotation_manual_basket_references_order
             ON quotation_manual_basket_references(basket_id, display_order);
+        """;
+
+    private const string SchemaV14Sql = """
+        UPDATE quotation_lines SET display_name = description WHERE TRIM(display_name) = '';
+
+        CREATE TABLE IF NOT EXISTS quotation_catalog_selections(
+            line_id TEXT PRIMARY KEY REFERENCES quotation_lines(id) ON DELETE CASCADE,
+            catalog_kind INTEGER NOT NULL CHECK(catalog_kind IN (1, 2)),
+            catalog_code TEXT NOT NULL,
+            description_snapshot TEXT NOT NULL,
+            selected_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS catalog_entries(
+            catalog_kind INTEGER NOT NULL CHECK(catalog_kind IN (1, 2)),
+            code TEXT NOT NULL,
+            description TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            level1_code TEXT NOT NULL DEFAULT '',
+            level1_name TEXT NOT NULL DEFAULT '',
+            level2_code TEXT NOT NULL DEFAULT '',
+            level2_name TEXT NOT NULL DEFAULT '',
+            level3_code TEXT NOT NULL DEFAULT '',
+            level3_name TEXT NOT NULL DEFAULT '',
+            level4_code TEXT NOT NULL DEFAULT '',
+            level4_name TEXT NOT NULL DEFAULT '',
+            level5_code TEXT NOT NULL DEFAULT '',
+            level5_name TEXT NOT NULL DEFAULT '',
+            ncm_code TEXT NOT NULL DEFAULT '',
+            sustainable INTEGER NOT NULL DEFAULT 0,
+            exclusive_central INTEGER NOT NULL DEFAULT 0,
+            remote_updated_at TEXT,
+            search_text TEXT NOT NULL,
+            PRIMARY KEY(catalog_kind, code)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_catalog_entries_active_kind
+            ON catalog_entries(active, catalog_kind, code);
+        CREATE INDEX IF NOT EXISTS idx_catalog_entries_hierarchy
+            ON catalog_entries(catalog_kind, active, level1_code, level2_code, level3_code, level4_code, level5_code);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS catalog_entries_fts USING fts5(
+            catalog_kind UNINDEXED,
+            code,
+            search_text,
+            content='catalog_entries',
+            content_rowid='rowid',
+            tokenize='unicode61 remove_diacritics 2'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS catalog_entries_fts_insert AFTER INSERT ON catalog_entries BEGIN
+            INSERT INTO catalog_entries_fts(rowid, catalog_kind, code, search_text)
+            VALUES(new.rowid, new.catalog_kind, new.code, new.search_text);
+        END;
+        CREATE TRIGGER IF NOT EXISTS catalog_entries_fts_delete AFTER DELETE ON catalog_entries BEGIN
+            INSERT INTO catalog_entries_fts(catalog_entries_fts, rowid, catalog_kind, code, search_text)
+            VALUES('delete', old.rowid, old.catalog_kind, old.code, old.search_text);
+        END;
+        CREATE TRIGGER IF NOT EXISTS catalog_entries_fts_update AFTER UPDATE ON catalog_entries BEGIN
+            INSERT INTO catalog_entries_fts(catalog_entries_fts, rowid, catalog_kind, code, search_text)
+            VALUES('delete', old.rowid, old.catalog_kind, old.code, old.search_text);
+            INSERT INTO catalog_entries_fts(rowid, catalog_kind, code, search_text)
+            VALUES(new.rowid, new.catalog_kind, new.code, new.search_text);
+        END;
+
+        CREATE TABLE IF NOT EXISTS catalog_entries_stage(
+            generation TEXT NOT NULL,
+            catalog_kind INTEGER NOT NULL,
+            code TEXT NOT NULL,
+            description TEXT NOT NULL,
+            level1_code TEXT NOT NULL DEFAULT '',
+            level1_name TEXT NOT NULL DEFAULT '',
+            level2_code TEXT NOT NULL DEFAULT '',
+            level2_name TEXT NOT NULL DEFAULT '',
+            level3_code TEXT NOT NULL DEFAULT '',
+            level3_name TEXT NOT NULL DEFAULT '',
+            level4_code TEXT NOT NULL DEFAULT '',
+            level4_name TEXT NOT NULL DEFAULT '',
+            level5_code TEXT NOT NULL DEFAULT '',
+            level5_name TEXT NOT NULL DEFAULT '',
+            ncm_code TEXT NOT NULL DEFAULT '',
+            sustainable INTEGER NOT NULL DEFAULT 0,
+            exclusive_central INTEGER NOT NULL DEFAULT 0,
+            remote_updated_at TEXT,
+            search_text TEXT NOT NULL,
+            PRIMARY KEY(generation, catalog_kind, code)
+        );
+
+        CREATE TABLE IF NOT EXISTS catalog_sync_state(
+            catalog_kind INTEGER PRIMARY KEY CHECK(catalog_kind IN (1, 2)),
+            status INTEGER NOT NULL DEFAULT 0,
+            generation TEXT NOT NULL DEFAULT '',
+            next_page INTEGER NOT NULL DEFAULT 1,
+            total_pages INTEGER NOT NULL DEFAULT 0,
+            total_records INTEGER NOT NULL DEFAULT 0,
+            staged_records INTEGER NOT NULL DEFAULT 0,
+            active_records INTEGER NOT NULL DEFAULT 0,
+            started_at TEXT,
+            completed_at TEXT,
+            last_error TEXT NOT NULL DEFAULT ''
+        );
+        INSERT OR IGNORE INTO catalog_sync_state(catalog_kind) VALUES(1);
+        INSERT OR IGNORE INTO catalog_sync_state(catalog_kind) VALUES(2);
+
+        CREATE TABLE IF NOT EXISTS catalog_equivalence_rules(
+            id TEXT PRIMARY KEY,
+            rule_kind INTEGER NOT NULL CHECK(rule_kind IN (1, 2)),
+            canonical TEXT NOT NULL,
+            alias TEXT NOT NULL COLLATE NOCASE UNIQUE,
+            dimension TEXT NOT NULL DEFAULT '',
+            factor REAL NOT NULL DEFAULT 1,
+            is_default INTEGER NOT NULL DEFAULT 0
+        );
+
+        INSERT OR IGNORE INTO catalog_equivalence_rules VALUES
+            ('00000000000000000000000000000001',2,'POL','"','length',25.4,1),
+            ('00000000000000000000000000000002',2,'POL','POL','length',25.4,1),
+            ('00000000000000000000000000000003',2,'POL','POLEGADA','length',25.4,1),
+            ('00000000000000000000000000000004',2,'MM','MM','length',1,1),
+            ('00000000000000000000000000000005',2,'CM','CM','length',10,1),
+            ('00000000000000000000000000000006',2,'M','M','length',1000,1),
+            ('00000000000000000000000000000007',2,'MG','MG','mass',0.001,1),
+            ('00000000000000000000000000000008',2,'G','G','mass',1,1),
+            ('00000000000000000000000000000009',2,'KG','KG','mass',1000,1),
+            ('0000000000000000000000000000000a',2,'ML','ML','volume',1,1),
+            ('0000000000000000000000000000000b',2,'L','L','volume',1000,1),
+            ('0000000000000000000000000000000c',2,'MM2','MM2','area',1,1),
+            ('0000000000000000000000000000000d',2,'CM2','CM2','area',100,1),
+            ('0000000000000000000000000000000e',2,'M2','M2','area',1000000,1),
+            ('00000000000000000000000000000010',1,'UNIDADE','UN','',1,1),
+            ('00000000000000000000000000000011',1,'UNIDADE','UND','',1,1),
+            ('00000000000000000000000000000012',1,'UNIDADE','UNIDADE','',1,1),
+            ('00000000000000000000000000000013',1,'CAIXA','CX','',1,1),
+            ('00000000000000000000000000000014',1,'CAIXA','CAIXA','',1,1),
+            ('00000000000000000000000000000015',1,'PACOTE','PCT','',1,1),
+            ('00000000000000000000000000000016',1,'PACOTE','PACOTE','',1,1),
+            ('00000000000000000000000000000017',1,'ROLO','RL','',1,1),
+            ('00000000000000000000000000000018',1,'ROLO','ROLO','',1,1),
+            ('00000000000000000000000000000019',1,'JOGO','JG','',1,1),
+            ('0000000000000000000000000000001a',1,'JOGO','JOGO','',1,1);
         """;
 
 }

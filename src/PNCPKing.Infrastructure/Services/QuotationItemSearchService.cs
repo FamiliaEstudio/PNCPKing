@@ -55,6 +55,11 @@ public sealed class QuotationItemSearchService(
                 workspace.Slot,
                 cancellationToken)
             .ConfigureAwait(false);
+        var contractCandidatesChanged = stored is not null &&
+                                        !string.Equals(
+                                            ContractCandidateKey(stored.SearchText),
+                                            ContractCandidateKey(workspace.SearchText),
+                                            StringComparison.Ordinal);
         await workspaces.SaveWorkspaceAsync(stored is null
                 ? workspace
                 : stored with
@@ -67,6 +72,15 @@ public sealed class QuotationItemSearchService(
                     MinimumUnitPrice = workspace.MinimumUnitPrice,
                     MaximumUnitPrice = workspace.MaximumUnitPrice,
                     BatchCount = workspace.BatchCount,
+                    Checkpoint = contractCandidatesChanged
+                        ? new QuotationItemSearchCheckpoint
+                        {
+                            RandomPivot = Random.Shared.NextInt64(1, long.MaxValue)
+                        }
+                        : stored.Checkpoint,
+                    StatusMessage = contractCandidatesChanged
+                        ? "Crivos de contratações alterados; candidatas reiniciadas sem remover resultados coletados."
+                        : stored.StatusMessage,
                     UpdatedAt = DateTimeOffset.UtcNow
                 },
             cancellationToken).ConfigureAwait(false);
@@ -389,6 +403,11 @@ public sealed class QuotationItemSearchService(
             throw new ArgumentException("A faixa de preços é inválida.");
         }
     }
+
+    private static string ContractCandidateKey(string text) =>
+        string.Join(
+            '\u001F',
+            SearchText.Parse(text).ContractCandidates.Select(candidate => candidate.Text));
 
     private static QuotationItemSearchProgress CreateProgress(
         QuotationItemSearchWorkspace workspace,

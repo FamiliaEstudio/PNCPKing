@@ -115,7 +115,7 @@ public sealed record AiQuotationDraftItem
 
 public sealed record AiQuotationDraft
 {
-    public const int CurrentAnalyzerVersion = 2;
+    public const int CurrentAnalyzerVersion = 3;
 
     public required Guid Id { get; init; }
     public required string PdfSha256 { get; init; }

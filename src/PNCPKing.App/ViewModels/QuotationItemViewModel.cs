@@ -20,6 +20,8 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     private readonly IInternetEvidenceStore _evidenceStore;
     private readonly IContractRelevantPageService _relevantPages;
     private readonly IPdfPageRasterizer _rasterizer;
+    private readonly ICatalogRepository _catalogRepository;
+    private readonly ICatalogSearchService _catalogSearch;
     private readonly string _dataFolder;
     private readonly Guid _projectId;
     private readonly Guid _lineId;
@@ -54,6 +56,16 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     private bool _disposed;
     private DateTimeOffset _lastRefresh = DateTimeOffset.MinValue;
     private CancellationTokenSource? _searchCancellation;
+    private string _catalogQuery = string.Empty;
+    private CatalogKindOption _selectedCatalogKind = new("Todos", null);
+    private CatalogSearchResultDisplay? _selectedCatalogResult;
+    private CatalogHierarchyFilter? _catalogHierarchyFilter;
+    private bool _catalogAvailable;
+    private bool _catalogHierarchyLoaded;
+    private bool _isCatalogSearchBusy;
+    private int _catalogPage = 1;
+    private int _catalogTotalCandidates;
+    private string _catalogStatus = "Verificando o catálogo local…";
 
     public QuotationItemViewModel(
         MainViewModel main,
@@ -76,6 +88,8 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         _evidenceStore = evidenceStore;
         _relevantPages = relevantPages;
         _rasterizer = rasterizer;
+        _catalogRepository = main.CatalogRepository;
+        _catalogSearch = main.CatalogSearchService;
         _dataFolder = dataFolder;
         _projectId = projectId;
         _lineId = lineId;
@@ -100,6 +114,12 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         _customStartDate = DateTime.Today.AddDays(-364);
         _customEndDate = DateTime.Today;
         _main.TimedQuotationProgressChanged += OnTimedProgress;
+        CatalogKinds =
+        [
+            _selectedCatalogKind,
+            new CatalogKindOption("CATMAT", CatalogKind.Catmat),
+            new CatalogKindOption("CATSER", CatalogKind.Catser)
+        ];
         UpdateProgress(_main.LatestTimedQuotationProgress);
     }
 
@@ -116,6 +136,9 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     public ObservableCollection<InternetPriceDraft> Drafts { get; } = [];
     public ObservableCollection<DocumentThumbnailDisplay> DocumentThumbnails { get; } = [];
     public ObservableCollection<string> SweetCodeExpressions { get; } = [];
+    public ObservableCollection<CatalogSearchResultDisplay> CatalogResults { get; } = [];
+    public ObservableCollection<CatalogHierarchyNode> CatalogHierarchy { get; } = [];
+    public IReadOnlyList<CatalogKindOption> CatalogKinds { get; }
 
     public QuotationLineDisplay? Line
     {
@@ -126,6 +149,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             {
                 OnPropertyChanged(nameof(Header));
                 OnPropertyChanged(nameof(ItemSummary));
+                OnPropertyChanged(nameof(CatalogSelectionSummary));
             }
         }
     }
@@ -138,6 +162,89 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
           $"alvo {Line.RequestedBasketSize:N0} preços · " +
           $"coletados {Line.CollectedCount:N0} · elegíveis {Line.EligibleCount:N0} · " +
           $"nível {Line.ActivePromptLevel} · situação {Line.Status}";
+
+    public string CatalogQuery
+    {
+        get => _catalogQuery;
+        set => SetProperty(ref _catalogQuery, value);
+    }
+
+    public CatalogKindOption SelectedCatalogKind
+    {
+        get => _selectedCatalogKind;
+        set
+        {
+            if (SetProperty(ref _selectedCatalogKind, value))
+            {
+                _catalogHierarchyFilter = null;
+                OnPropertyChanged(nameof(CatalogHierarchyLabel));
+            }
+        }
+    }
+
+    public CatalogSearchResultDisplay? SelectedCatalogResult
+    {
+        get => _selectedCatalogResult;
+        set => SetProperty(ref _selectedCatalogResult, value);
+    }
+
+    public bool IsCatalogAvailable
+    {
+        get => _catalogAvailable;
+        private set => SetProperty(ref _catalogAvailable, value);
+    }
+
+    public bool IsCatalogSearchBusy
+    {
+        get => _isCatalogSearchBusy;
+        private set => SetProperty(ref _isCatalogSearchBusy, value);
+    }
+
+    public int CatalogPage
+    {
+        get => _catalogPage;
+        private set
+        {
+            if (SetProperty(ref _catalogPage, Math.Max(1, value)))
+            {
+                OnPropertyChanged(nameof(CatalogPageSummary));
+            }
+        }
+    }
+
+    public int CatalogTotalCandidates
+    {
+        get => _catalogTotalCandidates;
+        private set
+        {
+            if (SetProperty(ref _catalogTotalCandidates, value))
+            {
+                OnPropertyChanged(nameof(CatalogPageSummary));
+            }
+        }
+    }
+
+    public string CatalogPageSummary => CatalogTotalCandidates == 0
+        ? "Nenhum candidato"
+        : $"Página {CatalogPage:N0} · {CatalogTotalCandidates:N0} candidato(s) ordenado(s)";
+
+    public string CatalogStatus
+    {
+        get => _catalogStatus;
+        private set => SetProperty(ref _catalogStatus, value);
+    }
+
+    public string CatalogHierarchyLabel => _catalogHierarchyFilter is null
+        ? "Toda a hierarquia"
+        : "Filtro da árvore aplicado";
+
+    public string CatalogSelectionSummary => Line?.Line.CatalogSelection switch
+    {
+        null => "Código principal: nenhum",
+        { IsActive: false } selection =>
+            $"Código principal: {selection.Label} — INATIVO; escolha um substituto.",
+        { } selection => $"Código principal: {selection.Label} — {selection.Description}"
+    };
 
     public QuotationBasketDisplay? SelectedBasket
     {
@@ -390,6 +497,11 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             var analysis = analyses.SingleOrDefault(item => item.Line.Id == _lineId)
                            ?? throw new InvalidOperationException("O item da cotação não existe mais.");
             Line = new QuotationLineDisplay(analysis);
+            if (string.IsNullOrWhiteSpace(CatalogQuery))
+            {
+                CatalogQuery = analysis.Line.EffectiveDisplayName;
+            }
+            await RefreshCatalogAvailabilityAsync().ConfigureAwait(true);
             UpdateProgress(_main.LatestTimedQuotationProgress);
             Baskets.Clear();
             foreach (var basket in analysis.Baskets)
@@ -440,6 +552,174 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                 _refreshPending = false;
                 _ = LoadAsync();
             }
+        }
+    }
+
+    public async Task RenameItemAsync(string displayName)
+    {
+        var previous = Line?.Line.EffectiveDisplayName ?? string.Empty;
+        await _quotations.RenameLineDisplayNameAsync(_lineId, displayName).ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(CatalogQuery) ||
+            string.Equals(CatalogQuery.Trim(), previous, StringComparison.Ordinal))
+        {
+            CatalogQuery = displayName;
+        }
+
+        await LoadAsync(SelectedBasket?.Key).ConfigureAwait(true);
+        await _main.RefreshQuotationItemAsync(_projectId, _lineId).ConfigureAwait(true);
+    }
+
+    public async Task SearchCatalogAsync(int page = 1)
+    {
+        if (!IsCatalogAvailable)
+        {
+            throw new InvalidOperationException(
+                "A pesquisa será liberada depois que o primeiro snapshot completo de CATMAT e CATSER for publicado.");
+        }
+
+        if (string.IsNullOrWhiteSpace(CatalogQuery))
+        {
+            throw new ArgumentException("Digite um nome, característica ou código para pesquisar.");
+        }
+
+        IsCatalogSearchBusy = true;
+        try
+        {
+            var result = await _catalogSearch.SearchAsync(new CatalogSearchQuery(
+                    CatalogQuery,
+                    SelectedCatalogKind.Kind,
+                    _catalogHierarchyFilter,
+                    Math.Max(1, page),
+                    50))
+                .ConfigureAwait(true);
+            CatalogResults.Clear();
+            foreach (var item in result.Results)
+            {
+                CatalogResults.Add(new CatalogSearchResultDisplay(item));
+            }
+
+            CatalogPage = result.Page;
+            CatalogTotalCandidates = result.TotalCandidates;
+            SelectedCatalogResult = CatalogResults.FirstOrDefault();
+            CatalogStatus = CatalogResults.Count == 0
+                ? "Nenhum código ativo corresponde aos termos e ao filtro escolhidos."
+                : "Candidatos ativos ordenados por correspondência; verde é igual/equivalente, vermelho é conflito e cinza é ausência.";
+        }
+        finally
+        {
+            IsCatalogSearchBusy = false;
+        }
+    }
+
+    public Task PreviousCatalogPageAsync() => SearchCatalogAsync(Math.Max(1, CatalogPage - 1));
+    public Task NextCatalogPageAsync() => SearchCatalogAsync(CatalogPage + 1);
+
+    public void ApplyCatalogHierarchy(CatalogHierarchyNode? node)
+    {
+        _catalogHierarchyFilter = node?.Filter;
+        if (node is not null)
+        {
+            SelectedCatalogKind = CatalogKinds.First(option => option.Kind == node.Kind);
+            _catalogHierarchyFilter = node.Filter;
+        }
+
+        OnPropertyChanged(nameof(CatalogHierarchyLabel));
+    }
+
+    public async Task AssignSelectedCatalogAsync()
+    {
+        var entry = SelectedCatalogResult?.Source.Entry
+                    ?? throw new InvalidOperationException("Selecione um código ativo para atribuir.");
+        await _quotations.SetLineCatalogSelectionAsync(_lineId, new QuotationCatalogSelection
+        {
+            Kind = entry.Kind,
+            Code = entry.Code,
+            Description = entry.Description,
+            SelectedAt = DateTimeOffset.UtcNow,
+            IsActive = true
+        }).ConfigureAwait(true);
+        await LoadAsync(SelectedBasket?.Key).ConfigureAwait(true);
+        await _main.RefreshQuotationItemAsync(_projectId, _lineId).ConfigureAwait(true);
+    }
+
+    public async Task RemoveCatalogSelectionAsync()
+    {
+        await _quotations.SetLineCatalogSelectionAsync(_lineId, null).ConfigureAwait(true);
+        await LoadAsync(SelectedBasket?.Key).ConfigureAwait(true);
+        await _main.RefreshQuotationItemAsync(_projectId, _lineId).ConfigureAwait(true);
+    }
+
+    private async Task RefreshCatalogAvailabilityAsync()
+    {
+        var states = await _catalogRepository.GetSyncStatesAsync().ConfigureAwait(true);
+        IsCatalogAvailable = states.Count == 2 && states.All(state =>
+            state.Status == CatalogSyncStatus.Complete && state.ActiveRecords > 0);
+        if (!IsCatalogAvailable)
+        {
+            CatalogStatus = "Primeira carga em andamento ou ausente. O último catálogo completo continuará disponível nas atualizações futuras.";
+            return;
+        }
+
+        CatalogStatus = "Catálogo local completo. Pesquise livremente por nome, atributo, medida ou código.";
+        if (!_catalogHierarchyLoaded)
+        {
+            await LoadCatalogHierarchyAsync().ConfigureAwait(true);
+        }
+    }
+
+    private async Task LoadCatalogHierarchyAsync()
+    {
+        var paths = await _catalogRepository.GetHierarchyAsync().ConfigureAwait(true);
+        CatalogHierarchy.Clear();
+        foreach (var kind in new[] { CatalogKind.Catmat, CatalogKind.Catser })
+        {
+            var root = new CatalogHierarchyNode
+            {
+                Label = kind == CatalogKind.Catmat ? "CATMAT — materiais" : "CATSER — serviços",
+                Kind = kind
+            };
+            foreach (var path in paths.Where(path => path.Kind == kind))
+            {
+                AddHierarchyPath(root, path);
+            }
+
+            CatalogHierarchy.Add(root);
+        }
+
+        _catalogHierarchyLoaded = true;
+    }
+
+    private static void AddHierarchyPath(CatalogHierarchyNode root, CatalogHierarchyPath path)
+    {
+        var levels = new[]
+        {
+            (path.Level1Code, path.Level1Name),
+            (path.Level2Code, path.Level2Name),
+            (path.Level3Code, path.Level3Name),
+            (path.Level4Code, path.Level4Name),
+            (path.Level5Code, path.Level5Name)
+        };
+        var codes = new string[5];
+        var current = root;
+        for (var index = 0; index < levels.Length; index++)
+        {
+            var (code, name) = levels[index];
+            if (string.IsNullOrWhiteSpace(code) && string.IsNullOrWhiteSpace(name)) break;
+            codes[index] = code;
+            var child = current.Children.FirstOrDefault(node =>
+                string.Equals(node.Filter.GetType().GetProperty($"Level{index + 1}Code")?.GetValue(node.Filter)?.ToString(), code, StringComparison.Ordinal));
+            if (child is null)
+            {
+                child = new CatalogHierarchyNode
+                {
+                    Label = string.IsNullOrWhiteSpace(code) ? name : $"{code} — {name}",
+                    Kind = path.Kind,
+                    Filter = new CatalogHierarchyFilter(codes[0], codes[1], codes[2], codes[3], codes[4])
+                };
+                current.Children.Add(child);
+            }
+
+            current = child;
         }
     }
 

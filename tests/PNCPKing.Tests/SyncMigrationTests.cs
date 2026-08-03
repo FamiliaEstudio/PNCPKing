@@ -7,6 +7,127 @@ namespace PNCPKing.Tests;
 public sealed class SyncMigrationTests
 {
     [Fact]
+    public async Task VersionThirteenToFourteenBackfillsDisplayNameAndCreatesCatalogStructures()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var quotations = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var project = await quotations.CreateProjectAsync("Migrar catálogo");
+        var lineId = Guid.NewGuid();
+        await quotations.SaveSampleAsync(
+            project.Id,
+            lineId,
+            new QuotationLineInput("Papel sulfite", 1m, "resma", null, null),
+            []);
+
+        SqliteConnection.ClearAllPools();
+        await using (var connection = new SqliteConnection($"Data Source={database.Repository.DatabasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var downgrade = connection.CreateCommand();
+            downgrade.CommandText = """
+                DROP TRIGGER IF EXISTS catalog_entries_fts_insert;
+                DROP TRIGGER IF EXISTS catalog_entries_fts_delete;
+                DROP TRIGGER IF EXISTS catalog_entries_fts_update;
+                DROP TABLE IF EXISTS catalog_entries_fts;
+                DROP TABLE IF EXISTS catalog_entries_stage;
+                DROP TABLE IF EXISTS catalog_sync_state;
+                DROP TABLE IF EXISTS catalog_equivalence_rules;
+                DROP TABLE IF EXISTS quotation_catalog_selections;
+                DROP TABLE IF EXISTS catalog_entries;
+                ALTER TABLE quotation_lines DROP COLUMN display_name;
+                UPDATE schema_info SET version = 13 WHERE id = 1;
+                """;
+            await downgrade.ExecuteNonQueryAsync();
+        }
+
+        SqliteConnection.ClearAllPools();
+        await new SqliteContractRepository(database.Repository.DatabasePath).InitializeAsync();
+        var restored = Assert.Single(
+            await new SqliteQuotationRepository(database.Repository.DatabasePath).GetLinesAsync(project.Id));
+        Assert.Equal("Papel sulfite", restored.DisplayName);
+        var catalog = new SqliteCatalogRepository(database.Repository.DatabasePath);
+        Assert.Equal(2, (await catalog.GetSyncStatesAsync()).Count);
+        Assert.NotEmpty(await catalog.GetEquivalenceRulesAsync());
+    }
+
+    [Fact]
+    public async Task VersionTwelveToThirteenBackfillsSupplierLocationFromItemResults()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contract = RepositorySearchTests.Contract(
+            "supplier-location-v12",
+            "Aquisição de café",
+            "SP",
+            1);
+        await database.Repository.UpsertContractsAsync([contract]);
+        await database.Repository.UpsertItemsAsync(contract.PncpId, [new ProcurementItem
+        {
+            ContractId = contract.PncpId,
+            ItemNumber = 7,
+            Description = "Café torrado",
+            Unit = "pacote",
+            HasResult = true,
+            HydrationStatus = ItemHydrationStatus.Complete
+        }], false);
+        await database.Repository.ReplaceItemResultsAsync(contract.PncpId, 7, [new HomologationResult
+        {
+            ContractId = contract.PncpId,
+            ItemNumber = 7,
+            ResultSequence = 3,
+            SupplierName = "Fornecedor legado",
+            SupplierMunicipality = "Sertãozinho",
+            SupplierUf = "SP",
+            HomologatedUnitValueScaled = DecimalScale.ToScaled(25m),
+            ResultStatusId = 1,
+            ResultStatusName = "Informado"
+        }]);
+
+        var quotations = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var project = await quotations.CreateProjectAsync("Localidade legada");
+        var lineId = Guid.NewGuid();
+        await quotations.SaveSampleAsync(
+            project.Id,
+            lineId,
+            new QuotationLineInput("Café torrado", 1, "pacote", null, null),
+            [new QuotationReference
+            {
+                Id = "referencia-v12",
+                LineId = lineId,
+                ContractId = contract.PncpId,
+                ItemNumber = 7,
+                ResultSequence = 3,
+                SupplierName = "Fornecedor legado",
+                UnitPrice = 25m,
+                ItemDescription = "Café torrado",
+                ItemUnit = "pacote"
+            }]);
+
+        SqliteConnection.ClearAllPools();
+        await using (var connection = new SqliteConnection(
+                         $"Data Source={database.Repository.DatabasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var downgrade = connection.CreateCommand();
+            downgrade.CommandText = """
+                PRAGMA foreign_keys=OFF;
+                ALTER TABLE quotation_references DROP COLUMN supplier_municipality;
+                ALTER TABLE quotation_references DROP COLUMN supplier_uf;
+                UPDATE schema_info SET version = 12 WHERE id = 1;
+                PRAGMA foreign_keys=ON;
+                """;
+            await downgrade.ExecuteNonQueryAsync();
+        }
+
+        SqliteConnection.ClearAllPools();
+        await new SqliteContractRepository(database.Repository.DatabasePath).InitializeAsync();
+        var reference = Assert.Single(
+            await new SqliteQuotationRepository(database.Repository.DatabasePath)
+                .GetReferencesAsync(lineId));
+        Assert.Equal("Sertãozinho", reference.SupplierMunicipality);
+        Assert.Equal("SP", reference.SupplierUf);
+    }
+
+    [Fact]
     public async Task VersionElevenToTwelvePreservesQuotationAndCreatesIndependentItemSearchWorkspaces()
     {
         var directory = Path.Combine(Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"));

@@ -2,8 +2,16 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:services="clr-namespace:PNCPKing.App.Services"
+        xmlns:vm="clr-namespace:PNCPKing.App.ViewModels"
         Title="{Binding Header}" Width="1420" Height="900"
-        MinWidth="1080" MinHeight="720" WindowStartupLocation="CenterOwner">
+        MinWidth="1080" MinHeight="720" WindowStartupLocation="CenterOwner"
+        PreviewKeyDown="Window_PreviewKeyDown">
+    <Window.Resources>
+        <HierarchicalDataTemplate DataType="{x:Type vm:CatalogHierarchyNode}"
+                                  ItemsSource="{Binding Children}">
+            <TextBlock Text="{Binding Label}" />
+        </HierarchicalDataTemplate>
+    </Window.Resources>
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -18,6 +26,8 @@
                 <TextBlock Text="{Binding ItemSummary}" Margin="0,4,0,0" TextWrapping="Wrap" />
             </StackPanel>
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
+                <Button Content="✎ Editar nome" Click="RenameItem_Click"
+                        ToolTip="F2 — altera somente o nome visível, sem recalcular pesquisas ou preços." />
                 <Button Content="Atualizar" Click="Refresh_Click" />
                 <Button Content="Pausar automação" Click="Pause_Click" />
                 <Button Content="Retomar automação" Click="Resume_Click" />
@@ -184,7 +194,7 @@
                         </Grid.ColumnDefinitions>
                         <TextBox Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
                                  AcceptsReturn="True" TextWrapping="Wrap" MinHeight="58"
-                                 ToolTip="Use E, OU, exclusões com -, frases e aproximações numéricas com %." />
+                                 ToolTip="Use E, OU, exclusões com -, frases, aproximações com % e C:(título 1, título 2) para priorizar contratações." />
                         <StackPanel Grid.Column="1" Margin="8,0,0,0">
                             <CheckBox Content="Sweet Codes" IsChecked="{Binding SweetCodeEnabled}" />
                             <ComboBox Width="260" ItemsSource="{Binding SweetCodeExpressions}"
@@ -364,6 +374,100 @@
                         <Button Content="Continuar rascunho" Click="EditDraft_Click" />
                         <Button Content="Excluir rascunho" Click="DeleteDraft_Click" />
                     </StackPanel>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="CATMAT/CATSER">
+                <Grid Margin="4">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Border Background="#F4F7FA" BorderBrush="#C7D2DE" BorderThickness="1"
+                            CornerRadius="4" Padding="8">
+                        <StackPanel>
+                            <TextBlock Text="{Binding CatalogSelectionSummary}" FontWeight="SemiBold"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding CatalogStatus}" Margin="0,3,0,0" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+                    <Grid Grid.Row="1" Margin="0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="160" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <ComboBox ItemsSource="{Binding CatalogKinds}" SelectedItem="{Binding SelectedCatalogKind}" />
+                        <TextBox x:Name="CatalogQueryBox" Grid.Column="1" Margin="8,0"
+                                 Text="{Binding CatalogQuery, UpdateSourceTrigger=PropertyChanged}"
+                                 PreviewKeyDown="CatalogQuery_KeyDown"
+                                 ToolTip="Pesquise livremente por nome, característica, medida ou pelo código." />
+                        <StackPanel Grid.Column="2" Orientation="Horizontal">
+                            <Button Content="Pesquisar" Click="CatalogSearch_Click"
+                                    IsEnabled="{Binding IsCatalogAvailable}" MinWidth="90" />
+                            <Button Content="Editar equivalências" Click="CatalogDictionary_Click" />
+                        </StackPanel>
+                    </Grid>
+                    <Grid Grid.Row="2">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="285" />
+                            <ColumnDefinition Width="8" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <DockPanel>
+                            <TextBlock DockPanel.Dock="Top" Text="{Binding CatalogHierarchyLabel}"
+                                       FontWeight="SemiBold" Margin="0,0,0,5" />
+                            <TreeView ItemsSource="{Binding CatalogHierarchy}"
+                                      SelectedItemChanged="CatalogHierarchy_SelectedItemChanged" />
+                        </DockPanel>
+                        <GridSplitter Grid.Column="1" Width="8" Background="#DDD" />
+                        <DataGrid Grid.Column="2" ItemsSource="{Binding CatalogResults}"
+                                  SelectedItem="{Binding SelectedCatalogResult}"
+                                  AutoGenerateColumns="False" IsReadOnly="True"
+                                  SelectionMode="Single" RowDetailsVisibilityMode="VisibleWhenSelected">
+                            <DataGrid.RowDetailsTemplate>
+                                <DataTemplate>
+                                    <ItemsControl ItemsSource="{Binding Signals}" Margin="8,5,8,10">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border Background="{Binding Background}" CornerRadius="9"
+                                                        Margin="2" Padding="7,2" ToolTip="{Binding ToolTip}">
+                                                    <TextBlock Text="{Binding Text}" Foreground="{Binding Foreground}" />
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </DataTemplate>
+                            </DataGrid.RowDetailsTemplate>
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Tipo" Binding="{Binding Kind}" Width="75" />
+                                <DataGridTextColumn Header="Código" Binding="{Binding Code}" Width="95" />
+                                <DataGridTextColumn Header="Correspondência" Binding="{Binding Score, StringFormat={}{0:N1}%}" Width="115" />
+                                <DataGridTextColumn Header="Descrição oficial" Binding="{Binding Description}" Width="*" MinWidth="330" />
+                                <DataGridTextColumn Header="Hierarquia" Binding="{Binding Hierarchy}" Width="300" />
+                                <DataGridTextColumn Header="Iguais" Binding="{Binding Matches}" Width="60" />
+                                <DataGridTextColumn Header="Conflitos" Binding="{Binding Conflicts}" Width="65" />
+                                <DataGridTextColumn Header="Ausentes" Binding="{Binding Missing}" Width="65" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                    <DockPanel Grid.Row="3" Margin="0,8,0,0">
+                        <StackPanel Orientation="Horizontal">
+                            <Button Content="Anterior" Click="CatalogPrevious_Click" />
+                            <Button Content="Próxima" Click="CatalogNext_Click" />
+                            <TextBlock Text="{Binding CatalogPageSummary}" VerticalAlignment="Center" Margin="8,0" />
+                        </StackPanel>
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <Button Content="Atribuir/substituir código principal" Click="CatalogAssign_Click" />
+                            <Button Content="Remover código principal" Click="CatalogRemove_Click" />
+                            <Button Content="Copiar código" Click="CatalogCopy_Click" />
+                        </StackPanel>
+                    </DockPanel>
                 </Grid>
             </TabItem>
         </TabControl>

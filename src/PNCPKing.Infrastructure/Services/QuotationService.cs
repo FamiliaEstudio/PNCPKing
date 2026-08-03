@@ -18,6 +18,18 @@ public sealed class QuotationService(
     public Task RenameProjectAsync(Guid projectId, string name, CancellationToken cancellationToken = default) =>
         repository.RenameProjectAsync(projectId, name, cancellationToken);
 
+    public Task RenameLineDisplayNameAsync(
+        Guid lineId,
+        string displayName,
+        CancellationToken cancellationToken = default) =>
+        repository.RenameLineDisplayNameAsync(lineId, displayName, cancellationToken);
+
+    public Task SetLineCatalogSelectionAsync(
+        Guid lineId,
+        QuotationCatalogSelection? selection,
+        CancellationToken cancellationToken = default) =>
+        repository.SetLineCatalogSelectionAsync(lineId, selection, cancellationToken);
+
     public Task DeleteProjectAsync(Guid projectId, CancellationToken cancellationToken = default) =>
         repository.DeleteProjectAsync(projectId, cancellationToken);
 
@@ -550,6 +562,8 @@ public sealed class QuotationService(
             SupplierName = result.SupplierName,
             SupplierTaxId = result.SupplierTaxId,
             SupplierType = result.SupplierType,
+            SupplierMunicipality = result.SupplierMunicipality,
+            SupplierUf = result.SupplierUf,
             HomologatedQuantity = result.HomologatedQuantity,
             UnitPrice = result.HomologatedUnitValue!.Value,
             ResultDate = result.ResultDate,

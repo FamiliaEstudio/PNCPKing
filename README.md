@@ -16,7 +16,7 @@ A distribuição autocontida mais recente para Windows x64 está em `artifacts\w
 - remoção de contratações vencidas somente depois que a nova borda da janela estiver comprovadamente completa;
 - atualização por `dataAtualizacaoGlobal` com sobreposição de 48 horas;
 - SQLite em WAL com FTS5 e pesquisa sem diferença entre acentos/maiúsculas, sempre por prefixo;
-- sintaxe textual com E implícito ou `+`, OU por `OU`, `OR` ou `|`, frases entre aspas fechadas, exclusões globais por `-palavra` ou `-"frase"` e unidades aceitas por marcadores como `"pacote "unidade`;
+- sintaxe textual com E implícito ou `+`, OU por `OU`, `OR` ou `|`, frases entre aspas fechadas, exclusões globais por `-palavra` ou `-"frase"`, unidades aceitas por marcadores como `"pacote "unidade` e até dez títulos prioritários de contratações em `C:(material escolar, materiais de expediente)`;
 - pesquisa em duas etapas: um resumo local mostra imediatamente o total exato de contratações candidatas e as contagens parciais de itens/preços já existentes no cache; depois a API revela os valores;
 - filtros `Todos`, `Cidades Próximas`, `Sudeste` e UF, períodos de 7 a 365 dias ou personalizados e ordenação por relevância, data ou proximidade;
 - catálogo nacional embutido das localidades oficiais de 2022 do IBGE, usado somente para distância e ordem geográfica, sem consultas remotas por município;
@@ -84,7 +84,7 @@ A suíte automatizada cobre pesquisa por objeto e item, geografia, faixa de pre�
 3. Revise o volume, o espaço e a duração estimados.
 4. Clique em **Baixar/atualizar dados** e confirme os números exibidos.
 5. Digite o objeto, escolha geografia, período e ordenação e clique em **Pesquisar**.
-6. Você pode combinar termos: `café filtro` ou `café + filtro` exigem ambos; `café OU chá` aceita qualquer um; `"café torrado"` busca a frase; `café -cafeteira -"filtro de papel"` exclui descrições; `"pacote "unidade` aceita qualquer uma dessas unidades estruturadas do item.
+6. Você pode combinar termos: `café filtro` ou `café + filtro` exigem ambos; `café OU chá` aceita qualquer um; `"café torrado"` busca a frase; `café -cafeteira -"filtro de papel"` exclui descrições; `"pacote "unidade` aceita qualquer uma dessas unidades estruturadas do item. Acrescente `C:(alimentação escolar, gêneros alimentícios)` para examinar primeiro contratações cujos títulos correspondam a esses crivos; o bloco `C:` seleciona contratos, mas não substitui os termos que identificam o item.
 7. Ao clicar em **Pesquisar**, confira o resumo local exibido na própria tela. O aplicativo examinará automaticamente os três lotes visíveis — até 150 contratações candidatas — e revelará todos os itens compatíveis encontrados.
 8. Para ampliar a sessão atual sem repetir contratações, informe de 1 a 100 lotes e use **Mostrar valores das próximas contratações**. Cada lote contém 50 contratações. Use **Parar preços** para interromper preservando os resultados concluídos.
 9. Use os campos de preço mínimo/máximo para filtrar o valor unitário homologado ativo.

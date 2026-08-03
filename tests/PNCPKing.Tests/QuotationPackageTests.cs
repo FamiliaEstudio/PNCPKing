@@ -1,4 +1,8 @@
 using System.IO.Compression;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using PNCPKing.Core.Models;
 using PNCPKing.Core.Quotations;
 using PNCPKing.Infrastructure.Data;
@@ -29,6 +33,14 @@ public sealed class QuotationPackageTests
                 Reference(lineId, "pncp-2", 100m),
                 Reference(lineId, "pncp-3", 110m)
             ]);
+        await sourceRepository.RenameLineDisplayNameAsync(lineId, "Café premium");
+        await sourceRepository.SetLineCatalogSelectionAsync(lineId, new QuotationCatalogSelection
+        {
+            Kind = CatalogKind.Catmat,
+            Code = "123456",
+            Description = "CAFÉ TORRADO",
+            SelectedAt = DateTimeOffset.UtcNow
+        });
         var initial = Assert.Single(await sourceQuotations.GetAnalysesAsync(project.Id));
         var manual = await sourceRepository.SaveManualBasketAsync(
             lineId,
@@ -152,7 +164,18 @@ public sealed class QuotationPackageTests
         var restored = Assert.Single(
             await destinationQuotations.GetAnalysesAsync(project.Id));
         Assert.Equal(4, restored.References.Count);
+        Assert.All(
+            restored.References.Where(reference =>
+                reference.Source == QuotationReferenceSource.PncpIncisoII),
+            reference =>
+            {
+                Assert.Equal("Ribeirão Preto", reference.SupplierMunicipality);
+                Assert.Equal("SP", reference.SupplierUf);
+            });
         Assert.True(restored.Line.SelectionConfirmed);
+        Assert.Equal("Café premium", restored.Line.DisplayName);
+        Assert.Equal("Café torrado", restored.Line.Description);
+        Assert.Equal("CATMAT 123456", restored.Line.CatalogSelection?.Label);
         var restoredManual = Assert.Single(
             restored.Baskets,
             basket => basket.IsManual);
@@ -219,6 +242,69 @@ public sealed class QuotationPackageTests
         }
 
         await Assert.ThrowsAsync<InvalidDataException>(() => service.InspectAsync(path));
+    }
+
+    [Fact]
+    public async Task Package_ImportsSchemaTwelveWithoutSupplierLocation()
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        var sourceRepository = new SqliteQuotationRepository(source.Repository.DatabasePath);
+        var project = await sourceRepository.CreateProjectAsync("Pacote versão 12");
+        var lineId = Guid.NewGuid();
+        await sourceRepository.SaveSampleAsync(
+            project.Id,
+            lineId,
+            new QuotationLineInput("Café", 1m, "pacote", null, null),
+            [Reference(lineId, "legacy", 25m)]);
+        var path = Path.Combine(source.Directory, "schema-12.pncpcotacao");
+        await new QuotationPackageService(
+                source.Repository.DatabasePath,
+                source.Directory)
+            .ExportAsync(path, project.Id);
+        await DowngradePackageToSchemaTwelveAsync(path);
+
+        var destinationPackages = new QuotationPackageService(
+            destination.Repository.DatabasePath,
+            destination.Directory);
+        var preview = await destinationPackages.InspectAsync(path);
+        Assert.Equal(project.Id, preview.ProjectId);
+        await destinationPackages.ImportAsync(
+            path,
+            QuotationPackageImportMode.PreserveIdentity);
+
+        var reference = Assert.Single(
+            await new SqliteQuotationRepository(destination.Repository.DatabasePath)
+                .GetReferencesAsync(lineId));
+        Assert.Empty(reference.SupplierMunicipality);
+        Assert.Empty(reference.SupplierUf);
+    }
+
+    [Fact]
+    public async Task Package_ImportsSchemaThirteenUsingTechnicalDescriptionAsDisplayName()
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(source.Repository.DatabasePath);
+        var project = await repository.CreateProjectAsync("Pacote versão 13");
+        var lineId = Guid.NewGuid();
+        await repository.SaveSampleAsync(
+            project.Id,
+            lineId,
+            new QuotationLineInput("Descrição técnica", 1m, "unidade", null, null),
+            []);
+        await repository.RenameLineDisplayNameAsync(lineId, "Nome novo que o esquema antigo não tinha");
+        var path = Path.Combine(source.Directory, "schema-13.pncpcotacao");
+        await new QuotationPackageService(source.Repository.DatabasePath, source.Directory)
+            .ExportAsync(path, project.Id);
+        await DowngradePackageToSchemaThirteenAsync(path);
+
+        await new QuotationPackageService(destination.Repository.DatabasePath, destination.Directory)
+            .ImportAsync(path, QuotationPackageImportMode.PreserveIdentity);
+        var restored = Assert.Single(
+            await new SqliteQuotationRepository(destination.Repository.DatabasePath).GetLinesAsync(project.Id));
+        Assert.Equal("Descrição técnica", restored.DisplayName);
+        Assert.Null(restored.CatalogSelection);
     }
 
     [Fact]
@@ -538,6 +624,8 @@ public sealed class QuotationPackageTests
         ResultSequence = 1,
         SupplierName = $"Fornecedor {id}",
         SupplierTaxId = "11222333000181",
+        SupplierMunicipality = "Ribeirão Preto",
+        SupplierUf = "SP",
         HomologatedQuantity = 10m,
         UnitPrice = price,
         ResultDate = new DateOnly(2026, 7, 20),
@@ -551,6 +639,76 @@ public sealed class QuotationPackageTests
         PortalUrl = $"https://pncp.gov.br/app/editais/contrato-{id}",
         State = QuotationReferenceState.Eligible
     };
+
+    private static async Task DowngradePackageToSchemaTwelveAsync(string path)
+    {
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
+        var payload = JsonNode.Parse(
+            await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
+        var references = payload["tables"]!["quotation_references"]!.AsArray();
+        foreach (var reference in references)
+        {
+            var row = reference!.AsObject();
+            row.Remove("supplier_municipality");
+            row.Remove("supplier_uf");
+        }
+        var lines = payload["tables"]!["quotation_lines"]!.AsArray();
+        foreach (var line in lines)
+        {
+            line!.AsObject().Remove("display_name");
+        }
+        payload["tables"]!.AsObject().Remove("quotation_catalog_selections");
+
+        var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
+        var payloadBytes = Encoding.UTF8.GetBytes(payload.ToJsonString(jsonOptions));
+        ReplaceEntry(archive, "quotation.json", payloadBytes);
+
+        var manifest = JsonNode.Parse(
+            await ReadEntryAsync(archive.GetEntry("manifest.json")!))!.AsObject();
+        manifest["databaseSchemaVersion"] = 12;
+        manifest["dataSha256"] = Convert.ToHexString(SHA256.HashData(payloadBytes))
+            .ToLowerInvariant();
+        ReplaceEntry(
+            archive,
+            "manifest.json",
+            Encoding.UTF8.GetBytes(manifest.ToJsonString(jsonOptions)));
+    }
+
+    private static async Task DowngradePackageToSchemaThirteenAsync(string path)
+    {
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
+        var payload = JsonNode.Parse(
+            await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
+        foreach (var line in payload["tables"]!["quotation_lines"]!.AsArray())
+        {
+            line!.AsObject().Remove("display_name");
+        }
+        payload["tables"]!.AsObject().Remove("quotation_catalog_selections");
+        var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
+        var payloadBytes = Encoding.UTF8.GetBytes(payload.ToJsonString(jsonOptions));
+        ReplaceEntry(archive, "quotation.json", payloadBytes);
+        var manifest = JsonNode.Parse(
+            await ReadEntryAsync(archive.GetEntry("manifest.json")!))!.AsObject();
+        manifest["databaseSchemaVersion"] = 13;
+        manifest["dataSha256"] = Convert.ToHexString(SHA256.HashData(payloadBytes)).ToLowerInvariant();
+        ReplaceEntry(archive, "manifest.json", Encoding.UTF8.GetBytes(manifest.ToJsonString(jsonOptions)));
+    }
+
+    private static async Task<byte[]> ReadEntryAsync(ZipArchiveEntry entry)
+    {
+        await using var input = entry.Open();
+        using var output = new MemoryStream();
+        await input.CopyToAsync(output);
+        return output.ToArray();
+    }
+
+    private static void ReplaceEntry(ZipArchive archive, string name, byte[] contents)
+    {
+        archive.GetEntry(name)!.Delete();
+        var replacement = archive.CreateEntry(name, CompressionLevel.Optimal);
+        using var output = replacement.Open();
+        output.Write(contents);
+    }
 
     private static byte[] CreatePng(SKColor color)
     {

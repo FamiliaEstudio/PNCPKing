@@ -102,8 +102,8 @@ public sealed class InternetPriceTests
         Assert.Equal(2, evidenceResult.Occurrences);
         using var pdf = PdfReader.Open(evidencePath, PdfDocumentOpenMode.Import);
         Assert.Equal(
-            7,
-            pdf.PageCount); // capa + 3 avisos PNCP + identificação e 2 prints web
+            6,
+            pdf.PageCount); // identificação da parte + 3 diagnósticos PNCP + 2 prints web
     }
 
     [Fact]
@@ -163,7 +163,7 @@ public sealed class InternetPriceTests
     }
 
     [Fact]
-    public async Task EvidenceExport_BlocksWhenMandatoryInternetPrintWasAltered()
+    public async Task EvidenceExport_WritesDiagnosticWhenMandatoryInternetPrintWasAltered()
     {
         await using var database = await TestDatabase.CreateAsync();
         var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
@@ -211,11 +211,14 @@ public sealed class InternetPriceTests
             repository,
             store);
         var report = await quotations.GetReportAsync(project.Id);
-        var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
-            exporter.ExportAsync(
-                Path.Combine(database.Directory, "nao-deve-existir.pdf"),
-                report));
-        Assert.Contains("recapturadas", exception.Message, StringComparison.OrdinalIgnoreCase);
+        var destination = Path.Combine(database.Directory, "diagnostico.pdf");
+        var result = await exporter.ExportAsync(destination, report);
+        Assert.Contains(
+            result.Warnings,
+            warning => warning.Contains("ausente ou alterado", StringComparison.OrdinalIgnoreCase));
+        Assert.True(File.Exists(destination));
+        using var pdf = UglyToad.PdfPig.PdfDocument.Open(destination);
+        Assert.Equal(2, pdf.NumberOfPages);
     }
 
     private static QuotationReference Reference(

@@ -23,6 +23,10 @@ public sealed class PncpClientTests
                   "sequencialResultado": 7,
                   "niFornecedor": "123",
                   "nomeRazaoSocialFornecedor": "Fornecedor",
+                  "localidadeFornecedor": {
+                    "nomeMunicipio": "Ribeirão Preto",
+                    "uf": "SP"
+                  },
                   "quantidadeHomologada": 3.5,
                   "valorUnitarioHomologado": 10.1234,
                   "valorTotalHomologado": 35.4319,
@@ -42,6 +46,8 @@ public sealed class PncpClientTests
         Assert.Equal(2, handler.Calls);
         Assert.Single(results);
         Assert.Equal(10.1234m, results[0].HomologatedUnitValue);
+        Assert.Equal("Ribeirão Preto", results[0].SupplierMunicipality);
+        Assert.Equal("SP", results[0].SupplierUf);
         Assert.True(results[0].IsActive);
         Assert.DoesNotContain(
             handler.RequestUris,

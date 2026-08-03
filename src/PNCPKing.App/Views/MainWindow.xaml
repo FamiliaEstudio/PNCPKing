@@ -49,6 +49,8 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="18" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
                 <DockPanel Margin="0,0,0,4">
                     <TextBlock Text="Cobertura do índice - mais antigo à esquerda, mais novo à direita"
@@ -137,6 +139,54 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
+
+                <Border Grid.Row="3" BorderBrush="#D6DDE4" BorderThickness="0,1,0,0"
+                        Margin="0,8,0,6" Padding="0,8,0,0">
+                    <DockPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="Catálogo oficial CATMAT/CATSER" FontWeight="SemiBold"
+                                       VerticalAlignment="Center" />
+                            <TextBlock Text="{Binding CatalogActivityText}" Margin="12,0,0,0"
+                                       VerticalAlignment="Center" Foreground="#5F6871" />
+                        </StackPanel>
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <Button Content="Atualizar agora" Command="{Binding UpdateCatalogCommand}" />
+                            <Button Content="{Binding PauseCatalogButtonText}" Command="{Binding PauseCatalogCommand}" />
+                            <Button Content="Cancelar" Command="{Binding CancelCatalogCommand}" />
+                            <Button Content="Editar equivalências" Click="CatalogDictionary_Click" />
+                        </StackPanel>
+                    </DockPanel>
+                </Border>
+                <Grid Grid.Row="4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="2*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <ItemsControl ItemsSource="{Binding CatalogCoverage}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate><StackPanel Orientation="Horizontal" /></ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Width="430" Margin="0,0,14,0">
+                                    <DockPanel>
+                                        <Border Width="10" Height="10" CornerRadius="5"
+                                                Background="{Binding Color}" Margin="0,0,6,0" />
+                                        <TextBlock Text="{Binding Summary}" TextTrimming="CharacterEllipsis" />
+                                    </DockPanel>
+                                    <ProgressBar Height="7" Minimum="0" Maximum="100"
+                                                 Value="{Binding Percentage}" Margin="0,3,0,0" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Text="{Binding CatalogProgressText}" TextWrapping="Wrap"
+                                   HorizontalAlignment="Right" />
+                        <ProgressBar Height="7" Minimum="0" Maximum="100"
+                                     Value="{Binding CatalogProgress}" Margin="0,3,0,0" />
+                    </StackPanel>
+                </Grid>
             </Grid>
         </Border>
 
@@ -157,7 +207,7 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <TextBox x:Name="QueryTextBox" Text="{Binding QueryText, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="Sintaxe: café filtro ou café + filtro (E); café OU chá (OU); -cafeteira (exclusão); &quot;café torrado&quot; (frase fechada); &quot;pacote &quot;unidade (unidades aceitas)."
+                         ToolTip="Sintaxe: café + filtro (E); café OU chá; -cafeteira; &quot;café torrado&quot;; &quot;pacote (unidade); C:(material escolar, expediente) prioriza títulos de contratações."
                          VerticalContentAlignment="Center" FontSize="15"
                          PreviewKeyDown="QueryTextBox_PreviewKeyDown" />
                 <CheckBox Grid.Column="1" Content="Sweet Code" IsChecked="{Binding SweetCodeEnabled}"
@@ -389,6 +439,8 @@
                             <Button Content="Renomear" Command="{Binding RenameQuotationCommand}" />
                             <Button Content="Excluir cotação" Command="{Binding DeleteQuotationCommand}" />
                             <Button Content="Excluir item" Command="{Binding DeleteQuotationLineCommand}" />
+                            <Button Content="Editar nome" Command="{Binding RenameQuotationLineCommand}"
+                                    ToolTip="Altera somente o nome visível; pesquisas, preços e cestas permanecem intactos." />
                             <Button Content="Abrir item" Command="{Binding OpenQuotationItemCommand}" />
                             <Button Content="Importar XLSX" Command="{Binding ImportQuotationCommand}" />
                             <Button Content="Automação com IA" Command="{Binding AiQuotationCommand}" />
@@ -427,11 +479,14 @@
                                   SelectedItem="{Binding SelectedQuotationLine}"
                                   AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
                                   MouseDoubleClick="QuotationLinesGrid_MouseDoubleClick"
+                                  PreviewKeyDown="QuotationLinesGrid_PreviewKeyDown"
                                   EnableRowVirtualization="True" EnableColumnVirtualization="True"
                                   ScrollViewer.HorizontalScrollBarVisibility="Auto"
                                   ScrollViewer.VerticalScrollBarVisibility="Auto">
                             <DataGrid.Columns>
-                                <DataGridTextColumn Header="Descrição" Binding="{Binding Description}" Width="230" MinWidth="180" />
+                                <DataGridTextColumn Header="Nome do item" Binding="{Binding Description}" Width="230" MinWidth="180" />
+                                <DataGridTextColumn Header="Descrição técnica" Binding="{Binding TechnicalDescription}" Width="230" />
+                                <DataGridTextColumn Header="CATMAT/CATSER" Binding="{Binding CatalogCode}" Width="115" />
                                 <DataGridTextColumn Header="Restritivo" Binding="{Binding RestrictiveSearchText}" Width="220" />
                                 <DataGridTextColumn Header="Intermediário" Binding="{Binding IntermediateSearchText}" Width="200" />
                                 <DataGridTextColumn Header="Amplo" Binding="{Binding BroadSearchText}" Width="180" />

@@ -189,10 +189,11 @@
                         </DataGrid.Columns>
                     </DataGrid>
                     <StackPanel Grid.Row="2" Margin="0,8,0,0">
-                        <TextBlock Text="Prompts globais de contratações — um por linha, na ordem (1 a 10):" />
+                        <TextBlock Text="10 crivos globais de contratações — um por linha; sincronizados com C: nos prompts:" />
                         <TextBox x:Name="ContractPromptsTextBox" MinHeight="80" MaxHeight="145"
                                  AcceptsReturn="True" VerticalScrollBarVisibility="Auto"
-                                 TextWrapping="Wrap" />
+                                 TextWrapping="Wrap"
+                                 TextChanged="ContractPromptsTextBox_TextChanged" />
                     </StackPanel>
                     <TextBlock x:Name="ReviewSummaryTextBlock" Grid.Row="3" Margin="0,8,0,0"
                                TextWrapping="Wrap" Text="Analise o PDF para carregar a prévia editável." />

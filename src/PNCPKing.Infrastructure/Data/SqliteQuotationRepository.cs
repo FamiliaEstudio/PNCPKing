@@ -68,6 +68,85 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         }
     }
 
+    public async Task RenameLineDisplayNameAsync(
+        Guid lineId,
+        string displayName,
+        CancellationToken cancellationToken = default)
+    {
+        var normalized = string.Join(
+            ' ',
+            (displayName ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        if (normalized.Length == 0)
+        {
+            throw new ArgumentException("O nome do item não pode ficar vazio.", nameof(displayName));
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var line = connection.CreateCommand())
+        {
+            line.Transaction = (SqliteTransaction)transaction;
+            line.CommandText = "UPDATE quotation_lines SET display_name = $name WHERE id = $id;";
+            line.Parameters.AddWithValue("$name", normalized);
+            line.Parameters.AddWithValue("$id", lineId.ToString("N"));
+            if (await line.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+            {
+                throw new InvalidOperationException("O item da cotação não existe mais.");
+            }
+        }
+
+        await TouchLineProjectAsync(connection, (SqliteTransaction)transaction, lineId, now, cancellationToken)
+            .ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task SetLineCatalogSelectionAsync(
+        Guid lineId,
+        QuotationCatalogSelection? selection,
+        CancellationToken cancellationToken = default)
+    {
+        if (selection is not null &&
+            (string.IsNullOrWhiteSpace(selection.Code) || string.IsNullOrWhiteSpace(selection.Description)))
+        {
+            throw new ArgumentException("O código e a descrição do catálogo são obrigatórios.", nameof(selection));
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = (SqliteTransaction)transaction;
+            command.CommandText = selection is null
+                ? "DELETE FROM quotation_catalog_selections WHERE line_id = $lineId;"
+                : """
+                  INSERT INTO quotation_catalog_selections(
+                      line_id, catalog_kind, catalog_code, description_snapshot, selected_at)
+                  VALUES($lineId, $kind, $code, $description, $selectedAt)
+                  ON CONFLICT(line_id) DO UPDATE SET
+                      catalog_kind = excluded.catalog_kind,
+                      catalog_code = excluded.catalog_code,
+                      description_snapshot = excluded.description_snapshot,
+                      selected_at = excluded.selected_at;
+                  """;
+            command.Parameters.AddWithValue("$lineId", lineId.ToString("N"));
+            if (selection is not null)
+            {
+                command.Parameters.AddWithValue("$kind", (int)selection.Kind);
+                command.Parameters.AddWithValue("$code", selection.Code.Trim());
+                command.Parameters.AddWithValue("$description", selection.Description.Trim());
+                command.Parameters.AddWithValue("$selectedAt", FormatDateTime(now));
+            }
+
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await TouchLineProjectAsync(connection, (SqliteTransaction)transaction, lineId, now, cancellationToken)
+            .ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task DeleteProjectAsync(Guid projectId, CancellationToken cancellationToken = default)
     {
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -257,22 +336,28 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id, project_id, description, requested_quantity_scaled, requested_unit,
-                   minimum_unit_price_scaled, maximum_unit_price_scaled, description_weight,
-                   unit_weight, quantity_weight, proximity_weight, recency_weight, sample_version,
-                   sampled_at, selected_basket_key, selection_confirmed, search_text,
-                   requested_batch_count, display_order, automation_run_id, automation_state,
-                   automation_message, requested_basket_size, estimated_unit_price_scaled,
-                   estimated_total_price_scaled, use_estimated_price, estimate_stage,
-                   search_random_pivot, search_cursor_geo_layer, search_cursor_group_rank,
-                   search_cursor_rotation_band, search_cursor_random_key, search_cursor_pncp_id,
-                   search_contracts_examined, search_batches_completed, search_candidate_exhausted,
+            SELECT l.id, l.project_id, l.description, l.requested_quantity_scaled, l.requested_unit,
+                   l.minimum_unit_price_scaled, l.maximum_unit_price_scaled, l.description_weight,
+                   l.unit_weight, l.quantity_weight, l.proximity_weight, l.recency_weight, l.sample_version,
+                   l.sampled_at, l.selected_basket_key, l.selection_confirmed, l.search_text,
+                   l.requested_batch_count, l.display_order, l.automation_run_id, l.automation_state,
+                   l.automation_message, l.requested_basket_size, l.estimated_unit_price_scaled,
+                   l.estimated_total_price_scaled, l.use_estimated_price, l.estimate_stage,
+                   l.search_random_pivot, l.search_cursor_geo_layer, l.search_cursor_group_rank,
+                   l.search_cursor_rotation_band, l.search_cursor_random_key, l.search_cursor_pncp_id,
+                   l.search_contracts_examined, l.search_batches_completed, l.search_candidate_exhausted,
                    p.version, p.restrictive_text, p.intermediate_text, p.broad_text,
                    p.origin, p.validation_state, p.active_level, p.contracts_at_level,
-                   p.matched_items, p.revealed_prices, p.updated_at
+                   p.matched_items, p.revealed_prices, p.updated_at,
+                   l.display_name, s.catalog_kind, s.catalog_code,
+                   s.description_snapshot, s.selected_at,
+                   CASE WHEN ce.code IS NULL THEN 1 ELSE ce.active END
               FROM quotation_lines l
               LEFT JOIN quotation_line_search_prompts p
                 ON p.line_id = l.id AND p.is_current = 1
+              LEFT JOIN quotation_catalog_selections s ON s.line_id = l.id
+              LEFT JOIN catalog_entries ce
+                ON ce.catalog_kind = s.catalog_kind AND ce.code = s.catalog_code
              WHERE l.project_id = $projectId
              ORDER BY l.display_order, l.sampled_at, l.id;
             """;
@@ -380,13 +465,13 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             lineCommand.Transaction = (SqliteTransaction)transaction;
             lineCommand.CommandText = """
                 INSERT INTO quotation_lines(
-                    id, project_id, description, requested_quantity_scaled, requested_unit,
+                    id, project_id, description, display_name, requested_quantity_scaled, requested_unit,
                     minimum_unit_price_scaled, maximum_unit_price_scaled, description_weight,
                     unit_weight, quantity_weight, proximity_weight, recency_weight, sample_version,
                     sampled_at, selected_basket_key, selection_confirmed, search_text,
                     requested_batch_count, display_order, automation_run_id, automation_state,
                     automation_message, requested_basket_size)
-                VALUES($id, $projectId, $description, $quantity, $unit, $minimum, $maximum,
+                VALUES($id, $projectId, $description, $description, $quantity, $unit, $minimum, $maximum,
                        $descriptionWeight, $unitWeight, $quantityWeight, $proximityWeight, $recencyWeight,
                        1, $sampledAt, NULL, 0, $description, 1,
                        COALESCE((SELECT MAX(display_order) + 1 FROM quotation_lines WHERE project_id = $projectId), 0),
@@ -1220,7 +1305,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             line.Transaction = (SqliteTransaction)transaction;
             line.CommandText = """
                 INSERT INTO quotation_lines(
-                    id, project_id, description, requested_quantity_scaled, requested_unit,
+                    id, project_id, description, display_name, requested_quantity_scaled, requested_unit,
                     minimum_unit_price_scaled, maximum_unit_price_scaled, description_weight,
                     unit_weight, quantity_weight, proximity_weight, recency_weight, sample_version,
                     sampled_at, selected_basket_key, selection_confirmed, search_text,
@@ -1229,7 +1314,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                     estimated_total_price_scaled, use_estimated_price, estimate_stage,
                     search_random_pivot, search_contracts_examined, search_batches_completed,
                     search_candidate_exhausted)
-                VALUES($id, $projectId, $description, $quantity, $unit, $minimum, $maximum,
+                VALUES($id, $projectId, $description, $description, $quantity, $unit, $minimum, $maximum,
                        $descriptionWeight, $unitWeight, $quantityWeight, $proximityWeight, $recencyWeight,
                        0, $sampledAt, NULL, 0, $searchText, $batches, $displayOrder, $runId, $state, '',
                        $basketSize, $estimatedUnit, $estimatedTotal, $useEstimated, $estimateStage,
@@ -2042,7 +2127,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                 distance_ribeirao_km, publication_date, portal_url, description_score_scaled,
                 unit_score_scaled, quantity_score_scaled, proximity_score_scaled, recency_score_scaled,
                 explanation, state, state_reason, duplicate_of_reference_id,
-                prompt_match_level, matched_search_text, source_kind)
+                prompt_match_level, matched_search_text, source_kind,
+                supplier_municipality, supplier_uf)
             VALUES($id, $lineId, $contractId, $itemNumber, $resultSequence, $supplierName,
                    $supplierTaxId, $supplierType, $homologatedQuantity, $unitPrice, $resultDate,
                    $itemDescription, $itemAdditional, $itemUnit, $itemRequestedQuantity,
@@ -2050,7 +2136,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                    $catalogCategory, $organization, $municipality, $uf, $distance, $publicationDate,
                    $portalUrl, $descriptionScore, $unitScore, $quantityScore, $proximityScore,
                    $recencyScore, $explanation, $state, $stateReason, $duplicateOf,
-                   $promptLevel, $matchedSearchText, $sourceKind)
+                   $promptLevel, $matchedSearchText, $sourceKind,
+                   $supplierMunicipality, $supplierUf)
             ON CONFLICT(line_id, id) DO UPDATE SET
                 contract_id = excluded.contract_id,
                 item_number = excluded.item_number,
@@ -2088,7 +2175,9 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                 duplicate_of_reference_id = excluded.duplicate_of_reference_id,
                 prompt_match_level = excluded.prompt_match_level,
                 matched_search_text = excluded.matched_search_text,
-                source_kind = excluded.source_kind;
+                source_kind = excluded.source_kind,
+                supplier_municipality = excluded.supplier_municipality,
+                supplier_uf = excluded.supplier_uf;
             """;
         foreach (var name in new[]
                  {
@@ -2099,7 +2188,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                      "$organization", "$municipality", "$uf", "$distance", "$publicationDate", "$portalUrl",
                      "$descriptionScore", "$unitScore", "$quantityScore", "$proximityScore", "$recencyScore",
                      "$explanation", "$state", "$stateReason", "$duplicateOf",
-                     "$promptLevel", "$matchedSearchText", "$sourceKind"
+                     "$promptLevel", "$matchedSearchText", "$sourceKind",
+                     "$supplierMunicipality", "$supplierUf"
                  })
         {
             command.Parameters.Add(name, SqliteType.Text);
@@ -2115,6 +2205,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             command.Parameters["$supplierName"].Value = reference.SupplierName;
             command.Parameters["$supplierTaxId"].Value = reference.SupplierTaxId;
             command.Parameters["$supplierType"].Value = reference.SupplierType;
+            command.Parameters["$supplierMunicipality"].Value = reference.SupplierMunicipality;
+            command.Parameters["$supplierUf"].Value = reference.SupplierUf;
             command.Parameters["$homologatedQuantity"].Value = DbValue(DecimalScale.ToScaled(reference.HomologatedQuantity));
             command.Parameters["$unitPrice"].Value = DecimalScale.ToScaled(reference.UnitPrice)!.Value;
             command.Parameters["$resultDate"].Value = DbValue(reference.ResultDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
@@ -2201,6 +2293,28 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         command.CommandText = "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000;";
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         return connection;
+    }
+
+    private static async Task TouchLineProjectAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        Guid lineId,
+        DateTimeOffset updatedAt,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE quotation_projects
+               SET updated_at = $updated
+             WHERE id = (SELECT project_id FROM quotation_lines WHERE id = $lineId);
+            """;
+        command.Parameters.AddWithValue("$updated", FormatDateTime(updatedAt));
+        command.Parameters.AddWithValue("$lineId", lineId.ToString("N"));
+        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+        {
+            throw new InvalidOperationException("O item da cotação não existe mais.");
+        }
     }
 
     private static QuotationProject ReadProject(SqliteDataReader reader) => new(
@@ -2298,7 +2412,18 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         },
         PromptSet = reader.IsDBNull(36)
             ? null
-            : ReadPromptSet(reader, Guid.ParseExact(reader.GetString(0), "N"), 36)
+            : ReadPromptSet(reader, Guid.ParseExact(reader.GetString(0), "N"), 36),
+        DisplayName = reader.GetString(47),
+        CatalogSelection = reader.IsDBNull(48)
+            ? null
+            : new QuotationCatalogSelection
+            {
+                Kind = (CatalogKind)reader.GetInt32(48),
+                Code = reader.GetString(49),
+                Description = reader.GetString(50),
+                SelectedAt = ParseDateTime(reader.GetString(51)),
+                IsActive = reader.GetInt64(52) == 1
+            }
     };
 
     private static QuotationReference ReadReference(SqliteDataReader reader) => new()
@@ -2342,7 +2467,9 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         DuplicateOfReferenceId = reader.IsDBNull(35) ? null : reader.GetString(35),
         MatchedPromptLevel = reader.IsDBNull(36) ? null : (PromptMatchLevel)reader.GetInt32(36),
         MatchedSearchText = reader.GetString(37),
-        Source = (QuotationReferenceSource)reader.GetInt32(38)
+        Source = (QuotationReferenceSource)reader.GetInt32(38),
+        SupplierMunicipality = reader.GetString(39),
+        SupplierUf = reader.GetString(40)
     };
 
     private static void ValidateInput(QuotationLineInput input)
@@ -2591,7 +2718,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                distance_ribeirao_km, publication_date, portal_url, description_score_scaled,
                unit_score_scaled, quantity_score_scaled, proximity_score_scaled, recency_score_scaled,
                explanation, state, state_reason, duplicate_of_reference_id,
-               prompt_match_level, matched_search_text, source_kind
+               prompt_match_level, matched_search_text, source_kind,
+               supplier_municipality, supplier_uf
           FROM quotation_references
         """;
 }

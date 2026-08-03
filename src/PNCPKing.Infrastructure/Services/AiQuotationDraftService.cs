@@ -126,7 +126,6 @@ public sealed class AiQuotationDraftService : IAiQuotationDraftService
                 .Select(value => value.Trim())
                 .Where(value => value.Length > 0)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
-                .Take(10)
                 .ToArray()
         };
         var mapped = raw.Items
@@ -135,30 +134,41 @@ public sealed class AiQuotationDraftService : IAiQuotationDraftService
             .ToArray();
         var warnings = preparation.Warnings.Concat(raw.Warnings).Distinct(StringComparer.Ordinal).ToList();
         var contractPrompts = new List<string>();
+        var normalizedContractPrompts = new HashSet<string>(StringComparer.Ordinal);
         foreach (var contractPrompt in raw.ContractSearchPrompts)
         {
             try
             {
-                var parsed = SearchText.Parse(contractPrompt);
-                if (!string.IsNullOrWhiteSpace(parsed.ContractMatchQuery))
+                var normalizedPrompt = SearchText.NormalizeContractCandidatePrompt(contractPrompt);
+                if (normalizedPrompt.Length > 0 && normalizedContractPrompts.Add(normalizedPrompt))
                 {
-                    contractPrompts.Add(contractPrompt);
+                    contractPrompts.Add(normalizedPrompt);
                 }
             }
             catch (SearchQueryException exception)
             {
                 warnings.Add($"Prompt de contratação ignorado: {exception.Message}");
             }
+
+            if (contractPrompts.Count == 10)
+            {
+                break;
+            }
         }
-        if (contractPrompts.Count == 0)
+        if (contractPrompts.Count != 10)
         {
-            contractPrompts.AddRange(mapped
-                .Select(item => BuildFallbackPrompt(item.BroadSearchText, item.Description))
-                .Where(value => value.Length > 0)
-                .Distinct(StringComparer.Ordinal)
-                .Take(10));
-            warnings.Add("A IA não devolveu prompts globais válidos; foram criados termos de identidade locais.");
+            throw new InvalidDataException(
+                $"A IA devolveu {contractPrompts.Count:N0} crivo(s) global(is) distinto(s); são necessários exatamente 10.");
         }
+
+        mapped = mapped.Select(item => item with
+        {
+            SearchText = SearchText.ReplaceContractCandidates(item.SearchText, contractPrompts),
+            IntermediateSearchText = SearchText.ReplaceContractCandidates(
+                item.IntermediateSearchText,
+                contractPrompts),
+            BroadSearchText = SearchText.ReplaceContractCandidates(item.BroadSearchText, contractPrompts)
+        }).ToArray();
         var blocking = mapped.Any(item => item.HasBlockingError);
         if (raw.DeclaredItemCount > 0 && raw.DeclaredItemCount != mapped.Length)
         {

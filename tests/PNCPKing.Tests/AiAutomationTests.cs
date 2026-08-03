@@ -63,9 +63,18 @@ public sealed class AiAutomationTests
 
             Assert.Equal(1, provider.Calls);
             Assert.Single(first.Items);
-            Assert.Equal("cafe gourmet", first.Items[0].IntermediateSearchText);
-            Assert.Equal("cafe", first.Items[0].BroadSearchText);
-            Assert.Equal(["alimentação escolar", "café"], first.ContractSearchPrompts);
+            Assert.Equal("cafe gourmet", SearchText.Parse(first.Items[0].IntermediateSearchText).ItemText);
+            Assert.Equal("cafe", SearchText.Parse(first.Items[0].BroadSearchText).ItemText);
+            Assert.Equal(10, first.ContractSearchPrompts.Count);
+            Assert.Equal(10, SearchText.Parse(first.Items[0].SearchText).ContractCandidates.Count);
+            Assert.All(
+                first.Items,
+                item =>
+                {
+                    Assert.Equal(10, SearchText.Parse(item.SearchText).ContractCandidates.Count);
+                    Assert.Equal(10, SearchText.Parse(item.IntermediateSearchText).ContractCandidates.Count);
+                    Assert.Equal(10, SearchText.Parse(item.BroadSearchText).ContractCandidates.Count);
+                });
             Assert.Equal(first.Id, second.Id);
             var draftFolder = cache.GetDraftFolder(first.PdfSha256);
             Assert.True(File.Exists(Path.Combine(draftFolder, "document.md")));
@@ -76,6 +85,41 @@ public sealed class AiAutomationTests
                 var text = await File.ReadAllTextAsync(file);
                 Assert.DoesNotContain("segredo-que-nao-pode-ser-gravado", text, StringComparison.Ordinal);
             }
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public async Task DraftCache_UpgradesVersionTwoAndKeepsLegacyPromptCountRecoverable()
+    {
+        var root = CreateTemporaryFolder();
+        try
+        {
+            var cache = new AiDraftCache(root);
+            var draft = new AiQuotationDraft
+            {
+                Id = Guid.NewGuid(),
+                PdfSha256 = new string('a', 64),
+                SourcePath = "origem.pdf",
+                MarkdownPath = "document.md",
+                CreatedAt = DateTimeOffset.UtcNow,
+                DeclaredItemCount = 1,
+                Items = [DraftItem()],
+                ContractSearchPrompts = ["materiais terapêuticos", "reabilitação"],
+                AnalyzerVersion = 2
+            };
+            await cache.SaveAsync(draft, "documento");
+
+            var loaded = await cache.LoadAsync(draft.PdfSha256);
+
+            Assert.NotNull(loaded);
+            Assert.Equal(AiQuotationDraft.CurrentAnalyzerVersion, loaded.AnalyzerVersion);
+            Assert.Equal(2, loaded.ContractSearchPrompts.Count);
+            Assert.Equal(2, SearchText.Parse(Assert.Single(loaded.Items).SearchText).ContractCandidates.Count);
+            Assert.Contains(loaded.Warnings, value => value.Contains("exatamente 10", StringComparison.Ordinal));
         }
         finally
         {
@@ -165,6 +209,7 @@ public sealed class AiAutomationTests
         Assert.EndsWith("/responses", handler.LastUri!.AbsoluteUri, StringComparison.Ordinal);
         Assert.Contains("\"store\":false", handler.LastBody, StringComparison.Ordinal);
         Assert.Contains("\"type\":\"json_schema\"", handler.LastBody, StringComparison.Ordinal);
+        Assert.Contains("\"minItems\":10,\"maxItems\":10", handler.LastBody, StringComparison.Ordinal);
         using (var body = JsonDocument.Parse(handler.LastBody))
         {
             var content = body.RootElement.GetProperty("input")[1].GetProperty("content").GetString();
@@ -584,7 +629,12 @@ public sealed class AiAutomationTests
     {
         var provider = new RefinementProvider(changeRestrictive: false);
         var service = new AiPromptRefinementService(provider);
-        var item = DraftItem();
+        var item = DraftItem() with
+        {
+            SearchText = "\"pincel artistico\" %20 cm C:(material antigo, terapia)",
+            IntermediateSearchText = "pincel %20 cm C:(material antigo, terapia)",
+            BroadSearchText = "pincel C:(material antigo, terapia)"
+        };
 
         var result = await service.RefineAsync(new AiPromptRefinementRequest
         {
@@ -596,8 +646,13 @@ public sealed class AiAutomationTests
         });
 
         Assert.Equal(1, provider.Calls);
-        Assert.Equal("pincel %20 cm", Assert.Single(result.Items).IntermediateText);
-        Assert.Equal(["terapia ocupacional"], result.ContractSearchPrompts);
+        Assert.Equal(
+            "pincel %20 cm",
+            SearchText.Parse(Assert.Single(result.Items).IntermediateText).ItemText);
+        Assert.Equal(10, result.ContractSearchPrompts.Count);
+        var restrictive = SearchText.Parse(result.Items[0].RestrictiveText);
+        Assert.Equal("\"pincel artistico\" %20 cm", restrictive.ItemText);
+        Assert.Equal(10, restrictive.ContractCandidates.Count);
 
         var invalid = new AiPromptRefinementService(new RefinementProvider(changeRestrictive: true));
         await Assert.ThrowsAsync<InvalidDataException>(() => invalid.RefineAsync(
@@ -723,7 +778,18 @@ public sealed class AiAutomationTests
                     {
                       "declared_item_count": 1,
                       "warnings": [],
-                      "contract_search_prompts": ["alimentação escolar", "café"],
+                      "contract_search_prompts": [
+                        "alimentação escolar",
+                        "café",
+                        "gêneros alimentícios",
+                        "merenda",
+                        "insumos para cozinha",
+                        "abastecimento alimentar",
+                        "produtos de consumo",
+                        "copa e cozinha",
+                        "alimentos não perecíveis",
+                        "fornecimento de mantimentos"
+                      ],
                       "items": [{
                         "source_order": 1,
                         "source_number": "1",
@@ -767,7 +833,18 @@ public sealed class AiAutomationTests
                 Json = $$"""
                     {
                       "warnings": [],
-                      "contract_search_prompts": ["terapia ocupacional"],
+                      "contract_search_prompts": [
+                        "terapia ocupacional",
+                        "materiais terapêuticos",
+                        "reabilitação",
+                        "saúde multidisciplinar",
+                        "insumos hospitalares",
+                        "materiais de saúde",
+                        "equipamentos terapêuticos",
+                        "atendimento especializado",
+                        "oficina terapêutica",
+                        "serviços assistenciais"
+                      ],
                       "items": [{
                         "stable_id": "item-1",
                         "restrictive_text": "{{(changeRestrictive ? "pincel alterado" : "\\\"pincel artistico\\\" %20 cm")}}",

@@ -57,6 +57,25 @@ public sealed class BackupTests
         await Assert.ThrowsAsync<InvalidDataException>(() => service.ImportAsync(incompatible));
     }
 
+    [Fact]
+    public async Task Export_CanReplaceBackupWithoutLeakingTemporaryDatabaseHandles()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await database.Repository.UpsertContractsAsync([
+            RepositorySearchTests.Contract("repetido", "Exportação repetida", "SP", 1)
+        ]);
+        var service = new BackupService(database.Repository);
+        var backupPath = Path.Combine(database.Directory, "repetido.pncpking");
+
+        await service.ExportAsync(backupPath);
+        await service.ExportAsync(backupPath);
+
+        using var archive = ZipFile.OpenRead(backupPath);
+        Assert.NotNull(archive.GetEntry("data.db"));
+        Assert.NotNull(archive.GetEntry("manifest.json"));
+        Assert.False(File.Exists(backupPath + ".partial"));
+    }
+
     private static void ReplaceEntry(string archivePath, string entryName, Func<byte[], byte[]> transform)
     {
         using var archive = ZipFile.Open(archivePath, ZipArchiveMode.Update);

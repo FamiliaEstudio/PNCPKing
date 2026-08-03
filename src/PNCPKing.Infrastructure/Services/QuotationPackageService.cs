@@ -17,6 +17,7 @@ public sealed class QuotationPackageService : IQuotationPackageService
     private const string PackageExtension = ".pncpcotacao";
     private const string PackageKind = "PNCPKing.QuotationPackage";
     private const int FormatVersion = 1;
+    private const int MinimumCompatibleDatabaseSchemaVersion = 12;
     private const string ManifestEntryName = "manifest.json";
     private const string DataEntryName = "quotation.json";
     private const long MaximumManifestBytes = 2 * 1024 * 1024;
@@ -43,6 +44,16 @@ public sealed class QuotationPackageService : IQuotationPackageService
             "quotation_lines",
             "SELECT l.* FROM quotation_lines l WHERE l.project_id = $projectId ORDER BY l.display_order, l.id;",
             ["id"]),
+        new(
+            "quotation_catalog_selections",
+            """
+            SELECT s.*
+              FROM quotation_catalog_selections s
+              JOIN quotation_lines l ON l.id = s.line_id
+             WHERE l.project_id = $projectId
+             ORDER BY s.line_id;
+            """,
+            ["line_id"]),
         new(
             "quotation_references",
             """
@@ -364,6 +375,9 @@ public sealed class QuotationPackageService : IQuotationPackageService
             }
 
             var payload = (JsonObject)package.Payload.DeepClone();
+            UpgradeCompatiblePayload(
+                payload,
+                package.Manifest.DatabaseSchemaVersion);
             var warnings = new List<string>();
             var projectId = package.Manifest.ProjectId;
             var projectName = package.Manifest.ProjectName;
@@ -664,7 +678,13 @@ public sealed class QuotationPackageService : IQuotationPackageService
         var tables = payload["tables"] as JsonObject
                      ?? throw new InvalidDataException(
                          "O pacote não contém as tabelas da cotação.");
-        var expectedNames = TableDefinitions
+        var compatibleDefinitions = manifest is { DatabaseSchemaVersion: < 14 }
+            ? TableDefinitions.Where(definition => !string.Equals(
+                definition.Name,
+                "quotation_catalog_selections",
+                StringComparison.Ordinal)).ToArray()
+            : TableDefinitions;
+        var expectedNames = compatibleDefinitions
             .Select(definition => definition.Name)
             .ToHashSet(StringComparer.Ordinal);
         if (tables.Select(pair => pair.Key).ToHashSet(StringComparer.Ordinal)
@@ -676,18 +696,35 @@ public sealed class QuotationPackageService : IQuotationPackageService
 
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        foreach (var definition in TableDefinitions)
+        foreach (var definition in compatibleDefinitions)
         {
             var columns = await ReadTableColumnsAsync(
                     connection,
                     definition.Name,
                     cancellationToken)
                 .ConfigureAwait(false);
+            var compatibleColumns = columns.ToHashSet(StringComparer.Ordinal);
+            if (manifest?.DatabaseSchemaVersion == 12 &&
+                string.Equals(
+                    definition.Name,
+                    "quotation_references",
+                    StringComparison.Ordinal))
+            {
+                compatibleColumns.Remove("supplier_municipality");
+                compatibleColumns.Remove("supplier_uf");
+            }
+
+            if (manifest?.DatabaseSchemaVersion < 14 &&
+                string.Equals(definition.Name, "quotation_lines", StringComparison.Ordinal))
+            {
+                compatibleColumns.Remove("display_name");
+            }
+
             var rows = GetRowsFromTables(tables, definition.Name);
             foreach (var row in rows)
             {
                 if (!row.Select(pair => pair.Key).ToHashSet(StringComparer.Ordinal)
-                        .SetEquals(columns))
+                        .SetEquals(compatibleColumns))
                 {
                     throw new InvalidDataException(
                         $"A estrutura da tabela {definition.Name} é incompatível.");
@@ -794,6 +831,21 @@ public sealed class QuotationPackageService : IQuotationPackageService
             var lineId = GetRequiredText(reference, "line_id");
             EnsureContains(lineIds, lineId, "Uma referência aponta para um item ausente.");
             referenceKeys.Add(Composite(lineId, GetRequiredText(reference, "id")));
+        }
+
+        foreach (var selection in GetOptionalRows(payload, "quotation_catalog_selections"))
+        {
+            EnsureContains(
+                lineIds,
+                GetRequiredText(selection, "line_id"),
+                "Uma seleção CATMAT/CATSER aponta para um item ausente.");
+            var kind = GetRequiredLong(selection, "catalog_kind");
+            if (kind is < 1 or > 2 ||
+                string.IsNullOrWhiteSpace(GetRequiredText(selection, "catalog_code")) ||
+                string.IsNullOrWhiteSpace(GetRequiredText(selection, "description_snapshot")))
+            {
+                throw new InvalidDataException("Uma seleção CATMAT/CATSER é inválida.");
+            }
         }
 
         var baskets = GetRows(payload, "quotation_manual_baskets");
@@ -997,6 +1049,7 @@ public sealed class QuotationPackageService : IQuotationPackageService
         Remap(GetRows(payload, "quotation_lines"), "id", lineMap);
         Remap(GetRows(payload, "quotation_lines"), "project_id", projectMap);
         RemapOptional(GetRows(payload, "quotation_lines"), "automation_run_id", runMap);
+        Remap(GetRows(payload, "quotation_catalog_selections"), "line_id", lineMap);
         Remap(GetRows(payload, "quotation_references"), "line_id", lineMap);
         Remap(GetRows(payload, "quotation_manual_baskets"), "id", basketMap);
         Remap(GetRows(payload, "quotation_manual_baskets"), "line_id", lineMap);
@@ -1089,6 +1142,32 @@ public sealed class QuotationPackageService : IQuotationPackageService
         {
             warnings.Add(
                 $"{recoveredRuns:N0} automação(ões) em execução foram importadas como pendentes.");
+        }
+    }
+
+    private static void UpgradeCompatiblePayload(
+        JsonObject payload,
+        int databaseSchemaVersion)
+    {
+        if (databaseSchemaVersion < 13)
+        {
+            foreach (var reference in GetRows(payload, "quotation_references"))
+            {
+                reference["supplier_municipality"] = string.Empty;
+                reference["supplier_uf"] = string.Empty;
+            }
+        }
+
+        if (databaseSchemaVersion < 14)
+        {
+            foreach (var line in GetRows(payload, "quotation_lines"))
+            {
+                line["display_name"] = GetRequiredText(line, "description");
+            }
+
+            var tables = payload["tables"] as JsonObject
+                         ?? throw new InvalidDataException("O pacote não contém tabelas.");
+            tables["quotation_catalog_selections"] = new JsonArray();
         }
     }
 
@@ -1544,11 +1623,13 @@ public sealed class QuotationPackageService : IQuotationPackageService
                 $"{QuotationAnalyzer.BasketAlgorithmVersion}.");
         }
 
-        if (manifest.DatabaseSchemaVersion != SqliteContractRepository.CurrentSchemaVersion)
+        if (manifest.DatabaseSchemaVersion < MinimumCompatibleDatabaseSchemaVersion ||
+            manifest.DatabaseSchemaVersion > SqliteContractRepository.CurrentSchemaVersion)
         {
             throw new InvalidDataException(
                 $"Versão de dados incompatível: {manifest.DatabaseSchemaVersion}. " +
-                $"Esperada: {SqliteContractRepository.CurrentSchemaVersion}.");
+                $"Compatíveis: {MinimumCompatibleDatabaseSchemaVersion} a " +
+                $"{SqliteContractRepository.CurrentSchemaVersion}.");
         }
 
         _ = NormalizeHash(manifest.DataSha256);
@@ -1598,6 +1679,9 @@ public sealed class QuotationPackageService : IQuotationPackageService
             Id = ParseGuid(GetRequiredText(row, "id"), "item"),
             ProjectId = ParseGuid(GetRequiredText(row, "project_id"), "projeto"),
             Description = GetRequiredText(row, "description"),
+            DisplayName = row.ContainsKey("display_name")
+                ? GetRequiredText(row, "display_name")
+                : GetRequiredText(row, "description"),
             RequestedQuantity = DecimalScale.FromScaled(
                 GetRequiredLong(row, "requested_quantity_scaled"))!.Value,
             RequestedUnit = GetRequiredText(row, "requested_unit"),
@@ -1669,6 +1753,12 @@ public sealed class QuotationPackageService : IQuotationPackageService
         SupplierName = GetRequiredText(row, "supplier_name"),
         SupplierTaxId = GetRequiredText(row, "supplier_tax_id"),
         SupplierType = GetRequiredText(row, "supplier_type"),
+        SupplierMunicipality = row.ContainsKey("supplier_municipality")
+            ? GetOptionalText(row, "supplier_municipality") ?? string.Empty
+            : string.Empty,
+        SupplierUf = row.ContainsKey("supplier_uf")
+            ? GetOptionalText(row, "supplier_uf") ?? string.Empty
+            : string.Empty,
         HomologatedQuantity = DecimalScale.FromScaled(
             GetOptionalLong(row, "homologated_quantity_scaled")),
         UnitPrice = DecimalScale.FromScaled(GetRequiredLong(row, "unit_price_scaled"))!.Value,
@@ -1712,6 +1802,13 @@ public sealed class QuotationPackageService : IQuotationPackageService
             payload["tables"] as JsonObject
             ?? throw new InvalidDataException("O pacote não contém tabelas."),
             table);
+
+    private static List<JsonObject> GetOptionalRows(JsonObject payload, string table)
+    {
+        var tables = payload["tables"] as JsonObject
+                     ?? throw new InvalidDataException("O pacote não contém tabelas.");
+        return tables[table] is null ? [] : GetRowsFromTables(tables, table);
+    }
 
     private static List<JsonObject> GetRowsFromTables(JsonObject tables, string table)
     {

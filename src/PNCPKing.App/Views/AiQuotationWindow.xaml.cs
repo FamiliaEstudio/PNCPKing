@@ -646,7 +646,10 @@ public partial class AiQuotationWindow : Window
             foreach (var item in reviewItems)
             {
                 var refined = byId[item.Source.StableId];
-                item.ApplyRefinement(refined.IntermediateText, refined.BroadText);
+                item.ApplyRefinement(
+                    refined.RestrictiveText,
+                    refined.IntermediateText,
+                    refined.BroadText);
                 item.Status = "Prompts retrabalhados; revisão pendente.";
             }
 
@@ -779,6 +782,19 @@ public partial class AiQuotationWindow : Window
             return;
         }
 
+        IReadOnlyList<string> contractPrompts;
+        try
+        {
+            contractPrompts = ReadContractPrompts(requireExactlyTen: true);
+            SynchronizeContractPrompts(contractPrompts);
+        }
+        catch (SearchQueryException exception)
+        {
+            MessageBox.Show(exception.Message, "Crivos de contratações");
+            StepsTab.SelectedIndex = 1;
+            return;
+        }
+
         var inferred = selected.Any(item => item.HasInference);
         if (inferred && AcceptInferencesCheckBox.IsChecked != true)
         {
@@ -857,35 +873,7 @@ public partial class AiQuotationWindow : Window
         EndDate = DateOnly.FromDateTime(EndDatePicker.SelectedDate.Value);
         TimeBudget = TimeSpan.FromMinutes(minutes);
         AcceptedItems = selected.Select(item => item.ToImportItem()).ToArray();
-        ContractSearchPrompts = ContractPromptsTextBox.Text
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
-            .Select(value => value.Trim())
-            .Where(value => value.Length > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        if (ContractSearchPrompts.Count is < 1 or > 10)
-        {
-            MessageBox.Show("Informe de 1 a 10 prompts globais de contratação, um por linha.", "Prompts globais");
-            StepsTab.SelectedIndex = 1;
-            return;
-        }
-
-        try
-        {
-            foreach (var prompt in ContractSearchPrompts)
-            {
-                if (string.IsNullOrWhiteSpace(SearchText.Parse(prompt).ContractMatchQuery))
-                {
-                    throw new SearchQueryException($"Prompt global sem termos pesquisáveis: {prompt}");
-                }
-            }
-        }
-        catch (SearchQueryException exception)
-        {
-            MessageBox.Show(exception.Message, "Prompts globais");
-            StepsTab.SelectedIndex = 1;
-            return;
-        }
+        ContractSearchPrompts = contractPrompts;
 
         AddSelectedPromptsToSweetCodes = AddSweetCodesCheckBox.IsChecked == true;
         SweetCodePrompts = selected.Select(item => item.SearchText).ToArray();
@@ -915,6 +903,18 @@ public partial class AiQuotationWindow : Window
     {
         DraftItemsGrid.CommitEdit(DataGridEditingUnit.Cell, true);
         DraftItemsGrid.CommitEdit(DataGridEditingUnit.Row, true);
+        IReadOnlyList<string> contractPrompts;
+        try
+        {
+            contractPrompts = ReadContractPrompts(requireExactlyTen: true);
+            SynchronizeContractPrompts(contractPrompts);
+        }
+        catch (SearchQueryException exception)
+        {
+            MessageBox.Show(exception.Message, "Crivos de contratações");
+            return;
+        }
+
         var invalid = DraftItems
             .Where(value =>
             {
@@ -929,27 +929,6 @@ public partial class AiQuotationWindow : Window
             DraftItemsGrid.Items.Refresh();
             MessageBox.Show(string.Join(Environment.NewLine, invalid), "Prompts inválidos");
             return;
-        }
-
-        var contractPrompts = ContractPromptsTextBox.Text
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
-            .Select(value => value.Trim())
-            .Where(value => value.Length > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        if (contractPrompts.Length is < 1 or > 10)
-        {
-            MessageBox.Show("Informe de 1 a 10 prompts globais, um por linha.", "Prompts globais");
-            return;
-        }
-
-        foreach (var prompt in contractPrompts)
-        {
-            if (string.IsNullOrWhiteSpace(SearchText.Parse(prompt).ContractMatchQuery))
-            {
-                MessageBox.Show($"Prompt global sem termos pesquisáveis: {prompt}", "Prompts globais");
-                return;
-            }
         }
 
         ContractSearchPrompts = contractPrompts;
@@ -986,6 +965,67 @@ public partial class AiQuotationWindow : Window
             $"{draft.Items.Count:N0} item(ns); declarado: {draft.DeclaredItemCount:N0}. " +
             "Edite campos e prompt diretamente; uma linha inválida bloqueia somente ela." + warning;
         DraftItemsGrid.Items.Refresh();
+    }
+
+    private void ContractPromptsTextBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (DraftItems.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            SynchronizeContractPrompts(ReadContractPrompts(requireExactlyTen: false));
+        }
+        catch (SearchQueryException)
+        {
+            // Durante a digitação a lista pode ficar momentaneamente incompleta.
+            // A validação final apresenta a mensagem sem apagar as edições do usuário.
+        }
+    }
+
+    private IReadOnlyList<string> ReadContractPrompts(bool requireExactlyTen)
+    {
+        var rawPrompts = ContractPromptsTextBox.Text
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(value => value.Trim())
+            .Where(value => value.Length > 0)
+            .ToArray();
+        if (rawPrompts.Length > 10 || requireExactlyTen && rawPrompts.Length != 10)
+        {
+            throw new SearchQueryException(
+                $"Informe exatamente 10 crivos globais de contratação, um por linha; foram informados {rawPrompts.Length:N0}.");
+        }
+
+        var prompts = new List<string>(rawPrompts.Length);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var rawPrompt in rawPrompts)
+        {
+            var normalized = SearchText.NormalizeContractCandidatePrompt(rawPrompt);
+            if (seen.Add(normalized))
+            {
+                prompts.Add(normalized);
+            }
+        }
+
+        if (requireExactlyTen && prompts.Count != 10)
+        {
+            throw new SearchQueryException(
+                $"Os crivos precisam ser distintos; após remover repetições restaram {prompts.Count:N0} de 10.");
+        }
+
+        return prompts;
+    }
+
+    private void SynchronizeContractPrompts(IReadOnlyList<string> contractPrompts)
+    {
+        foreach (var item in DraftItems)
+        {
+            item.SynchronizeContractCandidates(contractPrompts);
+        }
+
+        DraftItemsGrid?.Items.Refresh();
     }
 
     private void ApplyDuplicateSelection()
@@ -1402,12 +1442,36 @@ public sealed class AiQuotationReviewItem
             ? SearchPromptOrigin.Ai
             : SearchPromptOrigin.User;
 
-    public void ApplyRefinement(string intermediate, string broad)
+    public void ApplyRefinement(string restrictive, string intermediate, string broad)
     {
+        SearchText = restrictive;
         IntermediateSearchText = intermediate;
         BroadSearchText = broad;
+        _baselineRestrictiveSearchText = restrictive;
         _baselineIntermediateSearchText = intermediate;
         _baselineBroadSearchText = broad;
+    }
+
+    public void SynchronizeContractCandidates(IReadOnlyList<string> contractPrompts)
+    {
+        SearchText = PNCPKing.Core.Search.SearchText.ReplaceContractCandidates(
+            SearchText,
+            contractPrompts);
+        IntermediateSearchText = PNCPKing.Core.Search.SearchText.ReplaceContractCandidates(
+            IntermediateSearchText,
+            contractPrompts);
+        BroadSearchText = PNCPKing.Core.Search.SearchText.ReplaceContractCandidates(
+            BroadSearchText,
+            contractPrompts);
+        _baselineRestrictiveSearchText = PNCPKing.Core.Search.SearchText.ReplaceContractCandidates(
+            _baselineRestrictiveSearchText,
+            contractPrompts);
+        _baselineIntermediateSearchText = PNCPKing.Core.Search.SearchText.ReplaceContractCandidates(
+            _baselineIntermediateSearchText,
+            contractPrompts);
+        _baselineBroadSearchText = PNCPKing.Core.Search.SearchText.ReplaceContractCandidates(
+            _baselineBroadSearchText,
+            contractPrompts);
     }
 
     public void Validate()

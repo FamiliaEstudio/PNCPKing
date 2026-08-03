@@ -98,6 +98,69 @@ public partial class QuotationItemWindow : Window
     private async void Refresh_Click(object sender, RoutedEventArgs e) =>
         await RunAsync(() => ViewModel.LoadAsync()).ConfigureAwait(true);
 
+    private async void RenameItem_Click(object sender, RoutedEventArgs e) =>
+        await PromptRenameItemAsync().ConfigureAwait(true);
+
+    private async Task PromptRenameItemAsync()
+    {
+        var current = ViewModel.Line?.Line.EffectiveDisplayName;
+        if (string.IsNullOrWhiteSpace(current)) return;
+        var window = new TextPromptWindow(
+            "Editar nome do item",
+            "Nome visível nas telas e exportações (o descritor técnico continuará sendo usado nas pesquisas):",
+            current)
+        {
+            Owner = this
+        };
+        if (window.ShowDialog() == true)
+        {
+            await RunAsync(() => ViewModel.RenameItemAsync(window.Value)).ConfigureAwait(true);
+        }
+    }
+
+    private async void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.F2 || Keyboard.FocusedElement is TextBox) return;
+        e.Handled = true;
+        await PromptRenameItemAsync().ConfigureAwait(true);
+    }
+
+    private async void CatalogSearch_Click(object sender, RoutedEventArgs e) =>
+        await RunAsync(() => ViewModel.SearchCatalogAsync()).ConfigureAwait(true);
+
+    private async void CatalogQuery_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        e.Handled = true;
+        await RunAsync(() => ViewModel.SearchCatalogAsync()).ConfigureAwait(true);
+    }
+
+    private void CatalogHierarchy_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e) =>
+        ViewModel.ApplyCatalogHierarchy(e.NewValue as CatalogHierarchyNode);
+
+    private async void CatalogPrevious_Click(object sender, RoutedEventArgs e) =>
+        await RunAsync(ViewModel.PreviousCatalogPageAsync).ConfigureAwait(true);
+
+    private async void CatalogNext_Click(object sender, RoutedEventArgs e) =>
+        await RunAsync(ViewModel.NextCatalogPageAsync).ConfigureAwait(true);
+
+    private async void CatalogAssign_Click(object sender, RoutedEventArgs e) =>
+        await RunAsync(ViewModel.AssignSelectedCatalogAsync).ConfigureAwait(true);
+
+    private async void CatalogRemove_Click(object sender, RoutedEventArgs e) =>
+        await RunAsync(ViewModel.RemoveCatalogSelectionAsync).ConfigureAwait(true);
+
+    private void CatalogCopy_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel.SelectedCatalogResult is { } selected)
+        {
+            Clipboard.SetText($"{selected.Kind} {selected.Code}");
+        }
+    }
+
+    private void CatalogDictionary_Click(object sender, RoutedEventArgs e) =>
+        ViewModel.Main.OpenCatalogDictionary();
+
     private void Pause_Click(object sender, RoutedEventArgs e) => ViewModel.PauseAutomation();
     private void Resume_Click(object sender, RoutedEventArgs e) => ViewModel.ResumeAutomation();
 

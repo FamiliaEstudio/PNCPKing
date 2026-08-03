@@ -701,17 +701,16 @@ public sealed class DocumentProcessingTests
             using var pdf = UglyToad.PdfPig.PdfDocument.Open(destination);
             Assert.Equal(2, pdf.NumberOfPages);
             var reportImage = Assert.Single(pdf.GetPage(2).GetImages());
-            Assert.True(reportImage.TryGetPng(out var reportPng));
-            using var reportBitmap = SKBitmap.Decode(reportPng);
+            using var reportBitmap = SKBitmap.Decode(reportImage.RawBytes.ToArray());
             Assert.NotNull(reportBitmap);
-            Assert.Equal(2480, reportBitmap.Width);
-            Assert.Equal(3508, reportBitmap.Height);
+            Assert.Equal(1240, reportBitmap.Width);
+            Assert.Equal(1754, reportBitmap.Height);
             Assert.Contains(
                 reportBitmap.Pixels,
-                color => color.Red > 240 && color.Blue > 240 && color.Green < 20);
+                color => color.Red > 210 && color.Blue > 210 && color.Green < 80);
             Assert.Contains(
                 reportBitmap.Pixels,
-                color => color.Blue > 240 && color.Green > 240 && color.Red < 20);
+                color => color.Blue > 210 && color.Green > 210 && color.Red < 80);
         }
         finally
         {
@@ -762,12 +761,101 @@ public sealed class DocumentProcessingTests
     }
 
     [Fact]
-    public async Task EvidenceReport_PreservesPartialPdfWhenCancelled()
+    public async Task EvidenceReport_SelectsAtMostTwoDistinctPagesPerPrice()
+    {
+        var root = CreateTemporaryFolder();
+        try
+        {
+            var destination = Path.Combine(root, "duas-paginas.pdf");
+            var sourcePdf = Path.Combine(root, "documento.pdf");
+            await File.WriteAllBytesAsync(sourcePdf, BuildPdfPages("cafe torrado", "cafe torrado", "cafe torrado"));
+            var reference = Reference();
+            var index = new DocumentTextIndex
+            {
+                PdfSha256 = Cached(sourcePdf).Sha256,
+                SourcePath = sourcePdf,
+                Pages =
+                [
+                    IndexedPage(1, "cafe", "torrado"),
+                    IndexedPage(2, "cafe", "torrado"),
+                    IndexedPage(3, "cafe", "torrado")
+                ]
+            };
+            var rasterizer = new EvidenceRasterizer();
+            var service = new QuotationEvidenceExportService(
+                new FakeContractDocumentService(Cached(sourcePdf)),
+                new StaticTextIndexService(index),
+                rasterizer);
+
+            var result = await service.ExportAsync(destination, Report(reference));
+
+            Assert.Equal(2, result.Occurrences);
+            Assert.Equal([1, 2], rasterizer.Pages);
+            using var pdf = UglyToad.PdfPig.PdfDocument.Open(destination);
+            Assert.Equal(3, pdf.NumberOfPages);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public async Task EvidenceReport_SplitsIntoFortyNinePagePartsAndRemovesStaleParts()
+    {
+        var root = CreateTemporaryFolder();
+        try
+        {
+            var destination = Path.Combine(root, "evidencias.pdf");
+            await File.WriteAllTextAsync(destination, "antigo");
+            var stale = Path.Combine(root, "evidencias_parte-999.pdf");
+            await File.WriteAllTextAsync(stale, "antiga");
+            var sourcePdf = Path.Combine(root, "documento.pdf");
+            await File.WriteAllBytesAsync(sourcePdf, BuildPdf("cafe torrado"));
+            var lineId = Guid.NewGuid();
+            var references = Enumerable.Range(1, 100)
+                .Select(index => Reference() with
+                {
+                    Id = $"reference-{index:D3}",
+                    LineId = lineId,
+                    ResultSequence = index
+                })
+                .ToArray();
+            var report = Report(references);
+            var service = new QuotationEvidenceExportService(
+                new FakeContractDocumentService(Cached(sourcePdf)),
+                new FakeTextIndexService(references[0]),
+                new EvidenceRasterizer());
+
+            var result = await service.ExportAsync(destination, report);
+
+            Assert.Equal(3, result.ReportPaths.Count);
+            Assert.Equal(
+                [49, 49, 5],
+                result.ReportPaths.Select(path =>
+                {
+                    using var pdf = UglyToad.PdfPig.PdfDocument.Open(path);
+                    return pdf.NumberOfPages;
+                }).ToArray());
+            Assert.All(result.ReportPaths, path => Assert.Matches(@"_parte-\d{3}\.pdf$", path));
+            Assert.False(File.Exists(destination));
+            Assert.False(File.Exists(stale));
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public async Task EvidenceReport_CancellationPreservesPreviousPublishedFile()
     {
         var root = CreateTemporaryFolder();
         try
         {
             var destination = Path.Combine(root, "cancelado.pdf");
+            var previous = "relatório anterior"u8.ToArray();
+            await File.WriteAllBytesAsync(destination, previous);
             var sourcePdf = Path.Combine(root, "documento.pdf");
             await File.WriteAllBytesAsync(sourcePdf, BuildPdf("cafe torrado"));
             using var cancellation = new CancellationTokenSource();
@@ -778,17 +866,12 @@ public sealed class DocumentProcessingTests
                 new FakeTextIndexService(reference),
                 new EvidenceRasterizer());
 
-            var result = await service.ExportAsync(
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.ExportAsync(
                 destination,
                 Report(reference),
-                cancellationToken: cancellation.Token);
+                cancellationToken: cancellation.Token));
 
-            Assert.True(File.Exists(destination));
-            Assert.Contains(
-                result.Warnings,
-                warning => warning.Contains("interrompida", StringComparison.OrdinalIgnoreCase));
-            using var pdf = UglyToad.PdfPig.PdfDocument.Open(destination);
-            Assert.Equal(2, pdf.NumberOfPages);
+            Assert.Equal(previous, await File.ReadAllBytesAsync(destination));
         }
         finally
         {
@@ -966,6 +1049,39 @@ public sealed class DocumentProcessingTests
                 DateTimeOffset.UtcNow,
                 DateTimeOffset.UtcNow),
             [analysis]);
+    }
+
+    private static QuotationProjectReport Report(IReadOnlyList<QuotationReference> references)
+    {
+        var projectId = Guid.NewGuid();
+        var line = new QuotationLine
+        {
+            Id = references[0].LineId,
+            ProjectId = projectId,
+            Description = "cafe torrado",
+            DisplayName = "Café para relatório",
+            RequestedQuantity = 1,
+            RequestedUnit = "pacote",
+            SelectedBasketKey = "manual:test",
+            SelectionConfirmed = true
+        };
+        var basket = new QuotationBasket
+        {
+            Key = "manual:test",
+            References = references,
+            AveragePrice = references.Average(reference => reference.UnitPrice),
+            MinimumPrice = references.Min(reference => reference.UnitPrice),
+            MaximumPrice = references.Max(reference => reference.UnitPrice),
+            MaximumDeviationPercent = 0,
+            Score = 100,
+            IsRecommended = true,
+            Kind = QuotationBasketKind.Manual,
+            RequestedSize = references.Count,
+            Name = "Teste"
+        };
+        return new QuotationProjectReport(
+            new QuotationProject(projectId, "Projeto dividido", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
+            [new QuotationLineAnalysis(line, references, [basket], references.Count, references.Count, 0, 0, 1)]);
     }
 
     private static PncpContractKey Contract() =>
@@ -1157,6 +1273,7 @@ public sealed class DocumentProcessingTests
     {
         private static readonly byte[] FullPagePng = CreateFullPagePng();
         public int LastDpi { get; private set; }
+        public List<int> Pages { get; } = [];
 
         public Task<RenderedPdfPage> RenderAsync(
             string pdfPath,
@@ -1165,6 +1282,7 @@ public sealed class DocumentProcessingTests
             CancellationToken cancellationToken = default)
         {
             LastDpi = dpi;
+            Pages.Add(pageNumber);
             return Task.FromResult(new RenderedPdfPage(FullPagePng, 100, 100, 100, 100));
         }
 

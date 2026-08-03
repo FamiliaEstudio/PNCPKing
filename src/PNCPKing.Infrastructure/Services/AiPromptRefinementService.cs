@@ -32,9 +32,9 @@ public sealed class AiPromptRefinementService(
             description = item.Description,
             quantity = item.Quantity,
             unit = item.Unit,
-            restrictive_text = item.SearchText,
-            current_intermediate_text = item.IntermediateSearchText,
-            current_broad_text = item.BroadSearchText
+            restrictive_text = SearchText.RemoveContractCandidates(item.SearchText),
+            current_intermediate_text = SearchText.RemoveContractCandidates(item.IntermediateSearchText),
+            current_broad_text = SearchText.RemoveContractCandidates(item.BroadSearchText)
         });
         var response = await provider.AnalyzeAsync(
             new AiProviderRequest
@@ -62,7 +62,7 @@ public sealed class AiPromptRefinementService(
 
             if (!string.Equals(
                     item.RestrictiveText.Trim(),
-                    source.SearchText.Trim(),
+                    SearchText.RemoveContractCandidates(source.SearchText),
                     StringComparison.Ordinal))
             {
                 throw new InvalidDataException(
@@ -73,7 +73,7 @@ public sealed class AiPromptRefinementService(
             ValidatePrompt(item.BroadText, "amplo", source.SourceNumber);
             mapped.Add(new AiPromptRefinementItem(
                 item.StableId,
-                source.SearchText,
+                SearchText.RemoveContractCandidates(source.SearchText),
                 item.IntermediateText.Trim(),
                 item.BroadText.Trim()));
         }
@@ -86,28 +86,43 @@ public sealed class AiPromptRefinementService(
                 $"A IA omitiu {missing.Length:N0} item(ns) selecionado(s); nenhuma alteração foi aplicada.");
         }
 
-        var contractPrompts = raw.ContractSearchPrompts
-            .Select(value => value.Trim())
-            .Where(value => value.Length > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Take(10)
-            .ToArray();
-        foreach (var prompt in contractPrompts)
+        var contractPrompts = new List<string>(10);
+        var seenPrompts = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var rawPrompt in raw.ContractSearchPrompts)
         {
-            var parsed = SearchText.Parse(prompt);
-            if (string.IsNullOrWhiteSpace(parsed.ContractMatchQuery))
+            var prompt = rawPrompt.Trim();
+            if (prompt.Length == 0)
             {
-                throw new InvalidDataException($"Prompt global sem termos pesquisáveis: {prompt}");
+                continue;
+            }
+
+            var normalized = SearchText.NormalizeContractCandidatePrompt(prompt);
+            if (seenPrompts.Add(normalized))
+            {
+                contractPrompts.Add(normalized);
+            }
+
+            if (contractPrompts.Count == 10)
+            {
+                break;
             }
         }
 
-        if (contractPrompts.Length == 0)
+        if (contractPrompts.Count != 10)
         {
-            throw new InvalidDataException("A IA não devolveu nenhum prompt global de contratação válido.");
+            throw new InvalidDataException(
+                $"A IA devolveu {contractPrompts.Count:N0} crivo(s) global(is) distinto(s); são necessários exatamente 10.");
         }
 
+        var synchronized = mapped.Select(item => item with
+        {
+            RestrictiveText = SearchText.ReplaceContractCandidates(item.RestrictiveText, contractPrompts),
+            IntermediateText = SearchText.ReplaceContractCandidates(item.IntermediateText, contractPrompts),
+            BroadText = SearchText.ReplaceContractCandidates(item.BroadText, contractPrompts)
+        }).ToArray();
+
         return new AiPromptRefinementResult(
-            mapped,
+            synchronized,
             contractPrompts,
             response.InputTokens,
             response.OutputTokens,
@@ -123,7 +138,11 @@ public sealed class AiPromptRefinementService(
 
         try
         {
-            _ = SearchText.Parse(value);
+            var parsed = SearchText.Parse(value);
+            if (parsed.HasExplicitContractCandidates)
+            {
+                throw new SearchQueryException("A IA não deve incluir C:; o bloco é sincronizado localmente.");
+            }
         }
         catch (SearchQueryException exception)
         {

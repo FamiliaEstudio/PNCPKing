@@ -7,6 +7,14 @@ public interface IQuotationRepository
     Task<IReadOnlyList<QuotationProject>> GetProjectsAsync(CancellationToken cancellationToken = default);
     Task<QuotationProject> CreateProjectAsync(string name, CancellationToken cancellationToken = default);
     Task RenameProjectAsync(Guid projectId, string name, CancellationToken cancellationToken = default);
+    Task RenameLineDisplayNameAsync(
+        Guid lineId,
+        string displayName,
+        CancellationToken cancellationToken = default);
+    Task SetLineCatalogSelectionAsync(
+        Guid lineId,
+        QuotationCatalogSelection? selection,
+        CancellationToken cancellationToken = default);
     Task DeleteProjectAsync(Guid projectId, CancellationToken cancellationToken = default);
     Task DeleteLineAsync(Guid lineId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<QuotationLine>> GetLinesAsync(Guid projectId, CancellationToken cancellationToken = default);

@@ -127,7 +127,14 @@ public static partial class SearchText
             return SearchExpression.Empty;
         }
 
-        var tokens = Tokenize(sanitized);
+        var extracted = ExtractContractCandidates(sanitized);
+        if (string.IsNullOrWhiteSpace(extracted.ItemText))
+        {
+            throw new SearchQueryException(
+                "O bloco C: seleciona contratações, mas a pesquisa também precisa de uma palavra, frase ou unidade para localizar o item.");
+        }
+
+        var tokens = Tokenize(extracted.ItemText);
         var groups = new List<SearchConjunction>();
         var current = new List<SearchTerm>();
         var currentApproximateNumbers = new List<ApproximateNumberConstraint>();
@@ -212,15 +219,278 @@ public static partial class SearchText
         if (groups.Count == 0 && acceptedUnits.Count == 0)
         {
             throw new SearchQueryException(
-                "Informe ao menos uma palavra, frase ou unidade positiva; não é possível pesquisar somente exclusões.");
+                extracted.Candidates.Count > 0
+                    ? "O bloco C: seleciona contratações, mas a pesquisa também precisa de uma palavra, frase ou unidade para localizar o item."
+                    : "Informe ao menos uma palavra, frase ou unidade positiva; não é possível pesquisar somente exclusões.");
         }
 
         return new SearchExpression(
             sanitized.Trim(),
+            extracted.ItemText,
             groups,
             exclusions,
-            acceptedUnits.Distinct(StringComparer.Ordinal).ToArray());
+            acceptedUnits.Distinct(StringComparer.Ordinal).ToArray(),
+            extracted.Candidates);
     }
+
+    public static string RemoveContractCandidates(string? query)
+    {
+        var sanitized = Sanitize(query);
+        return string.IsNullOrWhiteSpace(sanitized)
+            ? string.Empty
+            : ExtractContractCandidates(sanitized).ItemText;
+    }
+
+    public static string ReplaceContractCandidates(
+        string? query,
+        IEnumerable<string> candidates)
+    {
+        ArgumentNullException.ThrowIfNull(candidates);
+        var itemText = RemoveContractCandidates(query);
+        var block = FormatContractCandidates(candidates);
+        var combined = string.IsNullOrWhiteSpace(block)
+            ? itemText
+            : $"{itemText.Trim()} {block}".Trim();
+        _ = Parse(combined);
+        return combined;
+    }
+
+    public static string FormatContractCandidates(IEnumerable<string> candidates)
+    {
+        ArgumentNullException.ThrowIfNull(candidates);
+        var values = candidates
+            .Select(value => value?.Trim() ?? string.Empty)
+            .Where(value => value.Length > 0)
+            .ToArray();
+        if (values.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        if (values.Length > 10)
+        {
+            throw new SearchQueryException("O bloco C: aceita no máximo 10 contratações candidatas.");
+        }
+
+        var normalized = new List<string>(values.Length);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var value in values)
+        {
+            var words = WordRegex().Matches(Normalize(value))
+                .Select(match => match.Value)
+                .ToArray();
+            if (words.Length == 0)
+            {
+                throw new SearchQueryException("Cada entrada do bloco C: precisa conter ao menos uma palavra.");
+            }
+
+            var candidate = string.Join(' ', words);
+            if (seen.Add(candidate))
+            {
+                normalized.Add(candidate);
+            }
+        }
+
+        if (normalized.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        return $"C:({string.Join(", ", normalized.Select(QuoteContractCandidate))})";
+    }
+
+    public static string NormalizeContractCandidatePrompt(string prompt)
+    {
+        var expression = Parse(prompt);
+        var hasApproximateNumber = expression.PositiveGroups.Any(group =>
+            group.ApproximateNumbers is { Count: > 0 });
+        if (expression.HasExplicitContractCandidates ||
+            expression.PositiveGroups.Count != 1 ||
+            expression.Exclusions.Count > 0 ||
+            expression.AcceptedUnits.Count > 0 ||
+            hasApproximateNumber ||
+            string.IsNullOrWhiteSpace(expression.ContractMatchQuery))
+        {
+            throw new SearchQueryException(
+                "Cada crivo global deve ser um fragmento simples de título, sem C:, OU, exclusões, unidades ou números aproximados.");
+        }
+
+        return expression.PositiveText.Trim();
+    }
+
+    private static ExtractedSearchText ExtractContractCandidates(string text)
+    {
+        var marker = ContractCandidateMarkerRegex().Match(text);
+        if (!marker.Success)
+        {
+            if (MalformedContractCandidateMarkerRegex().IsMatch(text))
+            {
+                throw new SearchQueryException(
+                    "Use o crivo de contratação no formato C:(título 1, título 2).");
+            }
+
+            return new ExtractedSearchText(text.Trim(), []);
+        }
+
+        var contentStart = marker.Index + marker.Length;
+        var closingIndex = FindContractCandidateClosingParenthesis(text, contentStart);
+        if (closingIndex < 0)
+        {
+            throw new SearchQueryException("Feche o bloco C: com ')'.");
+        }
+
+        var itemText = $"{text[..marker.Index]} {text[(closingIndex + 1)..]}".Trim();
+        if (ContractCandidateMarkerRegex().IsMatch(itemText) ||
+            MalformedContractCandidateMarkerRegex().IsMatch(itemText))
+        {
+            throw new SearchQueryException("Use somente um bloco C: em cada pesquisa.");
+        }
+
+        var candidates = ParseContractCandidates(text[contentStart..closingIndex]);
+        return new ExtractedSearchText(SpaceRegex().Replace(itemText, " "), candidates);
+    }
+
+    private static int FindContractCandidateClosingParenthesis(string text, int contentStart)
+    {
+        var quote = '\0';
+        for (var index = contentStart; index < text.Length; index++)
+        {
+            var character = text[index];
+            if (quote != '\0')
+            {
+                var closesQuote = quote == '"' ? character == '"' : character == '”';
+                if (closesQuote)
+                {
+                    if (quote == '"' && index + 1 < text.Length && text[index + 1] == '"')
+                    {
+                        index++;
+                        continue;
+                    }
+
+                    quote = '\0';
+                }
+
+                continue;
+            }
+
+            if (character is '"' or '“')
+            {
+                quote = character;
+                continue;
+            }
+
+            if (character == '(')
+            {
+                throw new SearchQueryException(
+                    "Não use parênteses dentro de C:; coloque o título entre aspas quando necessário.");
+            }
+
+            if (character == ')')
+            {
+                return index;
+            }
+        }
+
+        if (quote != '\0')
+        {
+            throw new SearchQueryException("Há uma aspa sem fechamento dentro do bloco C:.");
+        }
+
+        return -1;
+    }
+
+    private static IReadOnlyList<ContractCandidate> ParseContractCandidates(string content)
+    {
+        var rawEntries = new List<string>();
+        var builder = new StringBuilder();
+        var quote = '\0';
+        for (var index = 0; index < content.Length; index++)
+        {
+            var character = content[index];
+            if (quote != '\0')
+            {
+                var closesQuote = quote == '"' ? character == '"' : character == '”';
+                if (closesQuote)
+                {
+                    if (quote == '"' && index + 1 < content.Length && content[index + 1] == '"')
+                    {
+                        builder.Append('"');
+                        index++;
+                        continue;
+                    }
+
+                    quote = '\0';
+                    continue;
+                }
+
+                builder.Append(character);
+                continue;
+            }
+
+            if (character is '"' or '“')
+            {
+                if (builder.ToString().Trim().Length > 0)
+                {
+                    throw new SearchQueryException(
+                        "As aspas de uma entrada de C: devem envolver o título inteiro.");
+                }
+
+                quote = character;
+                continue;
+            }
+
+            if (character == ',')
+            {
+                rawEntries.Add(builder.ToString());
+                builder.Clear();
+                continue;
+            }
+
+            if (character is '(' or ')')
+            {
+                throw new SearchQueryException(
+                    "Não use parênteses dentro de C:; coloque o título entre aspas quando necessário.");
+            }
+
+            builder.Append(character);
+        }
+
+        if (quote != '\0')
+        {
+            throw new SearchQueryException("Há uma aspa sem fechamento dentro do bloco C:.");
+        }
+
+        rawEntries.Add(builder.ToString());
+        if (rawEntries.Count > 10)
+        {
+            throw new SearchQueryException("O bloco C: aceita no máximo 10 contratações candidatas.");
+        }
+
+        var candidates = new List<ContractCandidate>(rawEntries.Count);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var rawEntry in rawEntries)
+        {
+            var normalized = Normalize(rawEntry);
+            var words = WordRegex().Matches(normalized).Select(match => match.Value).ToArray();
+            if (words.Length == 0)
+            {
+                throw new SearchQueryException("Não deixe entradas vazias dentro do bloco C:.");
+            }
+
+            var candidateText = string.Join(' ', words);
+            if (seen.Add(candidateText))
+            {
+                candidates.Add(new ContractCandidate(candidateText, words));
+            }
+        }
+
+        return candidates;
+    }
+
+    private static string QuoteContractCandidate(string value) =>
+        value.IndexOfAny([',', '(', ')', '"']) >= 0
+            ? $"\"{value.Replace("\"", "\"\"")}\""
+            : value;
 
     private static List<SearchToken> Tokenize(string text)
     {
@@ -437,6 +707,12 @@ public static partial class SearchText
     [GeneratedRegex(@"[\p{L}\p{N}]+")]
     private static partial Regex WordRegex();
 
+    [GeneratedRegex(@"(?<![\p{L}\p{N}_])c\s*:\s*\(", RegexOptions.IgnoreCase)]
+    private static partial Regex ContractCandidateMarkerRegex();
+
+    [GeneratedRegex(@"(?<![\p{L}\p{N}_])c\s*:", RegexOptions.IgnoreCase)]
+    private static partial Regex MalformedContractCandidateMarkerRegex();
+
     private enum SearchTokenKind
     {
         Term,
@@ -451,6 +727,10 @@ public static partial class SearchText
         SearchTokenKind Kind,
         SearchTerm? Term = null,
         ApproximateNumberConstraint? ApproximateNumber = null);
+
+    private sealed record ExtractedSearchText(
+        string ItemText,
+        IReadOnlyList<ContractCandidate> Candidates);
 }
 
 public sealed class SearchQueryException(string message) : FormatException(message);
@@ -515,6 +795,18 @@ public sealed record SearchConjunction(
     internal bool Matches(IReadOnlyList<string> foundWords, string searchableText) =>
         Terms.All(term => term.Matches(foundWords)) &&
         (ApproximateNumbers ?? []).All(number => number.Matches(searchableText));
+}
+
+public sealed record ContractCandidate(
+    string Text,
+    IReadOnlyList<string> Words)
+{
+    internal string ToFtsQuery()
+    {
+        var terms = Words.Select(word => $"\"{word}\"*").ToArray();
+        var value = string.Join(" AND ", terms);
+        return terms.Length > 1 ? $"({value})" : value;
+    }
 }
 
 public sealed partial record ApproximateNumberConstraint
@@ -636,21 +928,39 @@ public sealed partial record ApproximateNumberConstraint
 
 public sealed record SearchExpression(
     string OriginalText,
+    string ItemText,
     IReadOnlyList<SearchConjunction> PositiveGroups,
     IReadOnlyList<SearchTerm> Exclusions,
-    IReadOnlyList<string> AcceptedUnits)
+    IReadOnlyList<string> AcceptedUnits,
+    IReadOnlyList<ContractCandidate> ContractCandidates)
 {
-    public static SearchExpression Empty { get; } = new(string.Empty, [], [], []);
+    public static SearchExpression Empty { get; } = new(string.Empty, string.Empty, [], [], [], []);
 
-    public bool IsEmpty => PositiveGroups.Count == 0 && Exclusions.Count == 0 && AcceptedUnits.Count == 0;
+    public bool IsEmpty =>
+        PositiveGroups.Count == 0 &&
+        Exclusions.Count == 0 &&
+        AcceptedUnits.Count == 0 &&
+        ContractCandidates.Count == 0;
 
     public bool HasPositiveDescriptionTerms => PositiveGroups.Count > 0;
+
+    public bool HasExplicitContractCandidates => ContractCandidates.Count > 0;
 
     public string PositiveText => string.Join(
         ' ',
         PositiveGroups.SelectMany(group => group.Terms).SelectMany(term => term.Words));
 
     public string ContractMatchQuery => BuildPositiveQuery();
+
+    public string ExplicitContractMatchQuery
+    {
+        get
+        {
+            var values = ContractCandidates.Select(candidate => candidate.ToFtsQuery()).ToArray();
+            var query = string.Join(" OR ", values);
+            return values.Length > 1 ? $"({query})" : query;
+        }
+    }
 
     public string ItemMatchQuery
     {

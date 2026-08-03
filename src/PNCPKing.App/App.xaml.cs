@@ -92,6 +92,24 @@ public partial class App : Application
                 quotationRepository,
                 itemSearchService);
             var quotationService = new QuotationService(quotationRepository, new QuotationAnalyzer());
+            var catalogRepository = new SqliteCatalogRepository(databasePath);
+            var catalogHttpClient = new HttpClient(new SocketsHttpHandler
+            {
+                AutomaticDecompression = DecompressionMethods.All,
+                ConnectTimeout = TimeSpan.FromSeconds(30),
+                PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+                MaxConnectionsPerServer = 2
+            })
+            {
+                BaseAddress = new Uri("https://dadosabertos.compras.gov.br/"),
+                Timeout = TimeSpan.FromMinutes(6)
+            };
+            catalogHttpClient.DefaultRequestHeaders.UserAgent.ParseAdd("PNCPKing/1.0");
+            catalogHttpClient.DefaultRequestHeaders.Accept.ParseAdd("application/json");
+            var catalogSyncService = new CatalogSyncService(
+                new ComprasCatalogClient(catalogHttpClient),
+                catalogRepository);
+            var catalogSearchService = new CatalogSearchService(catalogRepository);
             var sweetCodeRepository = new SqliteSweetCodeRepository(databasePath);
             var internetPriceService = new InternetPriceService(
                 quotationRepository,
@@ -137,6 +155,9 @@ public partial class App : Application
                 new QuotationWorkbookService(),
                 new QuotationWorkbookImportService(),
                 new QuotationPackageService(databasePath, settings.DataFolder),
+                catalogRepository,
+                catalogSyncService,
+                catalogSearchService,
                 requestTelemetry,
                 sweetCodeRepository,
                 documentService,
