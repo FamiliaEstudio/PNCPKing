@@ -175,7 +175,7 @@
                                         <TextBlock Text="{Binding Summary}" TextTrimming="CharacterEllipsis" />
                                     </DockPanel>
                                     <ProgressBar Height="7" Minimum="0" Maximum="100"
-                                                 Value="{Binding Percentage}" Margin="0,3,0,0" />
+                                                 Value="{Binding Percentage, Mode=OneWay}" Margin="0,3,0,0" />
                                 </StackPanel>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
@@ -184,7 +184,7 @@
                         <TextBlock Text="{Binding CatalogProgressText}" TextWrapping="Wrap"
                                    HorizontalAlignment="Right" />
                         <ProgressBar Height="7" Minimum="0" Maximum="100"
-                                     Value="{Binding CatalogProgress}" Margin="0,3,0,0" />
+                                     Value="{Binding CatalogProgress, Mode=OneWay}" Margin="0,3,0,0" />
                     </StackPanel>
                 </Grid>
             </Grid>
