@@ -334,17 +334,35 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
     private static string FormatSupplierName(QuotationReference reference)
     {
         var supplierName = reference.SupplierName.Trim();
-        var municipality = reference.SupplierMunicipality.Trim();
-        var uf = reference.SupplierUf.Trim();
-        if (supplierName.Length == 0 ||
-            municipality.Length == 0 ||
-            uf.Length == 0 ||
-            !StatePhrases.TryGetValue(uf, out var statePhrase))
+        if (supplierName.Length == 0)
         {
             return supplierName;
         }
 
-        return $"{supplierName} (da cidade de {municipality}, {statePhrase})";
+        if (TryFormatLocation(reference.SupplierMunicipality, reference.SupplierUf, out var supplierLocation))
+        {
+            return $"{supplierName} (da cidade de {supplierLocation})";
+        }
+
+        return TryFormatLocation(reference.Municipality, reference.Uf, out var buyerLocation)
+            ? $"{supplierName} (unidade compradora da cidade de {buyerLocation})"
+            : supplierName;
+    }
+
+    private static bool TryFormatLocation(string? municipality, string? uf, out string location)
+    {
+        var normalizedMunicipality = municipality?.Trim() ?? string.Empty;
+        var normalizedUf = uf?.Trim() ?? string.Empty;
+        if (normalizedMunicipality.Length == 0 ||
+            normalizedUf.Length == 0 ||
+            !StatePhrases.TryGetValue(normalizedUf, out var statePhrase))
+        {
+            location = string.Empty;
+            return false;
+        }
+
+        location = $"{normalizedMunicipality}, {statePhrase}";
+        return true;
     }
 
     private static void WritePriceFormulas(

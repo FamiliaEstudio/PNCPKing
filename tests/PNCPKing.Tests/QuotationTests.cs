@@ -807,7 +807,7 @@ public sealed class QuotationTests
     }
 
     [Fact]
-    public async Task Workbook_FormatsSupplierLocationAndExpandsLongSupplierRows()
+    public async Task Workbook_FormatsSupplierOrBuyerLocationAndExpandsLongSupplierRows()
     {
         var analyzer = new QuotationAnalyzer(Today);
         var project = new QuotationProject(
@@ -833,7 +833,9 @@ public sealed class QuotationTests
             Reference("invalid", "c3", "33000167000101", 110m) with
             {
                 SupplierMunicipality = "Franca",
-                SupplierUf = "XX"
+                SupplierUf = "XX",
+                Municipality = string.Empty,
+                Uf = "XX"
             }
         ]);
         analysis = Confirm(analysis, analysis.Baskets.Single(basket => basket.IsRecommended));
@@ -852,9 +854,11 @@ public sealed class QuotationTests
             var sheet = Assert.Single(workbook.Worksheets);
             var expectedComplete =
                 $"{longSupplierName} (da cidade de Ribeirão Preto, Estado de São Paulo)";
+            const string expectedBuyerFallback =
+                "Fornecedor missing (unidade compradora da cidade de Ribeirão Preto, Estado de São Paulo)";
             var supplierCells = sheet.Range("B6:B8").Cells().ToArray();
             Assert.Contains(supplierCells, cell => cell.GetString() == expectedComplete);
-            Assert.Contains(supplierCells, cell => cell.GetString() == "Fornecedor missing");
+            Assert.Contains(supplierCells, cell => cell.GetString() == expectedBuyerFallback);
             Assert.Contains(supplierCells, cell => cell.GetString() == "Fornecedor invalid");
             var longSupplierCell = supplierCells.Single(cell => cell.GetString() == expectedComplete);
             Assert.True(longSupplierCell.Style.Alignment.WrapText);
@@ -937,8 +941,12 @@ public sealed class QuotationTests
             using var workbook = new XLWorkbook(path);
             var sheet = Assert.Single(workbook.Worksheets);
             Assert.Equal("Item 1 - Café", sheet.Cell("B4").GetString());
-            Assert.Equal("Fornecedor melhor", sheet.Cell("B6").GetString());
-            Assert.Equal("Fornecedor segunda", sheet.Cell("B7").GetString());
+            Assert.Equal(
+                "Fornecedor melhor (unidade compradora da cidade de Ribeirão Preto, Estado de São Paulo)",
+                sheet.Cell("B6").GetString());
+            Assert.Equal(
+                "Fornecedor segunda (unidade compradora da cidade de Ribeirão Preto, Estado de São Paulo)",
+                sheet.Cell("B7").GetString());
             Assert.Equal("Preço 3 não obtido", sheet.Cell("B8").GetString());
             Assert.True(sheet.Cell("C8").IsEmpty());
             Assert.True(sheet.Cell("D8").IsEmpty());
