@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Http;
+using System.Diagnostics;
 using System.Windows;
 using PNCPKing.App.Services;
 using PNCPKing.App.ViewModels;
@@ -14,15 +15,73 @@ namespace PNCPKing.App;
 
 public partial class App : Application
 {
+    private Mutex? _instanceMutex;
+    private AppDiagnosticLog? _diagnosticLog;
+
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        _diagnosticLog = new AppDiagnosticLog();
+        _diagnosticLog.WriteStartupHeader();
+        DispatcherUnhandledException += (_, args) =>
+            _diagnosticLog.Error("dispatcher", "Exceção não tratada na interface.", args.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+        {
+            if (args.ExceptionObject is Exception exception)
+            {
+                _diagnosticLog.Error("appdomain", "Exceção fatal não tratada.", exception);
+            }
+        };
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+            _diagnosticLog.Error("task", "Exceção não observada em tarefa de fundo.", args.Exception);
+
         var culture = CultureInfo.GetCultureInfo("pt-BR");
         CultureInfo.DefaultThreadCurrentCulture = culture;
         CultureInfo.DefaultThreadCurrentUICulture = culture;
 
         try
         {
+            if (HasAnotherPncpKingProcess())
+            {
+                _diagnosticLog.Warning(
+                    "startup",
+                    "Outra instância PNCPKing.exe foi encontrada; a nova abertura foi interrompida.");
+                MessageBox.Show(
+                    "Já existe outro PNCP King em execução. Feche versões antigas pelo Gerenciador de Tarefas " +
+                    "antes de abrir este executável.",
+                    "PNCP King já está aberto",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                Shutdown();
+                return;
+            }
+
+            _instanceMutex = new Mutex(
+                initiallyOwned: true,
+                name: "Local\\PNCPKing.SingleInstance",
+                createdNew: out var createdNew);
+            if (!createdNew)
+            {
+                _diagnosticLog.Warning("startup", "O bloqueio de instância única já estava ocupado.");
+                MessageBox.Show(
+                    "O PNCP King já está em execução neste usuário.",
+                    "PNCP King já está aberto",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                _instanceMutex.Dispose();
+                _instanceMutex = null;
+                Shutdown();
+                return;
+            }
+
+            var staleImports = BackupService.CleanupStaleTemporaryDirectories(TimeSpan.FromMinutes(5));
+            if (staleImports > 0)
+            {
+                _diagnosticLog.Info(
+                    "startup",
+                    $"{staleImports} pasta(s) temporária(s) de importações antigas foram removidas.");
+            }
+
             var settingsService = new AppSettingsService();
             var settings = await settingsService.LoadAsync().ConfigureAwait(true);
             if (!settings.IsConfigured)
@@ -41,8 +100,13 @@ public partial class App : Application
             var columnLayouts = new DataGridColumnLayoutService(settingsService, settings);
             Directory.CreateDirectory(settings.DataFolder);
             var databasePath = Path.Combine(settings.DataFolder, "pncpking.db");
+            _diagnosticLog.Info(
+                "database",
+                $"Inicializando banco. pasta_dados={settings.DataFolder}; banco={databasePath}; " +
+                $"tamanho={(File.Exists(databasePath) ? new FileInfo(databasePath).Length : 0)} bytes.");
             var repository = new SqliteContractRepository(databasePath);
             await repository.InitializeAsync().ConfigureAwait(true);
+            _diagnosticLog.Info("database", "Banco inicializado e migrações de abertura concluídas.");
             var quotationRepository = new SqliteQuotationRepository(databasePath);
             var internetEvidenceStore = new InternetEvidenceStore(settings.DataFolder);
 
@@ -82,6 +146,12 @@ public partial class App : Application
                 internetEvidenceStore);
             var syncService = new SyncService(client, repository);
             var autoSyncCoordinator = new AutoSyncCoordinator(client, repository, syncService);
+            var priceCacheRepository = new SqlitePriceCacheRepository(databasePath);
+            var priceCacheService = new PriceCacheService(
+                client,
+                repository,
+                repository,
+                priceCacheRepository);
             var itemSearchService = new ItemSearchSessionService(
                 client,
                 repository,
@@ -147,6 +217,9 @@ public partial class App : Application
                 new PreflightService(client),
                 syncService,
                 autoSyncCoordinator,
+                requestScheduler,
+                priceCacheRepository,
+                priceCacheService,
                 new ItemHydrationService(client, repository),
                 itemSearchService,
                 quotationItemSearchService,
@@ -176,7 +249,8 @@ public partial class App : Application
                 aiPromptRefinementService,
                 timedAutomation,
                 settingsService,
-                settings.DataFolder);
+                settings.DataFolder,
+                _diagnosticLog);
             var mainWindow = new MainWindow(viewModel, columnLayouts);
             MainWindow = mainWindow;
             mainWindow.Show();
@@ -185,15 +259,60 @@ public partial class App : Application
             // normal shutdown behavior once the real main window is visible.
             ShutdownMode = ShutdownMode.OnMainWindowClose;
             await viewModel.InitializeAsync().ConfigureAwait(true);
+            _diagnosticLog.Info("startup", "Janela principal inicializada com sucesso.");
         }
         catch (Exception exception)
         {
+            _diagnosticLog.Error("startup", "Não foi possível iniciar o PNCP King.", exception);
             MessageBox.Show(
-                $"Não foi possível iniciar o PNCP King.\n\n{exception.Message}",
+                $"Não foi possível iniciar o PNCP King.\n\n{exception.Message}\n\n" +
+                $"Log para diagnóstico:\n{_diagnosticLog.FilePath}",
                 "PNCP King",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
             Shutdown(-1);
+        }
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        _diagnosticLog?.Info("shutdown", $"Aplicativo encerrado com código {e.ApplicationExitCode}.");
+        if (_instanceMutex is not null)
+        {
+            try
+            {
+                _instanceMutex.ReleaseMutex();
+            }
+            catch (ApplicationException)
+            {
+                // A instância não chegou a assumir o bloqueio.
+            }
+
+            _instanceMutex.Dispose();
+            _instanceMutex = null;
+        }
+
+        base.OnExit(e);
+    }
+
+    private static bool HasAnotherPncpKingProcess()
+    {
+        try
+        {
+            return Process.GetProcessesByName("PNCPKing")
+                .Any(process =>
+                {
+                    using (process)
+                    {
+                        return process.Id != Environment.ProcessId;
+                    }
+                });
+        }
+        catch (Exception exception) when (
+            exception is InvalidOperationException or NotSupportedException or
+                System.ComponentModel.Win32Exception)
+        {
+            return false;
         }
     }
 }

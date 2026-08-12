@@ -68,6 +68,51 @@ public sealed class PncpRequestSchedulingTests
     }
 
     [Fact]
+    public async Task BackgroundCache_WaitsForAllForegroundWorkAndUsesOnlyOneSlot()
+    {
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 2);
+        using var index = await scheduler.AcquireAsync(PncpRequestPriority.IndexMaintenance);
+        var background1 = scheduler.AcquireAsync(PncpRequestPriority.BackgroundPriceCache);
+        var background2 = scheduler.AcquireAsync(PncpRequestPriority.BackgroundPriceCache);
+
+        await Task.Delay(20);
+        Assert.False(background1.IsCompleted);
+        Assert.Equal(2, scheduler.GetSnapshot().QueuedBackgroundPriceCache);
+
+        index.Dispose();
+        using var first = await background1;
+        await Task.Delay(20);
+        Assert.False(background2.IsCompleted);
+        Assert.Equal(1, scheduler.GetSnapshot().ActiveBackgroundPriceCache);
+
+        var user = scheduler.AcquireAsync(PncpRequestPriority.UserSelectedItem);
+        using var userLease = await user;
+        first.Dispose();
+        await Task.Delay(20);
+        Assert.False(background2.IsCompleted);
+
+        userLease.Dispose();
+        (await background2).Dispose();
+        Assert.Equal(0, scheduler.GetSnapshot().TotalQueued);
+    }
+
+    [Fact]
+    public async Task ForegroundOperation_SuppressesBackgroundBetweenHttpCalls()
+    {
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 2);
+        var suppression = scheduler.SuppressBackgroundRequests();
+        var background = scheduler.AcquireAsync(PncpRequestPriority.BackgroundPriceCache);
+
+        await Task.Delay(20);
+        Assert.False(background.IsCompleted);
+        Assert.Equal(1, scheduler.GetSnapshot().BackgroundSuppressions);
+
+        suppression.Dispose();
+        (await background).Dispose();
+        Assert.Equal(0, scheduler.GetSnapshot().BackgroundSuppressions);
+    }
+
+    [Fact]
     public async Task Handler_NeverExceedsTheSharedConcurrencyLimit()
     {
         var inner = new BlockingHandler(expectedInitialCalls: 2);

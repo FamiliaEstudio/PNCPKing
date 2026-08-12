@@ -11,6 +11,8 @@ namespace PNCPKing.Infrastructure.Services;
 
 public sealed class BackupService(IContractRepository repository)
 {
+    private const long ImportSafetyReserveBytes = 1L * 1024 * 1024 * 1024;
+    private const int ProgressBufferBytes = 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -18,6 +20,14 @@ public sealed class BackupService(IContractRepository repository)
     };
 
     public async Task ExportAsync(string destinationPath, CancellationToken cancellationToken = default)
+    {
+        await ExportAsync(destinationPath, BackupProfile.Full, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task ExportAsync(
+        string destinationPath,
+        BackupProfile profile,
+        CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         if (!destinationPath.EndsWith(".pncpking", StringComparison.OrdinalIgnoreCase))
@@ -31,6 +41,11 @@ public sealed class BackupService(IContractRepository repository)
         {
             var snapshotPath = Path.Combine(temporaryDirectory, "data.db");
             await CreateSnapshotAsync(repository.DatabasePath, snapshotPath, cancellationToken).ConfigureAwait(false);
+            if (profile == BackupProfile.Compact)
+            {
+                await CompactSnapshotAsync(snapshotPath, cancellationToken).ConfigureAwait(false);
+            }
+
             var hash = await ComputeSha256Async(snapshotPath, cancellationToken).ConfigureAwait(false);
             var evidenceAssets = await ReadReferencedEvidenceAssetsAsync(snapshotPath, cancellationToken)
                 .ConfigureAwait(false);
@@ -43,6 +58,7 @@ public sealed class BackupService(IContractRepository repository)
             }
 
             var state = await repository.GetDatasetStateAsync(cancellationToken).ConfigureAwait(false);
+            var snapshotCounts = await ReadDatabaseCountsAsync(snapshotPath, cancellationToken).ConfigureAwait(false);
             var manifest = new DatasetManifest
             {
                 SchemaVersion = SqliteContractRepository.CurrentSchemaVersion,
@@ -51,8 +67,8 @@ public sealed class BackupService(IContractRepository repository)
                 EndDate = state.EndDate,
                 Scope = state.Scope.ToString(),
                 ContractCount = state.ContractCount,
-                ItemCount = state.CachedItemCount,
-                ResultCount = state.CachedResultCount,
+                ItemCount = snapshotCounts.Items,
+                ResultCount = snapshotCounts.Results,
                 CreatedAt = DateTimeOffset.UtcNow,
                 DatabaseSha256 = hash,
                 EvidenceAssets = evidenceAssets
@@ -62,7 +78,12 @@ public sealed class BackupService(IContractRepository repository)
                         ArchivePath = $"internet-evidence/{asset.Sha256}.png",
                         ByteLength = asset.ByteLength
                     })
-                    .ToArray()
+                    .ToArray(),
+                BackupProfile = profile,
+                ContainsPriceCache = profile == BackupProfile.Full && snapshotCounts.PriceCacheContracts > 0,
+                PriceCacheContractCount = snapshotCounts.PriceCacheContracts,
+                PriceCacheItemCount = snapshotCounts.Items,
+                PriceCacheResultCount = snapshotCounts.Results
             };
             var manifestPath = Path.Combine(temporaryDirectory, "manifest.json");
             await File.WriteAllTextAsync(
@@ -100,7 +121,105 @@ public sealed class BackupService(IContractRepository repository)
 
     public async Task<string> ImportAsync(string sourcePath, CancellationToken cancellationToken = default)
     {
+        return await ImportAsync(sourcePath, progress: null, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BackupInspection> InspectAsync(
+        string sourcePath,
+        CancellationToken cancellationToken = default)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+        if (!File.Exists(sourcePath))
+        {
+            throw new FileNotFoundException("O backup informado não foi encontrado.", sourcePath);
+        }
+
+        DatasetManifest manifest;
+        long databaseBytes;
+        using (var archive = ZipFile.OpenRead(sourcePath))
+        {
+            var manifestEntry = archive.GetEntry("manifest.json")
+                ?? throw new InvalidDataException("O backup não contém manifest.json.");
+            var databaseEntry = archive.GetEntry("data.db")
+                ?? throw new InvalidDataException("O backup não contém data.db.");
+            await using var manifestStream = manifestEntry.Open();
+            manifest = await JsonSerializer.DeserializeAsync<DatasetManifest>(
+                           manifestStream,
+                           JsonOptions,
+                           cancellationToken).ConfigureAwait(false)
+                       ?? throw new InvalidDataException("Manifesto inválido.");
+            databaseBytes = databaseEntry.Length;
+        }
+
+        if (manifest.SchemaVersion is < 1 or > SqliteContractRepository.CurrentSchemaVersion)
+        {
+            throw new InvalidDataException(
+                $"Versão de banco incompatível: {manifest.SchemaVersion}. " +
+                $"Versões aceitas: 1 a {SqliteContractRepository.CurrentSchemaVersion}.");
+        }
+
+        var temporaryRoot = Path.GetPathRoot(Path.GetFullPath(Path.GetTempPath())) ?? Path.GetTempPath();
+        var dataRoot = Path.GetPathRoot(repository.DatabasePath) ?? Path.GetDirectoryName(repository.DatabasePath)!;
+        var sameVolume = string.Equals(
+            temporaryRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            dataRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            StringComparison.OrdinalIgnoreCase);
+        var existingDatabaseBytes = File.Exists(repository.DatabasePath)
+            ? new FileInfo(repository.DatabasePath).Length
+            : 0L;
+        var migrationAllowance = Math.Max(ImportSafetyReserveBytes, databaseBytes / 2);
+        long temporaryRequired;
+        long dataRequired;
+        if (sameVolume)
+        {
+            temporaryRequired = AddSaturated(databaseBytes, existingDatabaseBytes, migrationAllowance);
+            dataRequired = temporaryRequired;
+        }
+        else
+        {
+            temporaryRequired = AddSaturated(databaseBytes, migrationAllowance);
+            dataRequired = AddSaturated(databaseBytes, existingDatabaseBytes, ImportSafetyReserveBytes);
+        }
+
+        return new BackupInspection
+        {
+            SourcePath = Path.GetFullPath(sourcePath),
+            SchemaVersion = manifest.SchemaVersion,
+            Profile = manifest.BackupProfile,
+            ArchiveBytes = new FileInfo(sourcePath).Length,
+            DatabaseBytes = databaseBytes,
+            ExistingDatabaseBytes = existingDatabaseBytes,
+            TemporaryRoot = temporaryRoot,
+            DataRoot = dataRoot,
+            TemporaryAvailableBytes = GetAvailableBytes(temporaryRoot),
+            DataAvailableBytes = sameVolume
+                ? GetAvailableBytes(temporaryRoot)
+                : GetAvailableBytes(dataRoot),
+            TemporaryRequiredBytes = temporaryRequired,
+            DataRequiredBytes = dataRequired,
+            SharesTemporaryAndDataVolume = sameVolume
+        };
+    }
+
+    public async Task<string> ImportAsync(
+        string sourcePath,
+        IProgress<BackupImportProgress>? progress,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+        Report(progress, BackupImportStage.Inspecting, 1, "Inspecionando o arquivo e o espaço disponível…");
+        CleanupStaleTemporaryDirectories(TimeSpan.FromMinutes(5));
+        var inspection = await InspectAsync(sourcePath, cancellationToken).ConfigureAwait(false);
+        if (!inspection.HasEnoughSpace)
+        {
+            throw new IOException(
+                "Espaço insuficiente para importar com segurança. " +
+                $"Temporários: {FormatBytes(inspection.TemporaryAvailableBytes)} livres, " +
+                $"{FormatBytes(inspection.TemporaryRequiredBytes)} necessários. " +
+                $"Dados: {FormatBytes(inspection.DataAvailableBytes)} livres, " +
+                $"{FormatBytes(inspection.DataRequiredBytes)} necessários.");
+        }
+
         var temporaryDirectory = CreateTemporaryDirectory();
         try
         {
@@ -131,7 +250,19 @@ public sealed class BackupService(IContractRepository repository)
 
                 await using var source = databaseEntry.Open();
                 await using var destination = File.Create(importedDatabase);
-                await source.CopyToAsync(destination, cancellationToken).ConfigureAwait(false);
+                await CopyWithProgressAsync(
+                        source,
+                        destination,
+                        databaseEntry.Length,
+                        (processed, total) => Report(
+                            progress,
+                            BackupImportStage.Extracting,
+                            Scale(processed, total, 5, 28),
+                            $"Descompactando o banco: {FormatBytes(processed)} de {FormatBytes(total)}…",
+                            processed,
+                            total),
+                        cancellationToken)
+                    .ConfigureAwait(false);
 
                 var manifestAssets = manifest.EvidenceAssets ?? [];
                 if (manifestAssets
@@ -164,7 +295,18 @@ public sealed class BackupService(IContractRepository repository)
                 }
             }
 
-            var actualHash = await ComputeSha256Async(importedDatabase, cancellationToken).ConfigureAwait(false);
+            Report(progress, BackupImportStage.VerifyingChecksum, 30, "Verificando o checksum do banco…");
+            var actualHash = await ComputeSha256Async(
+                    importedDatabase,
+                    (processed, total) => Report(
+                        progress,
+                        BackupImportStage.VerifyingChecksum,
+                        Scale(processed, total, 30, 43),
+                        $"Verificando checksum: {FormatBytes(processed)} de {FormatBytes(total)}…",
+                        processed,
+                        total),
+                    cancellationToken)
+                .ConfigureAwait(false);
             if (!CryptographicOperations.FixedTimeEquals(
                     Convert.FromHexString(actualHash),
                     Convert.FromHexString(manifest.DatabaseSha256)))
@@ -172,10 +314,16 @@ public sealed class BackupService(IContractRepository repository)
                 throw new InvalidDataException("O checksum do banco não corresponde ao manifesto.");
             }
 
+            Report(
+                progress,
+                BackupImportStage.CheckingIntegrity,
+                45,
+                "Verificando a integridade SQLite; esta etapa pode demorar em discos lentos…");
             await ValidateDatabaseAsync(
                 importedDatabase,
                 manifest.SchemaVersion,
                 cancellationToken).ConfigureAwait(false);
+            Report(progress, BackupImportStage.CheckingIntegrity, 58, "Integridade original confirmada.");
 
             var databaseAssets = await ReadReferencedEvidenceAssetsAsync(
                 importedDatabase,
@@ -197,16 +345,33 @@ public sealed class BackupService(IContractRepository repository)
             // migration and integrity check succeeds.
             if (manifest.SchemaVersion < SqliteContractRepository.CurrentSchemaVersion)
             {
+                Report(
+                    progress,
+                    BackupImportStage.Migrating,
+                    60,
+                    $"Migrando o banco do esquema {manifest.SchemaVersion} para " +
+                    $"{SqliteContractRepository.CurrentSchemaVersion}…");
                 var importedRepository = new SqliteContractRepository(importedDatabase);
                 await importedRepository.InitializeAsync(cancellationToken).ConfigureAwait(false);
                 SqliteConnection.ClearAllPools();
+                Report(
+                    progress,
+                    BackupImportStage.CheckingIntegrity,
+                    70,
+                    "Migração concluída; verificando novamente a integridade…");
                 await ValidateDatabaseAsync(
                     importedDatabase,
                     SqliteContractRepository.CurrentSchemaVersion,
                     cancellationToken).ConfigureAwait(false);
             }
 
+            if (manifest.BackupProfile == BackupProfile.Compact)
+            {
+                await DisableImportedCompactCacheAsync(importedDatabase, cancellationToken).ConfigureAwait(false);
+            }
+
             var dataFolder = Path.GetDirectoryName(repository.DatabasePath)!;
+            Report(progress, BackupImportStage.InstallingEvidence, 80, "Validando e instalando evidências…");
             await InstallStagedEvidenceAsync(
                 stagedEvidenceFolder,
                 dataFolder,
@@ -218,6 +383,11 @@ public sealed class BackupService(IContractRepository repository)
             var recoverableBackup = repository.DatabasePath + $".before-import-{timestamp}.bak";
             if (File.Exists(repository.DatabasePath))
             {
+                Report(
+                    progress,
+                    BackupImportStage.PreservingCurrentDatabase,
+                    86,
+                    "Preservando uma cópia recuperável do banco atual…");
                 File.Copy(repository.DatabasePath, recoverableBackup, true);
             }
 
@@ -226,11 +396,13 @@ public sealed class BackupService(IContractRepository repository)
             var replacementStarted = false;
             try
             {
+                Report(progress, BackupImportStage.InstallingDatabase, 93, "Instalando o banco validado…");
                 File.Move(importedDatabase, repository.DatabasePath, true);
                 replacementStarted = true;
                 SqliteConnection.ClearAllPools();
                 await repository.InitializeAsync(cancellationToken).ConfigureAwait(false);
                 CleanupOrphanEvidence(dataFolder, manifestHashes);
+                Report(progress, BackupImportStage.Completed, 100, "Backup importado e aberto com sucesso.");
             }
             catch
             {
@@ -261,6 +433,43 @@ public sealed class BackupService(IContractRepository repository)
         }
     }
 
+    public static int CleanupStaleTemporaryDirectories(TimeSpan maximumAge)
+    {
+        if (maximumAge <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumAge));
+        }
+
+        var root = Path.Combine(Path.GetTempPath(), "PNCPKing");
+        if (!Directory.Exists(root))
+        {
+            return 0;
+        }
+
+        var threshold = DateTime.UtcNow - maximumAge;
+        var removed = 0;
+        foreach (var path in Directory.EnumerateDirectories(root, "*", SearchOption.TopDirectoryOnly))
+        {
+            try
+            {
+                if (Directory.GetLastWriteTimeUtc(path) >= threshold)
+                {
+                    continue;
+                }
+
+                Directory.Delete(path, recursive: true);
+                removed++;
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+                // Another PNCP King process may still own this staging folder.
+            }
+        }
+
+        return removed;
+    }
+
     private static async Task CreateSnapshotAsync(string sourcePath, string destinationPath, CancellationToken cancellationToken)
     {
         var sourceConnectionString = new SqliteConnectionStringBuilder
@@ -282,6 +491,106 @@ public sealed class BackupService(IContractRepository repository)
         await source.OpenAsync(cancellationToken).ConfigureAwait(false);
         await destination.OpenAsync(cancellationToken).ConfigureAwait(false);
         source.BackupDatabase(destination);
+    }
+
+    private static async Task CompactSnapshotAsync(
+        string databasePath,
+        CancellationToken cancellationToken)
+    {
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadWrite,
+            Pooling = false,
+            ForeignKeys = true
+        }.ToString();
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using (var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false))
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = (SqliteTransaction)transaction;
+            command.CommandText = """
+                DELETE FROM items;
+                DELETE FROM contract_item_snapshots;
+                DELETE FROM price_cache_contracts;
+                UPDATE price_cache_control
+                   SET authorized = 0, enabled = 0, paused = 0, status = $disabled,
+                       last_error = '', authorized_at = NULL, last_started_at = NULL,
+                       last_completed_at = NULL,
+                       updated_at = $now
+                 WHERE id = 1;
+                """;
+            command.Parameters.AddWithValue("$disabled", (int)PriceCacheStatus.Disabled);
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var optimize = connection.CreateCommand())
+        {
+            optimize.CommandText = "INSERT INTO items_fts(items_fts) VALUES('optimize');";
+            await optimize.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var vacuum = connection.CreateCommand())
+        {
+            vacuum.CommandText = "VACUUM;";
+            await vacuum.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task DisableImportedCompactCacheAsync(
+        string databasePath,
+        CancellationToken cancellationToken)
+    {
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadWrite,
+            Pooling = false
+        }.ToString();
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            DELETE FROM price_cache_contracts;
+            UPDATE price_cache_control
+               SET authorized = 0, enabled = 0, paused = 0, status = $disabled,
+                   last_error = '', authorized_at = NULL, last_started_at = NULL,
+                   last_completed_at = NULL, updated_at = $now
+             WHERE id = 1;
+            """;
+        command.Parameters.AddWithValue("$disabled", (int)PriceCacheStatus.Disabled);
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await ValidateDatabaseAsync(
+            databasePath,
+            SqliteContractRepository.CurrentSchemaVersion,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<(long Items, long Results, long PriceCacheContracts)> ReadDatabaseCountsAsync(
+        string databasePath,
+        CancellationToken cancellationToken)
+    {
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false
+        }.ToString();
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT (SELECT COUNT(*) FROM items),
+                   (SELECT COUNT(*) FROM item_results),
+                   (SELECT COUNT(*) FROM price_cache_contracts);
+            """;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+        return (reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2));
     }
 
     private static async Task ValidateDatabaseAsync(
@@ -321,9 +630,44 @@ public sealed class BackupService(IContractRepository repository)
 
     private static async Task<string> ComputeSha256Async(string path, CancellationToken cancellationToken)
     {
-        await using var stream = File.OpenRead(path);
-        var hash = await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
-        return Convert.ToHexString(hash);
+        return await ComputeSha256Async(path, progress: null, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<string> ComputeSha256Async(
+        string path,
+        Action<long, long>? progress,
+        CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            ProgressBufferBytes,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[ProgressBufferBytes];
+        long processed = 0;
+        var lastReported = 0L;
+        while (true)
+        {
+            var read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                break;
+            }
+
+            hash.AppendData(buffer, 0, read);
+            processed += read;
+            if (progress is not null &&
+                (processed - lastReported >= 16L * ProgressBufferBytes || processed == stream.Length))
+            {
+                progress(processed, stream.Length);
+                lastReported = processed;
+            }
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset());
     }
 
     private static async Task<IReadOnlyList<EvidenceAssetRow>> ReadReferencedEvidenceAssetsAsync(
@@ -491,6 +835,108 @@ public sealed class BackupService(IContractRepository repository)
         var path = Path.Combine(Path.GetTempPath(), "PNCPKing", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private static async Task CopyWithProgressAsync(
+        Stream source,
+        Stream destination,
+        long totalBytes,
+        Action<long, long> progress,
+        CancellationToken cancellationToken)
+    {
+        var buffer = new byte[ProgressBufferBytes];
+        long processed = 0;
+        var lastReported = 0L;
+        while (true)
+        {
+            var read = await source.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                break;
+            }
+
+            await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+            processed += read;
+            if (processed - lastReported >= 16L * ProgressBufferBytes || processed == totalBytes)
+            {
+                progress(processed, totalBytes);
+                lastReported = processed;
+            }
+        }
+
+        await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static double Scale(long value, long total, double minimum, double maximum)
+    {
+        if (total <= 0)
+        {
+            return minimum;
+        }
+
+        return minimum + Math.Clamp(value / (double)total, 0d, 1d) * (maximum - minimum);
+    }
+
+    private static void Report(
+        IProgress<BackupImportProgress>? progress,
+        BackupImportStage stage,
+        double percentage,
+        string message,
+        long bytesProcessed = 0,
+        long totalBytes = 0) =>
+        progress?.Report(new BackupImportProgress(
+            stage,
+            Math.Clamp(percentage, 0d, 100d),
+            message,
+            bytesProcessed,
+            totalBytes));
+
+    private static long AddSaturated(params long[] values)
+    {
+        long result = 0;
+        foreach (var value in values)
+        {
+            if (value <= 0)
+            {
+                continue;
+            }
+
+            if (result > long.MaxValue - value)
+            {
+                return long.MaxValue;
+            }
+
+            result += value;
+        }
+
+        return result;
+    }
+
+    private static long GetAvailableBytes(string root)
+    {
+        try
+        {
+            return new DriveInfo(root).AvailableFreeSpace;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            return long.MaxValue;
+        }
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        var value = (double)Math.Max(0, bytes);
+        var unit = 0;
+        while (value >= 1024d && unit < units.Length - 1)
+        {
+            value /= 1024d;
+            unit++;
+        }
+
+        return $"{value:N1} {units[unit]}";
     }
 
     private sealed record EvidenceAssetRow(

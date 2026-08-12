@@ -9,7 +9,8 @@ public enum PncpRequestPriority
     UserSelectedItem = 0,
     VisiblePrices = 1,
     AdditionalBatches = 2,
-    IndexMaintenance = 3
+    IndexMaintenance = 3,
+    BackgroundPriceCache = 4
 }
 
 public sealed record PncpSchedulerSnapshot(
@@ -18,13 +19,17 @@ public sealed record PncpSchedulerSnapshot(
     int QueuedUserSelectedItems,
     int QueuedVisiblePrices,
     int QueuedAdditionalBatches,
-    int QueuedIndexMaintenance)
+    int QueuedIndexMaintenance,
+    int QueuedBackgroundPriceCache,
+    int ActiveBackgroundPriceCache,
+    int BackgroundSuppressions)
 {
     public int TotalQueued =>
         QueuedUserSelectedItems +
         QueuedVisiblePrices +
         QueuedAdditionalBatches +
-        QueuedIndexMaintenance;
+        QueuedIndexMaintenance +
+        QueuedBackgroundPriceCache;
 }
 
 /// <summary>
@@ -34,7 +39,8 @@ public sealed record PncpSchedulerSnapshot(
 public sealed class PncpRequestScheduler
 {
     // Five user-selected requests, two visible-price requests, one additional
-    // batch and one maintenance request per fully occupied scheduling cycle.
+    // batch, one maintenance request and one background opportunity per cycle.
+    // The background queue has an additional strict-idle gate below.
     private static readonly PncpRequestPriority[] Schedule =
     [
         PncpRequestPriority.UserSelectedItem,
@@ -45,15 +51,18 @@ public sealed class PncpRequestScheduler
         PncpRequestPriority.VisiblePrices,
         PncpRequestPriority.VisiblePrices,
         PncpRequestPriority.AdditionalBatches,
-        PncpRequestPriority.IndexMaintenance
+        PncpRequestPriority.IndexMaintenance,
+        PncpRequestPriority.BackgroundPriceCache
     ];
 
     private readonly object _gate = new();
     private readonly LinkedList<Waiter>[] _queues =
-        Enumerable.Range(0, 4).Select(_ => new LinkedList<Waiter>()).ToArray();
+        Enumerable.Range(0, 5).Select(_ => new LinkedList<Waiter>()).ToArray();
+    private readonly int[] _activeByPriority = new int[5];
     private readonly int _maximumConcurrency;
     private int _activeRequests;
     private int _schedulePosition;
+    private int _backgroundSuppressions;
 
     public PncpRequestScheduler(int maximumConcurrency = 2)
     {
@@ -98,6 +107,21 @@ public sealed class PncpRequestScheduler
         return waiter.Completion.Task;
     }
 
+    /// <summary>
+    /// Prevents a new background request from starting while a foreground
+    /// operation is between HTTP calls. A background call already in flight is
+    /// deliberately allowed to finish.
+    /// </summary>
+    public IDisposable SuppressBackgroundRequests()
+    {
+        lock (_gate)
+        {
+            _backgroundSuppressions++;
+        }
+
+        return new SuppressionLease(this);
+    }
+
     public PncpSchedulerSnapshot GetSnapshot()
     {
         lock (_gate)
@@ -108,7 +132,10 @@ public sealed class PncpRequestScheduler
                 _queues[0].Count,
                 _queues[1].Count,
                 _queues[2].Count,
-                _queues[3].Count);
+                _queues[3].Count,
+                _queues[4].Count,
+                _activeByPriority[(int)PncpRequestPriority.BackgroundPriceCache],
+                _backgroundSuppressions);
         }
     }
 
@@ -131,8 +158,9 @@ public sealed class PncpRequestScheduler
         while (_activeRequests < _maximumConcurrency && TryTakeNextLocked() is { } waiter)
         {
             _activeRequests++;
+            _activeByPriority[(int)waiter.Priority]++;
             waiter.CancellationRegistration.Unregister();
-            waiter.Completion.TrySetResult(new Lease(this));
+            waiter.Completion.TrySetResult(new Lease(this, waiter.Priority));
         }
     }
 
@@ -141,8 +169,17 @@ public sealed class PncpRequestScheduler
         for (var offset = 0; offset < Schedule.Length; offset++)
         {
             var scheduleIndex = (_schedulePosition + offset) % Schedule.Length;
-            var queue = _queues[(int)Schedule[scheduleIndex]];
+            var priority = Schedule[scheduleIndex];
+            var queue = _queues[(int)priority];
             if (queue.First is null)
+            {
+                continue;
+            }
+
+            if (priority == PncpRequestPriority.BackgroundPriceCache &&
+                (_backgroundSuppressions > 0 ||
+                 _activeByPriority[(int)priority] > 0 ||
+                 HasForegroundWorkLocked()))
             {
                 continue;
             }
@@ -157,23 +194,51 @@ public sealed class PncpRequestScheduler
         return null;
     }
 
-    private void Release()
+    private bool HasForegroundWorkLocked()
+    {
+        for (var index = 0; index < (int)PncpRequestPriority.BackgroundPriceCache; index++)
+        {
+            if (_activeByPriority[index] > 0 || _queues[index].Count > 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void Release(PncpRequestPriority priority)
     {
         lock (_gate)
         {
-            if (_activeRequests == 0)
+            if (_activeRequests == 0 || _activeByPriority[(int)priority] == 0)
             {
                 throw new InvalidOperationException("O agendador recebeu uma liberação sem aquisição correspondente.");
             }
 
             _activeRequests--;
+            _activeByPriority[(int)priority]--;
+            DispatchLocked();
+        }
+    }
+
+    private void ReleaseBackgroundSuppression()
+    {
+        lock (_gate)
+        {
+            if (_backgroundSuppressions == 0)
+            {
+                throw new InvalidOperationException("A supressão do cache de fundo já foi liberada.");
+            }
+
+            _backgroundSuppressions--;
             DispatchLocked();
         }
     }
 
     private static void ValidatePriority(PncpRequestPriority priority)
     {
-        if ((int)priority is < 0 or > 3)
+        if ((int)priority is < 0 or > 4)
         {
             throw new ArgumentOutOfRangeException(nameof(priority));
         }
@@ -194,10 +259,20 @@ public sealed class PncpRequestScheduler
         public bool CancellationRequested { get; set; }
     }
 
-    private sealed class Lease(PncpRequestScheduler owner) : IDisposable
+    private sealed class Lease(
+        PncpRequestScheduler owner,
+        PncpRequestPriority priority) : IDisposable
     {
         private PncpRequestScheduler? _owner = owner;
 
-        public void Dispose() => Interlocked.Exchange(ref _owner, null)?.Release();
+        public void Dispose() => Interlocked.Exchange(ref _owner, null)?.Release(priority);
+    }
+
+    private sealed class SuppressionLease(PncpRequestScheduler owner) : IDisposable
+    {
+        private PncpRequestScheduler? _owner = owner;
+
+        public void Dispose() =>
+            Interlocked.Exchange(ref _owner, null)?.ReleaseBackgroundSuppression();
     }
 }

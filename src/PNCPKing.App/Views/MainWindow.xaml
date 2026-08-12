@@ -28,6 +28,8 @@
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Content="Exportar backup" Command="{Binding ExportBackupCommand}" />
                 <Button Content="Importar backup" Command="{Binding ImportBackupCommand}" />
+                <Button Content="Logs de diagnóstico" Command="{Binding OpenDiagnosticLogsCommand}"
+                        ToolTip="Abre a pasta com os logs que podem ser copiados para análise." />
                 <Button Content="Limpar cache permanente" Command="{Binding ClearCacheCommand}" />
                 <Button Content="Limpar cache de documentos" Command="{Binding ClearDocumentCacheCommand}"
                         ToolTip="Remove anexos e índices de texto locais sem alterar o banco, relatórios ou PDFs em Downloads." />
@@ -49,6 +51,8 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="18" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
@@ -144,6 +148,60 @@
                         Margin="0,8,0,6" Padding="0,8,0,0">
                     <DockPanel>
                         <StackPanel Orientation="Horizontal">
+                            <Border Width="10" Height="10" CornerRadius="5" Margin="0,0,6,0">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Setter Property="Background" Value="#9AA1A8" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding PriceCacheStatus}" Value="{x:Static models:PriceCacheStatus.Downloading}">
+                                                <Setter Property="Background" Value="#2F80D0" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding PriceCacheStatus}" Value="{x:Static models:PriceCacheStatus.Paused}">
+                                                <Setter Property="Background" Value="#E6A23C" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding PriceCacheStatus}" Value="{x:Static models:PriceCacheStatus.Complete}">
+                                                <Setter Property="Background" Value="#36A269" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding PriceCacheStatus}" Value="{x:Static models:PriceCacheStatus.Failed}">
+                                                <Setter Property="Background" Value="#D9534F" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding PriceCacheStatus}" Value="{x:Static models:PriceCacheStatus.InsufficientSpace}">
+                                                <Setter Property="Background" Value="#D9534F" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                            </Border>
+                            <TextBlock Text="Itens e preços homologados — últimos 90 dias"
+                                       FontWeight="SemiBold" VerticalAlignment="Center" />
+                            <TextBlock Text="{Binding PriceCacheActivityText, Mode=OneWay}"
+                                       Margin="12,0,0,0" VerticalAlignment="Center"
+                                       Foreground="#5F6871" />
+                        </StackPanel>
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <Button Content="Estimar e ativar" Command="{Binding EstimateAndActivatePriceCacheCommand}" />
+                            <Button Content="{Binding PausePriceCacheButtonText, Mode=OneWay}" Command="{Binding PausePriceCacheCommand}" />
+                            <Button Content="Cancelar ciclo" Command="{Binding CancelPriceCacheCommand}" />
+                            <Button Content="Desativar" Command="{Binding DisablePriceCacheCommand}" />
+                            <Button Content="Remover cache" Command="{Binding RemovePriceCacheCommand}" />
+                        </StackPanel>
+                    </DockPanel>
+                </Border>
+                <Grid Grid.Row="4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="260" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="{Binding PriceCacheSummary, Mode=OneWay}" TextWrapping="Wrap"
+                               ToolTip="Pesquisas e cotações têm prioridade; o cache usa somente oportunidades livres da API PNCP." />
+                    <ProgressBar Grid.Column="1" Height="9" Minimum="0" Maximum="100"
+                                 Value="{Binding PriceCacheProgress, Mode=OneWay}" Margin="12,2,0,0" />
+                </Grid>
+
+                <Border Grid.Row="5" BorderBrush="#D6DDE4" BorderThickness="0,1,0,0"
+                        Margin="0,8,0,6" Padding="0,8,0,0">
+                    <DockPanel>
+                        <StackPanel Orientation="Horizontal">
                             <TextBlock Text="Catálogo oficial CATMAT/CATSER" FontWeight="SemiBold"
                                        VerticalAlignment="Center" />
                             <TextBlock Text="{Binding CatalogActivityText}" Margin="12,0,0,0"
@@ -157,7 +215,7 @@
                         </StackPanel>
                     </DockPanel>
                 </Border>
-                <Grid Grid.Row="4">
+                <Grid Grid.Row="6">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="2*" />
                         <ColumnDefinition Width="*" />
@@ -653,6 +711,27 @@
         </TabControl>
 
         <StatusBar Grid.Row="6">
+            <StatusBarItem>
+                <StatusBarItem.Style>
+                    <Style TargetType="StatusBarItem">
+                        <Setter Property="Visibility" Value="Collapsed" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsFileBusy}" Value="True">
+                                <Setter Property="Visibility" Value="Visible" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </StatusBarItem.Style>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="{Binding FileOperationProgressText}" MaxWidth="360"
+                               TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+                               ToolTip="{Binding FileOperationProgressText}" />
+                    <ProgressBar Width="135" Height="10" Margin="7,0"
+                                 Minimum="0" Maximum="100"
+                                 Value="{Binding OperationProgress, Mode=OneWay}" />
+                </StackPanel>
+            </StatusBarItem>
+            <Separator />
             <StatusBarItem>
                 <StackPanel Orientation="Horizontal">
                     <TextBlock Text="{Binding DocumentProgressText}" MaxWidth="330"

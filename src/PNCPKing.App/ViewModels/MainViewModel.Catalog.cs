@@ -94,6 +94,7 @@ public sealed partial class MainViewModel
     private async Task RunAutomaticMaintenanceCycleAsync()
     {
         await TryRunAutomaticMaintenanceAsync().ConfigureAwait(true);
+        _ = TryRunPriceCacheMaintenanceAsync();
         await TryRunCatalogMaintenanceAsync().ConfigureAwait(true);
     }
 

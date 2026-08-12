@@ -12,6 +12,7 @@ using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
 using PNCPKing.Core.Search;
 using PNCPKing.Infrastructure.Api;
+using PNCPKing.Infrastructure.Data;
 using PNCPKing.Infrastructure.Services;
 
 namespace PNCPKing.App.ViewModels;
@@ -24,6 +25,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private readonly PreflightService _preflightService;
     private readonly SyncService _syncService;
     private readonly AutoSyncCoordinator _autoSyncCoordinator;
+    private readonly PncpRequestScheduler _requestScheduler;
+    private readonly IPriceCacheRepository _priceCacheRepository;
+    private readonly PriceCacheService _priceCacheService;
     private readonly ItemHydrationService _hydrationService;
     private readonly ItemSearchSessionService _itemSearchService;
     private readonly IQuotationItemSearchService _quotationItemSearchService;
@@ -47,14 +51,21 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private readonly IAiPromptRefinementService _aiPromptRefinementService;
     private readonly ITimedQuotationAutomationService _timedQuotationAutomation;
     private readonly AppSettingsService _settingsService;
+    private readonly AppDiagnosticLog _diagnosticLog;
     private readonly DispatcherTimer _maintenanceTimer;
     private readonly SemaphoreSlim _itemPageGate = new(1, 1);
     private CancellationTokenSource? _indexCancellation;
     private CancellationTokenSource? _priceCancellation;
     private CancellationTokenSource? _foregroundCancellation;
     private CancellationTokenSource? _documentCancellation;
+    private IDisposable? _backgroundCacheSuppression;
     private SearchQuery? _activeSearchQuery;
     private ItemSearchLocalSummary? _localItemSearchSummary;
+    private SearchExpression? _activeItemSearchExpression;
+    private int _localPricePage;
+    private bool _hasMoreLocalPriceRows;
+    private int _localPriceRowsLoaded;
+    private bool _remotePriceExpansionStarted;
     private PncpRequestTelemetrySnapshot? _searchTelemetryBaseline;
     private string _queryText = string.Empty;
     private SearchGeoFilter _selectedGeoFilter = SearchGeoFilter.All;
@@ -81,6 +92,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _isFileBusy;
     private bool _isDocumentBusy;
     private double _operationProgress;
+    private string _fileOperationProgressText = "Operação de arquivo inativa";
     private double _priceSearchProgress;
     private double _documentProgress;
     private string _documentProgressText = "Documentos: inativos";
@@ -103,6 +115,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         PreflightService preflightService,
         SyncService syncService,
         AutoSyncCoordinator autoSyncCoordinator,
+        PncpRequestScheduler requestScheduler,
+        IPriceCacheRepository priceCacheRepository,
+        PriceCacheService priceCacheService,
         ItemHydrationService hydrationService,
         ItemSearchSessionService itemSearchService,
         IQuotationItemSearchService quotationItemSearchService,
@@ -132,12 +147,16 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         IAiPromptRefinementService aiPromptRefinementService,
         ITimedQuotationAutomationService timedQuotationAutomation,
         AppSettingsService settingsService,
-        string dataFolder)
+        string dataFolder,
+        AppDiagnosticLog diagnosticLog)
     {
         _repository = repository;
         _preflightService = preflightService;
         _syncService = syncService;
         _autoSyncCoordinator = autoSyncCoordinator;
+        _requestScheduler = requestScheduler;
+        _priceCacheRepository = priceCacheRepository;
+        _priceCacheService = priceCacheService;
         _hydrationService = hydrationService;
         _itemSearchService = itemSearchService;
         _quotationItemSearchService = quotationItemSearchService;
@@ -148,6 +167,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             quotationWorkbookImportService,
             quotationPackageService);
         InitializeCatalog(catalogRepository, catalogSyncService, catalogSearchService);
+        InitializePriceCache();
         _telemetry = telemetry;
         _sweetCodeRepository = sweetCodeRepository;
         _documentService = documentService;
@@ -167,6 +187,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _timedQuotationAutomation = timedQuotationAutomation;
         _settingsService = settingsService;
         _dataFolder = dataFolder;
+        _diagnosticLog = diagnosticLog;
 
         GeoFilters = BuildGeoFilters();
         SortOptions =
@@ -237,7 +258,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         ExportBackupCommand = new AsyncRelayCommand(ExportBackupAsync, () => !IsFileBusy && !IsIndexBusy);
         ImportBackupCommand = new AsyncRelayCommand(
             ImportBackupAsync,
-            () => !IsFileBusy && !IsIndexBusy && !IsForegroundBusy && !IsPriceBusy);
+            () => !IsFileBusy && !IsIndexBusy && !IsForegroundBusy && !IsPriceBusy &&
+                  !IsCatalogBusy && !IsPriceCacheBusy);
+        OpenDiagnosticLogsCommand = new RelayCommand(OpenDiagnosticLogs);
         ClearCacheCommand = new AsyncRelayCommand(
             ClearCacheAsync,
             () => !IsFileBusy && !IsForegroundBusy && !IsPriceBusy);
@@ -276,6 +299,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public ICommand CancelDocumentOperationCommand { get; }
     public ICommand ExportBackupCommand { get; }
     public ICommand ImportBackupCommand { get; }
+    public ICommand OpenDiagnosticLogsCommand { get; }
     public ICommand ClearCacheCommand { get; }
     public ICommand ManageSweetCodesCommand { get; }
 
@@ -531,6 +555,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         private set => SetProperty(ref _operationProgress, value);
     }
 
+    public string FileOperationProgressText
+    {
+        get => _fileOperationProgressText;
+        private set => SetProperty(ref _fileOperationProgressText, value);
+    }
+
     public double PriceSearchProgress
     {
         get => _priceSearchProgress;
@@ -628,6 +658,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         await RefreshQuotationProjectsAsync().ConfigureAwait(true);
         await RefreshDatasetSummaryAsync().ConfigureAwait(true);
         await RefreshCoverageAsync().ConfigureAwait(true);
+        await RefreshPriceCacheProgressAsync().ConfigureAwait(true);
         await RefreshCatalogCoverageAsync().ConfigureAwait(true);
         await SearchAsync(resetSession: false).ConfigureAwait(true);
         _maintenanceTimer.Start();
@@ -648,10 +679,25 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _foregroundCancellation?.Cancel();
         _documentCancellation?.Cancel();
         _catalogCancellation?.Cancel();
+        _priceCacheCycleCancellation?.Cancel();
         _quotationAutomationCancellation?.Cancel();
+        _backgroundCacheSuppression?.Dispose();
+        _backgroundCacheSuppression = null;
         if (_quotationAutomationCompletion is { } quotationCompletion)
         {
             await quotationCompletion.Task.ConfigureAwait(true);
+        }
+
+        if (_priceCacheCycleTask is { } priceCacheTask)
+        {
+            try
+            {
+                await priceCacheTask.ConfigureAwait(true);
+            }
+            catch (OperationCanceledException)
+            {
+                // Normal application shutdown.
+            }
         }
 
         SetItemSearchActive(false);
@@ -789,9 +835,14 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             SelectedResultsTabIndex = 0;
             _searchTelemetryBaseline = _telemetry.GetSnapshot();
             PriceSearchProgress = 0;
+            _activeItemSearchExpression = SearchText.Parse(_activeSearchQuery.Text);
+            _localPricePage = 0;
+            _hasMoreLocalPriceRows = false;
+            _localPriceRowsLoaded = 0;
+            _remotePriceExpansionStarted = false;
             _localItemSearchSummary = await _repository.GetItemSearchLocalSummaryAsync(
                     _activeSearchQuery,
-                    SearchText.Parse(_activeSearchQuery.Text),
+                    _activeItemSearchExpression,
                     _priceCancellation.Token)
                 .ConfigureAwait(true);
             ItemSearchSummary = BuildLocalSearchSummary();
@@ -801,7 +852,20 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 _priceCancellation.Token).ConfigureAwait(true);
             SetItemSearchActive(true);
             NotifyCommands();
-            await RunSelectedBatchesAsync(isAdditional: false, _priceCancellation.Token).ConfigureAwait(true);
+            var localRows = await LoadLocalPricePageAsync(_priceCancellation.Token).ConfigureAwait(true);
+            if (_hasMoreLocalPriceRows || localRows >= ItemSearchSessionService.DefaultPageSize)
+            {
+                HasMoreItemCandidates = true;
+                ItemSearchSummary =
+                    $"{BuildLocalSearchSummary()} A primeira página veio integralmente do cache local; " +
+                    "a API ainda não foi consultada para itens ou preços.";
+                StatusText = "Resultados locais entregues primeiro; use Continuar para avançar.";
+            }
+            else
+            {
+                _remotePriceExpansionStarted = true;
+                await RunSelectedBatchesAsync(isAdditional: false, _priceCancellation.Token).ConfigureAwait(true);
+            }
         }
         catch (Exception exception)
         {
@@ -859,6 +923,18 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
+        if (_hasMoreLocalPriceRows)
+        {
+            var localRows = await LoadLocalPricePageAsync(cancellation.Token).ConfigureAwait(true);
+            if (_hasMoreLocalPriceRows || localRows >= ItemSearchSessionService.DefaultPageSize)
+            {
+                ItemSearchSummary =
+                    $"{BuildLocalSearchSummary()} Página entregue do cache local; a ampliação pela API continua adiada.";
+                return;
+            }
+        }
+
+        _remotePriceExpansionStarted = true;
         await LoadItemPageSafelyAsync(CurrentItemPage + 1, append: true, cancellation.Token).ConfigureAwait(true);
     }
 
@@ -952,11 +1028,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         SetPriceBusy(true, usesNetwork: true);
         try
         {
-            if (!isAdditional)
-            {
-                ItemSearchRows.Clear();
-            }
-
+            _remotePriceExpansionStarted = true;
             PriceSearchProgress = 0;
             var (minimum, maximum) = ParsePriceRange();
             using var requestScope = PncpRequestOptions.BeginScope(PncpRequestPriority.AdditionalBatches);
@@ -1017,12 +1089,86 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private async Task ReloadAllDiscoveredRowsAsync(CancellationToken cancellationToken)
     {
         var (minimum, maximum) = ParsePriceRange();
+        var localPagesToRestore = Math.Max(1, _localPricePage);
+        _localPricePage = 0;
+        _hasMoreLocalPriceRows = false;
+        _localPriceRowsLoaded = 0;
+        ItemSearchRows.Clear();
+        for (var index = 0; index < localPagesToRestore; index++)
+        {
+            await LoadLocalPricePageAsync(cancellationToken, minimum, maximum).ConfigureAwait(true);
+            if (!_hasMoreLocalPriceRows)
+            {
+                break;
+            }
+        }
+
         var rows = await _itemSearchService.GetDiscoveredRowsAsync(
             minimum,
             maximum,
             cancellationToken).ConfigureAwait(true);
-        ItemSearchRows.Clear();
         AppendUniqueRows(rows);
+    }
+
+    private async Task<int> LoadLocalPricePageAsync(
+        CancellationToken cancellationToken,
+        decimal? minimum = null,
+        decimal? maximum = null)
+    {
+        if (_activeSearchQuery is null || _activeItemSearchExpression is null)
+        {
+            return 0;
+        }
+
+        if (minimum is null && maximum is null)
+        {
+            (minimum, maximum) = ParsePriceRange();
+        }
+
+        var page = await _priceCacheRepository.SearchLocalAsync(
+                _activeSearchQuery,
+                _activeItemSearchExpression,
+                minimum,
+                maximum,
+                _localPricePage + 1,
+                ItemSearchSessionService.DefaultPageSize,
+                cancellationToken)
+            .ConfigureAwait(true);
+        var rows = new List<ItemSearchRow>();
+        foreach (var hit in page.Hits)
+        {
+            var cached = await _repository.GetCachedItemResultsAsync(
+                    hit.Contract.PncpId,
+                    hit.Item.ItemNumber,
+                    cancellationToken)
+                .ConfigureAwait(true);
+            if (cached?.IsCurrent != true)
+            {
+                continue;
+            }
+
+            foreach (var result in cached.Results.Where(result =>
+                         result.IsActive &&
+                         result.HomologatedUnitValue is > 0 &&
+                         (minimum is null || result.HomologatedUnitValue >= minimum) &&
+                         (maximum is null || result.HomologatedUnitValue <= maximum)))
+            {
+                rows.Add(new ItemSearchRow(
+                    hit.Contract,
+                    cached.Item,
+                    result,
+                    ItemSearchPriceState.Homologated,
+                    "Preço homologado do cache local",
+                    false));
+            }
+        }
+
+        AppendUniqueRows(rows);
+        _localPricePage = page.Page;
+        _hasMoreLocalPriceRows = page.HasMore;
+        _localPriceRowsLoaded += rows.Count;
+        HasMoreItemCandidates = _hasMoreLocalPriceRows || !_remotePriceExpansionStarted;
+        return rows.Count;
     }
 
     private void StopItemSearch()
@@ -1075,7 +1221,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         ? "Contagem local parcial indisponível."
         : $"Banco local: {_localItemSearchSummary.CandidateContracts:N0} contratação(ões) candidata(s) (total exato); " +
           $"{_localItemSearchSummary.CachedMatchingItems:N0} item(ns) compatível(is) no cache (parcial); " +
-          $"{_localItemSearchSummary.CachedItemsWithActivePrices:N0} item(ns) com preço ativo salvo (parcial).";
+          $"{_localItemSearchSummary.CachedItemsWithActivePrices:N0} item(ns) com preço ativo salvo (parcial); " +
+          $"{_localPriceRowsLoaded:N0} preço(s) entregue(s) primeiro pelo cache.";
 
     private string BuildSearchTrafficSummary()
     {
@@ -1342,6 +1489,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         NotifyCommands();
         try
         {
+            using var backgroundSuppression = _requestScheduler.SuppressBackgroundRequests();
             using var requestScope = PncpRequestOptions.BeginScope(PncpRequestPriority.IndexMaintenance);
             await action(_indexCancellation.Token).ConfigureAwait(true);
         }
@@ -1395,6 +1543,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _foregroundCancellation = new CancellationTokenSource();
         try
         {
+            using var backgroundSuppression = _requestScheduler.SuppressBackgroundRequests();
+            await _priceCacheRepository.MarkContractPinnedAsync(
+                    contract.PncpId,
+                    _foregroundCancellation.Token)
+                .ConfigureAwait(true);
             using var requestScope = PncpRequestOptions.BeginScope(PncpRequestPriority.UserSelectedItem);
             StatusText = "Carregando a lista completa da contratação…";
             var preparation = await _hydrationService.PrepareAsync(
@@ -1534,6 +1687,23 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task ExportBackupAsync()
     {
+        var profileChoice = MessageBox.Show(
+            "Escolha o perfil do backup:\n\n" +
+            "SIM — Compacto (recomendado): preserva índice, cotações, evidências e CATMAT/CATSER, sem o cache reconstruível de itens/preços.\n\n" +
+            "NÃO — Completo: inclui também todo o cache de itens/preços e seus checkpoints.\n\n" +
+            "CANCELAR — não exportar.",
+            "Perfil do backup .pncpking",
+            MessageBoxButton.YesNoCancel,
+            MessageBoxImage.Question,
+            MessageBoxResult.Yes);
+        if (profileChoice == MessageBoxResult.Cancel)
+        {
+            return;
+        }
+
+        var profile = profileChoice == MessageBoxResult.Yes
+            ? BackupProfile.Compact
+            : BackupProfile.Full;
         var dialog = new SaveFileDialog
         {
             Title = "Exportar backup do PNCP King",
@@ -1548,9 +1718,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
         await RunFileOperationAsync(async cancellationToken =>
         {
-            StatusText = "Criando snapshot do banco permanente…";
-            await _backupService.ExportAsync(dialog.FileName, cancellationToken).ConfigureAwait(true);
-            StatusText = $"Backup criado em {dialog.FileName}";
+            StatusText = profile == BackupProfile.Compact
+                ? "Criando e compactando uma cópia temporária do banco…"
+                : "Criando snapshot completo do banco permanente…";
+            await _backupService.ExportAsync(dialog.FileName, profile, cancellationToken).ConfigureAwait(true);
+            StatusText = $"Backup {profile.ToString().ToLowerInvariant()} criado em {dialog.FileName}";
         }).ConfigureAwait(true);
     }
 
@@ -1562,27 +1734,125 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             Filter = "Backup PNCP King (*.pncpking)|*.pncpking",
             CheckFileExists = true
         };
-        if (dialog.ShowDialog() != true ||
-            MessageBox.Show(
-                "O banco atual será substituído somente após validação e migração. Uma cópia recuperável será preservada. Continuar?",
-                "Importar backup",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        if (dialog.ShowDialog() != true)
         {
             return;
         }
 
-        StopItemSearch();
-        await RunFileOperationAsync(async cancellationToken =>
+        BackupInspection inspection;
+        try
         {
-            StatusText = "Validando, migrando e importando o backup…";
-            var recovery = await _backupService.ImportAsync(dialog.FileName, cancellationToken).ConfigureAwait(true);
-            StatusText = $"Backup importado. Base anterior preservada em {recovery}";
-            Preflight = null;
-            await RefreshDatasetSummaryAsync().ConfigureAwait(true);
-            await RefreshCoverageAsync().ConfigureAwait(true);
-            await SearchAsync(resetSession: true).ConfigureAwait(true);
-        }).ConfigureAwait(true);
+            StatusText = "Inspecionando o backup e o espaço disponível…";
+            inspection = await Task.Run(() => _backupService.InspectAsync(dialog.FileName))
+                .ConfigureAwait(true);
+            _diagnosticLog.Info(
+                "backup-import",
+                $"Backup inspecionado. arquivo={inspection.SourcePath}; esquema={inspection.SchemaVersion}; " +
+                $"arquivo_bytes={inspection.ArchiveBytes}; banco_bytes={inspection.DatabaseBytes}; " +
+                $"temporario_livre={inspection.TemporaryAvailableBytes}; dados_livre={inspection.DataAvailableBytes}.");
+        }
+        catch (Exception exception)
+        {
+            _diagnosticLog.Error("backup-import", "Falha ao inspecionar o backup.", exception);
+            MessageBox.Show(
+                $"Não foi possível inspecionar o backup.\n\n{exception.Message}\n\n" +
+                $"Log: {_diagnosticLog.FilePath}",
+                "Importar backup",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            return;
+        }
+
+        if (!inspection.HasEnoughSpace)
+        {
+            var spaceMessage =
+                "Não há espaço livre suficiente para uma importação recuperável.\n\n" +
+                $"Banco descompactado: {FormatBytes(inspection.DatabaseBytes)}\n" +
+                $"Temporários ({inspection.TemporaryRoot}): " +
+                $"{FormatBytes(inspection.TemporaryAvailableBytes)} livres / " +
+                $"{FormatBytes(inspection.TemporaryRequiredBytes)} necessários\n" +
+                $"Dados ({inspection.DataRoot}): " +
+                $"{FormatBytes(inspection.DataAvailableBytes)} livres / " +
+                $"{FormatBytes(inspection.DataRequiredBytes)} necessários\n\n" +
+                "Libere espaço e tente novamente; nenhum banco foi alterado.";
+            _diagnosticLog.Warning("backup-import", spaceMessage.ReplaceLineEndings(" | "));
+            MessageBox.Show(
+                spaceMessage,
+                "Espaço insuficiente",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+
+        var profile = inspection.Profile?.ToString() ?? "legado";
+        if (MessageBox.Show(
+                "IMPORTAR BACKUP VALIDADO\n\n" +
+                $"Arquivo: {FormatBytes(inspection.ArchiveBytes)}\n" +
+                $"Banco descompactado: {FormatBytes(inspection.DatabaseBytes)}\n" +
+                $"Esquema: {inspection.SchemaVersion} → {SqliteContractRepository.CurrentSchemaVersion}\n" +
+                $"Perfil: {profile}\n" +
+                $"Espaço temporário livre: {FormatBytes(inspection.TemporaryAvailableBytes)}\n\n" +
+                "A operação pode levar vários minutos em computadores lentos. O progresso será mostrado e " +
+                "uma cópia recuperável do banco atual será preservada. Não encerre o programa durante a instalação final. Continuar?",
+                "Confirmar importação",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        {
+            StatusText = "Importação cancelada antes de alterar o banco.";
+            return;
+        }
+
+        StopItemSearch();
+        _maintenanceTimer.Stop();
+        try
+        {
+            await RunFileOperationAsync(async cancellationToken =>
+            {
+                BackupImportStage? lastLoggedStage = null;
+                var lastLoggedBucket = -1;
+                var importProgress = new Progress<BackupImportProgress>(item =>
+                {
+                    OperationProgress = item.Percentage;
+                    FileOperationProgressText = item.Message;
+                    StatusText = item.Message;
+                    var bucket = (int)(item.Percentage / 10d);
+                    if (lastLoggedStage != item.Stage || bucket != lastLoggedBucket)
+                    {
+                        _diagnosticLog.Info(
+                            "backup-import",
+                            $"fase={item.Stage}; progresso={item.Percentage:N1}%; " +
+                            $"bytes={item.BytesProcessed}/{item.TotalBytes}; mensagem={item.Message}");
+                        lastLoggedStage = item.Stage;
+                        lastLoggedBucket = bucket;
+                    }
+                });
+                _diagnosticLog.Info("backup-import", "Importação autorizada pelo usuário e iniciada.");
+                var recovery = await Task.Run(
+                        () => _backupService.ImportAsync(
+                            dialog.FileName,
+                            importProgress,
+                            cancellationToken),
+                        cancellationToken)
+                    .ConfigureAwait(true);
+                _diagnosticLog.Info(
+                    "backup-import",
+                    $"Importação concluída. banco_anterior={recovery}");
+                StatusText = $"Backup importado. Base anterior preservada em {recovery}";
+                FileOperationProgressText = "Importação concluída; atualizando a tela…";
+                Preflight = null;
+                await RefreshDatasetSummaryAsync().ConfigureAwait(true);
+                await RefreshCoverageAsync().ConfigureAwait(true);
+                await RefreshPriceCacheProgressAsync().ConfigureAwait(true);
+                await SearchAsync(resetSession: true).ConfigureAwait(true);
+            }).ConfigureAwait(true);
+        }
+        finally
+        {
+            if (!_disposed)
+            {
+                _maintenanceTimer.Start();
+            }
+        }
     }
 
     private async Task ClearCacheAsync()
@@ -1615,6 +1885,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
 
         IsFileBusy = true;
+        OperationProgress = 0;
+        FileOperationProgressText = "Preparando operação de arquivo…";
         using var cancellation = new CancellationTokenSource();
         try
         {
@@ -1622,12 +1894,40 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception)
         {
+            _diagnosticLog.Error("file-operation", "Falha em operação de arquivo.", exception);
             StatusText = $"Falha: {exception.Message}";
-            MessageBox.Show(exception.Message, "PNCP King", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(
+                $"{exception.Message}\n\nLog para diagnóstico:\n{_diagnosticLog.FilePath}",
+                "PNCP King",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
         }
         finally
         {
             IsFileBusy = false;
+        }
+    }
+
+    private void OpenDiagnosticLogs()
+    {
+        try
+        {
+            Directory.CreateDirectory(_diagnosticLog.DirectoryPath);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = _diagnosticLog.DirectoryPath,
+                UseShellExecute = true
+            });
+            StatusText = $"Pasta de logs aberta: {_diagnosticLog.DirectoryPath}";
+        }
+        catch (Exception exception)
+        {
+            _diagnosticLog.Error("diagnostics", "Não foi possível abrir a pasta de logs.", exception);
+            MessageBox.Show(
+                $"Não foi possível abrir a pasta de logs.\n\n{_diagnosticLog.DirectoryPath}\n\n{exception.Message}",
+                "Logs de diagnóstico",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
         }
     }
 
@@ -1940,6 +2240,16 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private void SetPriceBusy(bool value, bool usesNetwork)
     {
+        if (value && usesNetwork)
+        {
+            _backgroundCacheSuppression ??= _requestScheduler.SuppressBackgroundRequests();
+        }
+        else if (!value)
+        {
+            _backgroundCacheSuppression?.Dispose();
+            _backgroundCacheSuppression = null;
+        }
+
         _priceOperationUsesNetwork = value && usesNetwork;
         if (IsPriceBusy == value)
         {
@@ -2021,6 +2331,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      ExportBackupCommand, ImportBackupCommand, ClearCacheCommand,
                      ManageSweetCodesCommand,
                      UpdateCatalogCommand, PauseCatalogCommand, CancelCatalogCommand,
+                     EstimateAndActivatePriceCacheCommand, PausePriceCacheCommand,
+                     CancelPriceCacheCommand, DisablePriceCacheCommand,
+                     RemovePriceCacheCommand,
                      UseQuotationSampleCommand, UpdateQuotationSampleCommand,
                      AdjustQuotationWeightsCommand,
                      ConfirmQuotationBasketCommand, ExportQuotationCommand,

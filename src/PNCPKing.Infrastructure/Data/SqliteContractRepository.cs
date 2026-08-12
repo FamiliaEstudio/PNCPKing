@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 14;
+    public const int CurrentSchemaVersion = 15;
 
     private const string GeographicGroupExpression = "CASE WHEN COALESCE(c.geo_layer, 1) = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -284,6 +284,22 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             await using var updateVersion = connection.CreateCommand();
             updateVersion.Transaction = (SqliteTransaction)transaction;
             updateVersion.CommandText = "UPDATE schema_info SET version = 14 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 14;
+        }
+
+        if (version < 15)
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = (SqliteTransaction)transaction;
+            migration.CommandText = SchemaV15Sql;
+            await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 15 WHERE id = 1;";
             await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -869,6 +885,37 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
               ) THEN -1 ELSE COALESCE(c.geo_layer, 1) END
               """
             : "COALESCE(c.geo_layer, 1)";
+        var cachedItemMatch = expression.ItemMatchQuery;
+        var cachePriorityExpression = cachedItemMatch.Length > 0
+            ? """
+              CASE WHEN EXISTS(
+                  SELECT 1
+                    FROM items cached_i
+                    JOIN items_fts ON items_fts.rowid = cached_i.rowid
+                   WHERE cached_i.contract_id = c.pncp_id
+                     AND cached_i.hydration_status = 2
+                     AND items_fts MATCH $cachedItemMatch
+                     AND EXISTS(
+                         SELECT 1 FROM item_results cached_r
+                          WHERE cached_r.contract_id = cached_i.contract_id
+                            AND cached_r.item_number = cached_i.item_number
+                            AND cached_r.result_status_id = 1
+                            AND cached_r.unit_value_scaled > 0))
+                   THEN -10 ELSE 0 END
+              """
+            : """
+              CASE WHEN EXISTS(
+                  SELECT 1 FROM items cached_i
+                   WHERE cached_i.contract_id = c.pncp_id
+                     AND cached_i.hydration_status = 2
+                     AND EXISTS(
+                         SELECT 1 FROM item_results cached_r
+                          WHERE cached_r.contract_id = cached_i.contract_id
+                            AND cached_r.item_number = cached_i.item_number
+                            AND cached_r.result_status_id = 1
+                            AND cached_r.unit_value_scaled > 0))
+                   THEN -10 ELSE 0 END
+              """;
         var cursorWhere = cursor is null
             ? string.Empty
             : """
@@ -890,7 +937,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                        c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
                        c.publication_date, c.global_updated_at, c.total_homologated_scaled,
                        c.distance_from_ribeirao_km,
-                       {geographicLayerExpression} AS geographic_layer,
+                       ({cachePriorityExpression}) + ({geographicLayerExpression}) AS geographic_layer,
                        {GeographicGroupExpression} AS group_rank,
                        CASE WHEN COALESCE(c.random_order_key, 0) >= $randomPivot THEN 0 ELSE 1 END AS rotation_band,
                        COALESCE(c.random_order_key, 0) AS random_order_key
@@ -910,6 +957,10 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         if (explicitMatch.Length > 0)
         {
             command.Parameters.AddWithValue("$explicitMatch", explicitMatch);
+        }
+        if (cachedItemMatch.Length > 0)
+        {
+            command.Parameters.AddWithValue("$cachedItemMatch", cachedItemMatch);
         }
         command.Parameters.AddWithValue("$randomPivot", randomPivot);
         command.Parameters.AddWithValue("$limit", pageSize + 1);
@@ -975,6 +1026,19 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                 "CASE WHEN c.uf = $uf THEN 0 ELSE 1 END",
             _ => "COALESCE(c.geo_layer, 1)"
         };
+        const string cachedContractPriorityExpression = """
+            CASE WHEN EXISTS(
+                SELECT 1 FROM items cached_i
+                 WHERE cached_i.contract_id = c.pncp_id
+                   AND cached_i.hydration_status = 2
+                   AND EXISTS(
+                       SELECT 1 FROM item_results cached_r
+                        WHERE cached_r.contract_id = cached_i.contract_id
+                          AND cached_r.item_number = cached_i.item_number
+                          AND cached_r.result_status_id = 1
+                          AND cached_r.unit_value_scaled > 0))
+                 THEN -10 ELSE 0 END
+            """;
 
         if (filters.StartDate is not null)
         {
@@ -1008,7 +1072,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                        c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
                        c.publication_date, c.global_updated_at, c.total_homologated_scaled,
                        c.distance_from_ribeirao_km,
-                       {geographicPriorityExpression} AS geographic_layer,
+                       ({cachedContractPriorityExpression}) + ({geographicPriorityExpression}) AS geographic_layer,
                        {GeographicGroupExpression} AS group_rank,
                        CASE WHEN COALESCE(c.random_order_key, 0) >= $randomPivot THEN 0 ELSE 1 END AS rotation_band,
                        COALESCE(c.random_order_key, 0) AS random_order_key
@@ -3478,6 +3542,86 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             ('00000000000000000000000000000018',1,'ROLO','ROLO','',1,1),
             ('00000000000000000000000000000019',1,'JOGO','JG','',1,1),
             ('0000000000000000000000000000001a',1,'JOGO','JOGO','',1,1);
+        """;
+
+    private const string SchemaV15Sql = """
+        CREATE TABLE IF NOT EXISTS price_cache_control(
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            authorized INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            paused INTEGER NOT NULL DEFAULT 0,
+            status INTEGER NOT NULL DEFAULT 0,
+            window_start TEXT,
+            window_end TEXT,
+            authorized_at TEXT,
+            last_started_at TEXT,
+            last_completed_at TEXT,
+            last_error TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+
+        INSERT OR IGNORE INTO price_cache_control(id, updated_at)
+        VALUES(1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+
+        CREATE TABLE IF NOT EXISTS price_cache_contracts(
+            contract_id TEXT PRIMARY KEY REFERENCES contracts(pncp_id) ON DELETE CASCADE,
+            source_global_updated_at TEXT,
+            status INTEGER NOT NULL DEFAULT 0,
+            item_count INTEGER NOT NULL DEFAULT 0,
+            active_result_count INTEGER NOT NULL DEFAULT 0,
+            cancelled_result_count INTEGER NOT NULL DEFAULT 0,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT '',
+            next_retry_at TEXT,
+            background_owned INTEGER NOT NULL DEFAULT 0,
+            user_pinned INTEGER NOT NULL DEFAULT 0,
+            started_at TEXT,
+            completed_at TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_price_cache_contracts_work
+            ON price_cache_contracts(status, next_retry_at, contract_id);
+        CREATE INDEX IF NOT EXISTS idx_price_cache_contracts_ownership
+            ON price_cache_contracts(background_owned, user_pinned, contract_id);
+
+        INSERT OR IGNORE INTO price_cache_contracts(
+            contract_id, source_global_updated_at, status, item_count,
+            active_result_count, cancelled_result_count, attempts, last_error,
+            background_owned, user_pinned, completed_at, updated_at)
+        SELECT c.pncp_id,
+               s.source_global_updated_at,
+               CASE WHEN COALESCE(s.source_global_updated_at, '') = COALESCE(c.global_updated_at, '')
+                          AND NOT EXISTS(
+                              SELECT 1 FROM items pending
+                               WHERE pending.contract_id = c.pncp_id
+                                 AND pending.has_result = 1
+                                 AND pending.hydration_status <> 2)
+                    THEN 2 ELSE 0 END,
+               (SELECT COUNT(*) FROM items i WHERE i.contract_id = c.pncp_id),
+               (SELECT COUNT(*) FROM item_results r
+                 WHERE r.contract_id = c.pncp_id AND r.result_status_id = 1),
+               (SELECT COUNT(*) FROM item_results r
+                 WHERE r.contract_id = c.pncp_id AND r.result_status_id <> 1),
+               0, '', 0, 1,
+               CASE WHEN COALESCE(s.source_global_updated_at, '') = COALESCE(c.global_updated_at, '')
+                    THEN s.fetched_at ELSE NULL END,
+               strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          FROM contracts c
+          JOIN contract_item_snapshots s ON s.contract_id = c.pncp_id;
+
+        CREATE TRIGGER IF NOT EXISTS contracts_invalidate_price_cache
+        AFTER UPDATE OF global_updated_at ON contracts
+        WHEN COALESCE(old.global_updated_at, '') <> COALESCE(new.global_updated_at, '')
+        BEGIN
+            UPDATE price_cache_contracts
+               SET status = 0,
+                   last_error = '',
+                   next_retry_at = NULL,
+                   completed_at = NULL,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE contract_id = new.pncp_id;
+        END;
         """;
 
 }

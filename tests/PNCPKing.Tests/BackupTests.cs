@@ -31,6 +31,31 @@ public sealed class BackupTests
     }
 
     [Fact]
+    public async Task Import_InspectsSpaceAndReportsObservablePhases()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await database.Repository.UpsertContractsAsync([
+            RepositorySearchTests.Contract("progress", "Progresso de importação", "SP", 1)
+        ]);
+        var service = new BackupService(database.Repository);
+        var backupPath = Path.Combine(database.Directory, "progress.pncpking");
+        await service.ExportAsync(backupPath, BackupProfile.Compact);
+        var inspection = await service.InspectAsync(backupPath);
+        var progress = new RecordingProgress<BackupImportProgress>();
+
+        await service.ImportAsync(backupPath, progress);
+
+        Assert.Equal(SqliteContractRepository.CurrentSchemaVersion, inspection.SchemaVersion);
+        Assert.Equal(BackupProfile.Compact, inspection.Profile);
+        Assert.True(inspection.DatabaseBytes > 0);
+        Assert.True(inspection.HasEnoughSpace);
+        Assert.Contains(progress.Values, item => item.Stage == BackupImportStage.Extracting);
+        Assert.Contains(progress.Values, item => item.Stage == BackupImportStage.VerifyingChecksum);
+        Assert.Contains(progress.Values, item => item.Stage == BackupImportStage.CheckingIntegrity);
+        Assert.Contains(progress.Values, item => item.Stage == BackupImportStage.Completed && item.Percentage == 100d);
+    }
+
+    [Fact]
     public async Task Import_RejectsCorruptedAndIncompatibleBackups()
     {
         await using var database = await TestDatabase.CreateAsync();
@@ -76,6 +101,59 @@ public sealed class BackupTests
         Assert.False(File.Exists(backupPath + ".partial"));
     }
 
+    [Fact]
+    public async Task CompactBackup_RemovesReconstructibleCacheAndImportsDisabled()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var contract = PriceCacheTests.RecentContract("bulk", today, 1);
+        await database.Repository.UpsertContractsAsync([contract]);
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-89), today);
+        await cache.PrepareWindowAsync(today.AddDays(-89), today);
+        await cache.MarkContractDownloadingAsync(contract.PncpId, true);
+        var items = Enumerable.Range(1, 250).Select(number =>
+            PriceCacheTests.Item(contract, number) with
+            {
+                Description = $"Café especial {number} {Guid.NewGuid():N}"
+            }).ToArray();
+        await database.Repository.UpsertItemsAsync(contract.PncpId, items, false);
+        foreach (var item in items)
+        {
+            await database.Repository.ReplaceItemResultsAsync(
+                contract.PncpId,
+                item.ItemNumber,
+                [PriceCacheTests.Result(contract, item.ItemNumber, 1, true)]);
+        }
+        await cache.MarkContractCompleteAsync(contract.PncpId, contract.GlobalUpdatedAt);
+
+        var service = new BackupService(database.Repository);
+        var full = Path.Combine(database.Directory, "full.pncpking");
+        var compact = Path.Combine(database.Directory, "compact.pncpking");
+        await service.ExportAsync(full, BackupProfile.Full);
+        await service.ExportAsync(compact, BackupProfile.Compact);
+
+        using (var archive = ZipFile.OpenRead(compact))
+        {
+            await using var stream = archive.GetEntry("manifest.json")!.Open();
+            var manifest = await JsonSerializer.DeserializeAsync<DatasetManifest>(stream);
+            Assert.Equal(BackupProfile.Compact, manifest!.BackupProfile);
+            Assert.False(manifest.ContainsPriceCache);
+            Assert.Equal(0, manifest.ItemCount);
+            Assert.Equal(0, manifest.ResultCount);
+        }
+        Assert.True(new FileInfo(compact).Length < new FileInfo(full).Length);
+
+        await service.ImportAsync(compact);
+        var importedCache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
+        var policy = await importedCache.GetPolicyAsync();
+        var counts = await database.Repository.GetCountsAsync();
+        Assert.False(policy.Authorized);
+        Assert.False(policy.Enabled);
+        Assert.Equal(0, counts.Items);
+        Assert.Equal(0, counts.Results);
+    }
+
     private static void ReplaceEntry(string archivePath, string entryName, Func<byte[], byte[]> transform)
     {
         using var archive = ZipFile.Open(archivePath, ZipArchiveMode.Update);
@@ -93,5 +171,12 @@ public sealed class BackupTests
         using var output = newEntry.Open();
         var replacement = transform(bytes);
         output.Write(replacement);
+    }
+
+    private sealed class RecordingProgress<T> : IProgress<T>
+    {
+        public List<T> Values { get; } = [];
+
+        public void Report(T value) => Values.Add(value);
     }
 }
