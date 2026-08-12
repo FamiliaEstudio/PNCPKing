@@ -234,7 +234,7 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
             PncpRequestPriority.UserSelectedItem,
             PncpRequestCategory.Other);
         var uri = BuildDocumentUri(contract, document.Sequence);
-        const int maximumAttempts = 7;
+        var maximumAttempts = MaximumAttemptsFor(uri);
         for (var attempt = 1; attempt <= maximumAttempts; attempt++)
         {
             try
@@ -356,7 +356,7 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
 
     private async Task<JsonPayload<T>> GetJsonAsync<T>(Uri uri, CancellationToken cancellationToken)
     {
-        const int maximumAttempts = 7;
+        var maximumAttempts = MaximumAttemptsFor(uri);
         for (var attempt = 1; attempt <= maximumAttempts; attempt++)
         {
             var stopwatch = Stopwatch.StartNew();
@@ -366,26 +366,32 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
                     uri,
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(false);
-                stopwatch.Stop();
-
                 if (response.StatusCode == HttpStatusCode.NoContent)
                 {
+                    stopwatch.Stop();
                     return new JsonPayload<T>(default, 0, stopwatch.Elapsed);
                 }
 
                 if (response.IsSuccessStatusCode)
                 {
                     await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-                    using var memory = new MemoryStream();
-                    await stream.CopyToAsync(memory, cancellationToken).ConfigureAwait(false);
-                    var bytes = memory.ToArray();
-                    if (bytes.Length == 0)
+                    var countingStream = new PayloadCountingStream(stream);
+                    T? value;
+                    try
                     {
-                        return new JsonPayload<T>(default, 0, stopwatch.Elapsed);
+                        value = await JsonSerializer.DeserializeAsync<T>(
+                                countingStream,
+                                JsonOptions,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (JsonException) when (countingStream.BytesRead == 0)
+                    {
+                        value = default;
                     }
 
-                    var value = JsonSerializer.Deserialize<T>(bytes, JsonOptions);
-                    return new JsonPayload<T>(value, bytes.LongLength, stopwatch.Elapsed);
+                    stopwatch.Stop();
+                    return new JsonPayload<T>(value, countingStream.BytesRead, stopwatch.Elapsed);
                 }
 
                 if (response.StatusCode == HttpStatusCode.UnprocessableEntity)
@@ -464,6 +470,9 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
         return TimeSpan.FromMilliseconds(exponentialSeconds * 1000 + Random.Shared.Next(250, 1250));
     }
 
+    private static int MaximumAttemptsFor(Uri uri) =>
+        PncpRequestOptions.ResolveCurrentPriority(uri) <= PncpRequestPriority.AdditionalBatches ? 3 : 7;
+
     private static int ReadFlexibleInt(JsonElement element)
     {
         if (element.ValueKind == JsonValueKind.Number && element.TryGetInt32(out var number))
@@ -535,4 +544,69 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
     }
 
     private sealed record JsonPayload<T>(T? Value, long PayloadBytes, TimeSpan Elapsed);
+
+    private sealed class PayloadCountingStream(Stream inner) : Stream
+    {
+        public long BytesRead { get; private set; }
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var read = inner.Read(buffer, offset, count);
+            BytesRead += read;
+            return read;
+        }
+
+        public override int Read(Span<byte> buffer)
+        {
+            var read = inner.Read(buffer);
+            BytesRead += read;
+            return read;
+        }
+
+        public override async Task<int> ReadAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken)
+        {
+            var read = await inner.ReadAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
+            BytesRead += read;
+            return read;
+        }
+
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            var read = await inner.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            BytesRead += read;
+            return read;
+        }
+
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            // The response owns the underlying stream.
+            base.Dispose(disposing);
+        }
+
+        public override ValueTask DisposeAsync()
+        {
+            GC.SuppressFinalize(this);
+            return ValueTask.CompletedTask;
+        }
+    }
 }

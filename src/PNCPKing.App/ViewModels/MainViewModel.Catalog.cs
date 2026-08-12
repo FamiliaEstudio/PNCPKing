@@ -18,7 +18,7 @@ public sealed partial class MainViewModel
     private double _catalogProgress;
     private string _catalogProgressText = "CATMAT/CATSER: catálogo local ainda não verificado.";
 
-    public ObservableCollection<CatalogSyncDisplay> CatalogCoverage { get; } = [];
+    public RangeObservableCollection<CatalogSyncDisplay> CatalogCoverage { get; } = [];
     public ICommand UpdateCatalogCommand { get; private set; } = null!;
     public ICommand PauseCatalogCommand { get; private set; } = null!;
     public ICommand CancelCatalogCommand { get; private set; } = null!;
@@ -96,6 +96,10 @@ public sealed partial class MainViewModel
         await TryRunAutomaticMaintenanceAsync().ConfigureAwait(true);
         _ = TryRunPriceCacheMaintenanceAsync();
         await TryRunCatalogMaintenanceAsync().ConfigureAwait(true);
+        if (!IsIndexBusy && !IsPriceBusy && !IsForegroundBusy && !IsFileBusy && !IsCatalogBusy && !_disposed)
+        {
+            await Task.Run(() => _repository.OptimizeAsync()).ConfigureAwait(true);
+        }
     }
 
     private async Task TryRunCatalogMaintenanceAsync()
@@ -184,11 +188,7 @@ public sealed partial class MainViewModel
     private async Task RefreshCatalogCoverageAsync()
     {
         var states = await _catalogRepository.GetSyncStatesAsync().ConfigureAwait(true);
-        CatalogCoverage.Clear();
-        foreach (var state in states)
-        {
-            CatalogCoverage.Add(new CatalogSyncDisplay(state));
-        }
+        CatalogCoverage.ReplaceAll(states.Select(state => new CatalogSyncDisplay(state)));
 
         var completed = states.Where(state => state.Status == CatalogSyncStatus.Complete).ToArray();
         if (!IsCatalogBusy)

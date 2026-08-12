@@ -5,7 +5,11 @@
         xmlns:services="clr-namespace:PNCPKing.App.Services"
         Title="PNCP King" Width="1540" Height="940" MinWidth="1180" MinHeight="740"
         WindowStartupLocation="CenterScreen">
-    <Grid Margin="10">
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+    </Window.Resources>
+    <Grid>
+    <Grid Margin="10" IsEnabled="{Binding IsApplicationReady}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -30,6 +34,10 @@
                 <Button Content="Importar backup" Command="{Binding ImportBackupCommand}" />
                 <Button Content="Logs de diagnóstico" Command="{Binding OpenDiagnosticLogsCommand}"
                         ToolTip="Abre a pasta com os logs que podem ser copiados para análise." />
+                <Button Content="Relatório de desempenho" Command="{Binding ExportPerformanceReportCommand}"
+                        ToolTip="Exporta medições locais e anônimas desta execução em JSON e TXT." />
+                <Button Content="Comparar desempenho" Command="{Binding ComparePerformanceReportCommand}"
+                        ToolTip="Compara esta execução com um relatório-base e calcula os ganhos." />
                 <Button Content="Limpar cache permanente" Command="{Binding ClearCacheCommand}" />
                 <Button Content="Limpar cache de documentos" Command="{Binding ClearDocumentCacheCommand}"
                         ToolTip="Remove anexos e índices de texto locais sem alterar o banco, relatórios ou PDFs em Downloads." />
@@ -342,6 +350,8 @@
                               AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Extended"
                               SelectionUnit="FullRow"
                               EnableRowVirtualization="True" EnableColumnVirtualization="True"
+                              VirtualizingPanel.IsVirtualizing="True"
+                              VirtualizingPanel.VirtualizationMode="Recycling"
                               FrozenColumnCount="2"
                               ScrollViewer.HorizontalScrollBarVisibility="Auto"
                               ScrollViewer.VerticalScrollBarVisibility="Auto">
@@ -422,7 +432,9 @@
                         </Grid.RowDefinitions>
                         <DataGrid ItemsSource="{Binding ContractResults}" SelectedItem="{Binding SelectedContract}"
                                   AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
-                                  EnableRowVirtualization="True" EnableColumnVirtualization="True">
+                                  EnableRowVirtualization="True" EnableColumnVirtualization="True"
+                                  VirtualizingPanel.IsVirtualizing="True"
+                                  VirtualizingPanel.VirtualizationMode="Recycling">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="Publicação" Binding="{Binding PublicationDate, StringFormat=dd/MM/yyyy}" Width="95" />
                                 <DataGridTextColumn Header="UF" Binding="{Binding Uf}" Width="42" />
@@ -464,7 +476,9 @@
                         </DockPanel>
                         <TextBlock Grid.Row="1" Text="{Binding ItemSummary}" Margin="0,4" TextWrapping="Wrap" />
                         <DataGrid Grid.Row="2" ItemsSource="{Binding ContractItemRows}" AutoGenerateColumns="False"
-                                  IsReadOnly="True" EnableRowVirtualization="True" EnableColumnVirtualization="True">
+                                  IsReadOnly="True" EnableRowVirtualization="True" EnableColumnVirtualization="True"
+                                  VirtualizingPanel.IsVirtualizing="True"
+                                  VirtualizingPanel.VirtualizationMode="Recycling">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="Item" Binding="{Binding ItemNumber}" Width="60" />
                                 <DataGridTextColumn Header="Descrição" Binding="{Binding Description}" Width="*" MinWidth="300" />
@@ -539,6 +553,8 @@
                                   MouseDoubleClick="QuotationLinesGrid_MouseDoubleClick"
                                   PreviewKeyDown="QuotationLinesGrid_PreviewKeyDown"
                                   EnableRowVirtualization="True" EnableColumnVirtualization="True"
+                                  VirtualizingPanel.IsVirtualizing="True"
+                                  VirtualizingPanel.VirtualizationMode="Recycling"
                                   ScrollViewer.HorizontalScrollBarVisibility="Auto"
                                   ScrollViewer.VerticalScrollBarVisibility="Auto">
                             <DataGrid.Columns>
@@ -586,6 +602,8 @@
                                               SelectedItem="{Binding SelectedQuotationBasket}"
                                               AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
                                               EnableRowVirtualization="True" EnableColumnVirtualization="True"
+                                              VirtualizingPanel.IsVirtualizing="True"
+                                              VirtualizingPanel.VirtualizationMode="Recycling"
                                               ScrollViewer.HorizontalScrollBarVisibility="Auto"
                                               ScrollViewer.VerticalScrollBarVisibility="Auto">
                                         <DataGrid.RowStyle>
@@ -637,6 +655,8 @@
                                               SelectedItem="{Binding SelectedVisibleQuotationReference}"
                                               AutoGenerateColumns="False" IsReadOnly="True"
                                               EnableRowVirtualization="True" EnableColumnVirtualization="True"
+                                              VirtualizingPanel.IsVirtualizing="True"
+                                              VirtualizingPanel.VirtualizationMode="Recycling"
                                               PreviewMouseRightButtonDown="MainReferences_PreviewMouseRightButtonDown"
                                               MouseDoubleClick="MainReferences_MouseDoubleClick"
                                               ScrollViewer.HorizontalScrollBarVisibility="Auto"
@@ -757,5 +777,20 @@
                 <TextBlock Text="{Binding DataFolder, StringFormat=Pasta: {0}}" />
             </StatusBarItem>
         </StatusBar>
+    </Grid>
+        <Border Background="#EAF3FA" BorderBrush="#2F80D0" BorderThickness="1"
+                CornerRadius="8" Padding="24" Width="470" HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Visibility="{Binding IsInitializing, Converter={StaticResource BooleanToVisibilityConverter}}">
+            <StackPanel>
+                <TextBlock Text="PNCP King" FontSize="26" FontWeight="Bold"
+                           HorizontalAlignment="Center" />
+                <ProgressBar Height="8" Margin="0,18,0,12" IsIndeterminate="True" />
+                <TextBlock Text="{Binding StartupStatus}" TextWrapping="Wrap"
+                           TextAlignment="Center" FontSize="14" />
+                <Button Content="Cancelar inicialização" Command="{Binding CancelStartupCommand}"
+                        HorizontalAlignment="Center" Margin="0,18,0,0" />
+            </StackPanel>
+        </Border>
     </Grid>
 </Window>

@@ -41,12 +41,12 @@ public sealed partial class MainViewModel
 
     public bool IsQuotationAutomationRunning => _quotationAutomationCancellation is not null;
 
-    public ObservableCollection<QuotationProjectDisplay> QuotationProjects { get; } = [];
-    public ObservableCollection<QuotationLineDisplay> QuotationLines { get; } = [];
-    public ObservableCollection<QuotationBasketDisplay> QuotationBaskets { get; } = [];
-    public ObservableCollection<QuotationReferenceDisplay> QuotationReferences { get; } = [];
-    public ObservableCollection<QuotationReferenceDisplay> SelectedBasketReferences { get; } = [];
-    public ObservableCollection<QuotationPriceDisplayRow> VisibleQuotationReferences { get; } = [];
+    public RangeObservableCollection<QuotationProjectDisplay> QuotationProjects { get; } = [];
+    public RangeObservableCollection<QuotationLineDisplay> QuotationLines { get; } = [];
+    public RangeObservableCollection<QuotationBasketDisplay> QuotationBaskets { get; } = [];
+    public RangeObservableCollection<QuotationReferenceDisplay> QuotationReferences { get; } = [];
+    public RangeObservableCollection<QuotationReferenceDisplay> SelectedBasketReferences { get; } = [];
+    public RangeObservableCollection<QuotationPriceDisplayRow> VisibleQuotationReferences { get; } = [];
 
     public ICommand UseQuotationSampleCommand { get; private set; } = null!;
     public ICommand UpdateQuotationSampleCommand { get; private set; } = null!;
@@ -583,11 +583,7 @@ public sealed partial class MainViewModel
     {
         var projects = await _quotationService.GetProjectsAsync().ConfigureAwait(true);
         var selectedId = preferredProjectId ?? SelectedQuotationProject?.Id;
-        QuotationProjects.Clear();
-        foreach (var project in projects)
-        {
-            QuotationProjects.Add(new QuotationProjectDisplay(project));
-        }
+        QuotationProjects.ReplaceAll(projects.Select(project => new QuotationProjectDisplay(project)));
 
         SelectedQuotationProject = QuotationProjects.FirstOrDefault(project => project.Id == selectedId)
                                    ?? QuotationProjects.FirstOrDefault();
@@ -610,11 +606,7 @@ public sealed partial class MainViewModel
         try
         {
             var analyses = await _quotationService.GetAnalysesAsync(projectId.Value).ConfigureAwait(true);
-            QuotationLines.Clear();
-            foreach (var analysis in analyses)
-            {
-                QuotationLines.Add(new QuotationLineDisplay(analysis));
-            }
+            QuotationLines.ReplaceAll(analyses.Select(analysis => new QuotationLineDisplay(analysis)));
 
             SelectedQuotationLine = QuotationLines.FirstOrDefault(line => line.Line.Id == preferredLineId)
                                       ?? QuotationLines.FirstOrDefault();
@@ -1924,16 +1916,11 @@ public sealed partial class MainViewModel
 
     private void BindSelectedQuotationLine()
     {
-        QuotationReferences.Clear();
-        if (SelectedQuotationLine is not null)
-        {
-            foreach (var reference in SelectedQuotationLine.Analysis.References
-                         .OrderBy(reference => reference.State)
-                         .ThenByDescending(reference => reference.Adequacy.Total))
-            {
-                QuotationReferences.Add(new QuotationReferenceDisplay(reference));
-            }
-        }
+        QuotationReferences.ReplaceAll(
+            SelectedQuotationLine?.Analysis.References
+                .OrderBy(reference => reference.State)
+                .ThenByDescending(reference => reference.Adequacy.Total)
+                .Select(reference => new QuotationReferenceDisplay(reference)) ?? []);
 
         BindQuotationBasketPage();
         RebuildVisibleQuotationReferences();
@@ -2027,10 +2014,8 @@ public sealed partial class MainViewModel
         var selectedIds = SelectedQuotationBasket?.Source.References
             .Select(reference => reference.Id)
             .ToHashSet(StringComparer.Ordinal) ?? [];
-        VisibleQuotationReferences.Clear();
-        if (SelectedQuotationLine is not null)
-        {
-            foreach (var reference in SelectedQuotationLine.Analysis.References)
+        var visibleReferences = SelectedQuotationLine?.Analysis.References
+            .Select(reference =>
             {
                 var inBasket = selectedIds.Contains(reference.Id);
                 var visible = QuotationReferenceScope switch
@@ -2042,13 +2027,11 @@ public sealed partial class MainViewModel
                         reference.State != QuotationReferenceState.Eligible,
                     _ => true
                 };
-                if (visible)
-                {
-                    VisibleQuotationReferences.Add(
-                        new QuotationPriceDisplayRow(reference, inBasket));
-                }
-            }
-        }
+                return (Reference: reference, InBasket: inBasket, Visible: visible);
+            })
+            .Where(value => value.Visible)
+            .Select(value => new QuotationPriceDisplayRow(value.Reference, value.InBasket)) ?? [];
+        VisibleQuotationReferences.ReplaceAll(visibleReferences);
 
         SelectedVisibleQuotationReference =
             VisibleQuotationReferences.FirstOrDefault(value => value.Id == selectedId) ??
@@ -2067,18 +2050,13 @@ public sealed partial class MainViewModel
     private void BindQuotationBasketPage()
     {
         var previouslySelectedKey = SelectedQuotationBasket?.Key;
-        QuotationBaskets.Clear();
-        if (SelectedQuotationLine is not null)
-        {
-            foreach (var basket in SelectedQuotationLine.Analysis.Baskets
-                         .Skip((QuotationBasketPage - 1) * QuotationBasketPageSize)
-                         .Take(QuotationBasketPageSize))
-            {
-                QuotationBaskets.Add(new QuotationBasketDisplay(
+        QuotationBaskets.ReplaceAll(
+            SelectedQuotationLine?.Analysis.Baskets
+                .Skip((QuotationBasketPage - 1) * QuotationBasketPageSize)
+                .Take(QuotationBasketPageSize)
+                .Select(basket => new QuotationBasketDisplay(
                     basket,
-                    basket.Key == SelectedQuotationLine.Line.SelectedBasketKey));
-            }
-        }
+                    basket.Key == SelectedQuotationLine.Line.SelectedBasketKey)) ?? []);
 
         SelectedQuotationBasket = QuotationBaskets.FirstOrDefault(basket => basket.Key == previouslySelectedKey)
                                     ?? QuotationBaskets.FirstOrDefault(basket => basket.WasPreviouslySelected)

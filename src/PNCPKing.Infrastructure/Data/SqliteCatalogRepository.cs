@@ -9,8 +9,11 @@ namespace PNCPKing.Infrastructure.Data;
 public sealed class SqliteCatalogRepository : ICatalogRepository
 {
     private readonly string _connectionString;
+    private readonly IPerformanceTelemetry _performance;
 
-    public SqliteCatalogRepository(string databasePath)
+    public SqliteCatalogRepository(
+        string databasePath,
+        IPerformanceTelemetry? performance = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         _connectionString = new SqliteConnectionStringBuilder
@@ -21,6 +24,7 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
             ForeignKeys = true,
             Pooling = true
         }.ToString();
+        _performance = performance ?? NullPerformanceTelemetry.Instance;
     }
 
     public async Task<CatalogSyncState> GetSyncStateAsync(
@@ -94,6 +98,7 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         string generation,
         CancellationToken cancellationToken = default)
     {
+        using var span = _performance.Begin("catalog", "stage-page");
         ArgumentNullException.ThrowIfNull(page);
         ArgumentException.ThrowIfNullOrWhiteSpace(generation);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -138,8 +143,7 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
             UPDATE catalog_sync_state
                SET status = $status, next_page = $nextPage,
                    total_pages = $totalPages, total_records = $totalRecords,
-                   staged_records = (SELECT COUNT(*) FROM catalog_entries_stage
-                                      WHERE generation = $generation AND catalog_kind = $kind),
+                   staged_records = MIN($totalRecords, staged_records + $pageRecords),
                    last_error = ''
              WHERE catalog_kind = $kind AND generation = $generation;
             """;
@@ -147,6 +151,7 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         state.Parameters.AddWithValue("$nextPage", page.Page + 1);
         state.Parameters.AddWithValue("$totalPages", page.TotalPages);
         state.Parameters.AddWithValue("$totalRecords", page.TotalRecords);
+        state.Parameters.AddWithValue("$pageRecords", page.Entries.Count);
         state.Parameters.AddWithValue("$generation", generation);
         state.Parameters.AddWithValue("$kind", (int)page.Kind);
         if (await state.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
@@ -155,6 +160,7 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         }
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        span.Complete(page.Entries.Count);
     }
 
     public async Task PublishAsync(
@@ -162,6 +168,7 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         string generation,
         CancellationToken cancellationToken = default)
     {
+        using var span = _performance.Begin("catalog", "publish");
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         long staged;
@@ -229,7 +236,25 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
                     ncm_code = excluded.ncm_code, sustainable = excluded.sustainable,
                     exclusive_central = excluded.exclusive_central,
                     remote_updated_at = excluded.remote_updated_at,
-                    search_text = excluded.search_text;
+                    search_text = excluded.search_text
+                WHERE catalog_entries.description <> excluded.description
+                   OR catalog_entries.active <> 1
+                   OR catalog_entries.level1_code <> excluded.level1_code
+                   OR catalog_entries.level1_name <> excluded.level1_name
+                   OR catalog_entries.level2_code <> excluded.level2_code
+                   OR catalog_entries.level2_name <> excluded.level2_name
+                   OR catalog_entries.level3_code <> excluded.level3_code
+                   OR catalog_entries.level3_name <> excluded.level3_name
+                   OR catalog_entries.level4_code <> excluded.level4_code
+                   OR catalog_entries.level4_name <> excluded.level4_name
+                   OR catalog_entries.level5_code <> excluded.level5_code
+                   OR catalog_entries.level5_name <> excluded.level5_name
+                   OR catalog_entries.ncm_code <> excluded.ncm_code
+                   OR catalog_entries.sustainable <> excluded.sustainable
+                   OR catalog_entries.exclusive_central <> excluded.exclusive_central
+                   OR COALESCE(catalog_entries.remote_updated_at, '') <>
+                      COALESCE(excluded.remote_updated_at, '')
+                   OR catalog_entries.search_text <> excluded.search_text;
                 """;
             publish.Parameters.AddWithValue("$generation", generation);
             publish.Parameters.AddWithValue("$kind", (int)kind);
@@ -257,6 +282,7 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         }
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        span.Complete(staged);
     }
 
     public async Task MarkFailedAsync(
@@ -571,7 +597,9 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = "PRAGMA busy_timeout=30000; PRAGMA foreign_keys=ON;";
+        command.CommandText =
+            "PRAGMA busy_timeout=30000; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL; " +
+            "PRAGMA cache_size=-65536; PRAGMA temp_store=FILE; PRAGMA mmap_size=134217728;";
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         return connection;
     }

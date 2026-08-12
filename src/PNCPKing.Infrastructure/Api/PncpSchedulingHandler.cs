@@ -1,4 +1,6 @@
 using System.Net;
+using System.Diagnostics;
+using PNCPKing.Core.Interfaces;
 
 namespace PNCPKing.Infrastructure.Api;
 
@@ -51,6 +53,12 @@ public static class PncpRequestOptions
             ? taggedPriority
             : scope?.Priority ?? DefaultPriority(category);
         return (priority, category);
+    }
+
+    internal static PncpRequestPriority ResolveCurrentPriority(Uri uri)
+    {
+        var category = InferCategory(uri);
+        return CurrentScope.Value?.Priority ?? DefaultPriority(category);
     }
 
     public static PncpRequestCategory InferCategory(Uri? uri)
@@ -109,13 +117,16 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
 {
     private readonly PncpRequestScheduler _scheduler;
     private readonly PncpRequestTelemetry _telemetry;
+    private readonly IPerformanceTelemetry _performance;
 
     public PncpSchedulingHandler(
         PncpRequestScheduler scheduler,
-        PncpRequestTelemetry telemetry)
+        PncpRequestTelemetry telemetry,
+        IPerformanceTelemetry? performance = null)
     {
         _scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
         _telemetry = telemetry ?? throw new ArgumentNullException(nameof(telemetry));
+        _performance = performance ?? NullPerformanceTelemetry.Instance;
     }
 
     public PncpRequestScheduler Scheduler => _scheduler;
@@ -127,16 +138,28 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
     {
         var metadata = PncpRequestOptions.Resolve(request);
         var measurement = _telemetry.Begin(metadata.Category);
+        var queuedAt = Stopwatch.GetTimestamp();
         IDisposable? lease = null;
         RequestCompletion? completion = null;
+        PerformanceSpan? networkSpan = null;
 
         try
         {
             lease = await _scheduler.AcquireAsync(metadata.Priority, cancellationToken).ConfigureAwait(false);
+            _performance.Record(
+                "pncp-request",
+                $"queue-{metadata.Category}",
+                Stopwatch.GetElapsedTime(queuedAt));
             measurement.MarkDispatched();
+            networkSpan = _performance.Begin("pncp-request", $"network-{metadata.Category}");
             var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
-            completion = new RequestCompletion(lease, measurement, response.IsSuccessStatusCode);
+            completion = new RequestCompletion(
+                lease,
+                measurement,
+                networkSpan,
+                response.IsSuccessStatusCode);
             lease = null;
+            networkSpan = null;
 
             if (response.Content is null)
             {
@@ -149,10 +172,11 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
 
             return response;
         }
-        catch
+        catch (Exception exception)
         {
             completion?.Complete(contentSucceeded: false);
             measurement.Complete(succeeded: false);
+            networkSpan?.Fail(exception);
             throw;
         }
         finally
@@ -164,16 +188,19 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
     private sealed class RequestCompletion(
         IDisposable lease,
         PncpRequestTelemetry.Measurement measurement,
+        PerformanceSpan performanceSpan,
         bool responseSucceeded)
     {
         private IDisposable? _lease = lease;
         private int _completed;
+        private long _bytes;
 
         public void AddBytes(long count)
         {
             if (Volatile.Read(ref _completed) == 0)
             {
                 measurement.AddBytes(count);
+                Interlocked.Add(ref _bytes, count);
             }
         }
 
@@ -185,6 +212,14 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
             }
 
             measurement.Complete(responseSucceeded && contentSucceeded);
+            if (responseSucceeded && contentSucceeded)
+            {
+                performanceSpan.Complete(bytes: Interlocked.Read(ref _bytes));
+            }
+            else
+            {
+                performanceSpan.Fail(new HttpRequestException("PNCP request failed."), bytes: Interlocked.Read(ref _bytes));
+            }
             Interlocked.Exchange(ref _lease, null)?.Dispose();
         }
     }

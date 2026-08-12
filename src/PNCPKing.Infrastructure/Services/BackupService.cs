@@ -9,7 +9,9 @@ using PNCPKing.Infrastructure.Data;
 
 namespace PNCPKing.Infrastructure.Services;
 
-public sealed class BackupService(IContractRepository repository)
+public sealed class BackupService(
+    IContractRepository repository,
+    IPerformanceTelemetry? performance = null)
 {
     private const long ImportSafetyReserveBytes = 1L * 1024 * 1024 * 1024;
     private const int ProgressBufferBytes = 1024 * 1024;
@@ -18,6 +20,7 @@ public sealed class BackupService(IContractRepository repository)
         WriteIndented = true,
         PropertyNameCaseInsensitive = true
     };
+    private readonly IPerformanceTelemetry _performance = performance ?? NullPerformanceTelemetry.Instance;
 
     public async Task ExportAsync(string destinationPath, CancellationToken cancellationToken = default)
     {
@@ -29,6 +32,7 @@ public sealed class BackupService(IContractRepository repository)
         BackupProfile profile,
         CancellationToken cancellationToken = default)
     {
+        using var span = _performance.Begin("backup", "export");
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         if (!destinationPath.EndsWith(".pncpking", StringComparison.OrdinalIgnoreCase))
         {
@@ -112,6 +116,7 @@ public sealed class BackupService(IContractRepository repository)
             }
 
             File.Move(temporaryArchive, destinationPath, true);
+            span.Complete(bytes: new FileInfo(destinationPath).Length);
         }
         finally
         {
@@ -206,6 +211,7 @@ public sealed class BackupService(IContractRepository repository)
         IProgress<BackupImportProgress>? progress,
         CancellationToken cancellationToken = default)
     {
+        using var span = _performance.Begin("backup", "import");
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         Report(progress, BackupImportStage.Inspecting, 1, "Inspecionando o arquivo e o espaço disponível…");
         CleanupStaleTemporaryDirectories(TimeSpan.FromMinutes(5));
@@ -226,6 +232,7 @@ public sealed class BackupService(IContractRepository repository)
             var importedDatabase = Path.Combine(temporaryDirectory, "data.db");
             var stagedEvidenceFolder = Path.Combine(temporaryDirectory, "internet-evidence");
             DatasetManifest manifest;
+            string actualHash;
             using (var archive = ZipFile.OpenRead(sourcePath))
             {
                 var manifestEntry = archive.GetEntry("manifest.json")
@@ -250,7 +257,7 @@ public sealed class BackupService(IContractRepository repository)
 
                 await using var source = databaseEntry.Open();
                 await using var destination = File.Create(importedDatabase);
-                await CopyWithProgressAsync(
+                actualHash = await CopyWithProgressAsync(
                         source,
                         destination,
                         databaseEntry.Length,
@@ -295,18 +302,7 @@ public sealed class BackupService(IContractRepository repository)
                 }
             }
 
-            Report(progress, BackupImportStage.VerifyingChecksum, 30, "Verificando o checksum do banco…");
-            var actualHash = await ComputeSha256Async(
-                    importedDatabase,
-                    (processed, total) => Report(
-                        progress,
-                        BackupImportStage.VerifyingChecksum,
-                        Scale(processed, total, 30, 43),
-                        $"Verificando checksum: {FormatBytes(processed)} de {FormatBytes(total)}…",
-                        processed,
-                        total),
-                    cancellationToken)
-                .ConfigureAwait(false);
+            Report(progress, BackupImportStage.VerifyingChecksum, 43, "Checksum calculado durante a extração.");
             if (!CryptographicOperations.FixedTimeEquals(
                     Convert.FromHexString(actualHash),
                     Convert.FromHexString(manifest.DatabaseSha256)))
@@ -425,6 +421,7 @@ public sealed class BackupService(IContractRepository repository)
                 throw;
             }
 
+            span.Complete(bytes: inspection.DatabaseBytes);
             return recoverableBackup;
         }
         finally
@@ -837,13 +834,14 @@ public sealed class BackupService(IContractRepository repository)
         return path;
     }
 
-    private static async Task CopyWithProgressAsync(
+    private static async Task<string> CopyWithProgressAsync(
         Stream source,
         Stream destination,
         long totalBytes,
         Action<long, long> progress,
         CancellationToken cancellationToken)
     {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var buffer = new byte[ProgressBufferBytes];
         long processed = 0;
         var lastReported = 0L;
@@ -856,6 +854,7 @@ public sealed class BackupService(IContractRepository repository)
             }
 
             await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+            hash.AppendData(buffer, 0, read);
             processed += read;
             if (processed - lastReported >= 16L * ProgressBufferBytes || processed == totalBytes)
             {
@@ -865,6 +864,7 @@ public sealed class BackupService(IContractRepository repository)
         }
 
         await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+        return Convert.ToHexString(hash.GetHashAndReset());
     }
 
     private static double Scale(long value, long total, double minimum, double maximum)

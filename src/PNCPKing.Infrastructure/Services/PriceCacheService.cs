@@ -11,17 +11,20 @@ public sealed class PriceCacheService(
     IContractRepository contracts,
     ICoverageRepository coverage,
     IPriceCacheRepository cache,
-    TimeSpan? requestTimeout = null)
+    TimeSpan? requestTimeout = null,
+    IPerformanceTelemetry? performance = null)
 {
     public const int WindowDays = 90;
     public static TimeSpan DefaultRequestTimeout { get; } = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan MaximumRetryDelay = TimeSpan.FromHours(6);
     private readonly TimeSpan _requestTimeout = ValidateRequestTimeout(requestTimeout);
+    private readonly IPerformanceTelemetry _performance = performance ?? NullPerformanceTelemetry.Instance;
 
     public async Task SynchronizeAsync(
         IProgress<PriceCacheProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        using var span = _performance.Begin("price-cache", "synchronize");
         var today = DateOnly.FromDateTime(DateTime.Today);
         var start = today.AddDays(-(WindowDays - 1));
         var policy = await cache.GetPolicyAsync(cancellationToken).ConfigureAwait(false);
@@ -45,8 +48,29 @@ public sealed class PriceCacheService(
         await cache.SetStatusAsync(PriceCacheStatus.Downloading, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
         var stopwatch = Stopwatch.StartNew();
+        var lastProgressReport = Stopwatch.GetTimestamp();
         long completedThisRun = 0;
         string? currentContractId = null;
+        var activitySnapshot = await cache.GetProgressAsync(cancellationToken).ConfigureAwait(false);
+        progress?.Report(activitySnapshot);
+
+        bool ShouldReportProgress()
+        {
+            if (progress is null)
+            {
+                return false;
+            }
+
+            var now = Stopwatch.GetTimestamp();
+            if (Stopwatch.GetElapsedTime(lastProgressReport, now) < TimeSpan.FromSeconds(1))
+            {
+                return false;
+            }
+
+            lastProgressReport = now;
+            return true;
+        }
+
         try
         {
             while (true)
@@ -104,6 +128,7 @@ public sealed class PriceCacheService(
                             completedThisRun,
                             cancellationToken)
                         .ConfigureAwait(false));
+                    span.Complete(completedThisRun);
                     return;
                 }
 
@@ -121,14 +146,16 @@ public sealed class PriceCacheService(
                     .ConfigureAwait(false);
                 try
                 {
-                    var activitySnapshot = await cache.GetProgressAsync(cancellationToken).ConfigureAwait(false);
                     if (itemSnapshot?.IsCurrentFor(work.Contract) != true)
                     {
-                        progress?.Report(activitySnapshot with
+                        if (ShouldReportProgress())
                         {
-                            Message = $"consultando itens de {work.Contract.PncpId} " +
-                                      $"(limite de {_requestTimeout.TotalSeconds:N0} s)"
-                        });
+                            progress?.Report(activitySnapshot with
+                            {
+                                Message = $"consultando itens da contratação " +
+                                          $"(limite de {_requestTimeout.TotalSeconds:N0} s)"
+                            });
+                        }
                         using var listScope = PncpRequestOptions.BeginScope(
                             PncpRequestPriority.BackgroundPriceCache,
                             PncpRequestCategory.ItemLists);
@@ -153,11 +180,13 @@ public sealed class PriceCacheService(
                     {
                         var item = pendingItems[pendingIndex];
                         cancellationToken.ThrowIfCancellationRequested();
-                        progress?.Report(activitySnapshot with
+                        if (ShouldReportProgress())
                         {
-                            Message = $"consultando preço {pendingIndex + 1:N0}/{pendingItems.Count:N0} " +
-                                      $"de {work.Contract.PncpId}"
-                        });
+                            progress?.Report(activitySnapshot with
+                            {
+                                Message = $"consultando preço {pendingIndex + 1:N0}/{pendingItems.Count:N0}"
+                            });
+                        }
                         await contracts.SetItemHydrationStatusAsync(
                                 work.Contract.PncpId,
                                 item.ItemNumber,
@@ -261,11 +290,15 @@ public sealed class PriceCacheService(
                     currentContractId = null;
                 }
 
-                progress?.Report(await BuildProgressAsync(
-                        stopwatch,
-                        completedThisRun,
-                        cancellationToken)
-                    .ConfigureAwait(false));
+                if (ShouldReportProgress())
+                {
+                    activitySnapshot = await BuildProgressAsync(
+                            stopwatch,
+                            completedThisRun,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    progress?.Report(activitySnapshot);
+                }
             }
         }
         catch (OperationCanceledException)

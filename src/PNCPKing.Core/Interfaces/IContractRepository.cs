@@ -8,6 +8,12 @@ public interface IContractRepository
     string DatabasePath { get; }
     Task InitializeAsync(CancellationToken cancellationToken = default);
     Task UpsertContractsAsync(IReadOnlyList<ContractRecord> contracts, CancellationToken cancellationToken = default);
+    Task CommitSyncPageAsync(
+        IReadOnlyList<ContractRecord> contracts,
+        SyncPartitionCheckpoint checkpoint,
+        CancellationToken cancellationToken = default);
+    Task<SearchPageSlice> SearchPageAsync(SearchQuery query, CancellationToken cancellationToken = default);
+    Task<long> CountSearchAsync(SearchQuery query, CancellationToken cancellationToken = default);
     Task<SearchPage> SearchAsync(SearchQuery query, CancellationToken cancellationToken = default);
     Task<ItemCandidatePage> SearchItemCandidatesAsync(
         SearchQuery filters,
@@ -53,5 +59,6 @@ public interface IContractRepository
     Task<string> StartSyncRunAsync(SyncMode mode, DateOnly startDate, DateOnly endDate, CancellationToken cancellationToken = default);
     Task CompleteSyncRunAsync(string runId, bool succeeded, long contractsSaved, string? error, CancellationToken cancellationToken = default);
     Task<(long Contracts, long Items, long Results)> GetCountsAsync(CancellationToken cancellationToken = default);
+    Task OptimizeAsync(CancellationToken cancellationToken = default);
     Task CheckpointWalAsync(CancellationToken cancellationToken = default);
 }

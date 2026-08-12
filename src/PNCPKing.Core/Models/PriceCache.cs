@@ -97,7 +97,18 @@ public sealed record PriceCacheLocalPage(
     int Page,
     int PageSize,
     bool HasMore,
-    long MatchingItems);
+    long MatchingItems,
+    IReadOnlyList<ItemSearchRow>? Rows = null,
+    PriceCacheLocalCursor? Cursor = null);
+
+public sealed record PriceCacheLocalCursor(
+    int Page,
+    int ExplicitPriority,
+    double PrimaryRank,
+    double SecondaryRank,
+    string PublicationDate,
+    string ContractId,
+    long ItemNumber);
 
 public enum BackupProfile
 {

@@ -52,9 +52,13 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private readonly ITimedQuotationAutomationService _timedQuotationAutomation;
     private readonly AppSettingsService _settingsService;
     private readonly AppDiagnosticLog _diagnosticLog;
+    private readonly AppPerformanceTelemetry _performanceTelemetry;
     private readonly DispatcherTimer _maintenanceTimer;
     private readonly SemaphoreSlim _itemPageGate = new(1, 1);
+    private readonly HashSet<string> _visibleItemKeys = new(StringComparer.Ordinal);
     private CancellationTokenSource? _indexCancellation;
+    private CancellationTokenSource? _contractSearchCancellation;
+    private CancellationTokenSource? _visibleIdleResumeCancellation;
     private CancellationTokenSource? _priceCancellation;
     private CancellationTokenSource? _foregroundCancellation;
     private CancellationTokenSource? _documentCancellation;
@@ -63,6 +67,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private ItemSearchLocalSummary? _localItemSearchSummary;
     private SearchExpression? _activeItemSearchExpression;
     private int _localPricePage;
+    private PriceCacheLocalCursor? _localPriceCursor;
     private bool _hasMoreLocalPriceRows;
     private int _localPriceRowsLoaded;
     private bool _remotePriceExpansionStarted;
@@ -98,6 +103,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private string _documentProgressText = "Documentos: inativos";
     private int _currentContractPage = 1;
     private long _contractSearchTotal;
+    private bool _contractSearchCountPending;
+    private int _contractSearchGeneration;
     private int _currentItemPage;
     private bool _hasMoreItemCandidates;
     private int _batchCount = ItemSearchDefaults.InitialBatchCount;
@@ -106,6 +113,13 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _automaticMaintenanceRunning;
     private bool _isItemSearchActive;
     private bool _sweetCodeEnabled;
+    private bool _isApplicationReady;
+    private bool _isInitializing = true;
+    private string _startupStatus = "Abrindo o PNCP King…";
+    private readonly CancellationTokenSource _startupCancellation = new();
+    private bool _quotationsInitialized;
+    private bool _indexPausedForVisibleActivity;
+    private bool _catalogPausedForVisibleActivity;
     private string? _selectedSweetCodeSuggestion;
     private bool _disposed;
     private SweetCodeLibrary _sweetCodeLibrary = new(true, []);
@@ -148,7 +162,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         ITimedQuotationAutomationService timedQuotationAutomation,
         AppSettingsService settingsService,
         string dataFolder,
-        AppDiagnosticLog diagnosticLog)
+        AppDiagnosticLog diagnosticLog,
+        AppPerformanceTelemetry performanceTelemetry)
     {
         _repository = repository;
         _preflightService = preflightService;
@@ -188,6 +203,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _settingsService = settingsService;
         _dataFolder = dataFolder;
         _diagnosticLog = diagnosticLog;
+        _performanceTelemetry = performanceTelemetry;
 
         GeoFilters = BuildGeoFilters();
         SortOptions =
@@ -261,20 +277,27 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             () => !IsFileBusy && !IsIndexBusy && !IsForegroundBusy && !IsPriceBusy &&
                   !IsCatalogBusy && !IsPriceCacheBusy);
         OpenDiagnosticLogsCommand = new RelayCommand(OpenDiagnosticLogs);
+        ExportPerformanceReportCommand = new AsyncRelayCommand(
+            ExportPerformanceReportAsync,
+            () => !IsFileBusy);
+        ComparePerformanceReportCommand = new AsyncRelayCommand(
+            ComparePerformanceReportAsync,
+            () => !IsFileBusy);
         ClearCacheCommand = new AsyncRelayCommand(
             ClearCacheAsync,
             () => !IsFileBusy && !IsForegroundBusy && !IsPriceBusy);
         ManageSweetCodesCommand = new AsyncRelayCommand(ManageSweetCodesAsync, () => !IsFileBusy);
+        CancelStartupCommand = new RelayCommand(() => _startupCancellation.Cancel());
 
         _maintenanceTimer = new DispatcherTimer { Interval = SyncService.AutomaticRetryDelay };
         _maintenanceTimer.Tick += async (_, _) => await RunAutomaticMaintenanceCycleAsync().ConfigureAwait(true);
     }
 
-    public ObservableCollection<ContractRecord> ContractResults { get; } = [];
-    public ObservableCollection<ItemSearchDisplayRow> ItemSearchRows { get; } = [];
-    public ObservableCollection<ItemDisplayRow> ContractItemRows { get; } = [];
-    public ObservableCollection<CoverageDay> CoverageDays { get; } = [];
-    public ObservableCollection<string> SweetCodeSuggestions { get; } = [];
+    public RangeObservableCollection<ContractRecord> ContractResults { get; } = [];
+    public RangeObservableCollection<ItemSearchDisplayRow> ItemSearchRows { get; } = [];
+    public RangeObservableCollection<ItemDisplayRow> ContractItemRows { get; } = [];
+    public RangeObservableCollection<CoverageDay> CoverageDays { get; } = [];
+    public RangeObservableCollection<string> SweetCodeSuggestions { get; } = [];
     public IReadOnlyList<SearchGeoFilter> GeoFilters { get; }
     public IReadOnlyList<SearchSortOption> SortOptions { get; }
     public IReadOnlyList<DateRangeOption> DateRanges { get; }
@@ -300,8 +323,46 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public ICommand ExportBackupCommand { get; }
     public ICommand ImportBackupCommand { get; }
     public ICommand OpenDiagnosticLogsCommand { get; }
+    public ICommand ExportPerformanceReportCommand { get; }
+    public ICommand ComparePerformanceReportCommand { get; }
     public ICommand ClearCacheCommand { get; }
     public ICommand ManageSweetCodesCommand { get; }
+    public ICommand CancelStartupCommand { get; }
+
+    public bool IsApplicationReady
+    {
+        get => _isApplicationReady;
+        private set => SetProperty(ref _isApplicationReady, value);
+    }
+
+    public bool IsInitializing
+    {
+        get => _isInitializing;
+        private set => SetProperty(ref _isInitializing, value);
+    }
+
+    public string StartupStatus
+    {
+        get => _startupStatus;
+        private set => SetProperty(ref _startupStatus, value);
+    }
+
+    public CancellationToken StartupCancellationToken => _startupCancellation.Token;
+
+    public void SetStartupPhase(string phase)
+    {
+        StartupStatus = phase;
+        StatusText = phase;
+    }
+
+    public void CompleteStartup()
+    {
+        IsApplicationReady = true;
+        IsInitializing = false;
+        StartupStatus = "Inicialização concluída.";
+        StatusText = "Pronto";
+        NotifyCommands();
+    }
 
     public string QueryText
     {
@@ -617,7 +678,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    public string ContractPageSummary => $"Página {CurrentContractPage} - {ContractSearchTotal:N0} contratação(ões)";
+    public string ContractPageSummary => _contractSearchCountPending
+        ? $"Página {CurrentContractPage} - calculando o total exato…"
+        : $"Página {CurrentContractPage} - {ContractSearchTotal:N0} contratação(ões)";
 
     public int CurrentItemPage
     {
@@ -640,7 +703,13 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public int SelectedResultsTabIndex
     {
         get => _selectedResultsTabIndex;
-        set => SetProperty(ref _selectedResultsTabIndex, value);
+        set
+        {
+            if (SetProperty(ref _selectedResultsTabIndex, value) && value == 2 && !_quotationsInitialized)
+            {
+                _ = InitializeQuotationsOnDemandAsync();
+            }
+        }
     }
 
     public string DataFolder => _dataFolder;
@@ -651,18 +720,67 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         private set => SetProperty(ref _preflight, value);
     }
 
-    public async Task InitializeAsync()
+    public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         await LoadSweetCodesAsync().ConfigureAwait(true);
-        await _quotationService.RecoverInterruptedAutomationAsync().ConfigureAwait(true);
-        await RefreshQuotationProjectsAsync().ConfigureAwait(true);
-        await RefreshDatasetSummaryAsync().ConfigureAwait(true);
-        await RefreshCoverageAsync().ConfigureAwait(true);
-        await RefreshPriceCacheProgressAsync().ConfigureAwait(true);
-        await RefreshCatalogCoverageAsync().ConfigureAwait(true);
+        cancellationToken.ThrowIfCancellationRequested();
         await SearchAsync(resetSession: false).ConfigureAwait(true);
         _maintenanceTimer.Start();
-        _ = RunAutomaticMaintenanceCycleAsync();
+        _ = InitializeDeferredAreasAsync();
+        _ = StartMaintenanceAfterIdleAsync();
+    }
+
+    private async Task InitializeDeferredAreasAsync()
+    {
+        try
+        {
+            await Task.Yield();
+            await _quotationService.RecoverInterruptedAutomationAsync().ConfigureAwait(true);
+            await RefreshDatasetSummaryAsync().ConfigureAwait(true);
+            await RefreshCoverageAsync().ConfigureAwait(true);
+            await RefreshPriceCacheProgressAsync().ConfigureAwait(true);
+            await RefreshCatalogCoverageAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception)
+        {
+            _diagnosticLog.Warning("startup", $"Carga secundária adiada: {exception.Message}");
+        }
+    }
+
+    private async Task InitializeQuotationsOnDemandAsync()
+    {
+        if (_quotationsInitialized || _disposed)
+        {
+            return;
+        }
+
+        _quotationsInitialized = true;
+        try
+        {
+            await RefreshQuotationProjectsAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception)
+        {
+            _quotationsInitialized = false;
+            _diagnosticLog.Warning("quotations", $"Carga sob demanda adiada: {exception.Message}");
+        }
+    }
+
+    private async Task StartMaintenanceAfterIdleAsync()
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5), _startupCancellation.Token).ConfigureAwait(true);
+            if (!_disposed && !IsPriceBusy && !IsForegroundBusy && !IsFileBusy)
+            {
+                await RunAutomaticMaintenanceCycleAsync().ConfigureAwait(true);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Encerramento durante a janela inicial de ociosidade.
+        }
     }
 
     public async Task ShutdownAsync()
@@ -673,8 +791,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
 
         _disposed = true;
+        _startupCancellation.Cancel();
+        _visibleIdleResumeCancellation?.Cancel();
         _maintenanceTimer.Stop();
         _indexCancellation?.Cancel();
+        _contractSearchCancellation?.Cancel();
         _priceCancellation?.Cancel();
         _foregroundCancellation?.Cancel();
         _documentCancellation?.Cancel();
@@ -704,6 +825,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         await _itemSearchService.DisposeAsync().ConfigureAwait(false);
         await _columnLayouts.FlushAsync().ConfigureAwait(false);
         _documentResources.Dispose();
+        _visibleIdleResumeCancellation?.Dispose();
+        _startupCancellation.Dispose();
     }
 
     public ValueTask DisposeAsync() => new(ShutdownAsync());
@@ -794,6 +917,31 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task SearchAsync(bool resetSession)
     {
+        using var visibleActivity = _requestScheduler.SuppressBackgroundRequests();
+        _visibleIdleResumeCancellation?.Cancel();
+        _visibleIdleResumeCancellation?.Dispose();
+        _visibleIdleResumeCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            _startupCancellation.Token);
+        var visibleIdleToken = _visibleIdleResumeCancellation.Token;
+        if (IsIndexBusy && !_syncService.IsPaused)
+        {
+            _syncService.Pause();
+            IsIndexPaused = true;
+            _indexPausedForVisibleActivity = true;
+        }
+
+        if (IsCatalogBusy && !IsCatalogPaused)
+        {
+            _catalogSyncService.Pause();
+            IsCatalogPaused = true;
+            _catalogPausedForVisibleActivity = true;
+        }
+
+        _contractSearchCancellation?.Cancel();
+        _contractSearchCancellation?.Dispose();
+        _contractSearchCancellation = new CancellationTokenSource();
+        var contractSearchToken = _contractSearchCancellation.Token;
+        var searchGeneration = Interlocked.Increment(ref _contractSearchGeneration);
         try
         {
             var (startDate, endDate) = ResolveDateRange();
@@ -806,7 +954,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 sort,
                 1,
                 ContractPageSize);
-            await LoadContractPageAsync(1).ConfigureAwait(true);
+            await LoadContractPageAsync(1, searchGeneration, contractSearchToken).ConfigureAwait(true);
 
             if (!resetSession || string.IsNullOrWhiteSpace(_activeSearchQuery.Text))
             {
@@ -829,6 +977,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             _priceCancellation?.Dispose();
             _priceCancellation = new CancellationTokenSource();
             ItemSearchRows.Clear();
+            _visibleItemKeys.Clear();
             CurrentItemPage = 0;
             HasMoreItemCandidates = true;
             SelectedItemSearchRow = null;
@@ -837,22 +986,28 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             PriceSearchProgress = 0;
             _activeItemSearchExpression = SearchText.Parse(_activeSearchQuery.Text);
             _localPricePage = 0;
+            _localPriceCursor = null;
             _hasMoreLocalPriceRows = false;
             _localPriceRowsLoaded = 0;
             _remotePriceExpansionStarted = false;
-            _localItemSearchSummary = await _repository.GetItemSearchLocalSummaryAsync(
-                    _activeSearchQuery,
-                    _activeItemSearchExpression,
-                    _priceCancellation.Token)
-                .ConfigureAwait(true);
-            ItemSearchSummary = BuildLocalSearchSummary();
-            StatusText = $"Contagem local concluída; iniciando {BatchCount:N0} lote(s) de 50 contratações.";
-            await _itemSearchService.StartAsync(
-                _activeSearchQuery with { Page = 1, PageSize = 200 },
-                _priceCancellation.Token).ConfigureAwait(true);
+            _localItemSearchSummary = null;
+            ItemSearchSummary = "Buscando a primeira página no cache local…";
+            var localSummaryTask = RefreshLocalItemSearchSummaryAsync(
+                _activeSearchQuery,
+                _activeItemSearchExpression,
+                searchGeneration,
+                _priceCancellation.Token);
+            var itemSessionTask = Task.Run(
+                () => _itemSearchService.StartAsync(
+                    _activeSearchQuery with { Page = 1, PageSize = 200 },
+                    _priceCancellation.Token),
+                _priceCancellation.Token);
+            var localRows = await LoadLocalPricePageAsync(_priceCancellation.Token).ConfigureAwait(true);
+            await Task.Yield();
+            await itemSessionTask.ConfigureAwait(true);
             SetItemSearchActive(true);
             NotifyCommands();
-            var localRows = await LoadLocalPricePageAsync(_priceCancellation.Token).ConfigureAwait(true);
+            _ = localSummaryTask;
             if (_hasMoreLocalPriceRows || localRows >= ItemSearchSessionService.DefaultPageSize)
             {
                 HasMoreItemCandidates = true;
@@ -867,14 +1022,59 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 await RunSelectedBatchesAsync(isAdditional: false, _priceCancellation.Token).ConfigureAwait(true);
             }
         }
+        catch (OperationCanceledException)
+        {
+            StatusText = "Pesquisa anterior interrompida.";
+        }
         catch (Exception exception)
         {
             StatusText = $"Não foi possível pesquisar: {exception.Message}";
             ItemSearchSummary = $"Pesquisa rejeitada: {exception.Message}";
         }
+        finally
+        {
+            if (_indexPausedForVisibleActivity || _catalogPausedForVisibleActivity)
+            {
+                _ = ResumeVisiblePausedWorkAfterIdleAsync(
+                    _indexPausedForVisibleActivity,
+                    _catalogPausedForVisibleActivity,
+                    visibleIdleToken);
+            }
+        }
     }
 
-    private async Task LoadContractPageAsync(int page)
+    private async Task ResumeVisiblePausedWorkAfterIdleAsync(
+        bool resumeIndex,
+        bool resumeCatalog,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(true);
+            if (resumeIndex && IsIndexBusy && _syncService.IsPaused)
+            {
+                _syncService.Resume();
+                IsIndexPaused = false;
+                _indexPausedForVisibleActivity = false;
+            }
+
+            if (resumeCatalog && IsCatalogBusy && IsCatalogPaused)
+            {
+                _catalogSyncService.Resume();
+                IsCatalogPaused = false;
+                _catalogPausedForVisibleActivity = false;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Encerramento durante a janela de ociosidade.
+        }
+    }
+
+    private async Task LoadContractPageAsync(
+        int page,
+        int? expectedGeneration = null,
+        CancellationToken cancellationToken = default)
     {
         if (_activeSearchQuery is null)
         {
@@ -890,17 +1090,94 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
 
         StatusText = "Pesquisando no índice local…";
-        var result = await _repository.SearchAsync(
-            _activeSearchQuery with { Page = Math.Max(1, page), PageSize = ContractPageSize }).ConfigureAwait(true);
-        ContractResults.Clear();
-        foreach (var contract in result.Results)
+        var generation = expectedGeneration ?? Volatile.Read(ref _contractSearchGeneration);
+        var query = _activeSearchQuery with
         {
-            ContractResults.Add(contract);
+            Page = Math.Max(1, page),
+            PageSize = ContractPageSize
+        };
+        var result = await Task.Run(
+                () => _repository.SearchPageAsync(query, cancellationToken),
+                cancellationToken)
+            .ConfigureAwait(true);
+        if (generation != Volatile.Read(ref _contractSearchGeneration))
+        {
+            return;
         }
 
+        ContractResults.ReplaceAll(result.Results);
         CurrentContractPage = result.Page;
-        ContractSearchTotal = result.Total;
-        StatusText = $"Índice local: {result.Total:N0} contratação(ões).";
+        ContractSearchTotal = Math.Max(
+            result.Results.Count,
+            (result.Page - 1L) * result.PageSize + result.Results.Count + (result.MayHaveMore ? 1 : 0));
+        _contractSearchCountPending = true;
+        OnPropertyChanged(nameof(ContractPageSummary));
+        StatusText = $"Índice local: {result.Results.Count:N0} linha(s) exibida(s); calculando total…";
+        _ = CompleteContractCountAsync(query, generation, cancellationToken);
+    }
+
+    private async Task CompleteContractCountAsync(
+        SearchQuery query,
+        int generation,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var total = await Task.Run(
+                    () => _repository.CountSearchAsync(query, cancellationToken),
+                    cancellationToken)
+                .ConfigureAwait(true);
+            if (generation != Volatile.Read(ref _contractSearchGeneration))
+            {
+                return;
+            }
+
+            ContractSearchTotal = total;
+            _contractSearchCountPending = false;
+            OnPropertyChanged(nameof(ContractPageSummary));
+            StatusText = $"Índice local: {total:N0} contratação(ões).";
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer search owns the summary.
+        }
+        catch (Exception exception)
+        {
+            if (generation == Volatile.Read(ref _contractSearchGeneration))
+            {
+                _contractSearchCountPending = false;
+                OnPropertyChanged(nameof(ContractPageSummary));
+                _diagnosticLog.Warning("performance", $"Contagem exata adiada: {exception.Message}");
+            }
+        }
+    }
+
+    private async Task RefreshLocalItemSearchSummaryAsync(
+        SearchQuery query,
+        SearchExpression expression,
+        int generation,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var summary = await Task.Run(
+                    () => _repository.GetItemSearchLocalSummaryAsync(query, expression, cancellationToken),
+                    cancellationToken)
+                .ConfigureAwait(true);
+            if (generation == Volatile.Read(ref _contractSearchGeneration))
+            {
+                _localItemSearchSummary = summary;
+                ItemSearchSummary = BuildLocalSearchSummary();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer search superseded this summary.
+        }
+        catch (Exception exception)
+        {
+            _diagnosticLog.Warning("performance", $"Resumo local adiado: {exception.Message}");
+        }
     }
 
     private async Task ChangeContractPageAsync(int page)
@@ -1091,9 +1368,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         var (minimum, maximum) = ParsePriceRange();
         var localPagesToRestore = Math.Max(1, _localPricePage);
         _localPricePage = 0;
+        _localPriceCursor = null;
         _hasMoreLocalPriceRows = false;
         _localPriceRowsLoaded = 0;
         ItemSearchRows.Clear();
+        _visibleItemKeys.Clear();
         for (var index = 0; index < localPagesToRestore; index++)
         {
             await LoadLocalPricePageAsync(cancellationToken, minimum, maximum).ConfigureAwait(true);
@@ -1125,46 +1404,22 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             (minimum, maximum) = ParsePriceRange();
         }
 
-        var page = await _priceCacheRepository.SearchLocalAsync(
-                _activeSearchQuery,
-                _activeItemSearchExpression,
-                minimum,
-                maximum,
-                _localPricePage + 1,
-                ItemSearchSessionService.DefaultPageSize,
+        var page = await Task.Run(
+                () => _priceCacheRepository.SearchLocalAfterAsync(
+                    _activeSearchQuery,
+                    _activeItemSearchExpression,
+                    minimum,
+                    maximum,
+                    _localPriceCursor,
+                    ItemSearchSessionService.DefaultPageSize,
+                    cancellationToken),
                 cancellationToken)
             .ConfigureAwait(true);
-        var rows = new List<ItemSearchRow>();
-        foreach (var hit in page.Hits)
-        {
-            var cached = await _repository.GetCachedItemResultsAsync(
-                    hit.Contract.PncpId,
-                    hit.Item.ItemNumber,
-                    cancellationToken)
-                .ConfigureAwait(true);
-            if (cached?.IsCurrent != true)
-            {
-                continue;
-            }
-
-            foreach (var result in cached.Results.Where(result =>
-                         result.IsActive &&
-                         result.HomologatedUnitValue is > 0 &&
-                         (minimum is null || result.HomologatedUnitValue >= minimum) &&
-                         (maximum is null || result.HomologatedUnitValue <= maximum)))
-            {
-                rows.Add(new ItemSearchRow(
-                    hit.Contract,
-                    cached.Item,
-                    result,
-                    ItemSearchPriceState.Homologated,
-                    "Preço homologado do cache local",
-                    false));
-            }
-        }
+        var rows = page.Rows ?? [];
 
         AppendUniqueRows(rows);
         _localPricePage = page.Page;
+        _localPriceCursor = page.Cursor;
         _hasMoreLocalPriceRows = page.HasMore;
         _localPriceRowsLoaded += rows.Count;
         HasMoreItemCandidates = _hasMoreLocalPriceRows || !_remotePriceExpansionStarted;
@@ -1188,14 +1443,16 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private void AppendUniqueRows(IEnumerable<ItemSearchRow> rows)
     {
-        var keys = ItemSearchRows.Select(RowKey).ToHashSet(StringComparer.Ordinal);
+        var pending = new List<ItemSearchDisplayRow>();
         foreach (var row in rows.Select(item => new ItemSearchDisplayRow(item)))
         {
-            if (keys.Add(RowKey(row)))
+            if (_visibleItemKeys.Add(RowKey(row)))
             {
-                ItemSearchRows.Add(row);
+                pending.Add(row);
             }
         }
+
+        ItemSearchRows.AddRange(pending);
     }
 
     private static string RowKey(ItemSearchDisplayRow row) =>
@@ -1639,11 +1896,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        ContractItemRows.Clear();
-        foreach (var row in rows)
-        {
-            ContractItemRows.Add(row);
-        }
+        ContractItemRows.ReplaceAll(rows);
     }
 
     private async Task RefreshDatasetSummaryAsync()
@@ -1667,10 +1920,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             ? await coverageRepository.GetCoverageDaysAsync(start, end).ConfigureAwait(true)
             : [];
         var byDate = stored.ToDictionary(day => day.Date);
-        CoverageDays.Clear();
+        var displayDays = new List<CoverageDay>(365);
         for (var date = start; date <= end; date = date.AddDays(1))
         {
-            CoverageDays.Add(byDate.TryGetValue(date, out var day)
+            displayDays.Add(byDate.TryGetValue(date, out var day)
                 ? day
                 : new CoverageDay
                 {
@@ -1680,6 +1933,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                     CompletedModalities = 0
                 });
         }
+
+        CoverageDays.ReplaceAll(displayDays);
 
         var complete = CoverageDays.Count(day => day.IsComplete);
         CoverageSummary = new CoverageSummary(CoverageDays, complete, CoverageDays.Count).Display;
@@ -1928,6 +2183,90 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 "Logs de diagnóstico",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
+        }
+    }
+
+    private async Task ExportPerformanceReportAsync()
+    {
+        var dialog = new SaveFileDialog
+        {
+            Title = "Exportar relatório de desempenho",
+            Filter = "Relatório JSON (*.json)|*.json",
+            DefaultExt = ".json",
+            FileName = $"PNCPKing-performance-{DateTime.Now:yyyyMMdd-HHmmss}.json"
+        };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        IsFileBusy = true;
+        try
+        {
+            await _performanceTelemetry.ExportAsync(dialog.FileName).ConfigureAwait(true);
+            StatusText = $"Relatórios JSON e TXT exportados ao lado de {dialog.FileName}.";
+        }
+        catch (Exception exception)
+        {
+            _diagnosticLog.Error("performance", "Não foi possível exportar o relatório.", exception);
+            MessageBox.Show(
+                exception.Message,
+                "Relatório de desempenho",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+        finally
+        {
+            IsFileBusy = false;
+        }
+    }
+
+    private async Task ComparePerformanceReportAsync()
+    {
+        var baselineDialog = new OpenFileDialog
+        {
+            Title = "Selecionar o relatório-base (antes)",
+            Filter = "Relatório JSON (*.json)|*.json",
+            CheckFileExists = true
+        };
+        if (baselineDialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        var outputDialog = new SaveFileDialog
+        {
+            Title = "Salvar comparação de desempenho",
+            Filter = "Relatório JSON (*.json)|*.json",
+            DefaultExt = ".json",
+            FileName = $"PNCPKing-performance-comparison-{DateTime.Now:yyyyMMdd-HHmmss}.json"
+        };
+        if (outputDialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        IsFileBusy = true;
+        try
+        {
+            await _performanceTelemetry.ExportAsync(
+                    outputDialog.FileName,
+                    baselineDialog.FileName)
+                .ConfigureAwait(true);
+            StatusText = "Comparação antes × depois exportada em JSON e TXT.";
+        }
+        catch (Exception exception)
+        {
+            _diagnosticLog.Error("performance", "Não foi possível comparar os relatórios.", exception);
+            MessageBox.Show(
+                exception.Message,
+                "Comparar desempenho",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+        finally
+        {
+            IsFileBusy = false;
         }
     }
 

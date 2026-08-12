@@ -74,6 +74,12 @@ public sealed record SearchPage(
     int Page,
     int PageSize);
 
+public sealed record SearchPageSlice(
+    IReadOnlyList<ContractRecord> Results,
+    int Page,
+    int PageSize,
+    bool MayHaveMore);
+
 public sealed record ItemCandidateCursor(
     int GeographicLayer,
     int GroupRank,

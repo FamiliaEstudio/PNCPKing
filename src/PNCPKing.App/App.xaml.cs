@@ -17,11 +17,15 @@ public partial class App : Application
 {
     private Mutex? _instanceMutex;
     private AppDiagnosticLog? _diagnosticLog;
+    private AppPerformanceTelemetry? _performanceTelemetry;
+    private DispatcherResponsivenessMonitor? _responsivenessMonitor;
 
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
         _diagnosticLog = new AppDiagnosticLog();
+        _performanceTelemetry = new AppPerformanceTelemetry();
+        using var startupSpan = _performanceTelemetry.Begin("startup", "application");
         _diagnosticLog.WriteStartupHeader();
         DispatcherUnhandledException += (_, args) =>
             _diagnosticLog.Error("dispatcher", "Exceção não tratada na interface.", args.Exception);
@@ -100,13 +104,12 @@ public partial class App : Application
             var columnLayouts = new DataGridColumnLayoutService(settingsService, settings);
             Directory.CreateDirectory(settings.DataFolder);
             var databasePath = Path.Combine(settings.DataFolder, "pncpking.db");
+            _performanceTelemetry.SetDatabasePath(databasePath);
             _diagnosticLog.Info(
                 "database",
-                $"Inicializando banco. pasta_dados={settings.DataFolder}; banco={databasePath}; " +
+                $"Banco selecionado. pasta_dados={settings.DataFolder}; banco={databasePath}; " +
                 $"tamanho={(File.Exists(databasePath) ? new FileInfo(databasePath).Length : 0)} bytes.");
-            var repository = new SqliteContractRepository(databasePath);
-            await repository.InitializeAsync().ConfigureAwait(true);
-            _diagnosticLog.Info("database", "Banco inicializado e migrações de abertura concluídas.");
+            var repository = new SqliteContractRepository(databasePath, _performanceTelemetry);
             var quotationRepository = new SqliteQuotationRepository(databasePath);
             var internetEvidenceStore = new InternetEvidenceStore(settings.DataFolder);
 
@@ -119,7 +122,7 @@ public partial class App : Application
             };
             var requestScheduler = new PncpRequestScheduler(maximumConcurrency: 2);
             var requestTelemetry = new PncpRequestTelemetry();
-            var handler = new PncpSchedulingHandler(requestScheduler, requestTelemetry)
+            var handler = new PncpSchedulingHandler(requestScheduler, requestTelemetry, _performanceTelemetry)
             {
                 InnerHandler = socketsHandler
             };
@@ -144,14 +147,15 @@ public partial class App : Application
                 rasterizer,
                 quotationRepository,
                 internetEvidenceStore);
-            var syncService = new SyncService(client, repository);
+            var syncService = new SyncService(client, repository, _performanceTelemetry);
             var autoSyncCoordinator = new AutoSyncCoordinator(client, repository, syncService);
-            var priceCacheRepository = new SqlitePriceCacheRepository(databasePath);
+            var priceCacheRepository = new SqlitePriceCacheRepository(databasePath, _performanceTelemetry);
             var priceCacheService = new PriceCacheService(
                 client,
                 repository,
                 repository,
-                priceCacheRepository);
+                priceCacheRepository,
+                performance: _performanceTelemetry);
             var itemSearchService = new ItemSearchSessionService(
                 client,
                 repository,
@@ -162,7 +166,7 @@ public partial class App : Application
                 quotationRepository,
                 itemSearchService);
             var quotationService = new QuotationService(quotationRepository, new QuotationAnalyzer());
-            var catalogRepository = new SqliteCatalogRepository(databasePath);
+            var catalogRepository = new SqliteCatalogRepository(databasePath, _performanceTelemetry);
             var catalogHttpClient = new HttpClient(new SocketsHttpHandler
             {
                 AutomaticDecompression = DecompressionMethods.All,
@@ -223,7 +227,7 @@ public partial class App : Application
                 new ItemHydrationService(client, repository),
                 itemSearchService,
                 quotationItemSearchService,
-                new BackupService(repository),
+                new BackupService(repository, _performanceTelemetry),
                 quotationService,
                 new QuotationWorkbookService(),
                 new QuotationWorkbookImportService(),
@@ -250,16 +254,36 @@ public partial class App : Application
                 timedAutomation,
                 settingsService,
                 settings.DataFolder,
-                _diagnosticLog);
+                _diagnosticLog,
+                _performanceTelemetry);
             var mainWindow = new MainWindow(viewModel, columnLayouts);
             MainWindow = mainWindow;
             mainWindow.Show();
+            _responsivenessMonitor = new DispatcherResponsivenessMonitor(Dispatcher, _performanceTelemetry);
             // During first-run setup the folder dialog is temporarily the only
             // window. Keep the application alive when it closes, then restore
             // normal shutdown behavior once the real main window is visible.
             ShutdownMode = ShutdownMode.OnMainWindowClose;
-            await viewModel.InitializeAsync().ConfigureAwait(true);
+            viewModel.SetStartupPhase("Preparando e migrando o banco de dados…");
+            using (var databaseSpan = _performanceTelemetry.Begin("startup", "database-initialize"))
+            {
+                await Task.Run(
+                        () => repository.InitializeAsync(viewModel.StartupCancellationToken),
+                        viewModel.StartupCancellationToken)
+                    .ConfigureAwait(true);
+                databaseSpan.Complete();
+            }
+
+            _diagnosticLog.Info("database", "Banco inicializado e migrações de abertura concluídas.");
+            viewModel.SetStartupPhase("Carregando a pesquisa essencial…");
+            await viewModel.InitializeAsync(viewModel.StartupCancellationToken).ConfigureAwait(true);
+            viewModel.CompleteStartup();
+            startupSpan.Complete();
             _diagnosticLog.Info("startup", "Janela principal inicializada com sucesso.");
+        }
+        catch (OperationCanceledException)
+        {
+            Shutdown();
         }
         catch (Exception exception)
         {
@@ -276,6 +300,8 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _responsivenessMonitor?.Dispose();
+        _responsivenessMonitor = null;
         _diagnosticLog?.Info("shutdown", $"Aplicativo encerrado com código {e.ApplicationExitCode}.");
         if (_instanceMutex is not null)
         {
