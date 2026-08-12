@@ -104,13 +104,48 @@ public sealed partial class MainViewModel
 
     private async Task TryRunCatalogMaintenanceAsync()
     {
-        if (IsCatalogBusy || IsIndexBusy || IsFileBusy || _disposed ||
-            !await _catalogSyncService.IsDueAsync().ConfigureAwait(true))
+        if (IsCatalogBusy || IsIndexBusy || IsFileBusy || _disposed)
         {
             return;
         }
 
-        await RunCatalogSyncAsync(showErrorDialog: false).ConfigureAwait(true);
+        if (await _catalogSyncService.IsDueAsync().ConfigureAwait(true))
+        {
+            await RunCatalogSyncAsync(showErrorDialog: false).ConfigureAwait(true);
+            return;
+        }
+
+        await RunCatalogDescriptionIndexAsync().ConfigureAwait(true);
+    }
+
+    private async Task RunCatalogDescriptionIndexAsync()
+    {
+        _catalogCancellation = new CancellationTokenSource();
+        IsCatalogBusy = true;
+        IsCatalogPaused = false;
+        var progress = new Progress<CatalogDescriptionIndexProgress>(value =>
+        {
+            CatalogProgress = value.Percentage;
+            CatalogProgressText = value.Completed
+                ? "Índice de descrições oficiais pronto."
+                : $"Indexando descrições oficiais: {value.Percentage:N1}%";
+        });
+        try
+        {
+            await _catalogSyncService.BuildDescriptionIndexAsync(progress, _catalogCancellation.Token)
+                .ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            CatalogProgressText = "Indexação de descrições pausada; o checkpoint foi preservado.";
+        }
+        finally
+        {
+            _catalogCancellation.Dispose();
+            _catalogCancellation = null;
+            IsCatalogBusy = false;
+            IsCatalogPaused = false;
+        }
     }
 
     private async Task RunCatalogSyncAsync(bool showErrorDialog)
@@ -136,6 +171,16 @@ public sealed partial class MainViewModel
         try
         {
             await _catalogSyncService.SynchronizeAsync(progress, _catalogCancellation.Token)
+                .ConfigureAwait(true);
+            await _catalogSyncService.BuildDescriptionIndexAsync(
+                    new Progress<CatalogDescriptionIndexProgress>(value =>
+                    {
+                        CatalogProgress = value.Percentage;
+                        CatalogProgressText = value.Completed
+                            ? "Índice de descrições oficiais pronto."
+                            : $"Indexando descrições oficiais: {value.Percentage:N1}%";
+                    }),
+                    _catalogCancellation.Token)
                 .ConfigureAwait(true);
             CatalogProgress = 100;
             CatalogProgressText = "CATMAT e CATSER ativos foram publicados no catálogo local.";

@@ -39,7 +39,7 @@
             <TextBlock Text="{Binding ProgressText}" TextWrapping="Wrap" />
         </Border>
 
-        <TabControl x:Name="WorkspaceTabs" Grid.Row="2">
+        <TabControl x:Name="WorkspaceTabs" Grid.Row="2" SelectionChanged="WorkspaceTabs_SelectionChanged">
             <TabItem Header="Cestas e preços">
                 <Grid Margin="4">
                     <Grid.RowDefinitions>
@@ -377,7 +377,7 @@
                 </Grid>
             </TabItem>
 
-            <TabItem Header="CATMAT/CATSER">
+            <TabItem x:Name="CatalogTab" Header="CATMAT/CATSER">
                 <Grid Margin="4">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
@@ -420,6 +420,7 @@
                             <TextBlock DockPanel.Dock="Top" Text="{Binding CatalogHierarchyLabel}"
                                        FontWeight="SemiBold" Margin="0,0,0,5" />
                             <TreeView ItemsSource="{Binding CatalogHierarchy}"
+                                      TreeViewItem.Expanded="CatalogHierarchy_Expanded"
                                       SelectedItemChanged="CatalogHierarchy_SelectedItemChanged" />
                         </DockPanel>
                         <GridSplitter Grid.Column="1" Width="8" Background="#DDD" />

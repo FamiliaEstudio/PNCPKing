@@ -128,6 +128,17 @@ public partial class QuotationItemWindow : Window
     private async void CatalogSearch_Click(object sender, RoutedEventArgs e) =>
         await RunAsync(() => ViewModel.SearchCatalogAsync()).ConfigureAwait(true);
 
+    private async void WorkspaceTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded || !ReferenceEquals(e.Source, WorkspaceTabs) ||
+            !ReferenceEquals(WorkspaceTabs.SelectedItem, CatalogTab))
+        {
+            return;
+        }
+
+        await RunAsync(ViewModel.EnsureCatalogAreaLoadedAsync).ConfigureAwait(true);
+    }
+
     private async void CatalogQuery_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.Enter) return;
@@ -137,6 +148,14 @@ public partial class QuotationItemWindow : Window
 
     private void CatalogHierarchy_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e) =>
         ViewModel.ApplyCatalogHierarchy(e.NewValue as CatalogHierarchyNode);
+
+    private async void CatalogHierarchy_Expanded(object sender, RoutedEventArgs e)
+    {
+        if (e.OriginalSource is TreeViewItem { DataContext: CatalogHierarchyNode node })
+        {
+            await RunAsync(() => ViewModel.LoadCatalogHierarchyChildrenAsync(node)).ConfigureAwait(true);
+        }
+    }
 
     private async void CatalogPrevious_Click(object sender, RoutedEventArgs e) =>
         await RunAsync(ViewModel.PreviousCatalogPageAsync).ConfigureAwait(true);

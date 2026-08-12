@@ -45,6 +45,15 @@ public interface ICatalogRepository
     Task<IReadOnlyList<CatalogHierarchyPath>> GetHierarchyAsync(
         CatalogKind? kind = null,
         CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<CatalogHierarchyChild>> GetHierarchyChildrenAsync(
+        CatalogKind kind,
+        CatalogHierarchyFilter? parent = null,
+        CancellationToken cancellationToken = default);
+    Task<CatalogDescriptionIndexProgress> GetDescriptionIndexProgressAsync(
+        CancellationToken cancellationToken = default);
+    Task<CatalogDescriptionIndexProgress> BuildDescriptionIndexBatchAsync(
+        int batchSize = 2000,
+        CancellationToken cancellationToken = default);
     Task<IReadOnlyList<CatalogEquivalenceRule>> GetEquivalenceRulesAsync(
         CancellationToken cancellationToken = default);
     Task SaveEquivalenceRuleAsync(

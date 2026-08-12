@@ -1,11 +1,200 @@
 using System.Diagnostics;
 using PNCPKing.Core.Models;
+using PNCPKing.Core.Quotations;
+using PNCPKing.Core.Search;
+using PNCPKing.Infrastructure.Data;
+using PNCPKing.Infrastructure.Services;
 using Xunit.Abstractions;
 
 namespace PNCPKing.Tests;
 
 public sealed class PerformanceTests(ITestOutputHelper output)
 {
+    [Fact]
+    [Trait("Category", "Performance")]
+    public async Task RealDatabaseCopy_MeasuresOptimizedCriticalPaths()
+    {
+        var path = Environment.GetEnvironmentVariable("PNCPKING_PERFORMANCE_DATABASE_COPY");
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            output.WriteLine("Opt-in: informe PNCPKING_PERFORMANCE_DATABASE_COPY com uma cópia isolada do banco.");
+            return;
+        }
+
+        Assert.True(File.Exists(path), $"A cópia de desempenho não existe: {path}");
+        var connections = new SqliteConnectionFactory(path);
+        var contracts = new SqliteContractRepository(connections);
+        var stopwatch = Stopwatch.StartNew();
+        await contracts.InitializeAsync();
+        stopwatch.Stop();
+        var migrationMilliseconds = stopwatch.Elapsed.TotalMilliseconds;
+
+        var quotations = new SqliteQuotationRepository(connections);
+        var quotationService = new QuotationService(quotations, new QuotationAnalyzer());
+        var projects = await quotations.GetProjectsAsync();
+        (QuotationProject? Project, QuotationLine? Line) selectedLine = default;
+        foreach (var project in projects)
+        {
+            var line = (await quotations.GetLinesAsync(project.Id)).FirstOrDefault(candidate =>
+                candidate.EffectiveDisplayName.Contains("Café 500g", StringComparison.OrdinalIgnoreCase));
+            if (line is not null)
+            {
+                selectedLine = (project, line);
+                break;
+            }
+        }
+        var quotationSamples = new List<double>();
+        if (selectedLine.Line is not null)
+        {
+            for (var sample = 0; sample < 5; sample++)
+            {
+                stopwatch.Restart();
+                Assert.NotNull(await quotationService.GetAnalysisAsync(selectedLine.Project!.Id, selectedLine.Line.Id));
+                stopwatch.Stop();
+                quotationSamples.Add(stopwatch.Elapsed.TotalMilliseconds);
+            }
+        }
+
+        var catalog = new SqliteCatalogRepository(connections);
+        stopwatch.Restart();
+        var catalogIndex = await catalog.GetDescriptionIndexProgressAsync();
+        while (!catalogIndex.Completed)
+        {
+            catalogIndex = await catalog.BuildDescriptionIndexBatchAsync(2_000);
+        }
+        stopwatch.Stop();
+        var catalogIndexMilliseconds = stopwatch.Elapsed.TotalMilliseconds;
+        var catalogSearch = new CatalogSearchService(catalog);
+        var catalogSamples = new List<double>();
+        for (var sample = 0; sample < 5; sample++)
+        {
+            stopwatch.Restart();
+            var page = await catalogSearch.SearchAsync(new CatalogSearchQuery(
+                "café + torrado -cápsula",
+                CatalogKind.Catmat));
+            stopwatch.Stop();
+            Assert.DoesNotContain(page.Results, result =>
+                !SearchText.Normalize(result.Entry.Description).Contains("cafe", StringComparison.Ordinal));
+            catalogSamples.Add(stopwatch.Elapsed.TotalMilliseconds);
+        }
+
+        var priceCache = new SqlitePriceCacheRepository(connections);
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var localSamples = new List<double>();
+        for (var sample = 0; sample < 5; sample++)
+        {
+            stopwatch.Restart();
+            _ = await priceCache.SearchLocalAfterAsync(
+                new SearchQuery(
+                    "cafe",
+                    GeoScope.All,
+                    today.AddDays(-364),
+                    today,
+                    Page: 1,
+                    PageSize: 50,
+                    Sort: SearchSort.Newest),
+                SearchText.Parse("cafe"),
+                null,
+                null,
+                null,
+                50);
+            stopwatch.Stop();
+            localSamples.Add(stopwatch.Elapsed.TotalMilliseconds);
+        }
+
+        var checkpoint = new SyncPartitionCheckpoint
+        {
+            PartitionKey = "performance-empty-commit",
+            Mode = SyncMode.Publication,
+            StartDate = today,
+            EndDate = today,
+            ModalityId = 6,
+            Uf = "ALL",
+            NextPage = 1,
+            Status = SyncPartitionStatus.Partial,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        var commitSamples = new List<double>();
+        for (var sample = 0; sample < 5; sample++)
+        {
+            stopwatch.Restart();
+            await contracts.CommitSyncPageAsync([], checkpoint);
+            stopwatch.Stop();
+            commitSamples.Add(stopwatch.Elapsed.TotalMilliseconds);
+        }
+
+        output.WriteLine(
+            "migration_v17_ms={0:N1}; quotation_median_ms={1:N1}; quotation_p95_ms={2:N1}; " +
+            "local_price_median_ms={3:N1}; local_price_p95_ms={4:N1}; catalog_index_ms={5:N1}; " +
+            "catalog_search_median_ms={6:N1}; catalog_search_p95_ms={7:N1}; " +
+            "empty_commit_median_ms={8:N1}; empty_commit_p95_ms={9:N1}; working_set_bytes={10}",
+            migrationMilliseconds,
+            quotationSamples.Count == 0 ? double.NaN : Median(quotationSamples),
+            quotationSamples.Count == 0 ? double.NaN : P95(quotationSamples),
+            Median(localSamples),
+            P95(localSamples),
+            catalogIndexMilliseconds,
+            Median(catalogSamples),
+            P95(catalogSamples),
+            Median(commitSamples),
+            P95(commitSamples),
+            Process.GetCurrentProcess().WorkingSet64);
+    }
+
+    [Fact]
+    [Trait("Category", "Performance")]
+    public async Task RealDatabaseCopy_MeasuresMigration15To17()
+    {
+        var path = Environment.GetEnvironmentVariable("PNCPKING_PERFORMANCE_DATABASE_COPY");
+        var enabled = Environment.GetEnvironmentVariable("PNCPKING_PERFORMANCE_MIGRATE_FROM_V15");
+        if (string.IsNullOrWhiteSpace(path) || enabled != "1")
+        {
+            output.WriteLine("Opt-in destrutivo somente para cópia: informe o banco e PNCPKING_PERFORMANCE_MIGRATE_FROM_V15=1.");
+            return;
+        }
+
+        Assert.True(File.Exists(path));
+        await using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}"))
+        {
+            await connection.OpenAsync();
+            await using var downgrade = connection.CreateCommand();
+            downgrade.CommandText = """
+                DROP TRIGGER IF EXISTS catalog_description_fts_insert;
+                DROP TRIGGER IF EXISTS catalog_description_fts_delete;
+                DROP TRIGGER IF EXISTS catalog_description_fts_update;
+                DROP TABLE IF EXISTS catalog_description_index_state;
+                DROP TABLE IF EXISTS catalog_description_fts;
+                DROP TRIGGER IF EXISTS dataset_statistics_contract_insert;
+                DROP TRIGGER IF EXISTS dataset_statistics_contract_delete;
+                DROP TRIGGER IF EXISTS dataset_statistics_item_insert;
+                DROP TRIGGER IF EXISTS dataset_statistics_item_delete;
+                DROP TRIGGER IF EXISTS dataset_statistics_result_insert;
+                DROP TRIGGER IF EXISTS dataset_statistics_result_delete;
+                DROP TABLE IF EXISTS dataset_statistics;
+                DROP INDEX IF EXISTS idx_contracts_publication_id;
+                DROP INDEX IF EXISTS idx_contracts_uf_publication_id;
+                DROP INDEX IF EXISTS idx_contracts_geo_publication_id;
+                DROP INDEX IF EXISTS idx_item_results_active_price;
+                DROP INDEX IF EXISTS idx_price_cache_contracts_retry;
+                CREATE INDEX IF NOT EXISTS idx_contracts_publication
+                    ON contracts(publication_date DESC);
+                CREATE INDEX IF NOT EXISTS idx_contracts_uf_publication
+                    ON contracts(uf, publication_date DESC);
+                UPDATE schema_info SET version = 15 WHERE id = 1;
+                """;
+            await downgrade.ExecuteNonQueryAsync();
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        await new SqliteContractRepository(path).InitializeAsync();
+        stopwatch.Stop();
+        output.WriteLine(
+            "migration_v15_to_v17_ms={0:N1}; target_max_ms=359030.0; improvement_vs_512900_ms={1:N1}%",
+            stopwatch.Elapsed.TotalMilliseconds,
+            (512_900d - stopwatch.Elapsed.TotalMilliseconds) * 100d / 512_900d);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromMilliseconds(359_030));
+    }
+
     [Fact]
     [Trait("Category", "Performance")]
     public async Task DeterministicLargeDatabase_MeasuresConsolidationPageAndExactCount()
@@ -20,11 +209,15 @@ public sealed class PerformanceTests(ITestOutputHelper output)
         }
 
         await using var database = await TestDatabase.CreateAsync();
-        const int totalContracts = 25_000;
+        var totalContracts = int.TryParse(
+            Environment.GetEnvironmentVariable("PNCPKING_PERFORMANCE_CONTRACTS"),
+            out var requestedContracts)
+            ? Math.Max(25_000, requestedContracts)
+            : 1_470_000;
         var consolidation = Stopwatch.StartNew();
-        for (var offset = 0; offset < totalContracts; offset += 500)
+        for (var offset = 0; offset < totalContracts; offset += 2_000)
         {
-            var batch = Enumerable.Range(offset, Math.Min(500, totalContracts - offset))
+            var batch = Enumerable.Range(offset, Math.Min(2_000, totalContracts - offset))
                 .Select(CreateContract)
                 .ToArray();
             await database.Repository.UpsertContractsAsync(batch);
@@ -97,5 +290,11 @@ public sealed class PerformanceTests(ITestOutputHelper output)
     {
         var ordered = values.OrderBy(value => value).ToArray();
         return ordered[ordered.Length / 2];
+    }
+
+    private static double P95(IEnumerable<double> values)
+    {
+        var ordered = values.OrderBy(value => value).ToArray();
+        return ordered[Math.Clamp((int)Math.Ceiling(ordered.Length * .95) - 1, 0, ordered.Length - 1)];
     }
 }

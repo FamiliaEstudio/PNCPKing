@@ -106,6 +106,16 @@ public sealed record CatalogSyncProgress(
         : Math.Clamp(CompletedPages * 100d / TotalPages, 0d, 100d);
 }
 
+public sealed record CatalogDescriptionIndexProgress(
+    long IndexedRowId,
+    long TargetRowId,
+    bool Completed)
+{
+    public double Percentage => TargetRowId <= 0
+        ? 100d
+        : Math.Clamp(IndexedRowId * 100d / TargetRowId, 0d, 100d);
+}
+
 public sealed record CatalogHierarchyFilter(
     string Level1Code = "",
     string Level2Code = "",
@@ -125,6 +135,14 @@ public sealed record CatalogHierarchyPath(
     string Level4Name,
     string Level5Code,
     string Level5Name);
+
+public sealed record CatalogHierarchyChild(
+    CatalogKind Kind,
+    int Level,
+    string Code,
+    string Name,
+    CatalogHierarchyFilter Filter,
+    bool HasChildren);
 
 public sealed record CatalogSearchQuery(
     string Text,

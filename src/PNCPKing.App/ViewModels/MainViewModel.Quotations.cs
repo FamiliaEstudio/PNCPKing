@@ -318,6 +318,35 @@ public sealed partial class MainViewModel
             return;
         }
 
+        _priceCacheService.PauseForVisibleActivity();
+        _visibleIdleResumeCancellation?.Cancel();
+        _visibleIdleResumeCancellation?.Dispose();
+        _visibleIdleResumeCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            _startupCancellation.Token);
+        var resumeIndex = false;
+        var resumeCatalog = false;
+        if (IsIndexBusy && !_syncService.IsPaused)
+        {
+            _syncService.Pause();
+            IsIndexPaused = true;
+            _indexPausedForVisibleActivity = true;
+            resumeIndex = true;
+        }
+
+        if (IsCatalogBusy && !IsCatalogPaused)
+        {
+            _catalogSyncService.Pause();
+            IsCatalogPaused = true;
+            _catalogPausedForVisibleActivity = true;
+            resumeCatalog = true;
+        }
+
+        _ = ResumeVisiblePausedWorkAfterIdleAsync(
+            resumeIndex,
+            resumeCatalog,
+            resumePriceCache: true,
+            cancellationToken: _visibleIdleResumeCancellation.Token);
+
         if (_quotationItemWindow is { IsVisible: true } existing)
         {
             if (existing.ViewModel.LineId == line.Line.Id)

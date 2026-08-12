@@ -7,19 +7,16 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotationItemSearchRepository
 {
-    private readonly string _connectionString;
+    private readonly ISqliteConnectionFactory _connections;
 
     public SqliteQuotationRepository(string databasePath)
+        : this(new SqliteConnectionFactory(databasePath))
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
-        _connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = Path.GetFullPath(databasePath),
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Shared,
-            ForeignKeys = true,
-            Pooling = true
-        }.ToString();
+    }
+
+    public SqliteQuotationRepository(ISqliteConnectionFactory connections)
+    {
+        _connections = connections ?? throw new ArgumentNullException(nameof(connections));
     }
 
     public async Task<IReadOnlyList<QuotationProject>> GetProjectsAsync(CancellationToken cancellationToken = default)
@@ -370,6 +367,45 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         }
 
         return lines;
+    }
+
+    public async Task<QuotationLine?> GetLineAsync(
+        Guid projectId,
+        Guid lineId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT l.id, l.project_id, l.description, l.requested_quantity_scaled, l.requested_unit,
+                   l.minimum_unit_price_scaled, l.maximum_unit_price_scaled, l.description_weight,
+                   l.unit_weight, l.quantity_weight, l.proximity_weight, l.recency_weight, l.sample_version,
+                   l.sampled_at, l.selected_basket_key, l.selection_confirmed, l.search_text,
+                   l.requested_batch_count, l.display_order, l.automation_run_id, l.automation_state,
+                   l.automation_message, l.requested_basket_size, l.estimated_unit_price_scaled,
+                   l.estimated_total_price_scaled, l.use_estimated_price, l.estimate_stage,
+                   l.search_random_pivot, l.search_cursor_geo_layer, l.search_cursor_group_rank,
+                   l.search_cursor_rotation_band, l.search_cursor_random_key, l.search_cursor_pncp_id,
+                   l.search_contracts_examined, l.search_batches_completed, l.search_candidate_exhausted,
+                   p.version, p.restrictive_text, p.intermediate_text, p.broad_text,
+                   p.origin, p.validation_state, p.active_level, p.contracts_at_level,
+                   p.matched_items, p.revealed_prices, p.updated_at,
+                   l.display_name, s.catalog_kind, s.catalog_code,
+                   s.description_snapshot, s.selected_at,
+                   CASE WHEN ce.code IS NULL THEN 1 ELSE ce.active END
+              FROM quotation_lines l
+              LEFT JOIN quotation_line_search_prompts p
+                ON p.line_id = l.id AND p.is_current = 1
+              LEFT JOIN quotation_catalog_selections s ON s.line_id = l.id
+              LEFT JOIN catalog_entries ce
+                ON ce.catalog_kind = s.catalog_kind AND ce.code = s.catalog_code
+             WHERE l.project_id = $projectId AND l.id = $lineId
+             LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$projectId", projectId.ToString("N"));
+        command.Parameters.AddWithValue("$lineId", lineId.ToString("N"));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadLine(reader) : null;
     }
 
     public async Task<IReadOnlyList<QuotationReference>> GetReferencesAsync(Guid lineId, CancellationToken cancellationToken = default)
@@ -2287,12 +2323,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken)
     {
-        var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000;";
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        return connection;
+        return await _connections.OpenAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task TouchLineProjectAsync(

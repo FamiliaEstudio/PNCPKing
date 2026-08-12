@@ -19,6 +19,11 @@ public sealed class PriceCacheService(
     private static readonly TimeSpan MaximumRetryDelay = TimeSpan.FromHours(6);
     private readonly TimeSpan _requestTimeout = ValidateRequestTimeout(requestTimeout);
     private readonly IPerformanceTelemetry _performance = performance ?? NullPerformanceTelemetry.Instance;
+    private readonly AsyncPauseGate _visibleActivityPause = new();
+
+    public bool IsPausedForVisibleActivity => _visibleActivityPause.IsPaused;
+    public void PauseForVisibleActivity() => _visibleActivityPause.Pause();
+    public void ResumeAfterVisibleActivity() => _visibleActivityPause.Resume();
 
     public async Task SynchronizeAsync(
         IProgress<PriceCacheProgress>? progress = null,
@@ -76,6 +81,7 @@ public sealed class PriceCacheService(
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                await _visibleActivityPause.WaitAsync(cancellationToken).ConfigureAwait(false);
                 policy = await cache.GetPolicyAsync(cancellationToken).ConfigureAwait(false);
                 if (!policy.Authorized || !policy.Enabled || policy.Paused)
                 {
@@ -180,6 +186,7 @@ public sealed class PriceCacheService(
                     {
                         var item = pendingItems[pendingIndex];
                         cancellationToken.ThrowIfCancellationRequested();
+                        await _visibleActivityPause.WaitAsync(cancellationToken).ConfigureAwait(false);
                         if (ShouldReportProgress())
                         {
                             progress?.Report(activitySnapshot with

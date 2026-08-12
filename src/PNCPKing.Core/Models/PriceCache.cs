@@ -108,7 +108,8 @@ public sealed record PriceCacheLocalCursor(
     double SecondaryRank,
     string PublicationDate,
     string ContractId,
-    long ItemNumber);
+    long ItemNumber,
+    long ResultSequence = 0);
 
 public enum BackupProfile
 {

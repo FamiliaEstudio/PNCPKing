@@ -1,6 +1,8 @@
 using System.Net;
 using System.Text;
+using Microsoft.Data.Sqlite;
 using PNCPKing.Core.Models;
+using PNCPKing.Core.Search;
 using PNCPKing.Infrastructure.Api;
 using PNCPKing.Infrastructure.Data;
 using PNCPKing.Infrastructure.Services;
@@ -116,18 +118,165 @@ public sealed class CatalogTests
         Assert.Contains(await repository.GetEquivalenceRulesAsync(), rule => rule.Alias == "POL");
     }
 
-    private static CatalogEntry Entry(string code, string description) => new()
+    [Fact]
+    public async Task CatalogSearch_UsesFullGrammarAgainstOfficialDescriptionOnly()
     {
-        Kind = CatalogKind.Catmat,
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteCatalogRepository(database.Repository.DatabasePath);
+        await repository.BeginSyncAsync(CatalogKind.Catmat, "grammar");
+        await repository.StagePageAsync(new CatalogPage(
+            CatalogKind.Catmat,
+            1,
+            1,
+            5,
+            [
+                Entry("100001", "CAFÉ TORRADO EM GRÃOS 500 G"),
+                Entry("100002", "CAFÉ TORRADO EM CÁPSULA 500 G"),
+                Entry("100003", "CHÁ VERDE EM FOLHAS"),
+                Entry("100004", "MALTE DE CEVADA", "CAFÉ, CHÁ E CHOCOLATE"),
+                Entry("100005", "CAFETEIRA ELÉTRICA")
+            ]), "grammar");
+        await repository.PublishAsync(CatalogKind.Catmat, "grammar");
+        var search = new CatalogSearchService(repository);
+
+        var conjunction = await search.SearchAsync(new CatalogSearchQuery(
+            "cafe + torrado -capsula",
+            CatalogKind.Catmat));
+        var alternatives = await search.SearchAsync(new CatalogSearchQuery(
+            "\"café torrado\" OU \"chá verde\" -cápsula",
+            CatalogKind.Catmat));
+        var code = await search.SearchAsync(new CatalogSearchQuery("100004", CatalogKind.Catmat));
+
+        Assert.Equal("100001", Assert.Single(conjunction.Results).Entry.Code);
+        Assert.Equal(["100001", "100003"], alternatives.Results.Select(result => result.Entry.Code).Order().ToArray());
+        Assert.Equal("100004", Assert.Single(code.Results).Entry.Code);
+        Assert.DoesNotContain(
+            (await search.SearchAsync(new CatalogSearchQuery("café", CatalogKind.Catmat))).Results,
+            result => result.Entry.Code == "100004");
+        Assert.DoesNotContain(conjunction.Results, result => result.Entry.Code == "100005");
+    }
+
+    [Fact]
+    public async Task CatalogSearch_AppliesSameOperatorsToCatserAndBuildsDescriptionIndexInBatches()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteCatalogRepository(database.Repository.DatabasePath);
+        await repository.BeginSyncAsync(CatalogKind.Catser, "services");
+        await repository.StagePageAsync(new CatalogPage(
+            CatalogKind.Catser,
+            1,
+            1,
+            3,
+            [
+                Entry("200001", "SERVIÇO DE TORREFAÇÃO DE CAFÉ", kind: CatalogKind.Catser),
+                Entry("200002", "SERVIÇO DE CAFÉ EM CÁPSULA", kind: CatalogKind.Catser),
+                Entry("200003", "SERVIÇO DE MANUTENÇÃO DE CAFETEIRA", kind: CatalogKind.Catser)
+            ]), "services");
+        await repository.PublishAsync(CatalogKind.Catser, "services");
+        CatalogDescriptionIndexProgress progress;
+        do
+        {
+            progress = await repository.BuildDescriptionIndexBatchAsync(2);
+        } while (!progress.Completed);
+
+        var page = await new CatalogSearchService(repository).SearchAsync(new CatalogSearchQuery(
+            "serviço + café -cápsula",
+            CatalogKind.Catser));
+
+        Assert.Equal("200001", Assert.Single(page.Results).Entry.Code);
+        Assert.True((await repository.GetDescriptionIndexProgressAsync()).Completed);
+    }
+
+    [Fact]
+    public async Task HierarchyChildren_ReturnsOnlyOneLevelAtATime()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteCatalogRepository(database.Repository.DatabasePath);
+        await repository.BeginSyncAsync(CatalogKind.Catmat, "hierarchy");
+        await repository.StagePageAsync(new CatalogPage(
+            CatalogKind.Catmat,
+            1,
+            1,
+            2,
+            [
+                Entry("300001", "TUBO A") with
+                {
+                    Level1Code = "10", Level1Name = "Materiais",
+                    Level2Code = "11", Level2Name = "Tubos",
+                    Level3Code = "111", Level3Name = "PVC"
+                },
+                Entry("300002", "CONEXÃO B") with
+                {
+                    Level1Code = "10", Level1Name = "Materiais",
+                    Level2Code = "12", Level2Name = "Conexões",
+                    Level3Code = "121", Level3Name = "Metálicas"
+                }
+            ]), "hierarchy");
+        await repository.PublishAsync(CatalogKind.Catmat, "hierarchy");
+
+        var roots = await repository.GetHierarchyChildrenAsync(CatalogKind.Catmat);
+        var children = await repository.GetHierarchyChildrenAsync(
+            CatalogKind.Catmat,
+            Assert.Single(roots).Filter);
+
+        Assert.Equal(2, children.Count);
+        Assert.All(children, child => Assert.Equal(2, child.Level));
+        Assert.All(children, child => Assert.True(child.HasChildren));
+    }
+
+    [Fact]
+    public async Task Migration16To17_CheckpointsExistingCatalogWithoutRebuildingDuringStartup()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteCatalogRepository(database.Repository.DatabasePath);
+        await repository.BeginSyncAsync(CatalogKind.Catmat, "legacy");
+        await repository.StagePageAsync(new CatalogPage(
+            CatalogKind.Catmat,
+            1,
+            1,
+            2,
+            [Entry("400001", "CAFÉ TORRADO"), Entry("400002", "CHÁ VERDE")]), "legacy");
+        await repository.PublishAsync(CatalogKind.Catmat, "legacy");
+        await using (var connection = new SqliteConnection($"Data Source={database.Repository.DatabasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var downgrade = connection.CreateCommand();
+            downgrade.CommandText = """
+                DROP TRIGGER catalog_description_fts_insert;
+                DROP TRIGGER catalog_description_fts_delete;
+                DROP TRIGGER catalog_description_fts_update;
+                DROP TABLE catalog_description_index_state;
+                DROP TABLE catalog_description_fts;
+                UPDATE schema_info SET version = 16 WHERE id = 1;
+                """;
+            await downgrade.ExecuteNonQueryAsync();
+        }
+
+        await new SqliteContractRepository(database.Repository.DatabasePath).InitializeAsync();
+        var pending = await new SqliteCatalogRepository(database.Repository.DatabasePath)
+            .GetDescriptionIndexProgressAsync();
+
+        Assert.False(pending.Completed);
+        Assert.Equal(0, pending.IndexedRowId);
+        Assert.True(pending.TargetRowId >= 2);
+    }
+
+    private static CatalogEntry Entry(
+        string code,
+        string description,
+        string level1Name = "Tubos",
+        CatalogKind kind = CatalogKind.Catmat) => new()
+    {
+        Kind = kind,
         Code = code,
         Description = description,
         Level1Code = "10",
-        Level1Name = "Tubos",
+        Level1Name = level1Name,
         Level2Code = "11",
         Level2Name = "Conexões",
         Level3Code = "12",
         Level3Name = "Conexão hidráulica",
-        SearchText = description
+        SearchText = SearchText.Normalize($"{description} {level1Name}")
     };
 
     private sealed class JsonHandler(string json) : HttpMessageHandler

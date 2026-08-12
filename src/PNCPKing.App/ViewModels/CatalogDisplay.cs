@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using PNCPKing.Core.Models;
 
 namespace PNCPKing.App.ViewModels;
@@ -85,6 +86,23 @@ public sealed class CatalogHierarchyNode
 {
     public required string Label { get; init; }
     public required CatalogKind Kind { get; init; }
+    public int Level { get; init; }
     public CatalogHierarchyFilter Filter { get; init; } = new();
-    public List<CatalogHierarchyNode> Children { get; } = [];
+    public bool IsPlaceholder { get; init; }
+    public bool ChildrenLoaded { get; set; }
+    public ObservableCollection<CatalogHierarchyNode> Children { get; } = [];
+
+    public void PrepareLazyChildren()
+    {
+        if (Children.Count == 0)
+        {
+            Children.Add(new CatalogHierarchyNode
+            {
+                Label = "Carregando…",
+                Kind = Kind,
+                Level = Level + 1,
+                IsPlaceholder = true
+            });
+        }
+    }
 }

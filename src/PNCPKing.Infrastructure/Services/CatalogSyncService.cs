@@ -25,6 +25,20 @@ public sealed class CatalogSyncService(
             _timeProvider.GetUtcNow() - state.CompletedAt.Value >= RefreshInterval);
     }
 
+    public async Task BuildDescriptionIndexAsync(
+        IProgress<CatalogDescriptionIndexProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var state = await repository.GetDescriptionIndexProgressAsync(cancellationToken).ConfigureAwait(false);
+        while (!state.Completed)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await _pause.WaitAsync(cancellationToken).ConfigureAwait(false);
+            state = await repository.BuildDescriptionIndexBatchAsync(2000, cancellationToken).ConfigureAwait(false);
+            progress?.Report(state);
+        }
+    }
+
     public async Task SynchronizeAsync(
         IProgress<CatalogSyncProgress>? progress = null,
         CancellationToken cancellationToken = default)

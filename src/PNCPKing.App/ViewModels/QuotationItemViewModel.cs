@@ -493,15 +493,13 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         try
         {
             var previousBasketKey = preferredBasketKey ?? SelectedBasket?.Key;
-            var analyses = await _quotations.GetAnalysesAsync(_projectId).ConfigureAwait(true);
-            var analysis = analyses.SingleOrDefault(item => item.Line.Id == _lineId)
+            var analysis = await _quotations.GetAnalysisAsync(_projectId, _lineId).ConfigureAwait(true)
                            ?? throw new InvalidOperationException("O item da cotação não existe mais.");
             Line = new QuotationLineDisplay(analysis);
             if (string.IsNullOrWhiteSpace(CatalogQuery))
             {
                 CatalogQuery = analysis.Line.EffectiveDisplayName;
             }
-            await RefreshCatalogAvailabilityAsync().ConfigureAwait(true);
             UpdateProgress(_main.LatestTimedQuotationProgress);
             Baskets.Clear();
             foreach (var basket in analysis.Baskets)
@@ -660,67 +658,62 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        CatalogStatus = "Catálogo local completo. Pesquise livremente por nome, atributo, medida ou código.";
-        if (!_catalogHierarchyLoaded)
-        {
-            await LoadCatalogHierarchyAsync().ConfigureAwait(true);
-        }
+        CatalogStatus = "Catálogo local completo. Pesquise por descrição oficial, atributo, medida ou código.";
     }
 
-    private async Task LoadCatalogHierarchyAsync()
+    public async Task EnsureCatalogAreaLoadedAsync()
     {
-        var paths = await _catalogRepository.GetHierarchyAsync().ConfigureAwait(true);
+        await RefreshCatalogAvailabilityAsync().ConfigureAwait(true);
+        if (_catalogHierarchyLoaded || !IsCatalogAvailable)
+        {
+            return;
+        }
+
         CatalogHierarchy.Clear();
         foreach (var kind in new[] { CatalogKind.Catmat, CatalogKind.Catser })
         {
             var root = new CatalogHierarchyNode
             {
                 Label = kind == CatalogKind.Catmat ? "CATMAT — materiais" : "CATSER — serviços",
-                Kind = kind
+                Kind = kind,
+                Level = 0
             };
-            foreach (var path in paths.Where(path => path.Kind == kind))
-            {
-                AddHierarchyPath(root, path);
-            }
-
+            root.PrepareLazyChildren();
             CatalogHierarchy.Add(root);
         }
 
         _catalogHierarchyLoaded = true;
     }
 
-    private static void AddHierarchyPath(CatalogHierarchyNode root, CatalogHierarchyPath path)
+    public async Task LoadCatalogHierarchyChildrenAsync(CatalogHierarchyNode node)
     {
-        var levels = new[]
+        if (node.IsPlaceholder || node.ChildrenLoaded)
         {
-            (path.Level1Code, path.Level1Name),
-            (path.Level2Code, path.Level2Name),
-            (path.Level3Code, path.Level3Name),
-            (path.Level4Code, path.Level4Name),
-            (path.Level5Code, path.Level5Name)
-        };
-        var codes = new string[5];
-        var current = root;
-        for (var index = 0; index < levels.Length; index++)
+            return;
+        }
+
+        var children = await _catalogRepository
+            .GetHierarchyChildrenAsync(node.Kind, node.Filter)
+            .ConfigureAwait(true);
+        node.Children.Clear();
+        foreach (var child in children)
         {
-            var (code, name) = levels[index];
-            if (string.IsNullOrWhiteSpace(code) && string.IsNullOrWhiteSpace(name)) break;
-            codes[index] = code;
-            var child = current.Children.FirstOrDefault(node =>
-                string.Equals(node.Filter.GetType().GetProperty($"Level{index + 1}Code")?.GetValue(node.Filter)?.ToString(), code, StringComparison.Ordinal));
-            if (child is null)
+            var childNode = new CatalogHierarchyNode
             {
-                child = new CatalogHierarchyNode
-                {
-                    Label = string.IsNullOrWhiteSpace(code) ? name : $"{code} — {name}",
-                    Kind = path.Kind,
-                    Filter = new CatalogHierarchyFilter(codes[0], codes[1], codes[2], codes[3], codes[4])
-                };
-                current.Children.Add(child);
+                Label = string.IsNullOrWhiteSpace(child.Code) ? child.Name : $"{child.Code} — {child.Name}",
+                Kind = child.Kind,
+                Level = child.Level,
+                Filter = child.Filter
+            };
+            if (child.HasChildren)
+            {
+                childNode.PrepareLazyChildren();
             }
 
-            current = child;
+            node.Children.Add(childNode);
         }
+
+        node.ChildrenLoaded = true;
     }
 
     public async Task LoadPromptSlotAsync(ItemSearchPromptSlot slot)

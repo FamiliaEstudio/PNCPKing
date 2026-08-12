@@ -736,7 +736,6 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         try
         {
             await Task.Yield();
-            await _quotationService.RecoverInterruptedAutomationAsync().ConfigureAwait(true);
             await RefreshDatasetSummaryAsync().ConfigureAwait(true);
             await RefreshCoverageAsync().ConfigureAwait(true);
             await RefreshPriceCacheProgressAsync().ConfigureAwait(true);
@@ -758,6 +757,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _quotationsInitialized = true;
         try
         {
+            await _quotationService.RecoverInterruptedAutomationAsync().ConfigureAwait(true);
             await RefreshQuotationProjectsAsync().ConfigureAwait(true);
         }
         catch (Exception exception)
@@ -923,6 +923,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _visibleIdleResumeCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             _startupCancellation.Token);
         var visibleIdleToken = _visibleIdleResumeCancellation.Token;
+        _priceCacheService.PauseForVisibleActivity();
         if (IsIndexBusy && !_syncService.IsPaused)
         {
             _syncService.Pause();
@@ -1038,7 +1039,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 _ = ResumeVisiblePausedWorkAfterIdleAsync(
                     _indexPausedForVisibleActivity,
                     _catalogPausedForVisibleActivity,
-                    visibleIdleToken);
+                    resumePriceCache: true,
+                    cancellationToken: visibleIdleToken);
             }
         }
     }
@@ -1046,6 +1048,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private async Task ResumeVisiblePausedWorkAfterIdleAsync(
         bool resumeIndex,
         bool resumeCatalog,
+        bool resumePriceCache,
         CancellationToken cancellationToken)
     {
         try
@@ -1063,6 +1066,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 _catalogSyncService.Resume();
                 IsCatalogPaused = false;
                 _catalogPausedForVisibleActivity = false;
+            }
+
+            if (resumePriceCache)
+            {
+                _priceCacheService.ResumeAfterVisibleActivity();
             }
         }
         catch (OperationCanceledException)

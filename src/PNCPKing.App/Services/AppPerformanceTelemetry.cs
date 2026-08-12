@@ -162,6 +162,24 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
                 $"{FormatBytes(item.PeakWorkingSetBytes)}");
         }
 
+        var largestStalls = report.Measurements
+            .Where(item => item.Operation == "ui" || item.Duration >= TimeSpan.FromMilliseconds(250))
+            .OrderByDescending(item => item.Duration)
+            .Take(10)
+            .ToArray();
+        if (largestStalls.Length > 0)
+        {
+            builder.AppendLine();
+            builder.AppendLine("Dez maiores paralisações/atividades (sem consultas ou identificadores)");
+            builder.AppendLine("Início UTC | Operação | Fase | Duração ms | RAM");
+            foreach (var item in largestStalls)
+            {
+                builder.AppendLine(
+                    $"{item.StartedAt:O} | {item.Operation} | {item.Phase} | " +
+                    $"{item.Duration.TotalMilliseconds:N1} | {FormatBytes(item.WorkingSetBytes)}");
+            }
+        }
+
         if (report.Comparisons.Count > 0)
         {
             builder.AppendLine();

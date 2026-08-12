@@ -4,16 +4,17 @@ using PNCPKing.Core.Models;
 
 namespace PNCPKing.Infrastructure.Data;
 
-public sealed class SqliteSweetCodeRepository(string databasePath) : ISweetCodeRepository
+public sealed class SqliteSweetCodeRepository : ISweetCodeRepository
 {
-    private readonly string _connectionString = new SqliteConnectionStringBuilder
+    private readonly ISqliteConnectionFactory _connections;
+
+    public SqliteSweetCodeRepository(string databasePath)
+        : this(new SqliteConnectionFactory(databasePath))
     {
-        DataSource = Path.GetFullPath(databasePath),
-        Mode = SqliteOpenMode.ReadWrite,
-        Cache = SqliteCacheMode.Shared,
-        ForeignKeys = true,
-        Pooling = true
-    }.ToString();
+    }
+
+    public SqliteSweetCodeRepository(ISqliteConnectionFactory connections) =>
+        _connections = connections ?? throw new ArgumentNullException(nameof(connections));
 
     public async Task<SweetCodeLibrary> LoadAsync(CancellationToken cancellationToken = default)
     {
@@ -86,11 +87,6 @@ public sealed class SqliteSweetCodeRepository(string databasePath) : ISweetCodeR
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken)
     {
-        var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=30000;";
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        return connection;
+        return await _connections.OpenAsync(cancellationToken).ConfigureAwait(false);
     }
 }

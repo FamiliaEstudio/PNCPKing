@@ -23,17 +23,18 @@ public sealed partial class CatalogSearchService(ICatalogRepository repository) 
             throw new ArgumentOutOfRangeException(nameof(query), "Página e tamanho da página são inválidos.");
         }
 
+        var expression = CatalogSearchExpression.Parse(query.Text);
         var rules = await repository.GetEquivalenceRulesAsync(cancellationToken).ConfigureAwait(false);
         var vocabulary = new Vocabulary(rules);
-        var expandedText = vocabulary.ExpandForSearch(query.Text);
+        var candidateText = string.Join(' ', expression.PositiveTerms.Select(term =>
+            vocabulary.ExpandForSearch(term.Value)));
         var candidates = (await repository.FindCandidatesAsync(
-                query with { Text = expandedText },
-                1000,
+                query with { Text = candidateText },
+                5000,
                 cancellationToken).ConfigureAwait(false))
             .ToList();
 
-        var code = new string(query.Text.Where(char.IsDigit).ToArray());
-        if (code.Length > 0 && code.Length == query.Text.Trim().Length)
+        if (expression.ExactCode is { } code)
         {
             foreach (var kind in query.Kind is { } selected ? new[] { selected } : new[] { CatalogKind.Catmat, CatalogKind.Catser })
             {
@@ -45,9 +46,27 @@ public sealed partial class CatalogSearchService(ICatalogRepository repository) 
             }
         }
 
+        var requested = string.Join(' ', expression.PositiveTerms.Select(term => term.Value));
+        var normalizedRequested = vocabulary.Normalize(requested);
+        var requestedTokens = Tokens(normalizedRequested);
+        var requestedMeasures = ParseMeasures(requested, vocabulary);
+        var requestedFeatures = ParseFeatures(requested, vocabulary);
         var ranked = candidates
-            .Select(entry => Score(query.Text, entry, vocabulary))
-            .OrderByDescending(result => string.Equals(result.Entry.Code, query.Text.Trim(), StringComparison.Ordinal) ? 1 : 0)
+            .Select(entry =>
+            {
+                var normalized = vocabulary.Normalize(entry.Description);
+                return new PreparedCandidate(entry, normalized, Tokens(normalized).ToHashSet(StringComparer.Ordinal));
+            })
+            .Where(candidate => MatchesExpression(expression, candidate, vocabulary))
+            .Select(candidate => Score(
+                expression,
+                candidate,
+                normalizedRequested,
+                requestedTokens,
+                requestedMeasures,
+                requestedFeatures,
+                vocabulary))
+            .OrderByDescending(result => string.Equals(result.Entry.Code, expression.ExactCode, StringComparison.Ordinal) ? 1 : 0)
             .ThenByDescending(result => result.Score)
             .ThenBy(result => result.ConflictCount)
             .ThenByDescending(result => result.MatchCount)
@@ -62,13 +81,56 @@ public sealed partial class CatalogSearchService(ICatalogRepository repository) 
             ranked.Length);
     }
 
-    private static CatalogSearchResult Score(string requested, CatalogEntry entry, Vocabulary vocabulary)
+    private static bool MatchesExpression(
+        CatalogSearchExpression expression,
+        PreparedCandidate candidate,
+        Vocabulary vocabulary)
     {
-        var normalizedRequested = vocabulary.Normalize(requested);
-        var normalizedCandidate = vocabulary.Normalize(
-            $"{entry.Description} {entry.Hierarchy} {entry.Code}");
-        var requestedTokens = Tokens(normalizedRequested);
-        var candidateTokens = Tokens(normalizedCandidate).ToHashSet(StringComparer.Ordinal);
+        if (string.Equals(candidate.Entry.Code, expression.ExactCode, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return expression.Alternatives.Any(clause =>
+                   clause.Terms.All(term => ContainsAtom(candidate, term, vocabulary))) &&
+               expression.Exclusions.All(term => !ContainsAtom(candidate, term, vocabulary));
+    }
+
+    private static bool ContainsAtom(
+        PreparedCandidate candidate,
+        CatalogSearchAtom atom,
+        Vocabulary vocabulary)
+    {
+        var value = vocabulary.Normalize(atom.Value);
+        var requestedMeasures = ParseMeasures(atom.Value, vocabulary);
+        if (requestedMeasures.Length > 0)
+        {
+            var candidateMeasures = ParseMeasures(candidate.Entry.Description, vocabulary);
+            return requestedMeasures.All(requested => candidateMeasures.Any(candidate =>
+                candidate.Dimension == requested.Dimension &&
+                Equivalent(requested.CanonicalValue, candidate.CanonicalValue)));
+        }
+
+        if (atom.IsPhrase || value.Contains(' ', StringComparison.Ordinal))
+        {
+            return candidate.NormalizedDescription.Contains(value, StringComparison.Ordinal);
+        }
+
+        return candidate.Tokens.Contains(value);
+    }
+
+    private static CatalogSearchResult Score(
+        CatalogSearchExpression expression,
+        PreparedCandidate candidate,
+        string normalizedRequested,
+        string[] requestedTokens,
+        Measurement[] requestedMeasures,
+        IReadOnlyDictionary<string, string> requestedFeatures,
+        Vocabulary vocabulary)
+    {
+        var entry = candidate.Entry;
+        var normalizedCandidate = candidate.NormalizedDescription;
+        var candidateTokens = candidate.Tokens;
         var signals = new List<CatalogMatchSignal>();
         var matchedTokens = 0;
         foreach (var token in requestedTokens)
@@ -82,7 +144,6 @@ public sealed partial class CatalogSearchService(ICatalogRepository repository) 
                 matched ? "Termo equivalente localizado." : "O catálogo não informa termo equivalente."));
         }
 
-        var requestedMeasures = ParseMeasures(requested, vocabulary);
         var candidateMeasures = ParseMeasures(entry.Description, vocabulary);
         var measureMatches = 0;
         var conflicts = 0;
@@ -118,7 +179,6 @@ public sealed partial class CatalogSearchService(ICatalogRepository repository) 
             }
         }
 
-        var requestedFeatures = ParseFeatures(requested, vocabulary);
         var candidateFeatures = ParseFeatures(entry.Description, vocabulary);
         var featureMatches = 0;
         foreach (var feature in requestedFeatures)
@@ -166,7 +226,7 @@ public sealed partial class CatalogSearchService(ICatalogRepository repository) 
         }
 
         score = Math.Clamp(score - Math.Min(50, conflicts * 25), 0m, 100m);
-        if (string.Equals(entry.Code, requested.Trim(), StringComparison.Ordinal)) score = 100m;
+        if (string.Equals(entry.Code, expression.ExactCode, StringComparison.Ordinal)) score = 100m;
         var compactSignals = signals
             .DistinctBy(signal => (signal.Requested, signal.Found, signal.State))
             .Take(30)
@@ -272,12 +332,20 @@ public sealed partial class CatalogSearchService(ICatalogRepository repository) 
 
     private sealed record Measurement(string Original, string Dimension, decimal CanonicalValue);
     private sealed record Unit(string Dimension, decimal Factor);
+    private sealed record PreparedCandidate(
+        CatalogEntry Entry,
+        string NormalizedDescription,
+        HashSet<string> Tokens);
 
     private sealed class Vocabulary(IReadOnlyList<CatalogEquivalenceRule> rules)
     {
-        private readonly Dictionary<string, string> _aliases = rules
+        private readonly KeyValuePair<string, string>[] _aliases = rules
             .GroupBy(rule => NormalizeKey(rule.Alias), StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => NormalizeKey(group.First().Canonical), StringComparer.Ordinal);
+            .Select(group => new KeyValuePair<string, string>(
+                group.Key,
+                NormalizeKey(group.First().Canonical)))
+            .OrderByDescending(pair => pair.Key.Length)
+            .ToArray();
         private readonly Dictionary<string, Unit> _units = rules
             .Where(rule => rule.Kind == CatalogRuleKind.UnitConversion)
             .GroupBy(rule => NormalizeKey(rule.Alias), StringComparer.Ordinal)
@@ -290,11 +358,16 @@ public sealed partial class CatalogSearchService(ICatalogRepository repository) 
         {
             var normalized = SearchText.Normalize(value.Replace('”', '"').Replace('″', '"')).ToUpperInvariant();
             normalized = normalized.Replace("²", "2", StringComparison.Ordinal);
-            foreach (var alias in _aliases.OrderByDescending(pair => pair.Key.Length))
+            foreach (var alias in _aliases)
             {
                 if (alias.Key == "\"")
                 {
                     normalized = normalized.Replace("\"", $" {alias.Value} ", StringComparison.Ordinal);
+                    continue;
+                }
+
+                if (!normalized.Contains(alias.Key, StringComparison.Ordinal))
+                {
                     continue;
                 }
 

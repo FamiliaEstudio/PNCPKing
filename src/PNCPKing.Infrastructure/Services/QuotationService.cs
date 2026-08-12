@@ -7,8 +7,10 @@ namespace PNCPKing.Infrastructure.Services;
 
 public sealed class QuotationService(
     IQuotationRepository repository,
-    QuotationAnalyzer analyzer)
+    QuotationAnalyzer analyzer,
+    IPerformanceTelemetry? performance = null)
 {
+    private readonly IPerformanceTelemetry _performance = performance ?? NullPerformanceTelemetry.Instance;
     public Task<IReadOnlyList<QuotationProject>> GetProjectsAsync(CancellationToken cancellationToken = default) =>
         repository.GetProjectsAsync(cancellationToken);
 
@@ -286,6 +288,26 @@ public sealed class QuotationService(
         }
 
         return analyses;
+    }
+
+    public async Task<QuotationLineAnalysis?> GetAnalysisAsync(
+        Guid projectId,
+        Guid lineId,
+        CancellationToken cancellationToken = default)
+    {
+        using var span = _performance.Begin("quotation-item", "analysis-load");
+        var line = await repository.GetLineAsync(projectId, lineId, cancellationToken).ConfigureAwait(false);
+        if (line is null)
+        {
+            span.Complete();
+            return null;
+        }
+
+        var references = await repository.GetReferencesAsync(lineId, cancellationToken).ConfigureAwait(false);
+        var manualBaskets = await repository.GetManualBasketsAsync(lineId, cancellationToken).ConfigureAwait(false);
+        var analysis = analyzer.Analyze(line, references, manualBaskets);
+        span.Complete(references.Count + manualBaskets.Count + 1);
+        return analysis;
     }
 
     public async Task ConfirmBasketAsync(

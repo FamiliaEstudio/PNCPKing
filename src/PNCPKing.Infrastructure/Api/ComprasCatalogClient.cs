@@ -47,16 +47,6 @@ public sealed class ComprasCatalogClient(HttpClient httpClient) : IComprasCatalo
         var code = kind == CatalogKind.Catmat ? item.CodigoItem : item.CodigoServico;
         var description = SearchText.Sanitize(
             kind == CatalogKind.Catmat ? item.DescricaoItem : item.NomeServico).Trim();
-        var values = kind == CatalogKind.Catmat
-            ? new[]
-            {
-                item.NomeGrupo, item.NomeClasse, item.NomePdm, description, item.CodigoNcm
-            }
-            : new[]
-            {
-                item.NomeSecao, item.NomeDivisao, item.NomeGrupo, item.NomeClasse,
-                item.NomeSubclasse, description
-            };
         return new CatalogEntry
         {
             Kind = kind,
@@ -77,7 +67,7 @@ public sealed class ComprasCatalogClient(HttpClient httpClient) : IComprasCatalo
             Sustainable = item.ItemSustentavel,
             ExclusiveCentralPurchasing = item.ExclusivoCentralCompras,
             RemoteUpdatedAt = ParseDate(item.DataHoraAtualizacao),
-            SearchText = SearchText.Normalize(string.Join(' ', values.Where(value => !string.IsNullOrWhiteSpace(value))))
+            SearchText = SearchText.Normalize(description)
         };
     }
 

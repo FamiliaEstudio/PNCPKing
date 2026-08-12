@@ -11,7 +11,7 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
     private const long MinimumBytesPerContract = 14_000;
     private const long MaximumBytesPerContract = 28_000;
     private const long MinimumSafetyReserve = 2L * 1024 * 1024 * 1024;
-    private readonly string _connectionString;
+    private readonly ISqliteConnectionFactory _connections;
     private readonly string _databasePath;
     private readonly IPerformanceTelemetry _performance;
     private long _lastOccupiedBytes;
@@ -20,17 +20,16 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
     public SqlitePriceCacheRepository(
         string databasePath,
         IPerformanceTelemetry? performance = null)
+        : this(new SqliteConnectionFactory(databasePath), performance)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
-        _databasePath = Path.GetFullPath(databasePath);
-        _connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = _databasePath,
-            Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared,
-            ForeignKeys = true,
-            Pooling = true
-        }.ToString();
+    }
+
+    public SqlitePriceCacheRepository(
+        ISqliteConnectionFactory connections,
+        IPerformanceTelemetry? performance = null)
+    {
+        _connections = connections ?? throw new ArgumentNullException(nameof(connections));
+        _databasePath = connections.DatabasePath;
         _performance = performance ?? NullPerformanceTelemetry.Instance;
     }
 
@@ -132,6 +131,9 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
         DateOnly endDate,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -160,6 +162,9 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
         string? reason = null,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -188,6 +193,9 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
         string? message = null,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -212,6 +220,9 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
         DateOnly endDate,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         var now = FormatDateTime(DateTimeOffset.UtcNow);
@@ -416,6 +427,9 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
         DateTimeOffset? sourceGlobalUpdatedAt,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -444,6 +458,9 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
         string reason,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -581,6 +598,9 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
 
     public async Task RemoveBackgroundCacheAsync(CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
@@ -696,21 +716,18 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
         }
         var activePriceConditions = new List<string>
         {
-            "ar.contract_id = i.contract_id",
-            "ar.item_number = i.item_number",
-            "ar.result_status_id = 1",
-            "ar.unit_value_scaled > 0"
+            "r.result_status_id = 1",
+            "r.unit_value_scaled > 0"
         };
         if (minimumUnitPrice is not null)
         {
-            activePriceConditions.Add("ar.unit_value_scaled >= $minimum");
+            activePriceConditions.Add("r.unit_value_scaled >= $minimum");
         }
         if (maximumUnitPrice is not null)
         {
-            activePriceConditions.Add("ar.unit_value_scaled <= $maximum");
+            activePriceConditions.Add("r.unit_value_scaled <= $maximum");
         }
-        conditions.Add(
-            $"EXISTS(SELECT 1 FROM item_results ar WHERE {string.Join(" AND ", activePriceConditions)})");
+        conditions.AddRange(activePriceConditions);
 
         var itemJoin = itemMatch.Length > 0
             ? "JOIN items_fts ON items_fts.rowid = i.rowid"
@@ -740,6 +757,10 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
                  OR (sort_priority = $cursorPriority AND primary_rank = $cursorPrimary
                      AND secondary_rank = $cursorSecondary AND publication_date = $cursorPublication
                      AND pncp_id = $cursorContract AND item_number > $cursorItem)
+                 OR (sort_priority = $cursorPriority AND primary_rank = $cursorPrimary
+                     AND secondary_rank = $cursorSecondary AND publication_date = $cursorPublication
+                     AND pncp_id = $cursorContract AND item_number = $cursorItem
+                     AND result_sequence > $cursorResult)
               """;
         var scanLimit = Math.Min(10_000, Math.Max(pageSize * 4, pageSize + 1));
 
@@ -758,17 +779,22 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
                        i.source_updated_at, i.hydration_status, i.last_error,
                        {explicitPriority} AS sort_priority,
                        {primaryRank} AS primary_rank,
-                       {secondaryRank} AS secondary_rank
+                       {secondaryRank} AS secondary_rank,
+                       r.result_sequence, r.supplier_tax_id, r.supplier_name, r.supplier_type,
+                       r.supplier_municipality, r.supplier_uf, r.quantity_scaled,
+                       r.unit_value_scaled, r.total_value_scaled, r.result_date,
+                       r.result_status_id, r.result_status_name
                   FROM items i
                   JOIN contracts c ON c.pncp_id = i.contract_id
                   JOIN contract_item_snapshots s ON s.contract_id = i.contract_id
+                  JOIN item_results r ON r.contract_id = i.contract_id AND r.item_number = i.item_number
                   {itemJoin}
                  WHERE {string.Join(" AND ", conditions)}
             )
             SELECT * FROM ranked_items
             {cursorWhere}
              ORDER BY sort_priority, primary_rank, secondary_rank,
-                      publication_date DESC, pncp_id, item_number
+                      publication_date DESC, pncp_id, item_number, result_sequence
              LIMIT $scanLimit;
             """;
         command.Parameters.AddWithValue("$complete", (int)ItemHydrationStatus.Complete);
@@ -789,6 +815,7 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
             command.Parameters.AddWithValue("$cursorPublication", cursor.PublicationDate);
             command.Parameters.AddWithValue("$cursorContract", cursor.ContractId);
             command.Parameters.AddWithValue("$cursorItem", cursor.ItemNumber);
+            command.Parameters.AddWithValue("$cursorResult", cursor.ResultSequence);
         }
         AddFilterParameters(command, filters);
         if (minimumUnitPrice is not null)
@@ -800,7 +827,7 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
             command.Parameters.AddWithValue("$maximum", DecimalScale.ToScaled(maximumUnitPrice.Value)!.Value);
         }
 
-        var matches = new List<(ItemSearchHit Hit, PriceCacheLocalCursor Cursor)>(pageSize + 1);
+        var matches = new List<(ItemSearchHit Hit, ItemSearchRow Row, PriceCacheLocalCursor Cursor)>(pageSize + 1);
         var scanned = 0;
         PriceCacheLocalCursor? lastScannedCursor = cursor;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -815,11 +842,40 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
                 reader.GetDouble(38),
                 reader.GetString(15),
                 reader.GetString(0),
-                reader.GetInt64(20));
+                reader.GetInt64(20),
+                reader.GetInt64(39));
             lastScannedCursor = rowCursor;
             if (expression.MatchesItem(item.Description, item.Unit))
             {
-                matches.Add((new ItemSearchHit(ReadContract(reader), item), rowCursor));
+                var contract = ReadContract(reader);
+                var result = new HomologationResult
+                {
+                    ContractId = contract.PncpId,
+                    ItemNumber = item.ItemNumber,
+                    ResultSequence = reader.GetInt64(39),
+                    SupplierTaxId = reader.GetString(40),
+                    SupplierName = reader.GetString(41),
+                    SupplierType = reader.GetString(42),
+                    SupplierMunicipality = reader.GetString(43),
+                    SupplierUf = reader.GetString(44),
+                    HomologatedQuantityScaled = reader.IsDBNull(45) ? null : reader.GetInt64(45),
+                    HomologatedUnitValueScaled = reader.IsDBNull(46) ? null : reader.GetInt64(46),
+                    HomologatedTotalValueScaled = reader.IsDBNull(47) ? null : reader.GetInt64(47),
+                    ResultDate = ParseDate(reader, 48),
+                    ResultStatusId = reader.GetInt32(49),
+                    ResultStatusName = reader.GetString(50)
+                };
+                var hit = new ItemSearchHit(contract, item);
+                matches.Add((
+                    hit,
+                    new ItemSearchRow(
+                        contract,
+                        item,
+                        result,
+                        ItemSearchPriceState.Homologated,
+                        "Preço homologado do cache local",
+                        false),
+                    rowCursor));
                 if (matches.Count > pageSize)
                 {
                     break;
@@ -828,21 +884,18 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
         }
 
         var selectedMatches = matches.Take(pageSize).ToArray();
-        var hits = selectedMatches.Select(value => value.Hit).ToArray();
-        var rows = await LoadLocalRowsAsync(
-                connection,
-                hits,
-                minimumUnitPrice,
-                maximumUnitPrice,
-                cancellationToken)
-            .ConfigureAwait(false);
+        var hits = selectedMatches
+            .Select(value => value.Hit)
+            .DistinctBy(hit => (hit.Contract.PncpId, hit.Item.ItemNumber))
+            .ToArray();
+        var rows = selectedMatches.Select(value => value.Row).ToArray();
         var hasMore = matches.Count > pageSize || scanned >= scanLimit;
         var continuation = matches.Count > pageSize
             ? selectedMatches[^1].Cursor
             : hasMore
                 ? lastScannedCursor
                 : selectedMatches.LastOrDefault().Cursor ?? cursor;
-        span.Complete(rows.Count);
+        span.Complete(rows.Length);
         return new PriceCacheLocalPage(
             hits,
             page,
@@ -950,6 +1003,9 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
         Action<SqliteCommand, DateTimeOffset> addParameters,
         CancellationToken cancellationToken)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
@@ -1005,14 +1061,7 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken)
     {
-        var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText =
-            "PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000; " +
-            "PRAGMA cache_size=-65536; PRAGMA temp_store=FILE; PRAGMA mmap_size=134217728;";
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        return connection;
+        return await _connections.OpenAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static void AddFilterParameters(SqliteCommand command, SearchQuery query)

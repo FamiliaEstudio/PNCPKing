@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:models="clr-namespace:PNCPKing.Core.Models;assembly=PNCPKing.Core"
         xmlns:services="clr-namespace:PNCPKing.App.Services"
+        xmlns:controls="clr-namespace:PNCPKing.App.Controls"
         Title="PNCP King" Width="1540" Height="940" MinWidth="1180" MinHeight="740"
         WindowStartupLocation="CenterScreen">
     <Window.Resources>
@@ -115,42 +116,8 @@
                                      IsIndeterminate="{Binding IsPriceTransferActive}" />
                     </StackPanel>
                 </Grid>
-                <ItemsControl Grid.Row="2" ItemsSource="{Binding CoverageDays}"
-                              ToolTipService.ShowDuration="30000">
-                    <ItemsControl.ItemsPanel>
-                        <ItemsPanelTemplate>
-                            <UniformGrid Rows="1" Columns="365" />
-                        </ItemsPanelTemplate>
-                    </ItemsControl.ItemsPanel>
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <Border Margin="0.25,0" ToolTip="{Binding ToolTip}">
-                                <Border.Style>
-                                    <Style TargetType="Border">
-                                        <Setter Property="Background" Value="#BFC5CC" />
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding Status}" Value="{x:Static models:CoverageStatus.Partial}">
-                                                <Setter Property="Background" Value="#E6B84E" />
-                                            </DataTrigger>
-                                            <DataTrigger Binding="{Binding Status}" Value="{x:Static models:CoverageStatus.Downloading}">
-                                                <Setter Property="Background" Value="#3C8DDE" />
-                                            </DataTrigger>
-                                            <DataTrigger Binding="{Binding Status}" Value="{x:Static models:CoverageStatus.Complete}">
-                                                <Setter Property="Background" Value="#36A269" />
-                                            </DataTrigger>
-                                            <DataTrigger Binding="{Binding Status}" Value="{x:Static models:CoverageStatus.AssumedComplete}">
-                                                <Setter Property="Background" Value="#70B98D" />
-                                            </DataTrigger>
-                                            <DataTrigger Binding="{Binding Status}" Value="{x:Static models:CoverageStatus.Failed}">
-                                                <Setter Property="Background" Value="#D9534F" />
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </Border.Style>
-                            </Border>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
+                <controls:CoverageTimeline Grid.Row="2" Height="12"
+                                           ItemsSource="{Binding CoverageDays}" />
 
                 <Border Grid.Row="3" BorderBrush="#D6DDE4" BorderThickness="0,1,0,0"
                         Margin="0,8,0,6" Padding="0,8,0,0">

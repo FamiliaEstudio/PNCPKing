@@ -9,29 +9,28 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 16;
+    public const int CurrentSchemaVersion = 17;
 
     private const string GeographicGroupExpression = "CASE WHEN COALESCE(c.geo_layer, 1) = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
         "ELSE COALESCE(c.state_proximity_rank, 999) END";
 
-    private readonly string _connectionString;
+    private readonly ISqliteConnectionFactory _connections;
     private readonly IPerformanceTelemetry _performance;
 
     public SqliteContractRepository(
         string databasePath,
         IPerformanceTelemetry? performance = null)
+        : this(new SqliteConnectionFactory(databasePath), performance)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
-        DatabasePath = Path.GetFullPath(databasePath);
-        _connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = DatabasePath,
-            Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared,
-            ForeignKeys = true,
-            Pooling = true
-        }.ToString();
+    }
+
+    public SqliteContractRepository(
+        ISqliteConnectionFactory connections,
+        IPerformanceTelemetry? performance = null)
+    {
+        _connections = connections ?? throw new ArgumentNullException(nameof(connections));
+        DatabasePath = connections.DatabasePath;
         _performance = performance ?? NullPerformanceTelemetry.Instance;
     }
 
@@ -40,6 +39,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using (var databasePragmas = connection.CreateCommand())
         {
@@ -318,6 +320,13 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         {
             EnsureMigrationSpace();
             using var span = _performance.Begin("startup", "schema-v16");
+            await using (var migrationPragmas = connection.CreateCommand())
+            {
+                migrationPragmas.CommandText =
+                    $"PRAGMA cache_size=-{_connections.MigrationCacheKib}; " +
+                    $"PRAGMA mmap_size={_connections.MmapBytes}; PRAGMA temp_store=FILE; PRAGMA threads=2;";
+                await migrationPragmas.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
             migration.Transaction = (SqliteTransaction)transaction;
@@ -327,6 +336,24 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             await using var updateVersion = connection.CreateCommand();
             updateVersion.Transaction = (SqliteTransaction)transaction;
             updateVersion.CommandText = "UPDATE schema_info SET version = 16 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            span.Complete();
+            version = 16;
+        }
+
+        if (version < 17)
+        {
+            using var span = _performance.Begin("startup", "schema-v17");
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = (SqliteTransaction)transaction;
+            migration.CommandText = SchemaV17Sql;
+            await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 17 WHERE id = 1;";
             await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             span.Complete();
@@ -767,6 +794,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             return;
         }
 
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         var inserted = await ExecuteContractUpsertsAsync(
@@ -792,7 +822,13 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         ArgumentNullException.ThrowIfNull(contracts);
         ArgumentNullException.ThrowIfNull(checkpoint);
         using var span = _performance.Begin("sync", "database-commit");
+        using var queueSpan = _performance.Begin("sync", "sqlite-queue");
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
+        queueSpan.Complete();
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        using var sqlSpan = _performance.Begin("sync", "sql-execution");
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         if (contracts.Count > 0)
         {
@@ -887,7 +923,10 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             }
         }
 
+        sqlSpan.Complete(contracts.Count);
+        using var commitSpan = _performance.Begin("sync", "commit");
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        commitSpan.Complete(contracts.Count);
         span.Complete(contracts.Count);
     }
 
@@ -1413,6 +1452,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         bool forceRefresh,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
@@ -1724,6 +1766,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         IReadOnlyList<HomologationResult> results,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var delete = connection.CreateCommand())
@@ -1808,6 +1853,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         string? error = null,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -2521,8 +2569,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken)
     {
-        var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        var connection = await _connections.OpenAsync(cancellationToken).ConfigureAwait(false);
         connection.CreateFunction<string?, string?, string?, double?>(
             "pncp_geo_distance",
             (code, name, uf) => ResolveGeography(code, name, uf).Distance,
@@ -2543,11 +2590,6 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             "pncp_random_key",
             StableRandomOrderKey,
             isDeterministic: true);
-        await using var command = connection.CreateCommand();
-        command.CommandText =
-            "PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000; " +
-            "PRAGMA cache_size=-65536; PRAGMA temp_store=FILE; PRAGMA mmap_size=134217728;";
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         return connection;
     }
 
@@ -4007,6 +4049,64 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             VALUES('delete', old.rowid, old.catalog_kind, old.code, old.search_text);
             INSERT INTO catalog_entries_fts(rowid, catalog_kind, code, search_text)
             VALUES(new.rowid, new.catalog_kind, new.code, new.search_text);
+        END;
+        """;
+
+    private const string SchemaV17Sql = """
+        CREATE VIRTUAL TABLE IF NOT EXISTS catalog_description_fts USING fts5(
+            description,
+            content='catalog_entries',
+            content_rowid='rowid',
+            tokenize='unicode61 remove_diacritics 2'
+        );
+
+        CREATE TABLE IF NOT EXISTS catalog_description_index_state(
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            indexed_rowid INTEGER NOT NULL DEFAULT 0,
+            target_rowid INTEGER NOT NULL DEFAULT 0,
+            completed INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO catalog_description_index_state(
+            id, indexed_rowid, target_rowid, completed, updated_at)
+        SELECT 1, 0, COALESCE(MAX(rowid), 0),
+               CASE WHEN COALESCE(MAX(rowid), 0) = 0 THEN 1 ELSE 0 END,
+               strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          FROM catalog_entries
+         WHERE 1 = 1
+        ON CONFLICT(id) DO NOTHING;
+
+        CREATE TRIGGER IF NOT EXISTS catalog_description_fts_insert
+        AFTER INSERT ON catalog_entries
+        WHEN (SELECT completed FROM catalog_description_index_state WHERE id = 1) = 1
+          OR new.rowid > (SELECT target_rowid FROM catalog_description_index_state WHERE id = 1)
+          OR new.rowid <= (SELECT indexed_rowid FROM catalog_description_index_state WHERE id = 1)
+        BEGIN
+            INSERT INTO catalog_description_fts(rowid, description)
+            VALUES(new.rowid, new.description);
+        END;
+        CREATE TRIGGER IF NOT EXISTS catalog_description_fts_delete
+        AFTER DELETE ON catalog_entries
+        WHEN (SELECT completed FROM catalog_description_index_state WHERE id = 1) = 1
+          OR old.rowid > (SELECT target_rowid FROM catalog_description_index_state WHERE id = 1)
+          OR old.rowid <= (SELECT indexed_rowid FROM catalog_description_index_state WHERE id = 1)
+        BEGIN
+            INSERT INTO catalog_description_fts(
+                catalog_description_fts, rowid, description)
+            VALUES('delete', old.rowid, old.description);
+        END;
+        CREATE TRIGGER IF NOT EXISTS catalog_description_fts_update
+        AFTER UPDATE OF description ON catalog_entries
+        WHEN old.description <> new.description
+         AND ((SELECT completed FROM catalog_description_index_state WHERE id = 1) = 1
+          OR old.rowid > (SELECT target_rowid FROM catalog_description_index_state WHERE id = 1)
+          OR old.rowid <= (SELECT indexed_rowid FROM catalog_description_index_state WHERE id = 1))
+        BEGIN
+            INSERT INTO catalog_description_fts(
+                catalog_description_fts, rowid, description)
+            VALUES('delete', old.rowid, old.description);
+            INSERT INTO catalog_description_fts(rowid, description)
+            VALUES(new.rowid, new.description);
         END;
         """;
 

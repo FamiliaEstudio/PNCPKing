@@ -18,6 +18,10 @@ public interface IQuotationRepository
     Task DeleteProjectAsync(Guid projectId, CancellationToken cancellationToken = default);
     Task DeleteLineAsync(Guid lineId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<QuotationLine>> GetLinesAsync(Guid projectId, CancellationToken cancellationToken = default);
+    Task<QuotationLine?> GetLineAsync(
+        Guid projectId,
+        Guid lineId,
+        CancellationToken cancellationToken = default);
     Task<IReadOnlyList<QuotationReference>> GetReferencesAsync(Guid lineId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<QuotationManualBasket>> GetManualBasketsAsync(
         Guid lineId,

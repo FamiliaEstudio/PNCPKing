@@ -109,8 +109,9 @@ public partial class App : Application
                 "database",
                 $"Banco selecionado. pasta_dados={settings.DataFolder}; banco={databasePath}; " +
                 $"tamanho={(File.Exists(databasePath) ? new FileInfo(databasePath).Length : 0)} bytes.");
-            var repository = new SqliteContractRepository(databasePath, _performanceTelemetry);
-            var quotationRepository = new SqliteQuotationRepository(databasePath);
+            var sqliteConnections = new SqliteConnectionFactory(databasePath);
+            var repository = new SqliteContractRepository(sqliteConnections, _performanceTelemetry);
+            var quotationRepository = new SqliteQuotationRepository(sqliteConnections);
             var internetEvidenceStore = new InternetEvidenceStore(settings.DataFolder);
 
             var socketsHandler = new SocketsHttpHandler
@@ -149,7 +150,7 @@ public partial class App : Application
                 internetEvidenceStore);
             var syncService = new SyncService(client, repository, _performanceTelemetry);
             var autoSyncCoordinator = new AutoSyncCoordinator(client, repository, syncService);
-            var priceCacheRepository = new SqlitePriceCacheRepository(databasePath, _performanceTelemetry);
+            var priceCacheRepository = new SqlitePriceCacheRepository(sqliteConnections, _performanceTelemetry);
             var priceCacheService = new PriceCacheService(
                 client,
                 repository,
@@ -165,8 +166,11 @@ public partial class App : Application
                 repository,
                 quotationRepository,
                 itemSearchService);
-            var quotationService = new QuotationService(quotationRepository, new QuotationAnalyzer());
-            var catalogRepository = new SqliteCatalogRepository(databasePath, _performanceTelemetry);
+            var quotationService = new QuotationService(
+                quotationRepository,
+                new QuotationAnalyzer(),
+                _performanceTelemetry);
+            var catalogRepository = new SqliteCatalogRepository(sqliteConnections, _performanceTelemetry);
             var catalogHttpClient = new HttpClient(new SocketsHttpHandler
             {
                 AutomaticDecompression = DecompressionMethods.All,
@@ -184,7 +188,7 @@ public partial class App : Application
                 new ComprasCatalogClient(catalogHttpClient),
                 catalogRepository);
             var catalogSearchService = new CatalogSearchService(catalogRepository);
-            var sweetCodeRepository = new SqliteSweetCodeRepository(databasePath);
+            var sweetCodeRepository = new SqliteSweetCodeRepository(sqliteConnections);
             var internetPriceService = new InternetPriceService(
                 quotationRepository,
                 quotationService,

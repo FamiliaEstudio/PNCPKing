@@ -8,22 +8,21 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteCatalogRepository : ICatalogRepository
 {
-    private readonly string _connectionString;
+    private readonly ISqliteConnectionFactory _connections;
     private readonly IPerformanceTelemetry _performance;
 
     public SqliteCatalogRepository(
         string databasePath,
         IPerformanceTelemetry? performance = null)
+        : this(new SqliteConnectionFactory(databasePath), performance)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
-        _connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = Path.GetFullPath(databasePath),
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Shared,
-            ForeignKeys = true,
-            Pooling = true
-        }.ToString();
+    }
+
+    public SqliteCatalogRepository(
+        ISqliteConnectionFactory connections,
+        IPerformanceTelemetry? performance = null)
+    {
+        _connections = connections ?? throw new ArgumentNullException(nameof(connections));
         _performance = performance ?? NullPerformanceTelemetry.Instance;
     }
 
@@ -63,6 +62,9 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(generation);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var clear = connection.CreateCommand())
@@ -101,6 +103,9 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         using var span = _performance.Begin("catalog", "stage-page");
         ArgumentNullException.ThrowIfNull(page);
         ArgumentException.ThrowIfNullOrWhiteSpace(generation);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using var insert = connection.CreateCommand();
@@ -169,6 +174,9 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         CancellationToken cancellationToken = default)
     {
         using var span = _performance.Begin("catalog", "publish");
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         long staged;
@@ -290,6 +298,9 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         string error,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -311,7 +322,7 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         ArgumentNullException.ThrowIfNull(query);
         limit = Math.Clamp(limit, 1, 5000);
         var tokens = SearchText.Normalize(query.Text)
-            .Split(new[] { ' ', ',', '.', ';', ':', '/', '\\', '-', '(', ')', '[', ']' }, StringSplitOptions.RemoveEmptyEntries)
+            .Split(new[] { ' ', ',', '.', ';', ':', '/', '\\', '(', ')', '[', ']' }, StringSplitOptions.RemoveEmptyEntries)
             .Select(token => new string(token.Where(char.IsLetterOrDigit).ToArray()))
             .Where(token => token.Length > 1 || token.All(char.IsDigit))
             .Distinct(StringComparer.Ordinal)
@@ -319,6 +330,8 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
             .ToArray();
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
+        var descriptionIndex = await GetDescriptionIndexProgressAsync(cancellationToken).ConfigureAwait(false);
+        var useDescriptionIndex = tokens.Length > 0 && descriptionIndex.Completed;
         var filters = BuildEntryFilters(command, query, tokens.Length > 0);
         if (tokens.Length == 0)
         {
@@ -326,9 +339,9 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         }
         else
         {
-            command.CommandText = EntrySelectWithFts +
-                $" WHERE catalog_entries_fts MATCH $match AND {filters} " +
-                "ORDER BY bm25(catalog_entries_fts), e.remote_updated_at DESC, e.code LIMIT $limit;";
+            command.CommandText = (useDescriptionIndex ? EntrySelectWithDescriptionFts : EntrySelectWithFts) +
+                $" WHERE {(useDescriptionIndex ? "catalog_description_fts" : "catalog_entries_fts")} MATCH $match AND {filters} " +
+                $"ORDER BY bm25({(useDescriptionIndex ? "catalog_description_fts" : "catalog_entries_fts")}), e.remote_updated_at DESC, e.code LIMIT $limit;";
             command.Parameters.AddWithValue(
                 "$match",
                 string.Join(" OR ", tokens.Select(token => $"\"{token.Replace("\"", "\"\"")}\"*")));
@@ -343,6 +356,105 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         }
 
         return result;
+    }
+
+    public async Task<CatalogDescriptionIndexProgress> GetDescriptionIndexProgressAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT indexed_rowid, target_rowid, completed
+              FROM catalog_description_index_state
+             WHERE id = 1;
+            """;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            ? new CatalogDescriptionIndexProgress(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2) != 0)
+            : new CatalogDescriptionIndexProgress(0, 0, true);
+    }
+
+    public async Task<CatalogDescriptionIndexProgress> BuildDescriptionIndexBatchAsync(
+        int batchSize = 2000,
+        CancellationToken cancellationToken = default)
+    {
+        batchSize = Math.Clamp(batchSize, 1, 10_000);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        long indexed;
+        long target;
+        await using (var state = connection.CreateCommand())
+        {
+            state.Transaction = (SqliteTransaction)transaction;
+            state.CommandText = "SELECT indexed_rowid, target_rowid FROM catalog_description_index_state WHERE id = 1;";
+            await using var reader = await state.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                return new CatalogDescriptionIndexProgress(0, 0, true);
+            }
+
+            indexed = reader.GetInt64(0);
+            target = reader.GetInt64(1);
+        }
+
+        long batchEnd;
+        await using (var findEnd = connection.CreateCommand())
+        {
+            findEnd.Transaction = (SqliteTransaction)transaction;
+            findEnd.CommandText = """
+                SELECT COALESCE(MAX(rowid), $indexed)
+                  FROM (SELECT rowid FROM catalog_entries
+                         WHERE rowid > $indexed AND rowid <= $target
+                         ORDER BY rowid LIMIT $limit);
+                """;
+            findEnd.Parameters.AddWithValue("$indexed", indexed);
+            findEnd.Parameters.AddWithValue("$target", target);
+            findEnd.Parameters.AddWithValue("$limit", batchSize);
+            batchEnd = Convert.ToInt64(
+                await findEnd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                CultureInfo.InvariantCulture);
+        }
+
+        if (batchEnd == indexed && indexed < target)
+        {
+            batchEnd = target;
+        }
+
+        if (batchEnd > indexed)
+        {
+            await using var insert = connection.CreateCommand();
+            insert.Transaction = (SqliteTransaction)transaction;
+            insert.CommandText = """
+                INSERT INTO catalog_description_fts(rowid, description)
+                SELECT rowid, description FROM catalog_entries
+                 WHERE rowid > $indexed AND rowid <= $batchEnd
+                 ORDER BY rowid;
+                """;
+            insert.Parameters.AddWithValue("$indexed", indexed);
+            insert.Parameters.AddWithValue("$batchEnd", batchEnd);
+            await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var completed = batchEnd >= target;
+        await using (var update = connection.CreateCommand())
+        {
+            update.Transaction = (SqliteTransaction)transaction;
+            update.CommandText = """
+                UPDATE catalog_description_index_state
+                   SET indexed_rowid = $indexed, completed = $completed,
+                       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id = 1;
+                """;
+            update.Parameters.AddWithValue("$indexed", batchEnd);
+            update.Parameters.AddWithValue("$completed", completed ? 1 : 0);
+            await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return new CatalogDescriptionIndexProgress(batchEnd, target, completed);
     }
 
     public async Task<CatalogEntry?> GetEntryAsync(
@@ -386,6 +498,72 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
                 reader.GetString(5), reader.GetString(6),
                 reader.GetString(7), reader.GetString(8),
                 reader.GetString(9), reader.GetString(10)));
+        }
+
+        return result;
+    }
+
+    public async Task<IReadOnlyList<CatalogHierarchyChild>> GetHierarchyChildrenAsync(
+        CatalogKind kind,
+        CatalogHierarchyFilter? parent = null,
+        CancellationToken cancellationToken = default)
+    {
+        parent ??= new CatalogHierarchyFilter();
+        var parentCodes = new[]
+        {
+            parent.Level1Code,
+            parent.Level2Code,
+            parent.Level3Code,
+            parent.Level4Code,
+            parent.Level5Code
+        };
+        var parentLevel = Array.FindLastIndex(parentCodes, code => !string.IsNullOrWhiteSpace(code)) + 1;
+        var childLevel = parentLevel + 1;
+        if (childLevel > 5)
+        {
+            return [];
+        }
+
+        var filters = new List<string> { "active = 1", "catalog_kind = $kind" };
+        for (var index = 0; index < parentLevel; index++)
+        {
+            filters.Add($"level{index + 1}_code = $level{index + 1}");
+        }
+
+        var nextLevel = childLevel < 5 ? childLevel + 1 : 0;
+        var hasChildrenSql = nextLevel == 0
+            ? "0"
+            : $"MAX(CASE WHEN COALESCE(level{nextLevel}_code, '') <> '' OR COALESCE(level{nextLevel}_name, '') <> '' THEN 1 ELSE 0 END)";
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT level{childLevel}_code, level{childLevel}_name, {hasChildrenSql}
+              FROM catalog_entries
+             WHERE {string.Join(" AND ", filters)}
+               AND (COALESCE(level{childLevel}_code, '') <> '' OR COALESCE(level{childLevel}_name, '') <> '')
+             GROUP BY level{childLevel}_code, level{childLevel}_name
+             ORDER BY level{childLevel}_name, level{childLevel}_code;
+            """;
+        command.Parameters.AddWithValue("$kind", (int)kind);
+        for (var index = 0; index < parentLevel; index++)
+        {
+            command.Parameters.AddWithValue($"$level{index + 1}", parentCodes[index]);
+        }
+
+        var result = new List<CatalogHierarchyChild>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var code = reader.GetString(0);
+            var codes = (string[])parentCodes.Clone();
+            codes[childLevel - 1] = code;
+            result.Add(new CatalogHierarchyChild(
+                kind,
+                childLevel,
+                code,
+                reader.GetString(1),
+                new CatalogHierarchyFilter(codes[0], codes[1], codes[2], codes[3], codes[4]),
+                reader.GetInt32(2) != 0));
         }
 
         return result;
@@ -594,14 +772,7 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken)
     {
-        var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText =
-            "PRAGMA busy_timeout=30000; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL; " +
-            "PRAGMA cache_size=-65536; PRAGMA temp_store=FILE; PRAGMA mmap_size=134217728;";
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        return connection;
+        return await _connections.OpenAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static string NormalizeRuleText(string value) => value.Trim().ToUpperInvariant();
@@ -669,5 +840,14 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
                e.exclusive_central, e.remote_updated_at, e.search_text
           FROM catalog_entries_fts
           JOIN catalog_entries e ON e.rowid = catalog_entries_fts.rowid
+        """;
+    private const string EntrySelectWithDescriptionFts = """
+        SELECT e.catalog_kind, e.code, e.description, e.active,
+               e.level1_code, e.level1_name, e.level2_code, e.level2_name,
+               e.level3_code, e.level3_name, e.level4_code, e.level4_name,
+               e.level5_code, e.level5_name, e.ncm_code, e.sustainable,
+               e.exclusive_central, e.remote_updated_at, e.search_text
+          FROM catalog_description_fts
+          JOIN catalog_entries e ON e.rowid = catalog_description_fts.rowid
         """;
 }
