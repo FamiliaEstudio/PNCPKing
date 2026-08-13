@@ -23,13 +23,19 @@ public sealed class PerformanceSpan : IDisposable
     private readonly string _operation;
     private readonly string _phase;
     private readonly long _startedTimestamp;
+    private readonly Action? _onCompleted;
     private int _completed;
 
-    public PerformanceSpan(IPerformanceTelemetry owner, string operation, string phase)
+    public PerformanceSpan(
+        IPerformanceTelemetry owner,
+        string operation,
+        string phase,
+        Action? onCompleted = null)
     {
         _owner = owner;
         _operation = operation;
         _phase = phase;
+        _onCompleted = onCompleted;
         _startedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
     }
 
@@ -55,14 +61,21 @@ public sealed class PerformanceSpan : IDisposable
             return;
         }
 
-        _owner.Record(
-            _operation,
-            _phase,
-            System.Diagnostics.Stopwatch.GetElapsedTime(_startedTimestamp),
-            rows,
-            bytes,
-            succeeded,
-            errorKind);
+        try
+        {
+            _owner.Record(
+                _operation,
+                _phase,
+                System.Diagnostics.Stopwatch.GetElapsedTime(_startedTimestamp),
+                rows,
+                bytes,
+                succeeded,
+                errorKind);
+        }
+        finally
+        {
+            _onCompleted?.Invoke();
+        }
     }
 }
 

@@ -6,6 +6,7 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AssemblyName>PNCPKing</AssemblyName>
     <RootNamespace>PNCPKing.App</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../PNCPKing.Infrastructure/PNCPKing.Infrastructure.csproj"

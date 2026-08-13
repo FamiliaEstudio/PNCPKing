@@ -365,8 +365,12 @@
                             <DataGridTextColumn Header="Preço" Binding="{Binding UnitPrice, StringFormat=C4}" Width="115" />
                             <DataGridTextColumn Header="Descrição" Binding="{Binding Description}" Width="*" MinWidth="280" />
                             <DataGridTextColumn Header="URL" Binding="{Binding SourceUrl}" Width="280" />
-                            <DataGridCheckBoxColumn Header="Preço capturado" Binding="{Binding HasPriceImage}" Width="105" />
-                            <DataGridCheckBoxColumn Header="CNPJ capturado" Binding="{Binding HasTaxIdImage}" Width="105" />
+                            <DataGridCheckBoxColumn Header="Preço capturado"
+                                                    Binding="{Binding HasPriceImage, Mode=OneWay}"
+                                                    IsReadOnly="True" Width="105" />
+                            <DataGridCheckBoxColumn Header="CNPJ capturado"
+                                                    Binding="{Binding HasTaxIdImage, Mode=OneWay}"
+                                                    IsReadOnly="True" Width="105" />
                         </DataGrid.Columns>
                     </DataGrid>
                     <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">

@@ -6,7 +6,9 @@ namespace PNCPKing.Core.Interfaces;
 public interface IContractRepository
 {
     string DatabasePath { get; }
-    Task InitializeAsync(CancellationToken cancellationToken = default);
+    Task<DatabaseInitializationResult> InitializeAsync(
+        CancellationToken cancellationToken = default,
+        IProgress<DatabaseInitializationProgress>? progress = null);
     Task UpsertContractsAsync(IReadOnlyList<ContractRecord> contracts, CancellationToken cancellationToken = default);
     Task CommitSyncPageAsync(
         IReadOnlyList<ContractRecord> contracts,
@@ -61,4 +63,5 @@ public interface IContractRepository
     Task<(long Contracts, long Items, long Results)> GetCountsAsync(CancellationToken cancellationToken = default);
     Task OptimizeAsync(CancellationToken cancellationToken = default);
     Task CheckpointWalAsync(CancellationToken cancellationToken = default);
+    Task MaintainWalAsync(CancellationToken cancellationToken = default);
 }

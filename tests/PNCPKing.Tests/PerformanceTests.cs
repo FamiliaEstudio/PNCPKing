@@ -80,6 +80,34 @@ public sealed class PerformanceTests(ITestOutputHelper output)
 
         var priceCache = new SqlitePriceCacheRepository(connections);
         var today = DateOnly.FromDateTime(DateTime.Today);
+        var newestQuery = new SearchQuery(
+            string.Empty,
+            GeoScope.All,
+            today.AddDays(-364),
+            today,
+            Page: 1,
+            PageSize: 50,
+            Sort: SearchSort.Newest);
+        var nearestQuery = newestQuery with
+        {
+            GeoFilter = SearchGeoFilter.NearRibeirao,
+            Sort = SearchSort.Nearest
+        };
+        var newestSamples = new List<double>();
+        var nearestSamples = new List<double>();
+        for (var sample = 0; sample < 5; sample++)
+        {
+            stopwatch.Restart();
+            _ = await contracts.SearchPageAsync(newestQuery);
+            stopwatch.Stop();
+            newestSamples.Add(stopwatch.Elapsed.TotalMilliseconds);
+
+            stopwatch.Restart();
+            _ = await contracts.SearchPageAsync(nearestQuery);
+            stopwatch.Stop();
+            nearestSamples.Add(stopwatch.Elapsed.TotalMilliseconds);
+        }
+
         var localSamples = new List<double>();
         for (var sample = 0; sample < 5; sample++)
         {
@@ -115,19 +143,39 @@ public sealed class PerformanceTests(ITestOutputHelper output)
             UpdatedAt = DateTimeOffset.UtcNow
         };
         var commitSamples = new List<double>();
+        var mixedSamples = new List<double>();
         for (var sample = 0; sample < 5; sample++)
         {
             stopwatch.Restart();
             await contracts.CommitSyncPageAsync([], checkpoint);
             stopwatch.Stop();
             commitSamples.Add(stopwatch.Elapsed.TotalMilliseconds);
+
+            stopwatch.Restart();
+            var backgroundCommit = contracts.CommitSyncPageAsync(
+                [],
+                checkpoint with { PartitionKey = $"performance-mixed-{sample}" });
+            var visiblePage = contracts.SearchPageAsync(nearestQuery);
+            await Task.WhenAll(backgroundCommit, visiblePage);
+            stopwatch.Stop();
+            mixedSamples.Add(stopwatch.Elapsed.TotalMilliseconds);
         }
 
+        var walPath = path + "-wal";
+        var walBefore = File.Exists(walPath) ? new FileInfo(walPath).Length : 0;
+        stopwatch.Restart();
+        await contracts.MaintainWalAsync();
+        stopwatch.Stop();
+        var checkpointMilliseconds = stopwatch.Elapsed.TotalMilliseconds;
+        var walAfter = File.Exists(walPath) ? new FileInfo(walPath).Length : 0;
+
         output.WriteLine(
-            "migration_v17_ms={0:N1}; quotation_median_ms={1:N1}; quotation_p95_ms={2:N1}; " +
+            "migration_v18_ms={0:N1}; quotation_median_ms={1:N1}; quotation_p95_ms={2:N1}; " +
             "local_price_median_ms={3:N1}; local_price_p95_ms={4:N1}; catalog_index_ms={5:N1}; " +
             "catalog_search_median_ms={6:N1}; catalog_search_p95_ms={7:N1}; " +
-            "empty_commit_median_ms={8:N1}; empty_commit_p95_ms={9:N1}; working_set_bytes={10}",
+            "empty_commit_median_ms={8:N1}; empty_commit_p95_ms={9:N1}; working_set_bytes={10}; " +
+            "newest_page_median_ms={11:N1}; nearest_page_median_ms={12:N1}; " +
+            "mixed_median_ms={13:N1}; checkpoint_ms={14:N1}; wal_before={15}; wal_after={16}",
             migrationMilliseconds,
             quotationSamples.Count == 0 ? double.NaN : Median(quotationSamples),
             quotationSamples.Count == 0 ? double.NaN : P95(quotationSamples),
@@ -138,12 +186,18 @@ public sealed class PerformanceTests(ITestOutputHelper output)
             P95(catalogSamples),
             Median(commitSamples),
             P95(commitSamples),
-            Process.GetCurrentProcess().WorkingSet64);
+            Process.GetCurrentProcess().WorkingSet64,
+            Median(newestSamples),
+            Median(nearestSamples),
+            Median(mixedSamples),
+            checkpointMilliseconds,
+            walBefore,
+            walAfter);
     }
 
     [Fact]
     [Trait("Category", "Performance")]
-    public async Task RealDatabaseCopy_MeasuresMigration15To17()
+    public async Task RealDatabaseCopy_MeasuresMigration15To18()
     {
         var path = Environment.GetEnvironmentVariable("PNCPKING_PERFORMANCE_DATABASE_COPY");
         var enabled = Environment.GetEnvironmentVariable("PNCPKING_PERFORMANCE_MIGRATE_FROM_V15");
@@ -189,7 +243,7 @@ public sealed class PerformanceTests(ITestOutputHelper output)
         await new SqliteContractRepository(path).InitializeAsync();
         stopwatch.Stop();
         output.WriteLine(
-            "migration_v15_to_v17_ms={0:N1}; target_max_ms=359030.0; improvement_vs_512900_ms={1:N1}%",
+            "migration_v15_to_v18_ms={0:N1}; target_max_ms=359030.0; improvement_vs_512900_ms={1:N1}%",
             stopwatch.Elapsed.TotalMilliseconds,
             (512_900d - stopwatch.Elapsed.TotalMilliseconds) * 100d / 512_900d);
         Assert.True(stopwatch.Elapsed < TimeSpan.FromMilliseconds(359_030));

@@ -2,6 +2,34 @@ using System.Windows.Input;
 
 namespace PNCPKing.App.ViewModels;
 
+public static class AsyncCommandRuntime
+{
+    private static Action<Exception>? _exceptionHandler;
+    private static Action? _rejectedHandler;
+
+    public static void Configure(Action<Exception> exceptionHandler, Action? rejectedHandler = null)
+    {
+        _exceptionHandler = exceptionHandler ?? throw new ArgumentNullException(nameof(exceptionHandler));
+        _rejectedHandler = rejectedHandler;
+    }
+
+    internal static void ReportRejected() => _rejectedHandler?.Invoke();
+
+    internal static void Handle(Exception exception)
+    {
+        if (_exceptionHandler is null)
+        {
+            throw exception;
+        }
+
+        _exceptionHandler(exception);
+    }
+
+    internal static bool IsCritical(Exception exception) =>
+        exception is OutOfMemoryException or StackOverflowException or AccessViolationException or
+            AppDomainUnloadedException or BadImageFormatException;
+}
+
 public sealed class RelayCommand(Action execute, Func<bool>? canExecute = null) : ICommand
 {
     public event EventHandler? CanExecuteChanged;
@@ -31,28 +59,42 @@ public sealed class RelayCommand<T>(Action<T?> execute, Func<T?, bool>? canExecu
 
 public sealed class AsyncRelayCommand(Func<Task> execute, Func<bool>? canExecute = null) : ICommand
 {
-    private bool _isRunning;
+    private int _isRunning;
 
     public event EventHandler? CanExecuteChanged;
 
-    public bool CanExecute(object? parameter) => !_isRunning && (canExecute?.Invoke() ?? true);
+    public bool IsRunning => Volatile.Read(ref _isRunning) != 0;
+
+    public Task? ExecutionTask { get; private set; }
+
+    public bool CanExecute(object? parameter) => !IsRunning && (canExecute?.Invoke() ?? true);
 
     public async void Execute(object? parameter)
     {
-        if (!CanExecute(parameter))
+        if (!(canExecute?.Invoke() ?? true) || Interlocked.CompareExchange(ref _isRunning, 1, 0) != 0)
         {
+            AsyncCommandRuntime.ReportRejected();
             return;
         }
 
-        _isRunning = true;
         NotifyCanExecuteChanged();
+        ExecutionTask = ExecuteCoreAsync();
+        await ExecutionTask.ConfigureAwait(true);
+    }
+
+    private async Task ExecuteCoreAsync()
+    {
         try
         {
             await execute().ConfigureAwait(true);
         }
+        catch (Exception exception) when (!AsyncCommandRuntime.IsCritical(exception))
+        {
+            AsyncCommandRuntime.Handle(exception);
+        }
         finally
         {
-            _isRunning = false;
+            Interlocked.Exchange(ref _isRunning, 0);
             NotifyCanExecuteChanged();
         }
     }
@@ -63,32 +105,47 @@ public sealed class AsyncRelayCommand(Func<Task> execute, Func<bool>? canExecute
 public sealed class AsyncRelayCommand<T>(Func<T?, Task> execute, Func<T?, bool>? canExecute = null) : ICommand
     where T : class
 {
-    private bool _isRunning;
+    private int _isRunning;
 
     public event EventHandler? CanExecuteChanged;
+
+    public bool IsRunning => Volatile.Read(ref _isRunning) != 0;
+
+    public Task? ExecutionTask { get; private set; }
 
     public bool CanExecute(object? parameter)
     {
         var value = parameter as T;
-        return !_isRunning && (canExecute?.Invoke(value) ?? true);
+        return !IsRunning && (canExecute?.Invoke(value) ?? true);
     }
 
     public async void Execute(object? parameter)
     {
-        if (!CanExecute(parameter))
+        var value = parameter as T;
+        if (!(canExecute?.Invoke(value) ?? true) || Interlocked.CompareExchange(ref _isRunning, 1, 0) != 0)
         {
+            AsyncCommandRuntime.ReportRejected();
             return;
         }
 
-        _isRunning = true;
         NotifyCanExecuteChanged();
+        ExecutionTask = ExecuteCoreAsync(value);
+        await ExecutionTask.ConfigureAwait(true);
+    }
+
+    private async Task ExecuteCoreAsync(T? value)
+    {
         try
         {
-            await execute(parameter as T).ConfigureAwait(true);
+            await execute(value).ConfigureAwait(true);
+        }
+        catch (Exception exception) when (!AsyncCommandRuntime.IsCritical(exception))
+        {
+            AsyncCommandRuntime.Handle(exception);
         }
         finally
         {
-            _isRunning = false;
+            Interlocked.Exchange(ref _isRunning, 0);
             NotifyCanExecuteChanged();
         }
     }

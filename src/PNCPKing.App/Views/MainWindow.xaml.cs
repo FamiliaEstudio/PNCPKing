@@ -1,7 +1,9 @@
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using PNCPKing.App.Services;
 using PNCPKing.App.ViewModels;
 using PNCPKing.Core.Models;
@@ -10,10 +12,13 @@ namespace PNCPKing.App.Views;
 
 public partial class MainWindow : Window
 {
+    private const int WmGetMinMaxInfo = 0x0024;
+    private const uint MonitorDefaultToNearest = 0x00000002;
     private readonly MainViewModel _viewModel;
     private readonly DataGridColumnLayoutService _columnLayouts;
     private bool _shutdownInProgress;
     private bool _shutdownComplete;
+    private int _manualBasketInteraction;
 
     public MainWindow(MainViewModel viewModel, DataGridColumnLayoutService columnLayouts)
     {
@@ -21,10 +26,63 @@ public partial class MainWindow : Window
         _columnLayouts = columnLayouts;
         InitializeComponent();
         DataContext = viewModel;
+        ClampInitialSizeToWorkArea();
+        SourceInitialized += MainWindow_SourceInitialized;
         _columnLayouts.Register("item-results", ItemResultsGrid);
         _columnLayouts.Register("quotation-lines", QuotationLinesGrid);
         _columnLayouts.Register("quotation-baskets", QuotationBasketsGrid);
         _columnLayouts.Register("quotation-selected-references", SelectedBasketReferencesGrid);
+    }
+
+    private void ClampInitialSizeToWorkArea()
+    {
+        var workArea = SystemParameters.WorkArea;
+        var availableWidth = Math.Max(500, workArea.Width - 12);
+        var availableHeight = Math.Max(360, workArea.Height - 12);
+        MinWidth = Math.Min(MinWidth, availableWidth);
+        MinHeight = Math.Min(MinHeight, availableHeight);
+        Width = Math.Max(MinWidth, Math.Min(Width, availableWidth));
+        Height = Math.Max(MinHeight, Math.Min(Height, availableHeight));
+    }
+
+    private void MainWindow_SourceInitialized(object? sender, EventArgs e)
+    {
+        var source = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
+        source?.AddHook(WindowMessageHook);
+    }
+
+    private static IntPtr WindowMessageHook(
+        IntPtr hwnd,
+        int message,
+        IntPtr wParam,
+        IntPtr lParam,
+        ref bool handled)
+    {
+        if (message != WmGetMinMaxInfo || lParam == IntPtr.Zero)
+        {
+            return IntPtr.Zero;
+        }
+
+        var monitor = MonitorFromWindow(hwnd, MonitorDefaultToNearest);
+        if (monitor == IntPtr.Zero)
+        {
+            return IntPtr.Zero;
+        }
+
+        var monitorInfo = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+        if (!GetMonitorInfo(monitor, ref monitorInfo))
+        {
+            return IntPtr.Zero;
+        }
+
+        var info = Marshal.PtrToStructure<MinMaxInfo>(lParam);
+        info.MaxPosition.X = Math.Abs(monitorInfo.WorkArea.Left - monitorInfo.Monitor.Left);
+        info.MaxPosition.Y = Math.Abs(monitorInfo.WorkArea.Top - monitorInfo.Monitor.Top);
+        info.MaxSize.X = Math.Abs(monitorInfo.WorkArea.Right - monitorInfo.WorkArea.Left);
+        info.MaxSize.Y = Math.Abs(monitorInfo.WorkArea.Bottom - monitorInfo.WorkArea.Top);
+        Marshal.StructureToPtr(info, lParam, fDeleteOld: false);
+        handled = true;
+        return IntPtr.Zero;
     }
 
     protected override async void OnClosing(CancelEventArgs e)
@@ -57,16 +115,58 @@ public partial class MainWindow : Window
 
     private void ChooseColumns_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button { Tag: DataGrid dataGrid } button)
+        if (sender is not Button { Tag: DataGrid dataGrid })
         {
             return;
         }
 
-        _columnLayouts.ShowChooser(button, dataGrid);
+        _columnLayouts.ShowChooser(this, dataGrid);
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr handle, uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo monitorInfo);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MinMaxInfo
+    {
+        public NativePoint Reserved;
+        public NativePoint MaxSize;
+        public NativePoint MaxPosition;
+        public NativePoint MinTrackSize;
+        public NativePoint MaxTrackSize;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    private struct MonitorInfo
+    {
+        public int Size;
+        public NativeRect Monitor;
+        public NativeRect WorkArea;
+        public uint Flags;
     }
 
     private void CatalogDictionary_Click(object sender, RoutedEventArgs e) =>
-        _viewModel.OpenCatalogDictionary();
+        _viewModel.OpenCatalogDictionary(this);
 
     private void QuotationLinesGrid_PreviewKeyDown(object sender, KeyEventArgs e)
     {
@@ -112,10 +212,27 @@ public partial class MainWindow : Window
 
     private async void CreateManualBasket_Click(object sender, RoutedEventArgs e)
     {
-        var selected = ItemResultsGrid.SelectedItems
-            .OfType<ItemSearchDisplayRow>()
-            .ToArray();
-        await _viewModel.CreateOrAppendManualBasketAsync(selected).ConfigureAwait(true);
+        if (Interlocked.CompareExchange(ref _manualBasketInteraction, 1, 0) != 0)
+        {
+            AsyncCommandRuntime.ReportRejected();
+            return;
+        }
+
+        try
+        {
+            var selected = ItemResultsGrid.SelectedItems
+                .OfType<ItemSearchDisplayRow>()
+                .ToArray();
+            await _viewModel.CreateOrAppendManualBasketAsync(selected).ConfigureAwait(true);
+        }
+        catch (Exception exception) when (!AsyncCommandRuntime.IsCritical(exception))
+        {
+            AsyncCommandRuntime.Handle(exception);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _manualBasketInteraction, 0);
+        }
     }
 
     private void QuotationLinesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)

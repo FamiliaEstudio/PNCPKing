@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http;
 using System.Diagnostics;
 using System.Windows;
+using System.Windows.Input;
 using PNCPKing.App.Services;
 using PNCPKing.App.ViewModels;
 using PNCPKing.App.Views;
@@ -10,6 +11,7 @@ using PNCPKing.Infrastructure.Api;
 using PNCPKing.Infrastructure.Data;
 using PNCPKing.Infrastructure.Services;
 using PNCPKing.Core.Quotations;
+using PNCPKing.Core.Models;
 
 namespace PNCPKing.App;
 
@@ -19,14 +21,24 @@ public partial class App : Application
     private AppDiagnosticLog? _diagnosticLog;
     private AppPerformanceTelemetry? _performanceTelemetry;
     private DispatcherResponsivenessMonitor? _responsivenessMonitor;
+    private AdaptiveMaintenanceCoordinator? _maintenanceCoordinator;
+    private PreProcessInputEventHandler? _inputHandler;
+    private int _uiErrorDialogOpen;
 
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-        _diagnosticLog = new AppDiagnosticLog();
-        _performanceTelemetry = new AppPerformanceTelemetry();
+        var resourceProbe = new SystemResourceProbe();
+        _diagnosticLog = new AppDiagnosticLog(resourceProbe);
+        _performanceTelemetry = new AppPerformanceTelemetry(resourceProbe);
         using var startupSpan = _performanceTelemetry.Begin("startup", "application");
         _diagnosticLog.WriteStartupHeader();
+        AsyncCommandRuntime.Configure(
+            HandleRecoverableCommandException,
+            () => _performanceTelemetry.Record(
+                "ui",
+                "interaction-suppressed",
+                TimeSpan.Zero));
         DispatcherUnhandledException += (_, args) =>
             _diagnosticLog.Error("dispatcher", "Exceção não tratada na interface.", args.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
@@ -101,7 +113,10 @@ public partial class App : Application
                 await settingsService.SaveAsync(settings).ConfigureAwait(true);
             }
 
-            var columnLayouts = new DataGridColumnLayoutService(settingsService, settings);
+            var columnLayouts = new DataGridColumnLayoutService(
+                settingsService,
+                settings,
+                _performanceTelemetry);
             Directory.CreateDirectory(settings.DataFolder);
             var databasePath = Path.Combine(settings.DataFolder, "pncpking.db");
             _performanceTelemetry.SetDatabasePath(databasePath);
@@ -109,7 +124,10 @@ public partial class App : Application
                 "database",
                 $"Banco selecionado. pasta_dados={settings.DataFolder}; banco={databasePath}; " +
                 $"tamanho={(File.Exists(databasePath) ? new FileInfo(databasePath).Length : 0)} bytes.");
-            var sqliteConnections = new SqliteConnectionFactory(databasePath);
+            var sqliteConnections = new SqliteConnectionFactory(
+                databasePath,
+                resourceProbe: resourceProbe);
+            _performanceTelemetry.SetSqliteProfile(sqliteConnections.ProfileName);
             var repository = new SqliteContractRepository(sqliteConnections, _performanceTelemetry);
             var quotationRepository = new SqliteQuotationRepository(sqliteConnections);
             var internetEvidenceStore = new InternetEvidenceStore(settings.DataFolder);
@@ -220,6 +238,17 @@ public partial class App : Application
                 repository,
                 itemSearchService,
                 quotationService);
+            var maintenanceCoordinator = new AdaptiveMaintenanceCoordinator(resourceProbe);
+            _maintenanceCoordinator = maintenanceCoordinator;
+            _inputHandler = (_, args) =>
+            {
+                if (args.StagingItem.Input is MouseButtonEventArgs or MouseWheelEventArgs or
+                    KeyEventArgs or TouchEventArgs)
+                {
+                    maintenanceCoordinator.NotifyVisibleActivity();
+                }
+            };
+            InputManager.Current.PreProcessInput += _inputHandler;
             var viewModel = new MainViewModel(
                 repository,
                 new PreflightService(client),
@@ -259,7 +288,8 @@ public partial class App : Application
                 settingsService,
                 settings.DataFolder,
                 _diagnosticLog,
-                _performanceTelemetry);
+                _performanceTelemetry,
+                maintenanceCoordinator);
             var mainWindow = new MainWindow(viewModel, columnLayouts);
             MainWindow = mainWindow;
             mainWindow.Show();
@@ -269,16 +299,29 @@ public partial class App : Application
             // normal shutdown behavior once the real main window is visible.
             ShutdownMode = ShutdownMode.OnMainWindowClose;
             viewModel.SetStartupPhase("Preparando e migrando o banco de dados…");
+            var initializationProgress = new Progress<DatabaseInitializationProgress>(
+                viewModel.SetStartupProgress);
+            DatabaseInitializationResult initialization;
             using (var databaseSpan = _performanceTelemetry.Begin("startup", "database-initialize"))
             {
-                await Task.Run(
-                        () => repository.InitializeAsync(viewModel.StartupCancellationToken),
+                initialization = await Task.Run(
+                        () => repository.InitializeAsync(
+                            viewModel.StartupCancellationToken,
+                            initializationProgress),
                         viewModel.StartupCancellationToken)
                     .ConfigureAwait(true);
                 databaseSpan.Complete();
             }
 
-            _diagnosticLog.Info("database", "Banco inicializado e migrações de abertura concluídas.");
+            _performanceTelemetry.SetDatabaseSchemaVersion(initialization.CurrentVersion);
+
+            _diagnosticLog.Info(
+                "database",
+                $"Banco inicializado. esquema_anterior={initialization.PreviousVersion}; " +
+                $"esquema_atual={initialization.CurrentVersion}; " +
+                $"migracoes={string.Join(',', initialization.AppliedMigrations)}; " +
+                $"duracao_ms={initialization.Duration.TotalMilliseconds:N1}; " +
+                $"perfil_sqlite={sqliteConnections.ProfileName}.");
             viewModel.SetStartupPhase("Carregando a pesquisa essencial…");
             await viewModel.InitializeAsync(viewModel.StartupCancellationToken).ConfigureAwait(true);
             viewModel.CompleteStartup();
@@ -304,6 +347,14 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        if (_inputHandler is not null)
+        {
+            InputManager.Current.PreProcessInput -= _inputHandler;
+            _inputHandler = null;
+        }
+
+        _maintenanceCoordinator?.CancelActiveSlice();
+        _maintenanceCoordinator = null;
         _responsivenessMonitor?.Dispose();
         _responsivenessMonitor = null;
         _diagnosticLog?.Info("shutdown", $"Aplicativo encerrado com código {e.ApplicationExitCode}.");
@@ -323,6 +374,37 @@ public partial class App : Application
         }
 
         base.OnExit(e);
+    }
+
+    private void HandleRecoverableCommandException(Exception exception)
+    {
+        _diagnosticLog?.Error("ui-command", "Falha recuperável em uma ação da interface.", exception);
+        _performanceTelemetry?.Record(
+            "ui",
+            "command-error",
+            TimeSpan.Zero,
+            succeeded: false,
+            errorKind: exception.GetType().Name);
+        if (Interlocked.Exchange(ref _uiErrorDialogOpen, 1) != 0)
+        {
+            return;
+        }
+
+        Dispatcher.BeginInvoke(() =>
+        {
+            try
+            {
+                MessageBox.Show(
+                    $"A ação não pôde ser concluída, mas o PNCP King continuará aberto.\n\n{exception.Message}",
+                    "PNCP King",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _uiErrorDialogOpen, 0);
+            }
+        });
     }
 
     private static bool HasAnotherPncpKingProcess()

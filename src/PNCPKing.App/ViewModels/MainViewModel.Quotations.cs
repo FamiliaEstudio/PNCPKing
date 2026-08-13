@@ -420,7 +420,7 @@ public sealed partial class MainViewModel
         }
 
         QueryText = text;
-        SelectedResultsTabIndex = 0;
+        SelectedResultsWorkspace = ResultsWorkspace.Search;
         StatusText =
             $"Prompt {level switch
             {
@@ -817,7 +817,7 @@ public sealed partial class MainViewModel
             .ConfigureAwait(true);
         await RefreshQuotationProjectsAsync(projectId).ConfigureAwait(true);
         await LoadQuotationProjectAsync(projectId).ConfigureAwait(true);
-        SelectedResultsTabIndex = 2;
+        SelectedResultsWorkspace = ResultsWorkspace.Quotations;
         await RunQuotationAutomationAsync(run).ConfigureAwait(true);
     }
 
@@ -894,7 +894,7 @@ public sealed partial class MainViewModel
             window.SourcePdfSha256).ConfigureAwait(true);
         await RefreshQuotationProjectsAsync(projectId).ConfigureAwait(true);
         await LoadQuotationProjectAsync(projectId).ConfigureAwait(true);
-        SelectedResultsTabIndex = 2;
+        SelectedResultsWorkspace = ResultsWorkspace.Quotations;
         await RunTimedQuotationAutomationAsync(run).ConfigureAwait(true);
     }
 
@@ -1421,7 +1421,7 @@ public sealed partial class MainViewModel
                 .ConfigureAwait(true);
             await RefreshQuotationProjectsAsync(projectId).ConfigureAwait(true);
             await LoadQuotationProjectAsync(projectId, saved.Analysis.Line.Id).ConfigureAwait(true);
-            SelectedResultsTabIndex = 2;
+            SelectedResultsWorkspace = ResultsWorkspace.Quotations;
             StatusText =
                 $"Cesta manual \"{saved.Basket.Name}\" salva com " +
                 $"{saved.Basket.ReferenceIds.Count:N0} preço(s).";
@@ -1480,7 +1480,7 @@ public sealed partial class MainViewModel
                 .ConfigureAwait(true);
             await RefreshQuotationProjectsAsync(projectId).ConfigureAwait(true);
             await LoadQuotationProjectAsync(projectId, analysis.Line.Id).ConfigureAwait(true);
-            SelectedResultsTabIndex = 2;
+            SelectedResultsWorkspace = ResultsWorkspace.Quotations;
             StatusText = $"Amostra salva: {analysis.CollectedCount:N0} preço(s), {analysis.Baskets.Count:N0} cesta(s) válida(s).";
         }
         catch (Exception exception)
@@ -1884,7 +1884,7 @@ public sealed partial class MainViewModel
                 .ConfigureAwait(true);
             await RefreshQuotationProjectsAsync(result.ProjectId).ConfigureAwait(true);
             await LoadQuotationProjectAsync(result.ProjectId).ConfigureAwait(true);
-            SelectedResultsTabIndex = 2;
+            SelectedResultsWorkspace = ResultsWorkspace.Quotations;
 
             var recovery = string.IsNullOrWhiteSpace(result.RecoveryPackagePath)
                 ? string.Empty

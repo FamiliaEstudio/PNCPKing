@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Windows;
 using System.Windows.Input;
 using PNCPKing.App.Views;
 using PNCPKing.Core.Interfaces;
@@ -17,6 +18,7 @@ public sealed partial class MainViewModel
     private bool _isCatalogPaused;
     private double _catalogProgress;
     private string _catalogProgressText = "CATMAT/CATSER: catálogo local ainda não verificado.";
+    private CatalogDictionaryWindow? _catalogDictionaryWindow;
 
     public RangeObservableCollection<CatalogSyncDisplay> CatalogCoverage { get; } = [];
     public ICommand UpdateCatalogCommand { get; private set; } = null!;
@@ -93,34 +95,145 @@ public sealed partial class MainViewModel
 
     private async Task RunAutomaticMaintenanceCycleAsync()
     {
-        await TryRunAutomaticMaintenanceAsync().ConfigureAwait(true);
-        _ = TryRunPriceCacheMaintenanceAsync();
-        await TryRunCatalogMaintenanceAsync().ConfigureAwait(true);
-        if (!IsIndexBusy && !IsPriceBusy && !IsForegroundBusy && !IsFileBusy && !IsCatalogBusy && !_disposed)
+        if (_disposed || DateTimeOffset.UtcNow < _nextMaintenanceAllowedAt)
         {
-            await Task.Run(() => _repository.OptimizeAsync()).ConfigureAwait(true);
+            return;
+        }
+
+        await using var lease = _maintenanceCoordinator.TryEnter();
+        if (lease is null)
+        {
+            MaintenanceActivityText = "Manutenção: outro ciclo ainda está ativo";
+            return;
+        }
+
+        var decision = _maintenanceCoordinator.GetDecision();
+        ResourceStatusText =
+            $"RAM livre: {FormatBytes(decision.Resources.AvailablePhysicalMemoryBytes)} de " +
+            $"{FormatBytes(decision.Resources.TotalPhysicalMemoryBytes)} " +
+            $"({decision.Resources.MemoryLoadPercent}% em uso)";
+        if (!decision.CanRun)
+        {
+            MaintenanceActivityText = $"Manutenção: {decision.Description}";
+            ScheduleNextMaintenance(decision.RetryDelay);
+            return;
+        }
+
+        if (IsPriceBusy || IsForegroundBusy || IsFileBusy || IsDocumentBusy || _disposed)
+        {
+            MaintenanceActivityText = "Manutenção: aguardando atividade visível terminar";
+            ScheduleNextMaintenance(decision.RetryDelay);
+            return;
+        }
+
+        using var span = _performanceTelemetry.Begin("maintenance", "adaptive-slice");
+        await using var slice = _maintenanceCoordinator.BeginSlice(_startupCancellation.Token);
+        try
+        {
+            if (await TryRunAutomaticMaintenanceAsync(decision.SliceDuration, slice.Token).ConfigureAwait(true))
+            {
+                slice.Token.ThrowIfCancellationRequested();
+                MaintenanceActivityText = "Manutenção: fatia da cobertura PNCP concluída";
+            }
+            else if (_preferPriceCacheMaintenance &&
+                     await TryRunPriceCacheMaintenanceAsync(decision.SliceDuration, slice.Token).ConfigureAwait(true))
+            {
+                slice.Token.ThrowIfCancellationRequested();
+                _preferPriceCacheMaintenance = false;
+                MaintenanceActivityText = "Manutenção: fatia do cache de preços concluída";
+            }
+            else if (await TryRunCatalogMaintenanceAsync(decision.SliceDuration, slice.Token).ConfigureAwait(true))
+            {
+                slice.Token.ThrowIfCancellationRequested();
+                _preferPriceCacheMaintenance = true;
+                MaintenanceActivityText = "Manutenção: fatia do catálogo concluída";
+            }
+            else if (await TryRunPriceCacheMaintenanceAsync(decision.SliceDuration, slice.Token).ConfigureAwait(true))
+            {
+                slice.Token.ThrowIfCancellationRequested();
+                _preferPriceCacheMaintenance = false;
+                MaintenanceActivityText = "Manutenção: fatia do cache de preços concluída";
+            }
+            else if (_lastOptimizeDate != DateOnly.FromDateTime(DateTime.Today))
+            {
+                MaintenanceActivityText = "Manutenção: otimizando estatísticas SQLite";
+                await Task.Run(() => _repository.OptimizeAsync(slice.Token), slice.Token).ConfigureAwait(true);
+                _lastOptimizeDate = DateOnly.FromDateTime(DateTime.Today);
+            }
+            else
+            {
+                MaintenanceActivityText = "Manutenção: banco atualizado; aguardando próximo ciclo";
+            }
+
+            await _repository.MaintainWalAsync(slice.Token).ConfigureAwait(true);
+            span.Complete();
+        }
+        catch (OperationCanceledException) when (_disposed || slice.Token.IsCancellationRequested)
+        {
+            MaintenanceActivityText = _disposed
+                ? "Manutenção: encerrada com o aplicativo"
+                : "Manutenção: cedendo à interação do usuário; checkpoints preservados";
+            _performanceTelemetry.Record("maintenance", "user-yield", TimeSpan.Zero);
+        }
+        catch (Exception exception)
+        {
+            span.Fail(exception);
+            MaintenanceActivityText = "Manutenção: adiada após uma falha recuperável";
+            _diagnosticLog.Warning("maintenance", $"Fatia adaptativa adiada: {exception.Message}");
+        }
+        finally
+        {
+            ScheduleNextMaintenance(decision.RetryDelay);
         }
     }
 
-    private async Task TryRunCatalogMaintenanceAsync()
+    private void ScheduleNextMaintenance(TimeSpan delay)
+    {
+        _nextMaintenanceAllowedAt = DateTimeOffset.UtcNow + delay;
+        _maintenanceTimer.Stop();
+        _maintenanceTimer.Interval = delay;
+        if (!_disposed)
+        {
+            _maintenanceTimer.Start();
+        }
+    }
+
+    private async Task<bool> TryRunCatalogMaintenanceAsync(
+        TimeSpan sliceDuration,
+        CancellationToken cancellationToken)
     {
         if (IsCatalogBusy || IsIndexBusy || IsFileBusy || _disposed)
         {
-            return;
+            return false;
         }
 
         if (await _catalogSyncService.IsDueAsync().ConfigureAwait(true))
         {
-            await RunCatalogSyncAsync(showErrorDialog: false).ConfigureAwait(true);
-            return;
+            await RunCatalogSyncAsync(showErrorDialog: false, sliceDuration, cancellationToken).ConfigureAwait(true);
+            return true;
         }
 
-        await RunCatalogDescriptionIndexAsync().ConfigureAwait(true);
+        var index = await _catalogRepository.GetDescriptionIndexProgressAsync().ConfigureAwait(true);
+        if (index.Completed)
+        {
+            return false;
+        }
+
+        await RunCatalogDescriptionIndexAsync(sliceDuration, cancellationToken).ConfigureAwait(true);
+        return true;
     }
 
-    private async Task RunCatalogDescriptionIndexAsync()
+    private async Task RunCatalogDescriptionIndexAsync(
+        TimeSpan? sliceDuration = null,
+        CancellationToken cancellationToken = default)
     {
-        _catalogCancellation = new CancellationTokenSource();
+        _catalogCancellation = cancellationToken.CanBeCanceled
+            ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
+            : new CancellationTokenSource();
+        if (sliceDuration is { } budget)
+        {
+            _catalogCancellation.CancelAfter(budget);
+        }
         IsCatalogBusy = true;
         IsCatalogPaused = false;
         var progress = new Progress<CatalogDescriptionIndexProgress>(value =>
@@ -148,14 +261,23 @@ public sealed partial class MainViewModel
         }
     }
 
-    private async Task RunCatalogSyncAsync(bool showErrorDialog)
+    private async Task RunCatalogSyncAsync(
+        bool showErrorDialog,
+        TimeSpan? sliceDuration = null,
+        CancellationToken cancellationToken = default)
     {
         if (IsCatalogBusy || IsIndexBusy)
         {
             return;
         }
 
-        _catalogCancellation = new CancellationTokenSource();
+        _catalogCancellation = cancellationToken.CanBeCanceled
+            ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
+            : new CancellationTokenSource();
+        if (sliceDuration is { } budget)
+        {
+            _catalogCancellation.CancelAfter(budget);
+        }
         IsCatalogBusy = true;
         IsCatalogPaused = false;
         CatalogProgress = 0;
@@ -245,11 +367,37 @@ public sealed partial class MainViewModel
                     ? $"Falha na última carga: {error}"
                     : "A primeira carga completa do CATMAT/CATSER ainda não foi publicada.";
         }
+
+        if (states.Any(state => state.Status == CatalogSyncStatus.Failed))
+        {
+            OpenMaintenanceForIssue("catalog-failed");
+        }
     }
 
-    public void OpenCatalogDictionary() =>
-        new CatalogDictionaryWindow(_catalogRepository)
+    public void OpenCatalogDictionary(Window owner)
+    {
+        if (_catalogDictionaryWindow is { IsVisible: true } existing)
         {
-            Owner = System.Windows.Application.Current.MainWindow
-        }.ShowDialog();
+            _performanceTelemetry.Record("ui", "interaction-suppressed", TimeSpan.Zero);
+            existing.Activate();
+            return;
+        }
+
+        var window = new CatalogDictionaryWindow(
+            _catalogRepository,
+            _diagnosticLog,
+            _performanceTelemetry)
+        {
+            Owner = owner
+        };
+        _catalogDictionaryWindow = window;
+        window.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_catalogDictionaryWindow, window))
+            {
+                _catalogDictionaryWindow = null;
+            }
+        };
+        window.Show();
+    }
 }

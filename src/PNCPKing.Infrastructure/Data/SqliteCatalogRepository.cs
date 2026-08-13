@@ -103,9 +103,11 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         using var span = _performance.Begin("catalog", "stage-page");
         ArgumentNullException.ThrowIfNull(page);
         ArgumentException.ThrowIfNullOrWhiteSpace(generation);
+        using var queueSpan = _performance.Begin("catalog", "sqlite-queue");
         await using var writer = await _connections.WorkCoordinator
             .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
             .ConfigureAwait(false);
+        queueSpan.Complete();
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using var insert = connection.CreateCommand();
@@ -164,7 +166,11 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
             throw new InvalidOperationException("O checkpoint do catálogo pertence a outra geração.");
         }
 
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        using (var commitSpan = _performance.Begin("catalog", "commit"))
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            commitSpan.Complete(page.Entries.Count);
+        }
         span.Complete(page.Entries.Count);
     }
 
@@ -174,9 +180,11 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         CancellationToken cancellationToken = default)
     {
         using var span = _performance.Begin("catalog", "publish");
+        using var queueSpan = _performance.Begin("catalog", "sqlite-queue");
         await using var writer = await _connections.WorkCoordinator
             .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
             .ConfigureAwait(false);
+        queueSpan.Complete();
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         long staged;
@@ -289,7 +297,11 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
             await state.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        using (var commitSpan = _performance.Begin("catalog", "commit"))
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            commitSpan.Complete(staged);
+        }
         span.Complete(staged);
     }
 
@@ -328,6 +340,9 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
             .Distinct(StringComparer.Ordinal)
             .Take(20)
             .ToArray();
+        await using var readerLease = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         var descriptionIndex = await GetDescriptionIndexProgressAsync(cancellationToken).ConfigureAwait(false);
@@ -572,6 +587,9 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
     public async Task<IReadOnlyList<CatalogEquivalenceRule>> GetEquivalenceRulesAsync(
         CancellationToken cancellationToken = default)
     {
+        await using var visibleReader = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -599,6 +617,9 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
             throw new ArgumentException("Informe regra, termo canônico, alias e fator positivo.", nameof(rule));
         }
 
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -629,6 +650,9 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
 
     public async Task DeleteEquivalenceRuleAsync(Guid id, CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM catalog_equivalence_rules WHERE id = $id;";
@@ -638,6 +662,9 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
 
     public async Task ResetDefaultEquivalenceRulesAsync(CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var delete = connection.CreateCommand())

@@ -31,4 +31,36 @@ public sealed class SqliteWorkCoordinatorTests
         await first.DisposeAsync();
         await using var thirdLease = await third.WaitAsync(TimeSpan.FromSeconds(1));
     }
+
+    [Fact]
+    public async Task VisibleReader_OvertakesQueuedBackgroundWriter()
+    {
+        var coordinator = new SqliteWorkCoordinator();
+        await using var activeReader = await coordinator.EnterReaderAsync();
+        var backgroundWriter = coordinator.EnterWriterAsync(SqliteWorkPriority.Background).AsTask();
+        var visibleReader = coordinator.EnterReaderAsync(SqliteWorkPriority.Visible).AsTask();
+
+        await using var visibleLease = await visibleReader.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.False(backgroundWriter.IsCompleted);
+        await visibleLease.DisposeAsync();
+        await activeReader.DisposeAsync();
+        await using var writerLease = await backgroundWriter.WaitAsync(TimeSpan.FromSeconds(1));
+    }
+
+    [Fact]
+    public async Task Writer_IsExclusiveAndQueuedCancellationDoesNotBlockFollowers()
+    {
+        var coordinator = new SqliteWorkCoordinator();
+        await using var reader = await coordinator.EnterReaderAsync();
+        using var cancellation = new CancellationTokenSource();
+        var cancelledWriter = coordinator.EnterWriterAsync(
+            SqliteWorkPriority.Visible,
+            cancellation.Token).AsTask();
+        var followingReader = coordinator.EnterReaderAsync(SqliteWorkPriority.Visible).AsTask();
+
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelledWriter);
+        await using var followingLease = await followingReader.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.False(coordinator.IsIdle);
+    }
 }

@@ -201,17 +201,28 @@ public sealed partial class MainViewModel
         }).ConfigureAwait(true);
     }
 
-    private Task TryRunPriceCacheMaintenanceAsync()
+    private async Task<bool> TryRunPriceCacheMaintenanceAsync(
+        TimeSpan sliceDuration,
+        CancellationToken cancellationToken)
     {
         if (_disposed || IsFileBusy || IsPriceCacheBusy)
         {
-            return Task.CompletedTask;
+            return false;
         }
 
-        return StartPriceCacheCycleAsync();
+        var policy = await _priceCacheRepository.GetPolicyAsync().ConfigureAwait(true);
+        if (!policy.Authorized || !policy.Enabled || policy.Paused)
+        {
+            return false;
+        }
+
+        await StartPriceCacheCycleAsync(sliceDuration, cancellationToken).ConfigureAwait(true);
+        return true;
     }
 
-    private Task StartPriceCacheCycleAsync()
+    private Task StartPriceCacheCycleAsync(
+        TimeSpan? sliceDuration = null,
+        CancellationToken cancellationToken = default)
     {
         if (_priceCacheCycleTask is { IsCompleted: false })
         {
@@ -219,7 +230,14 @@ public sealed partial class MainViewModel
         }
 
         _priceCacheCycleCancellation?.Dispose();
-        _priceCacheCycleCancellation = new CancellationTokenSource();
+        _priceCacheCycleCancellation = cancellationToken.CanBeCanceled
+            ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
+            : new CancellationTokenSource();
+        if (sliceDuration is { } budget)
+        {
+            _priceCacheCycleCancellation.CancelAfter(budget);
+        }
+
         _priceCacheCycleTask = RunPriceCacheCycleCoreAsync(_priceCacheCycleCancellation.Token);
         return _priceCacheCycleTask;
     }
@@ -297,6 +315,11 @@ public sealed partial class MainViewModel
             PriceCacheStatus.Disabled => "Cache de 90 dias: desativado",
             _ => "Cache de 90 dias: aguardando índice ou próxima tentativa"
         };
+        if (progress.Status is PriceCacheStatus.Failed or PriceCacheStatus.InsufficientSpace)
+        {
+            OpenMaintenanceForIssue($"price-cache-{progress.Status}");
+        }
+
         NotifyCommands();
     }
 }

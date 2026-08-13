@@ -681,6 +681,14 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
             return new PriceCacheLocalPage([], page, pageSize, false, 0);
         }
 
+
+        using var queueSpan = _performance.Begin("price-search", "sqlite-queue");
+        await using var readerLease = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
+        queueSpan.Complete();
+        using var sqlSpan = _performance.Begin("price-search", "sql-execution");
+
         var itemMatch = expression.ItemMatchQuery;
         var explicitMatch = expression.ExplicitContractMatchQuery;
         var conditions = new List<string>
@@ -895,6 +903,7 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
             : hasMore
                 ? lastScannedCursor
                 : selectedMatches.LastOrDefault().Cursor ?? cursor;
+        sqlSpan.Complete(rows.Length);
         span.Complete(rows.Length);
         return new PriceCacheLocalPage(
             hits,

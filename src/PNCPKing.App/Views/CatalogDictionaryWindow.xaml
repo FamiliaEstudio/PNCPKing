@@ -6,6 +6,7 @@
         Title="Equivalências CATMAT/CATSER" Width="980" Height="650"
         MinWidth="760" MinHeight="480" WindowStartupLocation="CenterOwner">
     <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
         <ObjectDataProvider x:Key="RuleKinds" MethodName="GetValues"
                             ObjectType="{x:Type System:Enum}">
             <ObjectDataProvider.MethodParameters>
@@ -23,7 +24,11 @@
                    TextWrapping="Wrap" Margin="0,0,0,8" />
         <DataGrid x:Name="RulesGrid" Grid.Row="1" ItemsSource="{Binding Rules}"
                   SelectedItem="{Binding SelectedRule}" AutoGenerateColumns="False"
-                  CanUserAddRows="False" SelectionMode="Single">
+                  CanUserAddRows="False" SelectionMode="Single"
+                  IsEnabled="{Binding CanInteract}"
+                  EnableRowVirtualization="True" EnableColumnVirtualization="True"
+                  VirtualizingPanel.IsVirtualizing="True"
+                  VirtualizingPanel.VirtualizationMode="Recycling">
             <DataGrid.Columns>
                 <DataGridComboBoxColumn Header="Tipo" Width="125"
                                         SelectedItemBinding="{Binding Kind}"
@@ -32,16 +37,22 @@
                 <DataGridTextColumn Header="Alias" Binding="{Binding Alias}" Width="150" />
                 <DataGridTextColumn Header="Dimensão" Binding="{Binding Dimension}" Width="130" />
                 <DataGridTextColumn Header="Fator" Binding="{Binding Factor}" Width="110" />
-                <DataGridCheckBoxColumn Header="Padrão" Binding="{Binding IsDefault}" IsReadOnly="True" Width="70" />
+                <DataGridCheckBoxColumn Header="Padrão" Binding="{Binding IsDefault, Mode=OneWay}"
+                                        IsReadOnly="True" Width="70" />
             </DataGrid.Columns>
         </DataGrid>
         <DockPanel Grid.Row="2" Margin="0,8,0,0">
-            <TextBlock Text="{Binding Status}" VerticalAlignment="Center" TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <ProgressBar Width="90" Height="8" IsIndeterminate="True" Margin="0,0,8,0"
+                             Visibility="{Binding IsBusy, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                <TextBlock Text="{Binding Status}" VerticalAlignment="Center" TextWrapping="Wrap" />
+            </StackPanel>
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                <Button Content="Nova regra" Click="Add_Click" />
-                <Button Content="Salvar selecionada" Click="Save_Click" />
-                <Button Content="Excluir selecionada" Click="Delete_Click" />
-                <Button Content="Restaurar padrões" Click="Reset_Click" />
+                <Button Content="Nova regra" Click="Add_Click" IsEnabled="{Binding CanInteract}" />
+                <Button Content="Salvar selecionada" Click="Save_Click" IsEnabled="{Binding CanInteract}" />
+                <Button Content="Excluir selecionada" Click="Delete_Click" IsEnabled="{Binding CanInteract}" />
+                <Button Content="Restaurar padrões" Click="Reset_Click" IsEnabled="{Binding CanInteract}" />
+                <Button Content="Cancelar operação" Click="Cancel_Click" IsEnabled="{Binding IsBusy}" />
                 <Button Content="Fechar" IsCancel="True" />
             </StackPanel>
         </DockPanel>

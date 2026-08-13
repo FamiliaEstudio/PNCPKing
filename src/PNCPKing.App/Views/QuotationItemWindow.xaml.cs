@@ -14,6 +14,7 @@ public partial class QuotationItemWindow : Window
     private readonly IWindowCaptureService _capture;
     private readonly IInternetEvidenceStore _evidenceStore;
     private readonly DataGridColumnLayoutService _columnLayouts;
+    private readonly SemaphoreSlim _interactionGate = new(1, 1);
     private Task _initialLoadTask = Task.CompletedTask;
     private bool _closing;
     private bool _closedCleanly;
@@ -178,7 +179,7 @@ public partial class QuotationItemWindow : Window
     }
 
     private void CatalogDictionary_Click(object sender, RoutedEventArgs e) =>
-        ViewModel.Main.OpenCatalogDictionary();
+        ViewModel.Main.OpenCatalogDictionary(this);
 
     private void Pause_Click(object sender, RoutedEventArgs e) => ViewModel.PauseAutomation();
     private void Resume_Click(object sender, RoutedEventArgs e) => ViewModel.ResumeAutomation();
@@ -564,7 +565,7 @@ public partial class QuotationItemWindow : Window
     {
         if (sender is Button { Tag: DataGrid dataGrid } button)
         {
-            _columnLayouts.ShowChooser(button, dataGrid);
+            _columnLayouts.ShowChooser(this, dataGrid);
         }
     }
 
@@ -591,6 +592,12 @@ public partial class QuotationItemWindow : Window
 
     private async Task RunAsync(Func<Task> action)
     {
+        if (!await _interactionGate.WaitAsync(0).ConfigureAwait(true))
+        {
+            AsyncCommandRuntime.ReportRejected();
+            return;
+        }
+
         try
         {
             await action().ConfigureAwait(true);
@@ -598,6 +605,10 @@ public partial class QuotationItemWindow : Window
         catch (Exception exception)
         {
             ShowError(exception);
+        }
+        finally
+        {
+            _interactionGate.Release();
         }
     }
 

@@ -49,7 +49,7 @@ public partial class QuotationImportWindow : Window
     {
         if (sender is Button button)
         {
-            _columnLayouts.ShowChooser(button, ImportItemsGrid);
+            _columnLayouts.ShowChooser(this, ImportItemsGrid);
         }
     }
 

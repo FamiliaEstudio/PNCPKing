@@ -2,15 +2,18 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
+using PNCPKing.Infrastructure.Services;
 
 namespace PNCPKing.App.Services;
 
 public sealed class AppDiagnosticLog
 {
     private readonly object _gate = new();
+    private readonly ISystemResourceProbe _resourceProbe;
 
-    public AppDiagnosticLog()
+    public AppDiagnosticLog(ISystemResourceProbe? resourceProbe = null)
     {
+        _resourceProbe = resourceProbe ?? new SystemResourceProbe();
         var applicationData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         DirectoryPath = Path.Combine(applicationData, "PNCP King", "logs");
         Directory.CreateDirectory(DirectoryPath);
@@ -27,11 +30,15 @@ public sealed class AppDiagnosticLog
     public void WriteStartupHeader()
     {
         using var process = Process.GetCurrentProcess();
+        var resources = _resourceProbe.GetSnapshot();
         Info(
             "startup",
             $"PNCP King iniciado. Versão={typeof(AppDiagnosticLog).Assembly.GetName().Version}; " +
             $"SO={RuntimeInformation.OSDescription}; arquitetura={RuntimeInformation.OSArchitecture}; " +
-            $"processo={process.Id}; memória_física_GC={GC.GetGCMemoryInfo().TotalAvailableMemoryBytes}; " +
+            $"processo={process.Id}; ram_fisica_total={resources.TotalPhysicalMemoryBytes}; " +
+            $"ram_fisica_livre={resources.AvailablePhysicalMemoryBytes}; carga_memoria={resources.MemoryLoadPercent}; " +
+            $"limite_memoria_GC={GC.GetGCMemoryInfo().TotalAvailableMemoryBytes}; " +
+            $"memoria_privada_processo={process.PrivateMemorySize64}; " +
             $"pasta_execução={AppContext.BaseDirectory}");
     }
 

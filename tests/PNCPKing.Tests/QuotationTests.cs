@@ -235,7 +235,7 @@ public sealed class QuotationTests
             .ToArray();
 
         var first = analyzer.Analyze(line, references);
-        var second = analyzer.Analyze(line, references.Reverse().ToArray());
+        var second = analyzer.Analyze(line, references.AsEnumerable().Reverse().ToArray());
 
         Assert.InRange(first.Baskets.Count, 3, QuotationAnalyzer.MaximumCuratedBaskets);
         Assert.Equal(first.Baskets.Select(basket => basket.Key), second.Baskets.Select(basket => basket.Key));

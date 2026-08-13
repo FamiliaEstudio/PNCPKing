@@ -4,6 +4,9 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Threading;
+using PNCPKing.App.Views;
+using PNCPKing.App.ViewModels;
+using PNCPKing.Core.Interfaces;
 
 namespace PNCPKing.App.Services;
 
@@ -17,15 +20,22 @@ public sealed class DataGridColumnLayoutService
         DependencyPropertyDescriptor.FromProperty(DataGridColumn.DisplayIndexProperty, typeof(DataGridColumn));
 
     private readonly AppSettingsService _settingsService;
+    private readonly IPerformanceTelemetry _telemetry;
     private readonly DispatcherTimer _saveTimer;
     private readonly Dictionary<DataGrid, Registration> _registrations = [];
     private readonly SemaphoreSlim _saveGate = new(1, 1);
     private AppSettings _settings;
     private bool _applying;
+    private ColumnChooserWindow? _activeChooser;
+    private DataGrid? _activeChooserGrid;
 
-    public DataGridColumnLayoutService(AppSettingsService settingsService, AppSettings settings)
+    public DataGridColumnLayoutService(
+        AppSettingsService settingsService,
+        AppSettings settings,
+        IPerformanceTelemetry? telemetry = null)
     {
         _settingsService = settingsService;
+        _telemetry = telemetry ?? NullPerformanceTelemetry.Instance;
         _settings = settings with
         {
             SettingsVersion = Math.Max(3, settings.SettingsVersion),
@@ -76,48 +86,55 @@ public sealed class DataGridColumnLayoutService
         }
     }
 
-    public void ShowChooser(Button button, DataGrid dataGrid)
+    public void ShowChooser(Window owner, DataGrid dataGrid)
     {
         if (!_registrations.TryGetValue(dataGrid, out var registration))
         {
             throw new InvalidOperationException("A grade não possui uma chave de configuração registrada.");
         }
 
-        var menu = new ContextMenu
+        if (_activeChooser is { IsVisible: true } active)
         {
-            PlacementTarget = button,
-            Placement = PlacementMode.Top,
-            StaysOpen = true
-        };
-        foreach (var keyedColumn in registration.Columns.OrderBy(item => item.Column.DisplayIndex))
-        {
-            var item = new MenuItem
-            {
-                Header = keyedColumn.Column.Header?.ToString() ?? "Coluna",
-                IsCheckable = true,
-                IsChecked = keyedColumn.Column.Visibility == Visibility.Visible,
-                StaysOpenOnClick = true,
-                Tag = keyedColumn.Column
-            };
-            item.Click += (_, _) =>
-            {
-                if (item.Tag is DataGridColumn selectedColumn)
-                {
-                    selectedColumn.Visibility = item.IsChecked ? Visibility.Visible : Visibility.Collapsed;
-                }
-            };
-            menu.Items.Add(item);
+            _telemetry.Record("ui", "interaction-suppressed", TimeSpan.Zero);
+            active.Activate();
+            return;
         }
 
-        menu.Items.Add(new Separator());
-        var reset = new MenuItem { Header = "Restaurar padrão" };
-        reset.Click += (_, _) => Reset(registration);
-        menu.Items.Add(reset);
-        menu.IsOpen = true;
+        using var span = _telemetry.Begin("ui", "column-chooser-open");
+        var rows = registration.Columns
+            .OrderBy(item => item.Column.DisplayIndex)
+            .Select(item => new ColumnChooserRow(
+                item.Key,
+                item.Column.Header?.ToString() ?? "Coluna",
+                item.Column.Visibility == Visibility.Visible,
+                registration.Defaults.First(state => state.Key == item.Key).IsVisible))
+            .ToArray();
+        var chooser = new ColumnChooserWindow(rows)
+        {
+            Owner = owner
+        };
+        _activeChooser = chooser;
+        _activeChooserGrid = dataGrid;
+        chooser.ApplyRequested += (_, draft) => ApplyVisibilityDraft(registration, dataGrid, draft);
+        chooser.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_activeChooser, chooser))
+            {
+                _activeChooser = null;
+                _activeChooserGrid = null;
+            }
+        };
+        chooser.Show();
+        span.Complete(rows.Length);
     }
 
     public void Unregister(DataGrid dataGrid)
     {
+        if (ReferenceEquals(_activeChooserGrid, dataGrid))
+        {
+            _activeChooser?.Close();
+        }
+
         if (!_registrations.Remove(dataGrid, out var registration))
         {
             return;
@@ -204,6 +221,36 @@ public sealed class DataGridColumnLayoutService
         ScheduleSave();
     }
 
+    private void ApplyVisibilityDraft(
+        Registration registration,
+        DataGrid dataGrid,
+        IReadOnlyDictionary<string, bool> visibility)
+    {
+        using var span = _telemetry.Begin("ui", "column-layout-apply");
+        _applying = true;
+        try
+        {
+            using (dataGrid.Dispatcher.DisableProcessing())
+            {
+                foreach (var item in registration.Columns)
+                {
+                    if (visibility.TryGetValue(item.Key, out var isVisible))
+                    {
+                        item.Column.Visibility = isVisible ? Visibility.Visible : Visibility.Collapsed;
+                    }
+                }
+            }
+        }
+        finally
+        {
+            _applying = false;
+        }
+
+        Capture(registration);
+        ScheduleSave();
+        span.Complete(registration.Columns.Count);
+    }
+
     private static void ApplyStates(
         Registration registration,
         IReadOnlyList<ColumnLayoutSetting> states)
@@ -249,6 +296,18 @@ public sealed class DataGridColumnLayoutService
         _settings = _settings with { SettingsVersion = Math.Max(3, _settings.SettingsVersion), ColumnLayouts = layouts };
     }
 
+    private void Capture(Registration registration)
+    {
+        var layouts = _settings.ColumnLayouts ??
+                      new Dictionary<string, List<ColumnLayoutSetting>>(StringComparer.Ordinal);
+        layouts[registration.GridKey] = Capture(registration.Columns);
+        _settings = _settings with
+        {
+            SettingsVersion = Math.Max(3, _settings.SettingsVersion),
+            ColumnLayouts = layouts
+        };
+    }
+
     private void ScheduleSave()
     {
         _saveTimer.Stop();
@@ -260,11 +319,23 @@ public sealed class DataGridColumnLayoutService
         await _saveGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            _settings = await _settingsService.UpdateAsync(latest => latest with
+            try
             {
-                SettingsVersion = Math.Max(3, latest.SettingsVersion),
-                ColumnLayouts = _settings.ColumnLayouts
-            }).ConfigureAwait(false);
+                _settings = await _settingsService.UpdateAsync(latest => latest with
+                {
+                    SettingsVersion = Math.Max(3, latest.SettingsVersion),
+                    ColumnLayouts = _settings.ColumnLayouts
+                }).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (!AsyncCommandRuntime.IsCritical(exception))
+            {
+                _telemetry.Record(
+                    "ui",
+                    "column-layout-save",
+                    TimeSpan.Zero,
+                    succeeded: false,
+                    errorKind: exception.GetType().Name);
+            }
         }
         finally
         {

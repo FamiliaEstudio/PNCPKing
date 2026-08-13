@@ -13,6 +13,14 @@ public sealed record PerformanceMeasurement
     public string ErrorKind { get; init; } = string.Empty;
 }
 
+public sealed record PerformanceActiveOperation
+{
+    public string Operation { get; init; } = string.Empty;
+    public string Phase { get; init; } = string.Empty;
+    public DateTimeOffset StartedAt { get; init; }
+    public TimeSpan Elapsed { get; init; }
+}
+
 public sealed record PerformanceOperationSummary
 {
     public required string Operation { get; init; }
@@ -38,6 +46,14 @@ public sealed record PerformanceReport
     public required long WalBytes { get; init; }
     public required IReadOnlyList<PerformanceMeasurement> Measurements { get; init; }
     public required IReadOnlyList<PerformanceOperationSummary> Summaries { get; init; }
+    public long TotalPhysicalMemoryBytes { get; init; }
+    public long FreePhysicalMemoryBytes { get; init; }
+    public int PhysicalMemoryLoadPercent { get; init; }
+    public long PrivateMemoryBytes { get; init; }
+    public string BuildIdentifier { get; init; } = string.Empty;
+    public int DatabaseSchemaVersion { get; init; }
+    public string SqliteProfile { get; init; } = string.Empty;
+    public IReadOnlyList<PerformanceActiveOperation> ActiveOperations { get; init; } = [];
     public string BaselineApplicationVersion { get; init; } = string.Empty;
     public IReadOnlyList<PerformanceComparison> Comparisons { get; init; } = [];
 }

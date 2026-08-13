@@ -19,8 +19,19 @@
                       SkipGetTargetFrameworkProperties="true" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="../../src/PNCPKing.App/ViewModels/Commands.cs"
+             Link="AppLogic/Commands.cs" />
     <None Include="../../src/PNCPKing.App/Views/QuotationItemWindow.xaml"
           Link="Views/QuotationItemWindow.xaml"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/PNCPKing.App/Views/MainWindow.xaml"
+          Link="Views/MainWindow.xaml"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/PNCPKing.App/Views/CatalogDictionaryWindow.xaml"
+          Link="Views/CatalogDictionaryWindow.xaml"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/PNCPKing.App/Views/ColumnChooserWindow.xaml"
+          Link="Views/ColumnChooserWindow.xaml"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

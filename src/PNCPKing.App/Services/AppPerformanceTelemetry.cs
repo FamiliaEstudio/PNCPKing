@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
+using PNCPKing.Infrastructure.Services;
 
 namespace PNCPKing.App.Services;
 
@@ -14,17 +15,39 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
     private const int MaximumMeasurements = 20_000;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly ConcurrentQueue<PerformanceMeasurement> _measurements = new();
+    private readonly ConcurrentDictionary<long, ActiveSpan> _activeSpans = new();
+    private readonly ISystemResourceProbe _resourceProbe;
     private string? _databasePath;
+    private string _sqliteProfile = string.Empty;
+    private int _databaseSchemaVersion;
     private int _measurementCount;
+    private long _nextSpanId;
+
+    public AppPerformanceTelemetry(ISystemResourceProbe? resourceProbe = null)
+    {
+        _resourceProbe = resourceProbe ?? new SystemResourceProbe();
+    }
 
     public void SetDatabasePath(string databasePath) =>
         _databasePath = Path.GetFullPath(databasePath);
+
+    public void SetSqliteProfile(string profile) => _sqliteProfile = SanitizeLabel(profile);
+
+    public void SetDatabaseSchemaVersion(int version) => _databaseSchemaVersion = Math.Max(0, version);
 
     public PerformanceSpan Begin(string operation, string phase = "total")
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(operation);
         ArgumentException.ThrowIfNullOrWhiteSpace(phase);
-        return new PerformanceSpan(this, operation, phase);
+        var sanitizedOperation = SanitizeLabel(operation);
+        var sanitizedPhase = SanitizeLabel(phase);
+        var id = Interlocked.Increment(ref _nextSpanId);
+        _activeSpans[id] = new ActiveSpan(sanitizedOperation, sanitizedPhase, DateTimeOffset.UtcNow);
+        return new PerformanceSpan(
+            this,
+            sanitizedOperation,
+            sanitizedPhase,
+            () => _activeSpans.TryRemove(id, out _));
     }
 
     public void Record(
@@ -83,6 +106,18 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
             .ThenBy(value => value.Phase, StringComparer.Ordinal)
             .ToArray();
         var databasePath = _databasePath;
+        var resources = _resourceProbe.GetSnapshot();
+        var now = DateTimeOffset.UtcNow;
+        var activeOperations = _activeSpans.Values
+            .OrderBy(value => value.StartedAt)
+            .Select(value => new PerformanceActiveOperation
+            {
+                Operation = value.Operation,
+                Phase = value.Phase,
+                StartedAt = value.StartedAt,
+                Elapsed = now - value.StartedAt
+            })
+            .ToArray();
         return new PerformanceReport
         {
             GeneratedAt = DateTimeOffset.Now,
@@ -93,6 +128,14 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
             AvailableMemoryBytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes,
             DatabaseBytes = FileLength(databasePath),
             WalBytes = FileLength(databasePath is null ? null : databasePath + "-wal"),
+            TotalPhysicalMemoryBytes = resources.TotalPhysicalMemoryBytes,
+            FreePhysicalMemoryBytes = resources.AvailablePhysicalMemoryBytes,
+            PhysicalMemoryLoadPercent = resources.MemoryLoadPercent,
+            PrivateMemoryBytes = GetPrivateMemory(),
+            BuildIdentifier = BuildIdentifier(),
+            DatabaseSchemaVersion = _databaseSchemaVersion,
+            SqliteProfile = _sqliteProfile,
+            ActiveOperations = activeOperations,
             Measurements = measurements,
             Summaries = summaries
         };
@@ -149,7 +192,13 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
         builder.AppendLine($"Sistema: {report.OperatingSystem}");
         builder.AppendLine($"Runtime: {report.Framework}");
         builder.AppendLine($"Processadores lógicos: {report.LogicalProcessors}");
-        builder.AppendLine($"Memória disponível ao processo: {FormatBytes(report.AvailableMemoryBytes)}");
+        builder.AppendLine($"Limite de memória percebido pelo GC: {FormatBytes(report.AvailableMemoryBytes)}");
+        builder.AppendLine(
+            $"RAM física total/livre/carga: {FormatBytes(report.TotalPhysicalMemoryBytes)} / " +
+            $"{FormatBytes(report.FreePhysicalMemoryBytes)} / {report.PhysicalMemoryLoadPercent}%");
+        builder.AppendLine($"Memória privada do PNCP King: {FormatBytes(report.PrivateMemoryBytes)}");
+        builder.AppendLine($"Build/esquema/perfil SQLite: {report.BuildIdentifier} / " +
+                           $"{report.DatabaseSchemaVersion} / {report.SqliteProfile}");
         builder.AppendLine($"Banco/WAL: {FormatBytes(report.DatabaseBytes)} / {FormatBytes(report.WalBytes)}");
         builder.AppendLine();
         builder.AppendLine("Operação | Fase | Amostras | Mediana ms | P95 ms | Máximo ms | Linhas | Pico RAM");
@@ -177,6 +226,18 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
                 builder.AppendLine(
                     $"{item.StartedAt:O} | {item.Operation} | {item.Phase} | " +
                     $"{item.Duration.TotalMilliseconds:N1} | {FormatBytes(item.WorkingSetBytes)}");
+            }
+        }
+
+        if (report.ActiveOperations.Count > 0)
+        {
+            builder.AppendLine();
+            builder.AppendLine("Operações ainda ativas na exportação");
+            foreach (var item in report.ActiveOperations)
+            {
+                builder.AppendLine(
+                    $"{item.Operation} | {item.Phase} | início {item.StartedAt:O} | " +
+                    $"{item.Elapsed.TotalMilliseconds:N1} ms");
             }
         }
 
@@ -271,12 +332,34 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
     {
         try
         {
-            return Process.GetCurrentProcess().WorkingSet64;
+            using var process = Process.GetCurrentProcess();
+            return process.WorkingSet64;
         }
         catch (InvalidOperationException)
         {
             return 0;
         }
+    }
+
+    private static long GetPrivateMemory()
+    {
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            return process.PrivateMemorySize64;
+        }
+        catch (InvalidOperationException)
+        {
+            return 0;
+        }
+    }
+
+    private static string BuildIdentifier()
+    {
+        var assembly = Assembly.GetEntryAssembly();
+        return assembly is null
+            ? string.Empty
+            : $"{assembly.GetName().Version}-{assembly.ManifestModule.ModuleVersionId:N}";
     }
 
     private static long FileLength(string? path)
@@ -304,4 +387,6 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
 
         return $"{value:N1} {units[unit]}";
     }
+
+    private sealed record ActiveSpan(string Operation, string Phase, DateTimeOffset StartedAt);
 }

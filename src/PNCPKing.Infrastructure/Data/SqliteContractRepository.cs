@@ -9,9 +9,9 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 17;
+    public const int CurrentSchemaVersion = 18;
 
-    private const string GeographicGroupExpression = "CASE WHEN COALESCE(c.geo_layer, 1) = 0 " +
+    private const string GeographicGroupExpression = "CASE WHEN c.geo_layer = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
         "ELSE COALESCE(c.state_proximity_rank, 999) END";
 
@@ -36,8 +36,11 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
 
     public string DatabasePath { get; }
 
-    public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    public async Task<DatabaseInitializationResult> InitializeAsync(
+        CancellationToken cancellationToken = default,
+        IProgress<DatabaseInitializationProgress>? progress = null)
     {
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
         await using var writer = await _connections.WorkCoordinator
             .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken)
@@ -63,6 +66,16 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                 ? 0
                 : Convert.ToInt32(value, CultureInfo.InvariantCulture);
         }
+
+        var previousVersion = version;
+        ReportInitialization(
+            progress,
+            previousVersion,
+            5,
+            "Verificando esquema",
+            previousVersion < CurrentSchemaVersion
+                ? $"Preparando a atualização segura do banco v{previousVersion} → v{CurrentSchemaVersion}."
+                : $"Banco v{previousVersion} já está atualizado.");
 
         if (version > CurrentSchemaVersion)
         {
@@ -324,7 +337,8 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             {
                 migrationPragmas.CommandText =
                     $"PRAGMA cache_size=-{_connections.MigrationCacheKib}; " +
-                    $"PRAGMA mmap_size={_connections.MmapBytes}; PRAGMA temp_store=FILE; PRAGMA threads=2;";
+                    $"PRAGMA mmap_size={_connections.MmapBytes}; PRAGMA temp_store=FILE; " +
+                    $"PRAGMA threads={_connections.WorkerThreads};";
                 await migrationPragmas.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
@@ -357,8 +371,90 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             span.Complete();
+            version = 17;
         }
+
+        if (version < 18)
+        {
+            EnsureMigrationSpace();
+            using var span = _performance.Begin("startup", "schema-v18");
+            ReportInitialization(
+                progress,
+                previousVersion,
+                20,
+                "Preparando índice geográfico",
+                "Otimizando banco v17 → v18; nenhum backup está sendo importado.");
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using (var removeObsoleteIndex = connection.CreateCommand())
+            {
+                removeObsoleteIndex.Transaction = (SqliteTransaction)transaction;
+                removeObsoleteIndex.CommandText = "DROP INDEX IF EXISTS idx_contracts_geo_publication_id;";
+                await removeObsoleteIndex.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            ReportInitialization(
+                progress,
+                previousVersion,
+                40,
+                "Criando índice geográfico",
+                "Organizando contratações para acelerar “Mais próximas”…");
+            await using (var createIndex = connection.CreateCommand())
+            {
+                createIndex.Transaction = (SqliteTransaction)transaction;
+                createIndex.CommandText = SchemaV18Sql;
+                await createIndex.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            ReportInitialization(
+                progress,
+                previousVersion,
+                90,
+                "Confirmando otimização",
+                "Finalizando a otimização transacional do banco…");
+            await using (var updateVersion = connection.CreateCommand())
+            {
+                updateVersion.Transaction = (SqliteTransaction)transaction;
+                updateVersion.CommandText = "UPDATE schema_info SET version = 18 WHERE id = 1;";
+                await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            span.Complete();
+            version = 18;
+        }
+
+        stopwatch.Stop();
+        ReportInitialization(
+            progress,
+            previousVersion,
+            100,
+            "Banco pronto",
+            $"Banco v{version} pronto para uso.");
+        return new DatabaseInitializationResult
+        {
+            PreviousVersion = previousVersion,
+            CurrentVersion = version,
+            AppliedMigrations = previousVersion < version
+                ? Enumerable.Range(previousVersion + 1, version - previousVersion).ToArray()
+                : [],
+            Duration = stopwatch.Elapsed
+        };
     }
+
+    private static void ReportInitialization(
+        IProgress<DatabaseInitializationProgress>? progress,
+        int previousVersion,
+        int percentage,
+        string phase,
+        string message) =>
+        progress?.Report(new DatabaseInitializationProgress
+        {
+            PreviousVersion = previousVersion,
+            TargetVersion = CurrentSchemaVersion,
+            Percentage = Math.Clamp(percentage, 0, 100),
+            Phase = phase,
+            Message = message
+        });
 
     private void EnsureMigrationSpace()
     {
@@ -948,6 +1044,12 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         CancellationToken cancellationToken = default)
     {
         using var span = _performance.Begin("contract-search", "exact-count");
+        using var queueSpan = _performance.Begin("contract-search", "sqlite-queue");
+        await using var readerLease = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
+        queueSpan.Complete();
+        using var sqlSpan = _performance.Begin("contract-search", "sql-execution");
         var sql = BuildContractSearchSql(query);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
@@ -956,6 +1058,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         var total = Convert.ToInt64(
             await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
             CultureInfo.InvariantCulture);
+        sqlSpan.Complete(total);
         span.Complete(total);
         return total;
     }
@@ -965,6 +1068,12 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         CancellationToken cancellationToken = default)
     {
         using var span = _performance.Begin("contract-search", "page");
+        using var queueSpan = _performance.Begin("contract-search", "sqlite-queue");
+        await using var readerLease = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
+        queueSpan.Complete();
+        using var sqlSpan = _performance.Begin("contract-search", "sql-execution");
         var page = Math.Max(1, query.Page);
         var pageSize = Math.Clamp(query.PageSize, 1, 200);
         var sql = BuildContractSearchSql(query);
@@ -1000,6 +1109,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             results.RemoveAt(results.Count - 1);
         }
 
+        sqlSpan.Complete(results.Count);
         span.Complete(results.Count);
         return new SearchPageSlice(results, page, pageSize, mayHaveMore);
     }
@@ -1018,6 +1128,10 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         {
             return new ItemCandidatePage([], null, false);
         }
+
+        await using var readerLease = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
 
         pageSize = Math.Clamp(pageSize, 1, 500);
         randomPivot = Math.Clamp(randomPivot, 0, long.MaxValue - 1);
@@ -1186,6 +1300,10 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             return new ItemCandidatePage([], cursor, false);
         }
 
+        await using var readerLease = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
+
         pageSize = Math.Clamp(pageSize, 1, 500);
         randomPivot = Math.Clamp(randomPivot, 0, long.MaxValue - 1);
         var conditions = new List<string> { "contracts_fts MATCH $contractMatch" };
@@ -1303,6 +1421,10 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         {
             return new ItemSearchLocalSummary(0, 0, 0);
         }
+
+        await using var readerLease = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
 
         var candidateMatch = expression.CandidateMatchQuery;
         var explicitMatch = expression.ExplicitContractMatchQuery;
@@ -1904,6 +2026,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         string contractId,
         CancellationToken cancellationToken = default)
     {
+        await using var visibleReader = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -1958,6 +2083,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
 
         var normalizedUf = NormalizeCoverageUf(uf);
         var modalities = activeModalityIds.Distinct().Order().ToArray();
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var setup = connection.CreateCommand())
@@ -2058,6 +2186,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         }
 
         var normalizedUf = NormalizeCoverageUf(uf);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
@@ -2098,6 +2229,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             return [];
         }
 
+        await using var readerLease = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -2229,6 +2363,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
 
     public async Task<DatasetState> GetDatasetStateAsync(CancellationToken cancellationToken = default)
     {
+        await using var readerLease = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         DateOnly? startDate = null;
         DateOnly? endDate = null;
@@ -2251,7 +2388,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             }
         }
 
-        var counts = await GetCountsAsync(cancellationToken).ConfigureAwait(false);
+        var counts = await GetCountsCoreAsync(cancellationToken).ConfigureAwait(false);
         return new DatasetState(startDate, endDate, scope, lastSync, counts.Contracts, counts.Items, counts.Results);
     }
 
@@ -2295,6 +2432,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         DateTimeOffset completedAt,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -2314,6 +2454,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
 
     public async Task PruneContractsBeforeAsync(DateOnly cutoff, CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM contracts WHERE publication_date < $cutoff;";
@@ -2346,6 +2489,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
 
     public async Task ClearItemCacheAsync(CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM items; PRAGMA wal_checkpoint(TRUNCATE);";
@@ -2368,6 +2514,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         bool completed,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -2451,6 +2600,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         }
 
         var complete = checkpoint.Status == SyncPartitionStatus.Complete;
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -2499,6 +2651,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         CancellationToken cancellationToken = default)
     {
         var id = Guid.NewGuid().ToString("N");
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -2521,6 +2676,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         string? error,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -2537,6 +2695,15 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
 
     public async Task<(long Contracts, long Items, long Results)> GetCountsAsync(CancellationToken cancellationToken = default)
     {
+        await using var readerLease = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
+        return await GetCountsCoreAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<(long Contracts, long Items, long Results)> GetCountsCoreAsync(
+        CancellationToken cancellationToken)
+    {
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText =
@@ -2551,16 +2718,63 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
 
     public async Task CheckpointWalAsync(CancellationToken cancellationToken = default)
     {
+        using var span = _performance.Begin("maintenance", "wal-checkpoint-truncate");
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        span.Complete();
+    }
+
+    public async Task MaintainWalAsync(CancellationToken cancellationToken = default)
+    {
+        const long truncateThreshold = 128L * 1024 * 1024;
+        var walPath = DatabasePath + "-wal";
+        var walBytes = File.Exists(walPath) ? new FileInfo(walPath).Length : 0;
+        var truncate = walBytes >= truncateThreshold && _connections.WorkCoordinator.IsIdle;
+        using var span = _performance.Begin(
+            "maintenance",
+            truncate ? "wal-checkpoint-truncate" : "wal-checkpoint-passive");
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = truncate
+            ? "PRAGMA busy_timeout=0; PRAGMA wal_checkpoint(TRUNCATE);"
+            : "PRAGMA wal_checkpoint(PASSIVE);";
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        span.Complete(bytes: walBytes);
     }
 
     public async Task OptimizeAsync(CancellationToken cancellationToken = default)
     {
         using var span = _performance.Begin("maintenance", "sqlite-optimize");
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using (var claim = connection.CreateCommand())
+        {
+            claim.CommandText = """
+                UPDATE maintenance_state
+                   SET last_optimize_date = $today
+                 WHERE id = 1 AND last_optimize_date <> $today;
+                SELECT changes();
+                """;
+            claim.Parameters.AddWithValue("$today", DateOnly.FromDateTime(DateTime.Today).ToString("O"));
+            if (Convert.ToInt32(
+                    await claim.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                    CultureInfo.InvariantCulture) == 0)
+            {
+                span.Complete();
+                return;
+            }
+        }
+
         await using var command = connection.CreateCommand();
         command.CommandText = "PRAGMA optimize; PRAGMA wal_checkpoint(PASSIVE);";
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -2643,7 +2857,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         var order = query.Sort switch
         {
             SearchSort.Nearest =>
-                $" ORDER BY {explicitPriority} COALESCE(c.geo_layer, 1), {GeographicGroupExpression}, " +
+                $" ORDER BY {explicitPriority} c.geo_layer, {GeographicGroupExpression}, " +
                 "c.publication_date DESC, c.pncp_id",
             SearchSort.Newest => $" ORDER BY {explicitPriority} c.publication_date DESC, c.pncp_id",
             _ when joinsFts =>
@@ -4108,6 +4322,24 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             INSERT INTO catalog_description_fts(rowid, description)
             VALUES(new.rowid, new.description);
         END;
+        """;
+
+    private const string SchemaV18Sql = """
+        CREATE TABLE IF NOT EXISTS maintenance_state(
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            last_optimize_date TEXT NOT NULL DEFAULT ''
+        );
+        INSERT OR IGNORE INTO maintenance_state(id, last_optimize_date) VALUES(1, '');
+
+        CREATE INDEX IF NOT EXISTS idx_contracts_nearest_order
+            ON contracts(
+                geo_layer,
+                CASE WHEN geo_layer = 0
+                     THEN COALESCE(municipality_distance_rank, 999999)
+                     ELSE COALESCE(state_proximity_rank, 999)
+                END,
+                publication_date DESC,
+                pncp_id);
         """;
 
 }
