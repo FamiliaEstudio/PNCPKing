@@ -21,6 +21,8 @@
   <ItemGroup>
     <Compile Include="../../src/PNCPKing.App/ViewModels/Commands.cs"
              Link="AppLogic/Commands.cs" />
+    <Compile Include="../../src/PNCPKing.App/Services/AppSettingsService.cs"
+             Link="AppLogic/AppSettingsService.cs" />
     <None Include="../../src/PNCPKing.App/Views/QuotationItemWindow.xaml"
           Link="Views/QuotationItemWindow.xaml"
           CopyToOutputDirectory="PreserveNewest" />

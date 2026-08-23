@@ -8,6 +8,7 @@ public sealed class CatalogSyncService(
     ICatalogRepository repository,
     TimeProvider? timeProvider = null)
 {
+    private static readonly CatalogKind[] AllKinds = [CatalogKind.Catmat, CatalogKind.Catser];
     public static TimeSpan RefreshInterval { get; } = TimeSpan.FromHours(24);
     private readonly AsyncPauseGate _pause = new();
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
@@ -17,12 +18,38 @@ public sealed class CatalogSyncService(
     public void Resume() => _pause.Resume();
 
     public async Task<bool> IsDueAsync(CancellationToken cancellationToken = default)
+        => (await GetDueKindsAsync(RefreshInterval, cancellationToken).ConfigureAwait(false)).Count > 0;
+
+    public async Task<IReadOnlyList<CatalogKind>> GetDueKindsAsync(
+        TimeSpan? refreshInterval,
+        CancellationToken cancellationToken = default)
     {
+        if (refreshInterval is null)
+        {
+            return [];
+        }
+
+        if (refreshInterval <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(refreshInterval),
+                "O intervalo automático deve ser positivo ou nulo para o modo manual.");
+        }
+
         var states = await repository.GetSyncStatesAsync(cancellationToken).ConfigureAwait(false);
-        return states.Count < 2 || states.Any(state =>
-            state.Status != CatalogSyncStatus.Complete ||
-            state.CompletedAt is null ||
-            _timeProvider.GetUtcNow() - state.CompletedAt.Value >= RefreshInterval);
+        var statesByKind = states.ToDictionary(state => state.Kind);
+        var now = _timeProvider.GetUtcNow();
+        return AllKinds.Where(kind =>
+        {
+            if (!statesByKind.TryGetValue(kind, out var state))
+            {
+                return true;
+            }
+
+            return state.Status != CatalogSyncStatus.Complete ||
+                   state.CompletedAt is null ||
+                   now - state.CompletedAt.Value >= refreshInterval.Value;
+        }).ToArray();
     }
 
     public async Task BuildDescriptionIndexAsync(
@@ -39,12 +66,24 @@ public sealed class CatalogSyncService(
         }
     }
 
+    public Task SynchronizeAsync(
+        IProgress<CatalogSyncProgress>? progress = null,
+        CancellationToken cancellationToken = default) =>
+        SynchronizeAsync(AllKinds, progress, cancellationToken);
+
     public async Task SynchronizeAsync(
+        IReadOnlyCollection<CatalogKind> kinds,
         IProgress<CatalogSyncProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        foreach (var kind in new[] { CatalogKind.Catmat, CatalogKind.Catser })
+        ArgumentNullException.ThrowIfNull(kinds);
+        foreach (var kind in AllKinds)
         {
+            if (!kinds.Contains(kind))
+            {
+                continue;
+            }
+
             await SynchronizeKindAsync(kind, progress, cancellationToken).ConfigureAwait(false);
         }
     }

@@ -209,6 +209,12 @@
                                        VerticalAlignment="Center" Foreground="#5F6871" />
                         </StackPanel>
                         <WrapPanel DockPanel.Dock="Right">
+                            <TextBlock Text="Atualização automática:" VerticalAlignment="Center"
+                                       Margin="6,0,2,0" />
+                            <ComboBox Width="140"
+                                      ItemsSource="{Binding CatalogRefreshOptions}"
+                                      SelectedItem="{Binding SelectedCatalogRefreshOption, Mode=TwoWay}"
+                                      ToolTip="Define quando a manutenção verificará novos snapshots completos; Atualizar agora sempre força CATMAT e CATSER." />
                             <Button Content="Atualizar agora" Command="{Binding UpdateCatalogCommand}" />
                             <Button Content="{Binding PauseCatalogButtonText}" Command="{Binding PauseCatalogCommand}" />
                             <Button Content="Cancelar" Command="{Binding CancelCatalogCommand}" />
@@ -547,32 +553,56 @@
                             <TextBlock Text="Projeto:" VerticalAlignment="Center" Margin="0,0,5,0" />
                             <ComboBox Width="260" ItemsSource="{Binding QuotationProjects}"
                                       SelectedItem="{Binding SelectedQuotationProject}" />
-                            <Button Content="Nova" Command="{Binding NewQuotationCommand}" />
-                            <Button Content="Renomear" Command="{Binding RenameQuotationCommand}" />
-                            <Button Content="Excluir cotação" Command="{Binding DeleteQuotationCommand}" />
-                            <Button Content="Excluir item" Command="{Binding DeleteQuotationLineCommand}" />
-                            <Button Content="Editar nome" Command="{Binding RenameQuotationLineCommand}"
-                                    ToolTip="Altera somente o nome visível; pesquisas, preços e cestas permanecem intactos." />
-                            <Button Content="Abrir item" Command="{Binding OpenQuotationItemCommand}" />
-                            <Button Content="Importar XLSX" Command="{Binding ImportQuotationCommand}" />
-                            <Button Content="Automação com IA" Command="{Binding AiQuotationCommand}" />
-                            <Button Content="Retrabalhar prompts com IA" Command="{Binding RefineQuotationPromptsCommand}" />
-                            <Button Content="Retomar automação" Command="{Binding ResumeQuotationAutomationCommand}" />
-                            <Button Content="Cancelar automação" Command="{Binding CancelQuotationAutomationCommand}" />
-                            <Button Content="Pesquisar restritivo" Command="{Binding OpenRestrictiveQuotationSearchCommand}" />
-                            <Button Content="Pesquisar intermediário" Command="{Binding OpenIntermediateQuotationSearchCommand}" />
-                            <Button Content="Pesquisar amplo" Command="{Binding OpenBroadQuotationSearchCommand}" />
-                            <Button Content="Atualizar amostra com a pesquisa atual"
-                                    Command="{Binding UpdateQuotationSampleCommand}" />
-                            <Button Content="Ajustar pesos do índice"
-                                    Command="{Binding AdjustQuotationWeightsCommand}" />
-                            <Button Content="Exportar Excel" Command="{Binding ExportQuotationCommand}" />
-                            <Button Content="Exportar pacote"
-                                    Command="{Binding ExportQuotationPackageCommand}"
-                                    ToolTip="Salva a cotação selecionada com preços, cestas, pesquisas e prints." />
-                            <Button Content="Importar pacote"
-                                    Command="{Binding ImportQuotationPackageCommand}"
-                                    ToolTip="Importa um arquivo portátil .pncpcotacao sem substituir o banco inteiro." />
+                            <Button Content="Cotações ▾" Click="QuotationActionsMenu_Click">
+                                <Button.ContextMenu>
+                                    <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                        <MenuItem Header="Nova" Command="{Binding NewQuotationCommand}" />
+                                        <MenuItem Header="Renomear" Command="{Binding RenameQuotationCommand}" />
+                                        <MenuItem Header="Excluir cotação" Command="{Binding DeleteQuotationCommand}" />
+                                        <Separator />
+                                        <MenuItem Header="Excluir item" Command="{Binding DeleteQuotationLineCommand}" />
+                                        <MenuItem Header="Editar nome" Command="{Binding RenameQuotationLineCommand}"
+                                                  ToolTip="Altera somente o nome visível; pesquisas, preços e cestas permanecem intactos." />
+                                        <MenuItem Header="Abrir item" Command="{Binding OpenQuotationItemCommand}" />
+                                        <Separator />
+                                        <MenuItem Header="Importar XLSX" Command="{Binding ImportQuotationCommand}" />
+                                    </ContextMenu>
+                                </Button.ContextMenu>
+                            </Button>
+                            <Button Content="Automação ▾" Click="QuotationActionsMenu_Click">
+                                <Button.ContextMenu>
+                                    <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                        <MenuItem Header="Automação com IA" Command="{Binding AiQuotationCommand}" />
+                                        <MenuItem Header="Retrabalhar prompts com IA" Command="{Binding RefineQuotationPromptsCommand}" />
+                                        <Separator />
+                                        <MenuItem Header="Retomar automação" Command="{Binding ResumeQuotationAutomationCommand}" />
+                                        <MenuItem Header="Cancelar automação" Command="{Binding CancelQuotationAutomationCommand}" />
+                                        <Separator />
+                                        <MenuItem Header="Pesquisar restritivo" Command="{Binding OpenRestrictiveQuotationSearchCommand}" />
+                                        <MenuItem Header="Pesquisar intermediário" Command="{Binding OpenIntermediateQuotationSearchCommand}" />
+                                        <MenuItem Header="Pesquisar amplo" Command="{Binding OpenBroadQuotationSearchCommand}" />
+                                        <Separator />
+                                        <MenuItem Header="Atualizar amostra com a pesquisa atual"
+                                                  Command="{Binding UpdateQuotationSampleCommand}" />
+                                        <MenuItem Header="Ajustar pesos do índice"
+                                                  Command="{Binding AdjustQuotationWeightsCommand}" />
+                                    </ContextMenu>
+                                </Button.ContextMenu>
+                            </Button>
+                            <Button Content="Exportar/Importar ▾" Click="QuotationActionsMenu_Click">
+                                <Button.ContextMenu>
+                                    <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                        <MenuItem Header="Exportar Excel" Command="{Binding ExportQuotationCommand}" />
+                                        <Separator />
+                                        <MenuItem Header="Exportar pacote"
+                                                  Command="{Binding ExportQuotationPackageCommand}"
+                                                  ToolTip="Salva a cotação selecionada com preços, cestas, pesquisas e prints." />
+                                        <MenuItem Header="Importar pacote"
+                                                  Command="{Binding ImportQuotationPackageCommand}"
+                                                  ToolTip="Importa um arquivo portátil .pncpcotacao sem substituir o banco inteiro." />
+                                    </ContextMenu>
+                                </Button.ContextMenu>
+                            </Button>
                             <Button Content="Escolher colunas — itens" Click="ChooseColumns_Click"
                                     Tag="{Binding ElementName=QuotationLinesGrid}"
                                     ToolTip="Personalize visibilidade, ordem e largura; o layout será mantido nos próximos usos." />

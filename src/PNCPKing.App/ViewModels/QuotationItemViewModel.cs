@@ -651,14 +651,17 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     {
         var states = await _catalogRepository.GetSyncStatesAsync().ConfigureAwait(true);
         IsCatalogAvailable = states.Count == 2 && states.All(state =>
-            state.Status == CatalogSyncStatus.Complete && state.ActiveRecords > 0);
+            state.ActiveRecords > 0);
         if (!IsCatalogAvailable)
         {
-            CatalogStatus = "Primeira carga em andamento ou ausente. O último catálogo completo continuará disponível nas atualizações futuras.";
+            CatalogStatus =
+                "A pesquisa será liberada depois que o primeiro CATMAT e CATSER completos forem publicados.";
             return;
         }
 
-        CatalogStatus = "Catálogo local completo. Pesquise por descrição oficial, atributo, medida ou código.";
+        CatalogStatus = states.Any(state => state.Status != CatalogSyncStatus.Complete)
+            ? "Atualização em andamento; o catálogo publicado anteriormente continua disponível para pesquisa."
+            : "Catálogo local completo. Pesquise por descrição oficial, atributo, medida ou código.";
     }
 
     public async Task EnsureCatalogAreaLoadedAsync()

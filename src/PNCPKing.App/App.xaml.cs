@@ -286,6 +286,7 @@ public partial class App : Application
                 aiPromptRefinementService,
                 timedAutomation,
                 settingsService,
+                settings.EffectiveCatalogRefreshIntervalDays,
                 settings.DataFolder,
                 _diagnosticLog,
                 _performanceTelemetry,

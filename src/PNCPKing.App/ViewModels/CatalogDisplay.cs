@@ -8,6 +8,11 @@ public sealed record CatalogKindOption(string Label, CatalogKind? Kind)
     public override string ToString() => Label;
 }
 
+public sealed record CatalogRefreshOption(string Label, int IntervalDays)
+{
+    public override string ToString() => Label;
+}
+
 public sealed class CatalogSearchResultDisplay
 {
     public CatalogSearchResultDisplay(CatalogSearchResult source)
@@ -64,12 +69,20 @@ public sealed class CatalogSyncDisplay
     public string Summary => Source.Status switch
     {
         CatalogSyncStatus.Missing => $"{Kind}: catálogo ausente",
-        CatalogSyncStatus.Downloading =>
-            $"{Kind}: {Math.Max(0, Source.NextPage - 1):N0}/{Source.TotalPages:N0} páginas · {Source.StagedRecords:N0} registros",
+        CatalogSyncStatus.Downloading => Source.ActiveRecords > 0
+            ? $"{Kind}: {Math.Max(0, Source.NextPage - 1):N0}/{Source.TotalPages:N0} páginas · " +
+              $"{Source.StagedRecords:N0} novos · {Source.ActiveRecords:N0} publicados disponíveis"
+            : $"{Kind}: {Math.Max(0, Source.NextPage - 1):N0}/{Source.TotalPages:N0} páginas · " +
+              $"{Source.StagedRecords:N0} registros",
         CatalogSyncStatus.Complete =>
             $"{Kind}: {Source.ActiveRecords:N0} ativos · concluído {Source.CompletedAt:dd/MM/yyyy HH:mm}",
-        CatalogSyncStatus.Failed => $"{Kind}: falha — {Source.LastError}",
-        CatalogSyncStatus.Paused => $"{Kind}: pausado na página {Source.NextPage:N0}",
+        CatalogSyncStatus.Failed => Source.ActiveRecords > 0
+            ? $"{Kind}: falha — {Source.LastError} · {Source.ActiveRecords:N0} publicados disponíveis"
+            : $"{Kind}: falha — {Source.LastError}",
+        CatalogSyncStatus.Paused => Source.ActiveRecords > 0
+            ? $"{Kind}: pausado na página {Source.NextPage:N0} · " +
+              $"{Source.ActiveRecords:N0} publicados disponíveis"
+            : $"{Kind}: pausado na página {Source.NextPage:N0}",
         _ => Kind
     };
 

@@ -25,11 +25,22 @@ public sealed record AiProviderSetting(
 public sealed record AppSettings(
     string DataFolder,
     bool IsConfigured,
-    int SettingsVersion = 3,
+    int SettingsVersion = 4,
     Dictionary<string, List<ColumnLayoutSetting>>? ColumnLayouts = null,
     List<AiProviderSetting>? AiProviders = null,
     string? LastAiProviderId = null,
-    decimal AiSafetyMarginPercent = 10m);
+    decimal AiSafetyMarginPercent = 10m,
+    int? CatalogRefreshIntervalDays = null)
+{
+    public const int CurrentVersion = 4;
+    public const int DefaultCatalogRefreshIntervalDays = 7;
+
+    public int EffectiveCatalogRefreshIntervalDays =>
+        NormalizeCatalogRefreshIntervalDays(CatalogRefreshIntervalDays);
+
+    public static int NormalizeCatalogRefreshIntervalDays(int? value) =>
+        value is 0 or 2 or 7 or 15 ? value.Value : DefaultCatalogRefreshIntervalDays;
+}
 
 public sealed class AppSettingsService
 {
@@ -53,7 +64,11 @@ public sealed class AppSettingsService
                 var settings = await JsonSerializer.DeserializeAsync<AppSettings>(stream).ConfigureAwait(false);
                 if (settings is not null && !string.IsNullOrWhiteSpace(settings.DataFolder))
                 {
-                    return settings;
+                    return settings with
+                    {
+                        SettingsVersion = Math.Max(AppSettings.CurrentVersion, settings.SettingsVersion),
+                        CatalogRefreshIntervalDays = settings.EffectiveCatalogRefreshIntervalDays
+                    };
                 }
             }
             catch (Exception exception) when (
@@ -64,7 +79,10 @@ public sealed class AppSettingsService
         }
 
         var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-        return new AppSettings(Path.Combine(documents, "PNCP King"), false);
+        return new AppSettings(
+            Path.Combine(documents, "PNCP King"),
+            false,
+            CatalogRefreshIntervalDays: AppSettings.DefaultCatalogRefreshIntervalDays);
     }
 
     public async Task SaveAsync(AppSettings settings)

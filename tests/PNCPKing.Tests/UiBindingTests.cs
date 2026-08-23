@@ -1,4 +1,6 @@
+using System.Text.Json;
 using System.Xml.Linq;
+using PNCPKing.App.Services;
 
 namespace PNCPKing.Tests;
 
@@ -107,6 +109,132 @@ public sealed class UiBindingTests
         Assert.Contains("_Arquivo", menuHeaders);
         Assert.Contains("_Diagnóstico", menuHeaders);
         Assert.Contains("_Limpeza", menuHeaders);
+    }
+
+    [Fact]
+    public void MainWindow_CatalogRefreshSelector_IsInsideMaintenancePanel()
+    {
+        var document = LoadView("MainWindow.xaml");
+        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        var selector = Assert.Single(
+            document.Descendants(presentation + "ComboBox"),
+            element => element.Attribute("ItemsSource")?.Value.Contains(
+                "CatalogRefreshOptions",
+                StringComparison.Ordinal) == true);
+
+        Assert.Contains(
+            "SelectedCatalogRefreshOption",
+            Assert.IsType<XAttribute>(selector.Attribute("SelectedItem")).Value);
+        Assert.Contains(selector.Ancestors(presentation + "Border"), border =>
+            border.Attribute("Visibility")?.Value.Contains(
+                "IsMaintenancePanelOpen",
+                StringComparison.Ordinal) == true);
+        Assert.Contains(selector.Ancestors(presentation + "Border").SelectMany(border => border.Descendants()),
+            element => element.Name == presentation + "Button" &&
+                       element.Attribute("Command")?.Value.Contains(
+                           "UpdateCatalogCommand",
+                           StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public void AppSettings_CatalogRefreshDefaultsToWeeklyAndNormalizesInvalidValues()
+    {
+        var legacy = JsonSerializer.Deserialize<AppSettings>("""
+            {
+              "DataFolder": "D:\\PNCP",
+              "IsConfigured": true,
+              "SettingsVersion": 3
+            }
+            """);
+
+        Assert.NotNull(legacy);
+        Assert.Equal(7, legacy.EffectiveCatalogRefreshIntervalDays);
+        Assert.Equal(7, AppSettings.NormalizeCatalogRefreshIntervalDays(-1));
+        Assert.Equal(7, AppSettings.NormalizeCatalogRefreshIntervalDays(30));
+        Assert.Equal(0, AppSettings.NormalizeCatalogRefreshIntervalDays(0));
+        Assert.Equal(2, AppSettings.NormalizeCatalogRefreshIntervalDays(2));
+        Assert.Equal(15, AppSettings.NormalizeCatalogRefreshIntervalDays(15));
+    }
+
+    [Fact]
+    public void MainWindow_QuotationActions_AreGroupedInCompactMenus()
+    {
+        var document = LoadView("MainWindow.xaml");
+        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        var buttons = document.Descendants(presentation + "Button").ToArray();
+        var groups = new[]
+        {
+            new
+            {
+                Header = "Cotações ▾",
+                Separators = 2,
+                Commands = new[]
+                {
+                    "{Binding NewQuotationCommand}",
+                    "{Binding RenameQuotationCommand}",
+                    "{Binding DeleteQuotationCommand}",
+                    "{Binding DeleteQuotationLineCommand}",
+                    "{Binding RenameQuotationLineCommand}",
+                    "{Binding OpenQuotationItemCommand}",
+                    "{Binding ImportQuotationCommand}"
+                }
+            },
+            new
+            {
+                Header = "Automação ▾",
+                Separators = 3,
+                Commands = new[]
+                {
+                    "{Binding AiQuotationCommand}",
+                    "{Binding RefineQuotationPromptsCommand}",
+                    "{Binding ResumeQuotationAutomationCommand}",
+                    "{Binding CancelQuotationAutomationCommand}",
+                    "{Binding OpenRestrictiveQuotationSearchCommand}",
+                    "{Binding OpenIntermediateQuotationSearchCommand}",
+                    "{Binding OpenBroadQuotationSearchCommand}",
+                    "{Binding UpdateQuotationSampleCommand}",
+                    "{Binding AdjustQuotationWeightsCommand}"
+                }
+            },
+            new
+            {
+                Header = "Exportar/Importar ▾",
+                Separators = 1,
+                Commands = new[]
+                {
+                    "{Binding ExportQuotationCommand}",
+                    "{Binding ExportQuotationPackageCommand}",
+                    "{Binding ImportQuotationPackageCommand}"
+                }
+            }
+        };
+
+        foreach (var group in groups)
+        {
+            var button = Assert.Single(
+                buttons,
+                element => element.Attribute("Content")?.Value == group.Header);
+            Assert.Equal("QuotationActionsMenu_Click", button.Attribute("Click")?.Value);
+
+            var menu = Assert.Single(button.Descendants(presentation + "ContextMenu"));
+            var dataContext = Assert.IsType<XAttribute>(menu.Attribute("DataContext")).Value;
+            Assert.Contains(
+                "PlacementTarget.DataContext",
+                dataContext);
+            Assert.Equal(group.Separators, menu.Descendants(presentation + "Separator").Count());
+            Assert.Equal(
+                group.Commands,
+                menu.Descendants(presentation + "MenuItem")
+                    .Select(element => Assert.IsType<XAttribute>(element.Attribute("Command")).Value)
+                    .ToArray());
+        }
+
+        var chooseColumns = Assert.Single(
+            buttons,
+            element => element.Attribute("Content")?.Value == "Escolher colunas — itens");
+        Assert.Equal("ChooseColumns_Click", chooseColumns.Attribute("Click")?.Value);
+        var chooserTag = Assert.IsType<XAttribute>(chooseColumns.Attribute("Tag")).Value;
+        Assert.Contains("QuotationLinesGrid", chooserTag);
     }
 
     [Fact]

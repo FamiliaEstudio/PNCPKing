@@ -123,6 +123,18 @@ public partial class MainWindow : Window
         _columnLayouts.ShowChooser(this, dataGrid);
     }
 
+    private void QuotationActionsMenu_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { ContextMenu: { } menu } button)
+        {
+            return;
+        }
+
+        menu.PlacementTarget = button;
+        menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+        menu.IsOpen = true;
+    }
+
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromWindow(IntPtr handle, uint flags);
 

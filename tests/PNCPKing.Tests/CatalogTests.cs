@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using Microsoft.Data.Sqlite;
+using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
 using PNCPKing.Core.Search;
 using PNCPKing.Infrastructure.Api;
@@ -49,6 +50,79 @@ public sealed class CatalogTests
     }
 
     [Fact]
+    public async Task CatalogDueKinds_ManualModeNeverStartsAutomatically()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteCatalogRepository(database.Repository.DatabasePath);
+        var service = new CatalogSyncService(new RecordingCatalogClient(), repository);
+
+        Assert.Empty(await service.GetDueKindsAsync(null));
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(7)]
+    [InlineData(15)]
+    public async Task CatalogDueKinds_UsesConfiguredDayBoundary(int intervalDays)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteCatalogRepository(database.Repository.DatabasePath);
+        await PublishCatalogKindAsync(repository, CatalogKind.Catmat, "material");
+        await PublishCatalogKindAsync(repository, CatalogKind.Catser, "servico");
+        var states = await repository.GetSyncStatesAsync();
+        var oldest = states.MinBy(state => state.CompletedAt) ?? throw new InvalidOperationException();
+        var interval = TimeSpan.FromDays(intervalDays);
+
+        var beforeBoundary = new CatalogSyncService(
+            new RecordingCatalogClient(),
+            repository,
+            new FixedTimeProvider(oldest.CompletedAt!.Value.Add(interval).AddTicks(-1)));
+        Assert.Empty(await beforeBoundary.GetDueKindsAsync(interval));
+
+        var atBoundary = new CatalogSyncService(
+            new RecordingCatalogClient(),
+            repository,
+            new FixedTimeProvider(oldest.CompletedAt.Value.Add(interval)));
+        Assert.Contains(oldest.Kind, await atBoundary.GetDueKindsAsync(interval));
+    }
+
+    [Fact]
+    public async Task CatalogDueKinds_SelectsInterruptedCatserWithoutRepeatingFreshCatmat()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteCatalogRepository(database.Repository.DatabasePath);
+        await PublishCatalogKindAsync(repository, CatalogKind.Catmat, "material-pronto");
+        await PublishCatalogKindAsync(repository, CatalogKind.Catser, "servico-pronto");
+        await repository.BeginSyncAsync(CatalogKind.Catser, "servico-interrompido");
+        var states = await repository.GetSyncStatesAsync();
+        var now = states.Max(state => state.CompletedAt)!.Value.AddHours(1);
+        var service = new CatalogSyncService(
+            new RecordingCatalogClient(),
+            repository,
+            new FixedTimeProvider(now));
+
+        Assert.Equal(
+            [CatalogKind.Catser],
+            await service.GetDueKindsAsync(TimeSpan.FromDays(7)));
+    }
+
+    [Fact]
+    public async Task CatalogSync_SelectsAutomaticKindsButManualUpdateStillForcesBoth()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteCatalogRepository(database.Repository.DatabasePath);
+        var client = new RecordingCatalogClient();
+        var service = new CatalogSyncService(client, repository);
+
+        await service.SynchronizeAsync([CatalogKind.Catser]);
+        Assert.Equal([CatalogKind.Catser], client.RequestedKinds);
+
+        client.RequestedKinds.Clear();
+        await service.SynchronizeAsync();
+        Assert.Equal([CatalogKind.Catmat, CatalogKind.Catser], client.RequestedKinds);
+    }
+
+    [Fact]
     public async Task CatalogSnapshot_IsAtomicDeactivatesMissingAndSearchesEquivalentMeasures()
     {
         await using var database = await TestDatabase.CreateAsync();
@@ -79,6 +153,9 @@ public sealed class CatalogTests
             1,
             2,
             [Entry("123456", "CONEXÃO PARA TUBO, DIÂMETRO: 25,4 MM")]), "incompleta");
+        var publishedDuringDownload = await search.SearchAsync(
+            new CatalogSearchQuery("999999", CatalogKind.Catmat));
+        Assert.Equal("999999", Assert.Single(publishedDuringDownload.Results).Entry.Code);
         await Assert.ThrowsAsync<InvalidDataException>(() =>
             repository.PublishAsync(CatalogKind.Catmat, "incompleta"));
         Assert.True((await repository.GetEntryAsync(CatalogKind.Catmat, "999999"))!.Active);
@@ -261,6 +338,22 @@ public sealed class CatalogTests
         Assert.True(pending.TargetRowId >= 2);
     }
 
+    private static async Task PublishCatalogKindAsync(
+        ICatalogRepository repository,
+        CatalogKind kind,
+        string generation)
+    {
+        await repository.BeginSyncAsync(kind, generation);
+        await repository.StagePageAsync(new CatalogPage(
+            kind,
+            1,
+            1,
+            1,
+            [Entry(kind == CatalogKind.Catmat ? "100001" : "200001", "ITEM OFICIAL", kind: kind)]),
+            generation);
+        await repository.PublishAsync(kind, generation);
+    }
+
     private static CatalogEntry Entry(
         string code,
         string description,
@@ -278,6 +371,32 @@ public sealed class CatalogTests
         Level3Name = "Conexão hidráulica",
         SearchText = SearchText.Normalize($"{description} {level1Name}")
     };
+
+    private sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => utcNow;
+    }
+
+    private sealed class RecordingCatalogClient : IComprasCatalogClient
+    {
+        public List<CatalogKind> RequestedKinds { get; } = [];
+
+        public Task<CatalogPage> GetPageAsync(
+            CatalogKind kind,
+            int page,
+            int pageSize = 500,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            RequestedKinds.Add(kind);
+            return Task.FromResult(new CatalogPage(
+                kind,
+                1,
+                1,
+                1,
+                [Entry(kind == CatalogKind.Catmat ? "100001" : "200001", "ITEM OFICIAL", kind: kind)]));
+        }
+    }
 
     private sealed class JsonHandler(string json) : HttpMessageHandler
     {

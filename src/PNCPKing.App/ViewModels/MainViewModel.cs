@@ -183,6 +183,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         IAiPromptRefinementService aiPromptRefinementService,
         ITimedQuotationAutomationService timedQuotationAutomation,
         AppSettingsService settingsService,
+        int catalogRefreshIntervalDays,
         string dataFolder,
         AppDiagnosticLog diagnosticLog,
         AppPerformanceTelemetry performanceTelemetry,
@@ -199,12 +200,17 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _itemSearchService = itemSearchService;
         _quotationItemSearchService = quotationItemSearchService;
         _backupService = backupService;
+        _settingsService = settingsService;
         InitializeQuotation(
             quotationService,
             quotationWorkbookService,
             quotationWorkbookImportService,
             quotationPackageService);
-        InitializeCatalog(catalogRepository, catalogSyncService, catalogSearchService);
+        InitializeCatalog(
+            catalogRepository,
+            catalogSyncService,
+            catalogSearchService,
+            catalogRefreshIntervalDays);
         InitializePriceCache();
         _telemetry = telemetry;
         _sweetCodeRepository = sweetCodeRepository;
@@ -223,7 +229,6 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _aiDraftCache = aiDraftCache;
         _aiPromptRefinementService = aiPromptRefinementService;
         _timedQuotationAutomation = timedQuotationAutomation;
-        _settingsService = settingsService;
         _dataFolder = dataFolder;
         _diagnosticLog = diagnosticLog;
         _performanceTelemetry = performanceTelemetry;
