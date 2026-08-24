@@ -1096,7 +1096,21 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         bool restartPriceSession = false)
     {
         var previousSessionId = _itemSearchService.CurrentSession?.Id;
-        var interruptedBatchRemainder = 0;
+        var interruptedBatchRemainder = resetSession && !restartPriceSession && IsPriceBusy
+            ? Math.Max(0, _activeExpansionRemaining)
+            : 0;
+        CancellationTokenSource? priceCancellation = null;
+        if (resetSession)
+        {
+            Interlocked.Increment(ref _priceRunGeneration);
+            var previousPriceCancellation = _priceCancellation;
+            priceCancellation = new CancellationTokenSource();
+            _priceCancellation = priceCancellation;
+            previousPriceCancellation?.Cancel();
+            _itemSearchService.Stop();
+            previousPriceCancellation?.Dispose();
+        }
+
         using var visibleActivity = _requestScheduler.SuppressBackgroundRequests();
         _visibleIdleResumeCancellation?.Cancel();
         _visibleIdleResumeCancellation?.Dispose();
@@ -1134,7 +1148,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         {
             var (startDate, endDate) = ResolveDateRange();
             var sort = SelectedSortOption.Value;
-            _activeSearchQuery = new SearchQuery(
+            var activeSearchQuery = new SearchQuery(
                 QueryText.Trim(),
                 SelectedGeoFilter,
                 startDate,
@@ -1142,11 +1156,16 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 sort,
                 1,
                 ContractPageSize);
+            _activeSearchQuery = activeSearchQuery;
             await LoadContractPageAsync(1, searchGeneration, contractSearchToken).ConfigureAwait(true);
-
-            if (!resetSession || string.IsNullOrWhiteSpace(_activeSearchQuery.Text))
+            if (searchGeneration != Volatile.Read(ref _contractSearchGeneration))
             {
-                if (string.IsNullOrWhiteSpace(_activeSearchQuery.Text))
+                return;
+            }
+
+            if (!resetSession || string.IsNullOrWhiteSpace(activeSearchQuery.Text))
+            {
+                if (string.IsNullOrWhiteSpace(activeSearchQuery.Text))
                 {
                     StopItemSearch();
                     ItemSearchRows.Clear();
@@ -1160,14 +1179,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 return;
             }
 
-            interruptedBatchRemainder = !restartPriceSession && IsPriceBusy
-                ? Math.Max(0, _activeExpansionRemaining)
-                : 0;
-            _priceCancellation?.Cancel();
-            _itemSearchService.Stop();
+            var activePriceCancellation = priceCancellation ??
+                throw new InvalidOperationException("A pesquisa de itens não possui token de cancelamento.");
             SetItemSearchActive(false);
-            _priceCancellation?.Dispose();
-            _priceCancellation = new CancellationTokenSource();
             ItemSearchRows.Clear();
             _visibleItemKeys.Clear();
             CurrentItemPage = 0;
@@ -1176,7 +1190,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             SelectedResultsWorkspace = ResultsWorkspace.Search;
             _searchTelemetryBaseline = _telemetry.GetSnapshot();
             PriceSearchProgress = 0;
-            _activeItemSearchExpression = SearchText.Parse(_activeSearchQuery.Text);
+            _activeItemSearchExpression = SearchText.Parse(activeSearchQuery.Text);
             _localPricePage = 0;
             _localPriceCursor = null;
             _hasMoreLocalPriceRows = false;
@@ -1185,24 +1199,29 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             _localItemSearchSummary = null;
             ItemSearchSummary = "Buscando a primeira página no cache local…";
             var localSummaryTask = RefreshLocalItemSearchSummaryAsync(
-                _activeSearchQuery,
+                activeSearchQuery,
                 _activeItemSearchExpression,
                 searchGeneration,
-                _priceCancellation.Token);
+                activePriceCancellation.Token);
             var itemSessionTask = Task.Run(
                 () => _itemSearchService.StartAsync(
-                    _activeSearchQuery with { Page = 1, PageSize = 200 },
+                    activeSearchQuery with { Page = 1, PageSize = 200 },
                     restartPriceSession,
-                    _priceCancellation.Token),
-                _priceCancellation.Token);
-            var localRows = await LoadLocalPricePageAsync(_priceCancellation.Token).ConfigureAwait(true);
+                    activePriceCancellation.Token),
+                activePriceCancellation.Token);
+            var localRows = await LoadLocalPricePageAsync(activePriceCancellation.Token).ConfigureAwait(true);
             await Task.Yield();
             var itemSession = await itemSessionTask.ConfigureAwait(true);
+            if (searchGeneration != Volatile.Read(ref _contractSearchGeneration))
+            {
+                return;
+            }
+
             var (minimum, maximum) = ParsePriceRange();
             var restoredRows = await _itemSearchService.GetDiscoveredRowsAsync(
                     minimum,
                     maximum,
-                    _priceCancellation.Token)
+                    activePriceCancellation.Token)
                 .ConfigureAwait(true);
             AppendUniqueRows(restoredRows);
             SetItemSearchActive(true);
@@ -1219,7 +1238,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             int? exactRemainder = previousSessionId == itemSession.Id && interruptedBatchRemainder > 0
                 ? interruptedBatchRemainder
                 : null;
-            await RunSelectedBatchesAsync(_priceCancellation.Token, exactRemainder).ConfigureAwait(true);
+            await RunSelectedBatchesAsync(activePriceCancellation.Token, exactRemainder).ConfigureAwait(true);
         }
         catch (OperationCanceledException)
         {
@@ -1706,7 +1725,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private void AppendUniqueRows(IEnumerable<ItemSearchRow> rows)
     {
         var pending = new List<ItemSearchDisplayRow>();
-        foreach (var row in rows.Select(item => new ItemSearchDisplayRow(item)))
+        var expression = _activeItemSearchExpression;
+        foreach (var row in rows
+                     .Where(item => expression is null ||
+                                    expression.MatchesItem(item.Item.Description, item.Item.Unit))
+                     .Select(item => new ItemSearchDisplayRow(item)))
         {
             if (_visibleItemKeys.Add(RowKey(row)))
             {

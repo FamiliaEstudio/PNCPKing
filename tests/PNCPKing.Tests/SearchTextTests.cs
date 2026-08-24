@@ -72,6 +72,20 @@ public sealed class SearchTextTests
     }
 
     [Fact]
+    public void ContractPriority_DoesNotOverrideRepeatedItemExclusions()
+    {
+        var expression = SearchText.Parse(
+            "Televisão -serviço -monitoramento -instalação -controle " +
+            "-suporte -suporte -circuito C:(Eletroeletrônico)");
+
+        Assert.Equal("televisao", expression.AnchorTerm);
+        Assert.Equal("eletroeletronico", Assert.Single(expression.ContractCandidates).Text);
+        Assert.True(expression.MatchesItem("Televisão smart 50 polegadas", "unidade"));
+        Assert.False(expression.MatchesItem("Televisão com suporte articulado", "unidade"));
+        Assert.False(expression.MatchesItem("Televisão para circuito fechado", "unidade"));
+    }
+
+    [Fact]
     public void ContractCandidates_ReplaceAndRemoveCanonicalBlockWithoutChangingItemCriteria()
     {
         var synchronized = SearchText.ReplaceContractCandidates(

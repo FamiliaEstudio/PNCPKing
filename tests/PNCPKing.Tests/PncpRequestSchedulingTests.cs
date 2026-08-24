@@ -248,32 +248,37 @@ public sealed class PncpRequestSchedulingTests
     }
 
     [Fact]
-    public void AdaptiveConcurrency_StartsAtThirtyTwoAndBacksOffThroughTheDefinedTiers()
+    public void AdaptiveConcurrency_StartsAtFortyEightAndBacksOffThroughTheDefinedTiers()
     {
         var clock = new ManualTimeProvider();
-        var scheduler = new PncpRequestScheduler(maximumConcurrency: 32, timeProvider: clock);
-        Assert.Equal(32, scheduler.GetSnapshot().EffectiveConcurrency);
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 48, timeProvider: clock);
+        Assert.Equal(48, scheduler.GetSnapshot().EffectiveConcurrency);
         scheduler.ReportOutcome(
             PncpRequestCategory.ItemLists,
             HttpStatusCode.NotFound,
             TimeSpan.FromSeconds(1));
-        Assert.Equal(32, scheduler.GetSnapshot().EffectiveConcurrency);
+        Assert.Equal(48, scheduler.GetSnapshot().EffectiveConcurrency);
 
         scheduler.ReportOutcome(
             PncpRequestCategory.ItemLists,
             HttpStatusCode.InternalServerError,
             TimeSpan.FromSeconds(1));
-        Assert.Equal(24, scheduler.GetSnapshot().EffectiveConcurrency);
+        Assert.Equal(32, scheduler.GetSnapshot().EffectiveConcurrency);
         scheduler.ReportOutcome(
             PncpRequestCategory.ItemResults,
             HttpStatusCode.RequestTimeout,
             TimeSpan.FromSeconds(1));
-        Assert.Equal(16, scheduler.GetSnapshot().EffectiveConcurrency);
+        Assert.Equal(24, scheduler.GetSnapshot().EffectiveConcurrency);
         scheduler.ReportOutcome(
             PncpRequestCategory.ItemLists,
             statusCode: null,
             TimeSpan.FromSeconds(1),
             transportFailure: true);
+        Assert.Equal(16, scheduler.GetSnapshot().EffectiveConcurrency);
+        scheduler.ReportOutcome(
+            PncpRequestCategory.ItemLists,
+            HttpStatusCode.BadGateway,
+            TimeSpan.FromSeconds(1));
         Assert.Equal(16, scheduler.GetSnapshot().EffectiveConcurrency);
         scheduler.ReportOutcome(
             PncpRequestCategory.ItemLists,
@@ -288,7 +293,7 @@ public sealed class PncpRequestSchedulingTests
 
         var reduced = scheduler.GetSnapshot();
         Assert.Equal(1, reduced.EffectiveConcurrency);
-        Assert.Equal(4, reduced.ConcurrencyReductions);
+        Assert.Equal(5, reduced.ConcurrencyReductions);
         Assert.Equal("HTTP 429", reduced.LastReductionReason);
         Assert.NotNull(reduced.GrowthBlockedUntil);
         Assert.True(reduced.GrowthBlockedUntil >= clock.GetUtcNow().AddMinutes(2));
@@ -298,7 +303,7 @@ public sealed class PncpRequestSchedulingTests
     public void AdaptiveConcurrency_RecoversOneTierAfterThirtyTwoFastSuccesses()
     {
         var clock = new ManualTimeProvider();
-        var scheduler = new PncpRequestScheduler(maximumConcurrency: 32, timeProvider: clock);
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 48, timeProvider: clock);
         scheduler.ReportOutcome(
             PncpRequestCategory.ItemResults,
             HttpStatusCode.TooManyRequests,
@@ -306,7 +311,7 @@ public sealed class PncpRequestSchedulingTests
         Assert.Equal(1, scheduler.GetSnapshot().EffectiveConcurrency);
         clock.Advance(TimeSpan.FromMinutes(2));
 
-        foreach (var expected in new[] { 8, 16, 24, 32 })
+        foreach (var expected in new[] { 8, 16, 24, 32, 48 })
         {
             for (var index = 0; index < 32; index++)
             {
@@ -322,10 +327,54 @@ public sealed class PncpRequestSchedulingTests
     }
 
     [Fact]
+    public void AdaptiveConcurrency_CountsRecoverySuccessesOnlyAfterRetryAfterCooldown()
+    {
+        var clock = new ManualTimeProvider();
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 48, timeProvider: clock);
+        scheduler.ReportOutcome(
+            PncpRequestCategory.ItemResults,
+            HttpStatusCode.TooManyRequests,
+            TimeSpan.FromSeconds(1),
+            retryAfter: TimeSpan.FromMinutes(3));
+
+        var reduced = scheduler.GetSnapshot();
+        Assert.Equal(1, reduced.EffectiveConcurrency);
+        Assert.True(reduced.GrowthBlockedUntil >= clock.GetUtcNow().AddMinutes(3));
+        for (var index = 0; index < 64; index++)
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(50));
+            scheduler.ReportOutcome(
+                PncpRequestCategory.ItemLists,
+                HttpStatusCode.OK,
+                TimeSpan.FromSeconds(1));
+        }
+
+        Assert.Equal(1, scheduler.GetSnapshot().EffectiveConcurrency);
+        Assert.Equal(0, scheduler.GetSnapshot().ConsecutiveSuccesses);
+        clock.Advance(TimeSpan.FromMinutes(3));
+        for (var index = 0; index < 31; index++)
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(50));
+            scheduler.ReportOutcome(
+                PncpRequestCategory.ItemLists,
+                HttpStatusCode.OK,
+                TimeSpan.FromSeconds(1));
+        }
+
+        Assert.Equal(1, scheduler.GetSnapshot().EffectiveConcurrency);
+        clock.Advance(TimeSpan.FromMilliseconds(50));
+        scheduler.ReportOutcome(
+            PncpRequestCategory.ItemLists,
+            HttpStatusCode.OK,
+            TimeSpan.FromSeconds(1));
+        Assert.Equal(8, scheduler.GetSnapshot().EffectiveConcurrency);
+    }
+
+    [Fact]
     public void AdaptiveConcurrency_ReducesAfterTwoSlowWindows()
     {
         var clock = new ManualTimeProvider();
-        var scheduler = new PncpRequestScheduler(maximumConcurrency: 32, timeProvider: clock);
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 48, timeProvider: clock);
         for (var index = 0; index < 32; index++)
         {
             clock.Advance(TimeSpan.FromSeconds(1));
@@ -335,7 +384,7 @@ public sealed class PncpRequestSchedulingTests
                 TimeSpan.FromSeconds(31));
         }
 
-        Assert.Equal(32, scheduler.GetSnapshot().EffectiveConcurrency);
+        Assert.Equal(48, scheduler.GetSnapshot().EffectiveConcurrency);
         for (var index = 0; index < 32; index++)
         {
             clock.Advance(TimeSpan.FromSeconds(1));
@@ -346,7 +395,7 @@ public sealed class PncpRequestSchedulingTests
         }
 
         var snapshot = scheduler.GetSnapshot();
-        Assert.Equal(24, snapshot.EffectiveConcurrency);
+        Assert.Equal(32, snapshot.EffectiveConcurrency);
         Assert.Contains("latência p95", snapshot.LastReductionReason);
     }
 
@@ -354,7 +403,7 @@ public sealed class PncpRequestSchedulingTests
     public async Task ItemRequestTimeout_IsReportedAsPressure()
     {
         var inner = new BlockingHandler(expectedInitialCalls: 1);
-        var scheduler = new PncpRequestScheduler(maximumConcurrency: 32);
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 48);
         using var client = new HttpClient(new PncpSchedulingHandler(
             scheduler,
             new PncpRequestTelemetry(),
@@ -368,14 +417,14 @@ public sealed class PncpRequestSchedulingTests
                 "https://example.test/api/pncp/v1/orgaos/1/compras/2026/1/itens"));
 
         var snapshot = scheduler.GetSnapshot();
-        Assert.Equal(24, snapshot.EffectiveConcurrency);
+        Assert.Equal(32, snapshot.EffectiveConcurrency);
         Assert.Equal("timeout", snapshot.LastReductionReason);
     }
 
     [Fact]
-    public async Task MaintenanceRemainsLimitedToTwoWhenAdaptiveCeilingIsThirtyTwo()
+    public async Task MaintenanceRemainsLimitedToTwoWhenAdaptiveCeilingIsFortyEight()
     {
-        var scheduler = new PncpRequestScheduler(maximumConcurrency: 32);
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 48);
 
         using var first = await scheduler.AcquireAsync(PncpRequestPriority.IndexMaintenance);
         using var second = await scheduler.AcquireAsync(PncpRequestPriority.IndexMaintenance);
@@ -385,6 +434,39 @@ public sealed class PncpRequestSchedulingTests
 
         first.Dispose();
         (await third).Dispose();
+    }
+
+    [Fact]
+    public async Task Scheduler_NeverGrantsMoreThanFortyEightConcurrentRequests()
+    {
+        var scheduler = new PncpRequestScheduler(
+            maximumConcurrency: 48,
+            initialConcurrency: 64);
+        var leases = new List<IDisposable>();
+        try
+        {
+            for (var index = 0; index < 48; index++)
+            {
+                leases.Add(await scheduler.AcquireAsync(PncpRequestPriority.AdditionalBatches));
+            }
+
+            var fortyNinth = scheduler.AcquireAsync(PncpRequestPriority.AdditionalBatches);
+            await Task.Delay(20);
+            Assert.False(fortyNinth.IsCompleted);
+            Assert.Equal(48, scheduler.GetSnapshot().ActiveRequests);
+            Assert.Equal(1, scheduler.GetSnapshot().TotalQueued);
+
+            leases[0].Dispose();
+            using var granted = await fortyNinth;
+            Assert.Equal(48, scheduler.GetSnapshot().ActiveRequests);
+        }
+        finally
+        {
+            foreach (var lease in leases)
+            {
+                lease.Dispose();
+            }
+        }
     }
 
     private static void AssertCategory(

@@ -4,6 +4,7 @@ using PNCPKing.Core.Search;
 using PNCPKing.Infrastructure.Api;
 using PNCPKing.Infrastructure.Services;
 using System.Collections.Concurrent;
+using System.Net;
 using Microsoft.Data.Sqlite;
 
 namespace PNCPKing.Tests;
@@ -819,6 +820,63 @@ public sealed class ItemSearchSessionTests
     }
 
     [Fact]
+    public async Task AnchoredSession_AppliesAllExclusionsWithContractPriorityWithoutNetworkCalls()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var descriptions = new[]
+        {
+            "Televisão smart 50 polegadas",
+            "Televisão para serviço de monitoramento",
+            "Televisão com instalação e controle remoto",
+            "Suporte para televisão de circuito fechado",
+            "Televisão com suporte articulado"
+        };
+        var contracts = descriptions
+            .Select((_, index) => RepositorySearchTests.Contract(
+                $"television-exclusion-{index:D2}",
+                $"Aquisicao de eletroeletronico e televisao {index}",
+                "SP",
+                index + 1))
+            .ToArray();
+        await database.Repository.UpsertContractsAsync(contracts);
+        var client = new SessionPncpClient(contracts
+            .Select((contract, index) => (contract, index))
+            .ToDictionary(
+                value => value.contract.PncpId,
+                value => (IReadOnlyList<ProcurementItem>)[
+                    Item(value.contract.PncpId, 1, descriptions[value.index], true)
+                ]));
+        await using var service = new ItemSearchSessionService(
+            client,
+            database.Repository,
+            Path.Combine(database.Directory, "anchored-exclusions.db"),
+            persistentSession: true);
+
+        var original = await service.StartAsync(new SearchQuery(
+            "Televisão C:(Eletroeletrônico)",
+            GeoScope.All));
+        await service.RunContinuousAsync(new PriceBatchRequest(
+            1,
+            true,
+            PriceBatchBudgetMode.CandidateContracts,
+            descriptions.Length));
+        Assert.Equal(descriptions.Length, (await service.GetDiscoveredRowsAsync()).Count);
+        var listCalls = client.ItemListCalls;
+        var resultCalls = client.ResultCalls;
+
+        var filtered = await service.StartAsync(new SearchQuery(
+            "Televisão -serviço -monitoramento -instalação -controle " +
+            "-suporte -suporte -circuito C:(Eletroeletrônico)",
+            GeoScope.All));
+        var rows = await service.GetDiscoveredRowsAsync();
+
+        Assert.Equal(original.Id, filtered.Id);
+        Assert.Equal("Televisão smart 50 polegadas", Assert.Single(rows).Item.Description);
+        Assert.Equal(listCalls, client.ItemListCalls);
+        Assert.Equal(resultCalls, client.ResultCalls);
+    }
+
+    [Fact]
     public async Task InterruptedBatch_ResumesTheExactRemainingFortyContracts()
     {
         await using var database = await TestDatabase.CreateAsync();
@@ -883,10 +941,10 @@ public sealed class ItemSearchSessionTests
     }
 
     [Fact]
-    public async Task ContinuousBatch_UsesAWindowOfThirtyTwoThenEighteen()
+    public async Task ContinuousBatch_UsesAWindowOfFortyEightThenTwo()
     {
         await using var database = await TestDatabase.CreateAsync();
-        var contracts = CandidateContracts(50, "window-32");
+        var contracts = CandidateContracts(50, "window-48");
         await database.Repository.UpsertContractsAsync(contracts);
         var firstWindowReady = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -911,9 +969,9 @@ public sealed class ItemSearchSessionTests
 
                 try
                 {
-                    if (call <= 32)
+                    if (call <= 48)
                     {
-                        if (call == 32)
+                        if (call == 48)
                         {
                             firstWindowReady.TrySetResult();
                         }
@@ -937,11 +995,11 @@ public sealed class ItemSearchSessionTests
                     Interlocked.Decrement(ref active);
                 }
             });
-        var scheduler = new PncpRequestScheduler(maximumConcurrency: 32);
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 48);
         await using var service = new ItemSearchSessionService(
             client,
             database.Repository,
-            Path.Combine(database.Directory, "window-32.db"),
+            Path.Combine(database.Directory, "window-48.db"),
             requestScheduler: scheduler);
         await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
 
@@ -953,9 +1011,115 @@ public sealed class ItemSearchSessionTests
 
         Assert.Equal(50, result.ProcessedContracts);
         Assert.Equal(50, client.ItemListCalls);
-        Assert.Equal(32, maximumActive);
+        Assert.Equal(48, maximumActive);
         Assert.True(firstWindowReady.Task.IsCompletedSuccessfully);
         Assert.True(secondWindowReady.Task.IsCompletedSuccessfully);
+    }
+
+    [Fact]
+    public async Task ContinuousBatch_UsesReducedConcurrencyForTheNextWindow()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contracts = CandidateContracts(80, "adaptive-window");
+        await database.Repository.UpsertContractsAsync(contracts);
+        var firstWindowReady = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstWindow = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondWindowReady = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSecondWindow = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstWindowActive = 0;
+        var firstWindowMaximum = 0;
+        var secondWindowActive = 0;
+        var secondWindowMaximum = 0;
+
+        static void UpdateMaximum(ref int maximum, int current)
+        {
+            while (true)
+            {
+                var observed = Volatile.Read(ref maximum);
+                if (observed >= current ||
+                    Interlocked.CompareExchange(ref maximum, current, observed) == observed)
+                {
+                    return;
+                }
+            }
+        }
+
+        var client = new SessionPncpClient(
+            new Dictionary<string, IReadOnlyList<ProcurementItem>>(),
+            itemAsyncFactory: async (contract, call, cancellationToken) =>
+            {
+                if (call <= 48)
+                {
+                    var current = Interlocked.Increment(ref firstWindowActive);
+                    UpdateMaximum(ref firstWindowMaximum, current);
+                    try
+                    {
+                        if (call == 48)
+                        {
+                            firstWindowReady.TrySetResult();
+                        }
+
+                        await releaseFirstWindow.Task.WaitAsync(cancellationToken);
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref firstWindowActive);
+                    }
+                }
+                else
+                {
+                    var current = Interlocked.Increment(ref secondWindowActive);
+                    UpdateMaximum(ref secondWindowMaximum, current);
+                    try
+                    {
+                        if (call == 80)
+                        {
+                            secondWindowReady.TrySetResult();
+                        }
+
+                        await releaseSecondWindow.Task.WaitAsync(cancellationToken);
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref secondWindowActive);
+                    }
+                }
+
+                return [Item(contract.PncpId, 1, "Café em grãos", false)];
+            });
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 48);
+        await using var service = new ItemSearchSessionService(
+            client,
+            database.Repository,
+            Path.Combine(database.Directory, "adaptive-window.db"),
+            requestScheduler: scheduler);
+        await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
+
+        var running = service.RunContinuousAsync(new PriceBatchRequest(
+            2,
+            true,
+            PriceBatchBudgetMode.CandidateContracts,
+            80));
+        await firstWindowReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        scheduler.ReportOutcome(
+            PncpRequestCategory.ItemLists,
+            HttpStatusCode.InternalServerError,
+            TimeSpan.FromSeconds(1));
+        Assert.Equal(32, scheduler.GetSnapshot().EffectiveConcurrency);
+        releaseFirstWindow.TrySetResult();
+        await secondWindowReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releaseSecondWindow.TrySetResult();
+
+        var result = await running;
+        Assert.Equal(80, result.ProcessedContracts);
+        Assert.Equal(80, result.ContractsScanned);
+        Assert.Equal(80, client.ItemListCalls);
+        Assert.Equal(48, firstWindowMaximum);
+        Assert.Equal(32, secondWindowMaximum);
     }
 
     [Fact]

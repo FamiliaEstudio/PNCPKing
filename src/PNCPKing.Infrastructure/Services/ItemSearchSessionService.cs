@@ -84,7 +84,7 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
     private int CurrentNetworkConcurrency => Math.Clamp(
         _requestScheduler?.GetSnapshot().EffectiveConcurrency ?? DefaultNetworkConcurrency,
         1,
-        32);
+        48);
 
     /// <summary>
     /// Opens one contract once, compares its cached item list with every pending

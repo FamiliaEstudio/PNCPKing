@@ -152,9 +152,9 @@ public partial class App : Application
                 AutomaticDecompression = DecompressionMethods.All,
                 ConnectTimeout = TimeSpan.FromSeconds(30),
                 PooledConnectionLifetime = TimeSpan.FromMinutes(10),
-                MaxConnectionsPerServer = 32
+                MaxConnectionsPerServer = 48
             };
-            var requestScheduler = new PncpRequestScheduler(maximumConcurrency: 32);
+            var requestScheduler = new PncpRequestScheduler(maximumConcurrency: 48);
             var requestTelemetry = new PncpRequestTelemetry();
             var handler = new PncpSchedulingHandler(requestScheduler, requestTelemetry, _performanceTelemetry)
             {

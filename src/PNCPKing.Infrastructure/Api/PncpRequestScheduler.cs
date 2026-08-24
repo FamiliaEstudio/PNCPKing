@@ -50,7 +50,7 @@ public sealed record PncpSchedulerSnapshot(
 public sealed class PncpRequestScheduler
 {
     private const int OutcomeWindowSize = 32;
-    private static readonly int[] ConcurrencyTiers = [1, 8, 16, 24, 32];
+    private static readonly int[] ConcurrencyTiers = [1, 8, 16, 24, 32, 48];
 
     // Five user-selected requests, two visible-price requests, one additional
     // batch, one maintenance request and one background opportunity per cycle.
@@ -261,10 +261,15 @@ public sealed class PncpRequestScheduler
             }
         }
 
+        if (_growthBlockedUntil is { } blockedUntil && blockedUntil > now)
+        {
+            _consecutiveSuccesses = 0;
+            return;
+        }
+
         if (_effectiveConcurrency >= _maximumConcurrency ||
             _consecutiveSuccesses < OutcomeWindowSize ||
-            _successfulOutcomes.Count < OutcomeWindowSize ||
-            (_growthBlockedUntil is { } blockedUntil && blockedUntil > now))
+            _successfulOutcomes.Count < OutcomeWindowSize)
         {
             return;
         }
@@ -288,7 +293,11 @@ public sealed class PncpRequestScheduler
         DateTimeOffset blockedUntil)
     {
         var next = _effectiveConcurrency;
-        if (_effectiveConcurrency > 24)
+        if (_effectiveConcurrency > 32)
+        {
+            next = Math.Min(32, _maximumConcurrency);
+        }
+        else if (_effectiveConcurrency > 24)
         {
             next = Math.Min(24, _maximumConcurrency);
         }
