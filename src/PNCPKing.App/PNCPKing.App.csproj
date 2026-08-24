@@ -7,6 +7,7 @@
     <AssemblyName>PNCPKing</AssemblyName>
     <RootNamespace>PNCPKing.App</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Branding\PNCPKing.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../PNCPKing.Infrastructure/PNCPKing.Infrastructure.csproj"
@@ -15,6 +16,7 @@
     <PackageReference Include="PDFtoImage" />
   </ItemGroup>
   <ItemGroup>
+    <Resource Include="Assets/Branding/PNCPKingLogo.png" />
     <EmbeddedResource Include="Assets/tessdata/por.traineddata"
                       LogicalName="PNCPKing.App.Assets.tessdata.por.traineddata" />
   </ItemGroup>

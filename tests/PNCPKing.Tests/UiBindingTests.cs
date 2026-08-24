@@ -103,12 +103,9 @@ public sealed class UiBindingTests
                 "SelectedResultsWorkspace",
                 StringComparison.Ordinal) == true);
 
-        var menuHeaders = document.Descendants(presentation + "MenuItem")
-            .Select(element => element.Attribute("Header")?.Value)
-            .ToArray();
-        Assert.Contains("_Arquivo", menuHeaders);
-        Assert.Contains("_Diagnóstico", menuHeaders);
-        Assert.Contains("_Limpeza", menuHeaders);
+        Assert.Contains(
+            document.Descendants(presentation + "Button"),
+            element => element.Attribute("Content")?.Value == "Opções ▾");
     }
 
     [Fact]
@@ -154,6 +151,125 @@ public sealed class UiBindingTests
         Assert.Equal(0, AppSettings.NormalizeCatalogRefreshIntervalDays(0));
         Assert.Equal(2, AppSettings.NormalizeCatalogRefreshIntervalDays(2));
         Assert.Equal(15, AppSettings.NormalizeCatalogRefreshIntervalDays(15));
+    }
+
+    [Fact]
+    public void AppSettings_DesktopShortcutDefaultsToEnabledAndPersistsDisabled()
+    {
+        var legacy = JsonSerializer.Deserialize<AppSettings>("""
+            {
+              "DataFolder": "D:\\PNCP",
+              "IsConfigured": true,
+              "SettingsVersion": 4
+            }
+            """);
+
+        Assert.NotNull(legacy);
+        Assert.True(legacy.EffectiveDesktopShortcutEnabled);
+        Assert.Equal(5, AppSettings.CurrentVersion);
+
+        var disabledJson = JsonSerializer.Serialize(legacy with
+        {
+            SettingsVersion = AppSettings.CurrentVersion,
+            DesktopShortcutEnabled = false
+        });
+        var disabled = JsonSerializer.Deserialize<AppSettings>(disabledJson);
+
+        Assert.NotNull(disabled);
+        Assert.False(disabled.DesktopShortcutEnabled);
+        Assert.False(disabled.EffectiveDesktopShortcutEnabled);
+    }
+
+    [Fact]
+    public void DesktopShortcutService_DisabledRemovesOnlyManagedShortcut()
+    {
+        var desktop = Path.Combine(
+            Path.GetTempPath(),
+            $"pncpking-shortcut-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(desktop);
+        try
+        {
+            var service = new DesktopShortcutService(desktop, () => "ignored.exe");
+            var unrelated = Path.Combine(desktop, "Outro atalho.lnk");
+            File.WriteAllText(service.ShortcutPath, "atalho gerenciado");
+            File.WriteAllText(unrelated, "preservar");
+
+            service.Apply(enabled: false);
+
+            Assert.False(File.Exists(service.ShortcutPath));
+            Assert.True(File.Exists(unrelated));
+        }
+        finally
+        {
+            Directory.Delete(desktop, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void MainWindow_UsesPncpKingBrandingAndSingleOptionsMenu()
+    {
+        var document = LoadView("MainWindow.xaml");
+        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        var root = document.Root!;
+        const string logoPath = "/PNCPKing;component/Assets/Branding/PNCPKingLogo.png";
+
+        Assert.Equal(logoPath, root.Attribute("Icon")?.Value);
+        Assert.Equal(
+            2,
+            document.Descendants(presentation + "Image")
+                .Count(element => element.Attribute("Source")?.Value == logoPath));
+        Assert.DoesNotContain(
+            document.Descendants(presentation + "TextBlock"),
+            element => element.Attribute("Text")?.Value == "PNCP King");
+
+        var optionsButton = Assert.Single(
+            document.Descendants(presentation + "Button"),
+            element => element.Attribute("Content")?.Value == "Opções ▾");
+        Assert.Equal("DropdownMenu_Click", optionsButton.Attribute("Click")?.Value);
+        var menu = Assert.Single(optionsButton.Descendants(presentation + "ContextMenu"));
+        Assert.Contains(
+            "PlacementTarget.DataContext",
+            Assert.IsType<XAttribute>(menu.Attribute("DataContext")).Value);
+
+        var expectedGroups = new Dictionary<string, string[]>
+        {
+            ["_Arquivo"] = [
+                "{Binding ExportBackupCommand}",
+                "{Binding ImportBackupCommand}"
+            ],
+            ["_Diagnóstico"] = [
+                "{Binding OpenDiagnosticLogsCommand}",
+                "{Binding ExportPerformanceReportCommand}",
+                "{Binding ComparePerformanceReportCommand}"
+            ],
+            ["_Limpeza"] = [
+                "{Binding ClearCacheCommand}",
+                "{Binding ClearDocumentCacheCommand}"
+            ]
+        };
+        foreach (var expectedGroup in expectedGroups)
+        {
+            var group = Assert.Single(
+                menu.Elements(presentation + "MenuItem"),
+                element => element.Attribute("Header")?.Value == expectedGroup.Key);
+            Assert.Equal(
+                expectedGroup.Value,
+                group.Elements(presentation + "MenuItem")
+                    .Select(element => Assert.IsType<XAttribute>(element.Attribute("Command")).Value)
+                    .ToArray());
+        }
+
+        var shortcut = Assert.Single(
+            menu.Elements(presentation + "MenuItem"),
+            element => element.Attribute("Header")?.Value == "Atalho na área de trabalho");
+        Assert.Equal("True", shortcut.Attribute("IsCheckable")?.Value);
+        Assert.Contains(
+            "IsDesktopShortcutEnabled",
+            Assert.IsType<XAttribute>(shortcut.Attribute("IsChecked")).Value);
+        Assert.Equal(
+            "{Binding ToggleDesktopShortcutCommand}",
+            shortcut.Attribute("Command")?.Value);
+        Assert.Single(menu.Elements(presentation + "Separator"));
     }
 
     [Fact]
@@ -214,7 +330,7 @@ public sealed class UiBindingTests
             var button = Assert.Single(
                 buttons,
                 element => element.Attribute("Content")?.Value == group.Header);
-            Assert.Equal("QuotationActionsMenu_Click", button.Attribute("Click")?.Value);
+            Assert.Equal("DropdownMenu_Click", button.Attribute("Click")?.Value);
 
             var menu = Assert.Single(button.Descendants(presentation + "ContextMenu"));
             var dataContext = Assert.IsType<XAttribute>(menu.Attribute("DataContext")).Value;

@@ -123,7 +123,7 @@ public partial class MainWindow : Window
         _columnLayouts.ShowChooser(this, dataGrid);
     }
 
-    private void QuotationActionsMenu_Click(object sender, RoutedEventArgs e)
+    private void DropdownMenu_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { ContextMenu: { } menu } button)
         {

@@ -25,18 +25,21 @@ public sealed record AiProviderSetting(
 public sealed record AppSettings(
     string DataFolder,
     bool IsConfigured,
-    int SettingsVersion = 4,
+    int SettingsVersion = 5,
     Dictionary<string, List<ColumnLayoutSetting>>? ColumnLayouts = null,
     List<AiProviderSetting>? AiProviders = null,
     string? LastAiProviderId = null,
     decimal AiSafetyMarginPercent = 10m,
-    int? CatalogRefreshIntervalDays = null)
+    int? CatalogRefreshIntervalDays = null,
+    bool? DesktopShortcutEnabled = null)
 {
-    public const int CurrentVersion = 4;
+    public const int CurrentVersion = 5;
     public const int DefaultCatalogRefreshIntervalDays = 7;
 
     public int EffectiveCatalogRefreshIntervalDays =>
         NormalizeCatalogRefreshIntervalDays(CatalogRefreshIntervalDays);
+
+    public bool EffectiveDesktopShortcutEnabled => DesktopShortcutEnabled ?? true;
 
     public static int NormalizeCatalogRefreshIntervalDays(int? value) =>
         value is 0 or 2 or 7 or 15 ? value.Value : DefaultCatalogRefreshIntervalDays;
@@ -67,7 +70,8 @@ public sealed class AppSettingsService
                     return settings with
                     {
                         SettingsVersion = Math.Max(AppSettings.CurrentVersion, settings.SettingsVersion),
-                        CatalogRefreshIntervalDays = settings.EffectiveCatalogRefreshIntervalDays
+                        CatalogRefreshIntervalDays = settings.EffectiveCatalogRefreshIntervalDays,
+                        DesktopShortcutEnabled = settings.EffectiveDesktopShortcutEnabled
                     };
                 }
             }
@@ -82,7 +86,8 @@ public sealed class AppSettingsService
         return new AppSettings(
             Path.Combine(documents, "PNCP King"),
             false,
-            CatalogRefreshIntervalDays: AppSettings.DefaultCatalogRefreshIntervalDays);
+            CatalogRefreshIntervalDays: AppSettings.DefaultCatalogRefreshIntervalDays,
+            DesktopShortcutEnabled: true);
     }
 
     public async Task SaveAsync(AppSettings settings)

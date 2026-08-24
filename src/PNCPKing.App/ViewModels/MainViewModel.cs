@@ -57,6 +57,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private readonly IAiPromptRefinementService _aiPromptRefinementService;
     private readonly ITimedQuotationAutomationService _timedQuotationAutomation;
     private readonly AppSettingsService _settingsService;
+    private readonly DesktopShortcutService _desktopShortcutService;
     private readonly AppDiagnosticLog _diagnosticLog;
     private readonly AppPerformanceTelemetry _performanceTelemetry;
     private readonly AdaptiveMaintenanceCoordinator _maintenanceCoordinator;
@@ -124,6 +125,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private int _contractPanelViewIndex;
     private int _selectedContractCacheGeneration;
     private bool _isMaintenancePanelOpen;
+    private bool _isDesktopShortcutEnabled;
     private readonly HashSet<string> _openedMaintenanceIssues = new(StringComparer.Ordinal);
     private PreflightEstimate? _preflight;
     private bool _automaticMaintenanceRunning;
@@ -183,6 +185,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         IAiPromptRefinementService aiPromptRefinementService,
         ITimedQuotationAutomationService timedQuotationAutomation,
         AppSettingsService settingsService,
+        DesktopShortcutService desktopShortcutService,
+        bool desktopShortcutEnabled,
         int catalogRefreshIntervalDays,
         string dataFolder,
         AppDiagnosticLog diagnosticLog,
@@ -201,6 +205,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _quotationItemSearchService = quotationItemSearchService;
         _backupService = backupService;
         _settingsService = settingsService;
+        _desktopShortcutService = desktopShortcutService;
+        _isDesktopShortcutEnabled = desktopShortcutEnabled;
         InitializeQuotation(
             quotationService,
             quotationWorkbookService,
@@ -330,6 +336,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             () => SelectedContract is not null);
         ToggleMaintenancePanelCommand = new RelayCommand(
             () => IsMaintenancePanelOpen = !IsMaintenancePanelOpen);
+        ToggleDesktopShortcutCommand = new AsyncRelayCommand(ToggleDesktopShortcutAsync);
         CancelStartupCommand = new RelayCommand(() => _startupCancellation.Cancel());
 
         _maintenanceTimer = new DispatcherTimer { Interval = SyncService.AutomaticRetryDelay };
@@ -376,6 +383,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public ICommand CloseContractsPanelCommand { get; }
     public ICommand OpenSelectedContractCacheCommand { get; }
     public ICommand ToggleMaintenancePanelCommand { get; }
+    public ICommand ToggleDesktopShortcutCommand { get; }
     public ICommand CancelStartupCommand { get; }
 
     public bool IsApplicationReady
@@ -426,6 +434,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     {
         get => _isMaintenancePanelOpen;
         set => SetProperty(ref _isMaintenancePanelOpen, value);
+    }
+
+    public bool IsDesktopShortcutEnabled
+    {
+        get => _isDesktopShortcutEnabled;
+        private set => SetProperty(ref _isDesktopShortcutEnabled, value);
     }
 
     public double StartupProgress
@@ -2427,6 +2441,33 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
+    private async Task ToggleDesktopShortcutAsync()
+    {
+        var enabled = !IsDesktopShortcutEnabled;
+        var updatedSettings = await _settingsService.UpdateAsync(settings => settings with
+        {
+            SettingsVersion = Math.Max(AppSettings.CurrentVersion, settings.SettingsVersion),
+            DesktopShortcutEnabled = enabled
+        }).ConfigureAwait(true);
+
+        IsDesktopShortcutEnabled = updatedSettings.EffectiveDesktopShortcutEnabled;
+        try
+        {
+            _desktopShortcutService.Apply(IsDesktopShortcutEnabled);
+        }
+        catch (Exception exception) when (!AsyncCommandRuntime.IsCritical(exception))
+        {
+            throw new InvalidOperationException(
+                "A preferência do atalho foi salva, mas o Windows não conseguiu aplicá-la. " +
+                "O PNCP King tentará novamente na próxima abertura.",
+                exception);
+        }
+
+        StatusText = IsDesktopShortcutEnabled
+            ? "Atalho do PNCP King criado ou atualizado na área de trabalho."
+            : "Atalho do PNCP King removido da área de trabalho.";
+    }
+
     private async Task ClearCacheAsync()
     {
         var size = await _repository.GetCacheSizeBytesAsync().ConfigureAwait(true);
@@ -2986,6 +3027,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      ClearDocumentCacheCommand,
                      CancelDocumentOperationCommand,
                      ExportBackupCommand, ImportBackupCommand, ClearCacheCommand,
+                     ToggleDesktopShortcutCommand,
                      ManageSweetCodesCommand, ToggleContractsPanelCommand,
                      CloseContractsPanelCommand, OpenSelectedContractCacheCommand,
                      ToggleMaintenancePanelCommand,

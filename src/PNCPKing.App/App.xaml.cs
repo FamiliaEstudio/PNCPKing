@@ -113,6 +113,21 @@ public partial class App : Application
                 await settingsService.SaveAsync(settings).ConfigureAwait(true);
             }
 
+            var desktopShortcutService = new DesktopShortcutService();
+            Exception? desktopShortcutStartupException = null;
+            try
+            {
+                desktopShortcutService.Apply(settings.EffectiveDesktopShortcutEnabled);
+            }
+            catch (Exception exception) when (!AsyncCommandRuntime.IsCritical(exception))
+            {
+                desktopShortcutStartupException = exception;
+                _diagnosticLog.Error(
+                    "desktop-shortcut",
+                    "Não foi possível reconciliar o atalho da área de trabalho durante a abertura.",
+                    exception);
+            }
+
             var columnLayouts = new DataGridColumnLayoutService(
                 settingsService,
                 settings,
@@ -286,6 +301,8 @@ public partial class App : Application
                 aiPromptRefinementService,
                 timedAutomation,
                 settingsService,
+                desktopShortcutService,
+                settings.EffectiveDesktopShortcutEnabled,
                 settings.EffectiveCatalogRefreshIntervalDays,
                 settings.DataFolder,
                 _diagnosticLog,
@@ -294,6 +311,17 @@ public partial class App : Application
             var mainWindow = new MainWindow(viewModel, columnLayouts);
             MainWindow = mainWindow;
             mainWindow.Show();
+            if (desktopShortcutStartupException is not null)
+            {
+                MessageBox.Show(
+                    mainWindow,
+                    "O PNCP King continuará funcionando, mas o Windows não permitiu atualizar " +
+                    "o atalho da área de trabalho. A preferência foi mantida e uma nova tentativa " +
+                    "será feita na próxima abertura.\n\n" + desktopShortcutStartupException.Message,
+                    "Atalho da área de trabalho",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
             _responsivenessMonitor = new DispatcherResponsivenessMonitor(Dispatcher, _performanceTelemetry);
             // During first-run setup the folder dialog is temporarily the only
             // window. Keep the application alive when it closes, then restore

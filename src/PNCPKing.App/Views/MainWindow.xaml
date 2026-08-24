@@ -5,7 +5,8 @@
         xmlns:services="clr-namespace:PNCPKing.App.Services"
         xmlns:controls="clr-namespace:PNCPKing.App.Controls"
         xmlns:viewModels="clr-namespace:PNCPKing.App.ViewModels"
-        Title="PNCP King" Width="1540" Height="940" MinWidth="800" MinHeight="520"
+        Title="PNCP King" Icon="/PNCPKing;component/Assets/Branding/PNCPKingLogo.png"
+        Width="1540" Height="940" MinWidth="800" MinHeight="520"
         WindowStartupLocation="CenterScreen">
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
@@ -29,8 +30,11 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel Orientation="Horizontal">
-                <TextBlock Text="PNCP King" FontSize="28" FontWeight="Bold"
-                           VerticalAlignment="Center" Margin="4,0,12,0" />
+                <Image Source="/PNCPKing;component/Assets/Branding/PNCPKingLogo.png"
+                       Width="54" Height="54" Stretch="Uniform"
+                       VerticalAlignment="Center" Margin="4,0,12,0"
+                       AutomationProperties.Name="Logo PNCP King"
+                       ToolTip="PNCP King" />
                 <Button Command="{Binding ToggleMaintenancePanelCommand}"
                         ToolTip="Abre a prévia, cobertura, cache nacional e CATMAT/CATSER.">
                     <StackPanel>
@@ -40,21 +44,32 @@
                     </StackPanel>
                 </Button>
             </StackPanel>
-            <Menu Grid.Column="2" VerticalAlignment="Center" Background="Transparent">
-                <MenuItem Header="_Arquivo">
-                    <MenuItem Header="Exportar backup" Command="{Binding ExportBackupCommand}" />
-                    <MenuItem Header="Importar backup" Command="{Binding ImportBackupCommand}" />
-                </MenuItem>
-                <MenuItem Header="_Diagnóstico">
-                    <MenuItem Header="Logs de diagnóstico" Command="{Binding OpenDiagnosticLogsCommand}" />
-                    <MenuItem Header="Relatório de desempenho" Command="{Binding ExportPerformanceReportCommand}" />
-                    <MenuItem Header="Comparar desempenho" Command="{Binding ComparePerformanceReportCommand}" />
-                </MenuItem>
-                <MenuItem Header="_Limpeza">
-                    <MenuItem Header="Limpar cache permanente" Command="{Binding ClearCacheCommand}" />
-                    <MenuItem Header="Limpar cache de documentos" Command="{Binding ClearDocumentCacheCommand}" />
-                </MenuItem>
-            </Menu>
+            <Button Grid.Column="2" Content="Opções ▾" VerticalAlignment="Center"
+                    Click="DropdownMenu_Click">
+                <Button.ContextMenu>
+                    <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                        <MenuItem Header="_Arquivo">
+                            <MenuItem Header="Exportar backup" Command="{Binding ExportBackupCommand}" />
+                            <MenuItem Header="Importar backup" Command="{Binding ImportBackupCommand}" />
+                        </MenuItem>
+                        <MenuItem Header="_Diagnóstico">
+                            <MenuItem Header="Logs de diagnóstico" Command="{Binding OpenDiagnosticLogsCommand}" />
+                            <MenuItem Header="Relatório de desempenho" Command="{Binding ExportPerformanceReportCommand}" />
+                            <MenuItem Header="Comparar desempenho" Command="{Binding ComparePerformanceReportCommand}" />
+                        </MenuItem>
+                        <MenuItem Header="_Limpeza">
+                            <MenuItem Header="Limpar cache permanente" Command="{Binding ClearCacheCommand}" />
+                            <MenuItem Header="Limpar cache de documentos" Command="{Binding ClearDocumentCacheCommand}" />
+                        </MenuItem>
+                        <Separator />
+                        <MenuItem Header="Atalho na área de trabalho"
+                                  IsCheckable="True"
+                                  IsChecked="{Binding IsDesktopShortcutEnabled, Mode=OneWay}"
+                                  Command="{Binding ToggleDesktopShortcutCommand}"
+                                  ToolTip="Cria ou remove o atalho do PNCP King para este usuário." />
+                    </ContextMenu>
+                </Button.ContextMenu>
+            </Button>
         </Grid>
 
         <Border Grid.Row="1" BorderBrush="#C9D3DD" BorderThickness="1" CornerRadius="4"
@@ -553,7 +568,7 @@
                             <TextBlock Text="Projeto:" VerticalAlignment="Center" Margin="0,0,5,0" />
                             <ComboBox Width="260" ItemsSource="{Binding QuotationProjects}"
                                       SelectedItem="{Binding SelectedQuotationProject}" />
-                            <Button Content="Cotações ▾" Click="QuotationActionsMenu_Click">
+                            <Button Content="Cotações ▾" Click="DropdownMenu_Click">
                                 <Button.ContextMenu>
                                     <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
                                         <MenuItem Header="Nova" Command="{Binding NewQuotationCommand}" />
@@ -569,7 +584,7 @@
                                     </ContextMenu>
                                 </Button.ContextMenu>
                             </Button>
-                            <Button Content="Automação ▾" Click="QuotationActionsMenu_Click">
+                            <Button Content="Automação ▾" Click="DropdownMenu_Click">
                                 <Button.ContextMenu>
                                     <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
                                         <MenuItem Header="Automação com IA" Command="{Binding AiQuotationCommand}" />
@@ -589,7 +604,7 @@
                                     </ContextMenu>
                                 </Button.ContextMenu>
                             </Button>
-                            <Button Content="Exportar/Importar ▾" Click="QuotationActionsMenu_Click">
+                            <Button Content="Exportar/Importar ▾" Click="DropdownMenu_Click">
                                 <Button.ContextMenu>
                                     <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
                                         <MenuItem Header="Exportar Excel" Command="{Binding ExportQuotationCommand}" />
@@ -861,8 +876,10 @@
                 VerticalAlignment="Center"
                 Visibility="{Binding IsInitializing, Converter={StaticResource BooleanToVisibilityConverter}}">
             <StackPanel>
-                <TextBlock Text="PNCP King" FontSize="26" FontWeight="Bold"
-                           HorizontalAlignment="Center" />
+                <Image Source="/PNCPKing;component/Assets/Branding/PNCPKingLogo.png"
+                       Width="112" Height="112" Stretch="Uniform"
+                       HorizontalAlignment="Center"
+                       AutomationProperties.Name="Logo PNCP King" />
                 <ProgressBar Height="8" Margin="0,18,0,12" Minimum="0" Maximum="100"
                              Value="{Binding StartupProgress, Mode=OneWay}" />
                 <TextBlock Text="{Binding StartupStatus}" TextWrapping="Wrap"
