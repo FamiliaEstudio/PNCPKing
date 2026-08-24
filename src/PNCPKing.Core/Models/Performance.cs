@@ -53,6 +53,16 @@ public sealed record PerformanceReport
     public string BuildIdentifier { get; init; } = string.Empty;
     public int DatabaseSchemaVersion { get; init; }
     public string SqliteProfile { get; init; } = string.Empty;
+    public int PncpInitialConcurrency { get; init; }
+    public int PncpMaximumConcurrency { get; init; }
+    public int PncpEffectiveConcurrency { get; init; }
+    public int PncpActiveRequests { get; init; }
+    public int PncpQueuedRequests { get; init; }
+    public int PncpConcurrencyReductions { get; init; }
+    public double PncpRollingP50Milliseconds { get; init; }
+    public double PncpRollingP95Milliseconds { get; init; }
+    public double PncpRollingThroughput { get; init; }
+    public string PncpLastReductionReason { get; init; } = string.Empty;
     public IReadOnlyList<PerformanceActiveOperation> ActiveOperations { get; init; } = [];
     public string BaselineApplicationVersion { get; init; } = string.Empty;
     public IReadOnlyList<PerformanceComparison> Comparisons { get; init; } = [];

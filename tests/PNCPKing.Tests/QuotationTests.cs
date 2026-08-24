@@ -1,4 +1,5 @@
 using ClosedXML.Excel;
+using PNCPKing.App.ViewModels;
 using PNCPKing.Core.Models;
 using PNCPKing.Core.Quotations;
 using PNCPKing.Infrastructure.Data;
@@ -10,6 +11,13 @@ public sealed class QuotationTests
 {
     private static readonly DateOnly Today = new(2026, 7, 21);
 
+    public static TheoryData<string, decimal, string> InvalidEmptyLineInputs => new()
+    {
+        { "", 1m, "unidade" },
+        { "Café", 0m, "unidade" },
+        { "Café", 1m, "" }
+    };
+
     [Fact]
     public void WeightSlider_RebalancesOtherComponentsAndAlwaysTotalsOneHundred()
     {
@@ -17,6 +25,91 @@ public sealed class QuotationTests
 
         Assert.Equal(new AdequacyWeights(35, 14, 7, 40, 4), weights);
         Assert.Equal(100, weights.Total);
+    }
+
+    [Fact]
+    public async Task ManualLine_CanStartWithoutPricesAndIsReadyForItemSearch()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer(Today));
+        var project = await service.CreateProjectAsync("Material escolar");
+        var input = new QuotationLineInput("Papel sulfite", 20m, "resma", null, null);
+
+        var first = await service.CreateLineAsync(project.Id, input);
+        var second = await service.CreateLineAsync(project.Id, input);
+        var lines = await repository.GetLinesAsync(project.Id);
+
+        Assert.Equal(2, lines.Count);
+        Assert.True(lines[0].DisplayOrder < lines[1].DisplayOrder);
+        Assert.Equal(0, first.Line.SampleVersion);
+        Assert.Equal(QuotationAutomationItemState.Manual, first.Line.AutomationState);
+        Assert.Null(first.Line.AutomationRunId);
+        Assert.Equal("Papel sulfite", first.Line.SearchText);
+        Assert.Equal("Papel sulfite", first.Line.PromptSet?.RestrictiveText);
+        Assert.Equal(AdequacyWeights.Default, first.Line.Weights);
+        Assert.Equal(3, first.Line.RequestedBasketSize);
+        Assert.Empty(first.References);
+        Assert.Empty(first.Baskets);
+        Assert.Empty(await repository.GetReferencesAsync(first.Line.Id));
+        Assert.Empty(await repository.GetManualBasketsAsync(first.Line.Id));
+
+        var display = new QuotationLineDisplay(first);
+        Assert.Equal("Aguardando preços", display.Status);
+        Assert.Null(display.SampledAt);
+        Assert.Equal(0, display.SampleVersion);
+        Assert.Equal(first.Line.Description, second.Line.Description);
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidEmptyLineInputs))]
+    public async Task ManualLine_RequiresDescriptionPositiveQuantityAndUnit(
+        string description,
+        decimal quantity,
+        string unit)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer(Today));
+        var project = await service.CreateProjectAsync("Validação");
+
+        await Assert.ThrowsAnyAsync<ArgumentException>(() => service.CreateLineAsync(
+            project.Id,
+            new QuotationLineInput(description, quantity, unit, null, null)));
+
+        Assert.Empty(await repository.GetLinesAsync(project.Id));
+    }
+
+    [Fact]
+    public async Task ManualLine_MissingProjectRollsBackAndFirstPriceCreatesItsSampleAndBasket()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer(Today));
+        var input = new QuotationLineInput("Café", 10m, "pacote", null, null);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.CreateLineAsync(Guid.NewGuid(), input));
+
+        var project = await service.CreateProjectAsync("Compra mensal");
+        var created = await service.CreateLineAsync(project.Id, input);
+        Assert.Equal(0, created.Line.DisplayOrder);
+        var saved = await service.SaveManualBasketAsync(
+            project.Id,
+            created.Line.Id,
+            input,
+            null,
+            "Cesta 1",
+            [Row("c1", "11222333000181", 98m)]);
+
+        Assert.Equal(created.Line.Id, saved.Analysis.Line.Id);
+        Assert.Equal(created.Line.Description, saved.Analysis.Line.Description);
+        Assert.Equal(created.Line.RequestedQuantity, saved.Analysis.Line.RequestedQuantity);
+        Assert.Equal(created.Line.RequestedUnit, saved.Analysis.Line.RequestedUnit);
+        Assert.Equal(1, saved.Analysis.Line.SampleVersion);
+        Assert.Single(saved.Analysis.References);
+        Assert.Single(saved.Basket.ReferenceIds);
+        Assert.Contains(saved.Analysis.Baskets, basket => basket.ManualBasketId == saved.Basket.Id);
     }
 
     [Fact]

@@ -12,6 +12,7 @@ public sealed record MaintenanceDecision(
 public sealed class AdaptiveMaintenanceCoordinator
 {
     public static readonly TimeSpan VisibleIdleDelay = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan ConstrainedVisibleIdleDelay = TimeSpan.FromSeconds(60);
 
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _activityGate = new();
@@ -26,7 +27,7 @@ public sealed class AdaptiveMaintenanceCoordinator
     {
         _resourceProbe = resourceProbe ?? new SystemResourceProbe();
         _timeProvider = timeProvider ?? TimeProvider.System;
-        _lastVisibleActivity = _timeProvider.GetUtcNow() - VisibleIdleDelay;
+        _lastVisibleActivity = _timeProvider.GetUtcNow() - ConstrainedVisibleIdleDelay;
     }
 
     public void NotifyVisibleActivity()
@@ -65,10 +66,13 @@ public sealed class AdaptiveMaintenanceCoordinator
                 "manutenção aguardando: RAM física em nível crítico");
         }
 
+        var visibleIdleDelay = resources.Pressure == SystemResourcePressure.Constrained
+            ? ConstrainedVisibleIdleDelay
+            : VisibleIdleDelay;
         TimeSpan remainingIdle;
         lock (_activityGate)
         {
-            remainingIdle = VisibleIdleDelay - (_timeProvider.GetUtcNow() - _lastVisibleActivity);
+            remainingIdle = visibleIdleDelay - (_timeProvider.GetUtcNow() - _lastVisibleActivity);
         }
 
         if (remainingIdle > TimeSpan.Zero)
@@ -78,7 +82,7 @@ public sealed class AdaptiveMaintenanceCoordinator
                 false,
                 TimeSpan.Zero,
                 remainingIdle,
-                "aguardando 30 segundos sem interação do usuário");
+                $"aguardando {visibleIdleDelay.TotalSeconds:N0} segundos sem interação do usuário");
         }
 
         return resources.Pressure switch
@@ -86,9 +90,9 @@ public sealed class AdaptiveMaintenanceCoordinator
             SystemResourcePressure.Constrained => new MaintenanceDecision(
                 resources,
                 true,
-                TimeSpan.FromSeconds(15),
-                TimeSpan.FromSeconds(30),
-                "modo restrito: uma fatia de até 15 segundos"),
+                TimeSpan.FromSeconds(10),
+                TimeSpan.FromSeconds(60),
+                "modo restrito: uma fatia de até 10 segundos"),
             _ => new MaintenanceDecision(
                 resources,
                 true,
@@ -113,7 +117,11 @@ public sealed class AdaptiveMaintenanceCoordinator
             _activeSlice?.Cancel();
             _activeSlice?.Dispose();
             _activeSlice = source;
-            if (_timeProvider.GetUtcNow() - _lastVisibleActivity < VisibleIdleDelay)
+            var resources = _resourceProbe.GetSnapshot();
+            var visibleIdleDelay = resources.Pressure == SystemResourcePressure.Constrained
+                ? ConstrainedVisibleIdleDelay
+                : VisibleIdleDelay;
+            if (_timeProvider.GetUtcNow() - _lastVisibleActivity < visibleIdleDelay)
             {
                 source.Cancel();
             }

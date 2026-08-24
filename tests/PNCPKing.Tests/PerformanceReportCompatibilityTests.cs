@@ -32,6 +32,10 @@ public sealed class PerformanceReportCompatibilityTests
         Assert.Equal(0, report.TotalPhysicalMemoryBytes);
         Assert.Equal(0, report.FreePhysicalMemoryBytes);
         Assert.Equal(string.Empty, report.BuildIdentifier);
+        Assert.Equal(0, report.PncpInitialConcurrency);
+        Assert.Equal(0, report.PncpMaximumConcurrency);
+        Assert.Equal(0, report.PncpEffectiveConcurrency);
+        Assert.Equal(string.Empty, report.PncpLastReductionReason);
         Assert.Empty(report.ActiveOperations);
     }
 }

@@ -582,6 +582,68 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         return result;
     }
 
+    public async Task<QuotationLine> CreateLineAsync(
+        Guid projectId,
+        QuotationLineInput input,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateInput(input);
+        var id = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var project = connection.CreateCommand())
+        {
+            project.Transaction = (SqliteTransaction)transaction;
+            project.CommandText = "UPDATE quotation_projects SET updated_at = $updated WHERE id = $projectId;";
+            project.Parameters.AddWithValue("$updated", FormatDateTime(now));
+            project.Parameters.AddWithValue("$projectId", projectId.ToString("N"));
+            if (await project.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+            {
+                throw new InvalidOperationException("A cotação não existe mais.");
+            }
+        }
+
+        await using (var line = connection.CreateCommand())
+        {
+            line.Transaction = (SqliteTransaction)transaction;
+            line.CommandText = """
+                INSERT INTO quotation_lines(
+                    id, project_id, description, display_name, requested_quantity_scaled, requested_unit,
+                    minimum_unit_price_scaled, maximum_unit_price_scaled, description_weight,
+                    unit_weight, quantity_weight, proximity_weight, recency_weight, sample_version,
+                    sampled_at, selected_basket_key, selection_confirmed, search_text,
+                    requested_batch_count, display_order, automation_run_id, automation_state,
+                    automation_message, requested_basket_size)
+                VALUES($id, $projectId, $description, $description, $quantity, $unit, $minimum, $maximum,
+                       $descriptionWeight, $unitWeight, $quantityWeight, $proximityWeight, $recencyWeight,
+                       0, $createdAt, NULL, 0, $description, 1,
+                       COALESCE((SELECT MAX(display_order) + 1 FROM quotation_lines WHERE project_id = $projectId), 0),
+                       NULL, $manualState, '', $basketSize);
+                """;
+            line.Parameters.AddWithValue("$id", id.ToString("N"));
+            line.Parameters.AddWithValue("$projectId", projectId.ToString("N"));
+            line.Parameters.AddWithValue("$description", input.Description.Trim());
+            line.Parameters.AddWithValue("$quantity", DecimalScale.ToScaled(input.RequestedQuantity)!.Value);
+            line.Parameters.AddWithValue("$unit", input.RequestedUnit.Trim());
+            line.Parameters.AddWithValue("$minimum", DbValue(DecimalScale.ToScaled(input.MinimumUnitPrice)));
+            line.Parameters.AddWithValue("$maximum", DbValue(DecimalScale.ToScaled(input.MaximumUnitPrice)));
+            line.Parameters.AddWithValue("$descriptionWeight", input.Weights.Description);
+            line.Parameters.AddWithValue("$unitWeight", input.Weights.Unit);
+            line.Parameters.AddWithValue("$quantityWeight", input.Weights.Quantity);
+            line.Parameters.AddWithValue("$proximityWeight", input.Weights.Proximity);
+            line.Parameters.AddWithValue("$recencyWeight", input.Weights.Recency);
+            line.Parameters.AddWithValue("$createdAt", FormatDateTime(now));
+            line.Parameters.AddWithValue("$manualState", (int)QuotationAutomationItemState.Manual);
+            line.Parameters.AddWithValue("$basketSize", input.RequestedBasketSize);
+            await line.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return await GetLineAsync(projectId, id, cancellationToken).ConfigureAwait(false)
+               ?? throw new InvalidOperationException("O item criado não pôde ser reaberto.");
+    }
+
     public async Task<QuotationLine> SaveSampleAsync(
         Guid projectId,
         Guid? lineId,

@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
+using PNCPKing.Infrastructure.Api;
 using PNCPKing.Infrastructure.Services;
 
 namespace PNCPKing.App.Services;
@@ -20,6 +21,7 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
     private string? _databasePath;
     private string _sqliteProfile = string.Empty;
     private int _databaseSchemaVersion;
+    private Func<PncpSchedulerSnapshot>? _pncpSchedulerSnapshotProvider;
     private int _measurementCount;
     private long _nextSpanId;
 
@@ -34,6 +36,9 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
     public void SetSqliteProfile(string profile) => _sqliteProfile = SanitizeLabel(profile);
 
     public void SetDatabaseSchemaVersion(int version) => _databaseSchemaVersion = Math.Max(0, version);
+
+    public void SetPncpSchedulerSnapshotProvider(Func<PncpSchedulerSnapshot> provider) =>
+        _pncpSchedulerSnapshotProvider = provider ?? throw new ArgumentNullException(nameof(provider));
 
     public PerformanceSpan Begin(string operation, string phase = "total")
     {
@@ -107,6 +112,7 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
             .ToArray();
         var databasePath = _databasePath;
         var resources = _resourceProbe.GetSnapshot();
+        var scheduler = _pncpSchedulerSnapshotProvider?.Invoke();
         var now = DateTimeOffset.UtcNow;
         var activeOperations = _activeSpans.Values
             .OrderBy(value => value.StartedAt)
@@ -135,6 +141,16 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
             BuildIdentifier = BuildIdentifier(),
             DatabaseSchemaVersion = _databaseSchemaVersion,
             SqliteProfile = _sqliteProfile,
+            PncpInitialConcurrency = scheduler?.InitialConcurrency ?? 0,
+            PncpMaximumConcurrency = scheduler?.MaximumConcurrency ?? 0,
+            PncpEffectiveConcurrency = scheduler?.EffectiveConcurrency ?? 0,
+            PncpActiveRequests = scheduler?.ActiveRequests ?? 0,
+            PncpQueuedRequests = scheduler?.TotalQueued ?? 0,
+            PncpConcurrencyReductions = scheduler?.ConcurrencyReductions ?? 0,
+            PncpRollingP50Milliseconds = scheduler?.RollingP50?.TotalMilliseconds ?? 0,
+            PncpRollingP95Milliseconds = scheduler?.RollingP95?.TotalMilliseconds ?? 0,
+            PncpRollingThroughput = scheduler?.RollingThroughput ?? 0,
+            PncpLastReductionReason = scheduler?.LastReductionReason ?? string.Empty,
             ActiveOperations = activeOperations,
             Measurements = measurements,
             Summaries = summaries
@@ -200,6 +216,17 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
         builder.AppendLine($"Build/esquema/perfil SQLite: {report.BuildIdentifier} / " +
                            $"{report.DatabaseSchemaVersion} / {report.SqliteProfile}");
         builder.AppendLine($"Banco/WAL: {FormatBytes(report.DatabaseBytes)} / {FormatBytes(report.WalBytes)}");
+        if (report.PncpMaximumConcurrency > 0)
+        {
+            builder.AppendLine(
+                $"Concorrência PNCP inicial/máxima/efetiva: {report.PncpInitialConcurrency} / " +
+                $"{report.PncpMaximumConcurrency} / {report.PncpEffectiveConcurrency}; " +
+                $"ativas/fila/reduções: {report.PncpActiveRequests} / {report.PncpQueuedRequests} / " +
+                $"{report.PncpConcurrencyReductions}; p50/p95: " +
+                $"{report.PncpRollingP50Milliseconds:N1} / {report.PncpRollingP95Milliseconds:N1} ms; " +
+                $"vazão: {report.PncpRollingThroughput:N2} req/s; " +
+                $"último recuo: {report.PncpLastReductionReason}");
+        }
         builder.AppendLine();
         builder.AppendLine("Operação | Fase | Amostras | Mediana ms | P95 ms | Máximo ms | Linhas | Pico RAM");
         foreach (var item in report.Summaries)

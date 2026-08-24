@@ -7,6 +7,26 @@ namespace PNCPKing.Tests;
 public sealed class UiBindingTests
 {
     [Fact]
+    public void StartupOverlay_BlocksTheWholeWindowWithoutDisablingTheContentTree()
+    {
+        var document = LoadView("MainWindow.xaml");
+        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        var rootGrid = Assert.Single(document.Root!.Elements(presentation + "Grid"));
+        var contentGrid = Assert.Single(rootGrid.Elements(presentation + "Grid"), element =>
+            element.Attribute("Margin")?.Value == "10");
+        var overlay = Assert.Single(rootGrid.Elements(presentation + "Grid"), element =>
+            element.Attribute("Visibility")?.Value.Contains("IsInitializing", StringComparison.Ordinal) == true);
+
+        Assert.Null(contentGrid.Attribute("IsEnabled"));
+        Assert.False(string.IsNullOrWhiteSpace(overlay.Attribute("Background")?.Value));
+        Assert.Equal("100", overlay.Attribute("Panel.ZIndex")?.Value);
+        Assert.Equal("Cycle", overlay.Attribute("KeyboardNavigation.TabNavigation")?.Value);
+        Assert.Equal("True", overlay.Attribute("FocusManager.IsFocusScope")?.Value);
+        Assert.Contains(overlay.Descendants(presentation + "Button"), button =>
+            button.Attribute("Command")?.Value.Contains("CancelStartupCommand", StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
     public void QuotationItemSearchProgress_IsBoundOneWay()
     {
         var xamlPath = Path.Combine(
@@ -289,6 +309,7 @@ public sealed class UiBindingTests
                     "{Binding NewQuotationCommand}",
                     "{Binding RenameQuotationCommand}",
                     "{Binding DeleteQuotationCommand}",
+                    "{Binding NewQuotationItemCommand}",
                     "{Binding DeleteQuotationLineCommand}",
                     "{Binding RenameQuotationLineCommand}",
                     "{Binding OpenQuotationItemCommand}",
@@ -351,6 +372,23 @@ public sealed class UiBindingTests
         Assert.Equal("ChooseColumns_Click", chooseColumns.Attribute("Click")?.Value);
         var chooserTag = Assert.IsType<XAttribute>(chooseColumns.Attribute("Tag")).Value;
         Assert.Contains("QuotationLinesGrid", chooserTag);
+    }
+
+    [Fact]
+    public void NewQuotationItemWindow_CollectsOnlyTheThreeRequiredFields()
+    {
+        var document = LoadView("NewQuotationItemWindow.xaml");
+        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var textBoxes = document.Descendants(presentation + "TextBox").ToArray();
+
+        Assert.Equal(
+            ["DescriptionTextBox", "QuantityTextBox", "UnitTextBox"],
+            textBoxes.Select(element => Assert.IsType<XAttribute>(element.Attribute(x + "Name")).Value).ToArray());
+        Assert.All(textBoxes, element => Assert.Null(element.Attribute("Text")));
+        Assert.Contains(document.Descendants(presentation + "Button"), element =>
+            element.Attribute("Content")?.Value == "Criar item" &&
+            element.Attribute("IsDefault")?.Value == "True");
     }
 
     [Fact]

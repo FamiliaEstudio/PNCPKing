@@ -893,27 +893,44 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     {
         cancellationToken.ThrowIfCancellationRequested();
         await LoadSweetCodesAsync().ConfigureAwait(true);
-        cancellationToken.ThrowIfCancellationRequested();
-        await SearchAsync(resetSession: false).ConfigureAwait(true);
-        _maintenanceTimer.Start();
-        _ = InitializeDeferredAreasAsync();
-        _ = StartMaintenanceAfterIdleAsync();
     }
 
-    private async Task InitializeDeferredAreasAsync()
+    public async Task InitializeDeferredAsync(CancellationToken cancellationToken = default)
     {
+        using var span = _performanceTelemetry.Begin("startup", "deferred-initialization");
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            await SearchAsync(resetSession: false).ConfigureAwait(true);
             await Task.Yield();
+            cancellationToken.ThrowIfCancellationRequested();
             await RefreshDatasetSummaryAsync().ConfigureAwait(true);
             await RefreshCoverageAsync().ConfigureAwait(true);
             await RefreshPriceCacheProgressAsync().ConfigureAwait(true);
             await RefreshCatalogCoverageAsync().ConfigureAwait(true);
+            span.Complete();
+        }
+        catch (OperationCanceledException exception)
+        {
+            span.Fail(exception);
+            throw;
         }
         catch (Exception exception)
         {
+            span.Fail(exception);
             _diagnosticLog.Warning("startup", $"Carga secundária adiada: {exception.Message}");
         }
+    }
+
+    public void StartBackgroundMaintenance()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _maintenanceCoordinator.NotifyVisibleActivity();
+        _ = RunAutomaticMaintenanceCycleAsync();
     }
 
     private async Task InitializeQuotationsOnDemandAsync()
@@ -933,25 +950,6 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         {
             _quotationsInitialized = false;
             _diagnosticLog.Warning("quotations", $"Carga sob demanda adiada: {exception.Message}");
-        }
-    }
-
-    private async Task StartMaintenanceAfterIdleAsync()
-    {
-        try
-        {
-            await Task.Delay(
-                    AdaptiveMaintenanceCoordinator.VisibleIdleDelay,
-                    _startupCancellation.Token)
-                .ConfigureAwait(true);
-            if (!_disposed && !IsPriceBusy && !IsForegroundBusy && !IsFileBusy)
-            {
-                await RunAutomaticMaintenanceCycleAsync().ConfigureAwait(true);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // Encerramento durante a janela inicial de ociosidade.
         }
     }
 
@@ -978,6 +976,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _quotationAutomationCancellation?.Cancel();
         _backgroundCacheSuppression?.Dispose();
         _backgroundCacheSuppression = null;
+        await _columnLayouts.FlushAsync().ConfigureAwait(true);
         if (_quotationAutomationCompletion is { } quotationCompletion)
         {
             await quotationCompletion.Task.ConfigureAwait(true);
@@ -998,7 +997,6 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         SetItemSearchActive(false);
         await _itemSearchService.DisposeAsync().ConfigureAwait(false);
         await _transientItemSearchService.DisposeAsync().ConfigureAwait(false);
-        await _columnLayouts.FlushAsync().ConfigureAwait(false);
         _documentResources.Dispose();
         _visibleIdleResumeCancellation?.Dispose();
         _selectedContractCacheCancellation?.Dispose();
@@ -1333,6 +1331,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
+        using var applySpan = _performanceTelemetry.Begin("ui", "contract-results-apply");
         ContractResults.ReplaceAll(result.Results);
         CurrentContractPage = result.Page;
         _contractPageHasMore = result.MayHaveMore;
@@ -1354,6 +1353,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             ? $"Índice local: {ContractSearchTotal:N0} contratação(ões)."
             : $"Índice local: {result.Results.Count:N0} linha(s) exibida(s); total exato sob demanda.";
         NotifyCommands();
+        applySpan.Complete(result.Results.Count);
     }
 
     private async Task CalculateExactContractCountAsync()
@@ -1724,6 +1724,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private void AppendUniqueRows(IEnumerable<ItemSearchRow> rows)
     {
+        using var span = _performanceTelemetry.Begin("ui", "item-results-apply");
         var pending = new List<ItemSearchDisplayRow>();
         var expression = _activeItemSearchExpression;
         foreach (var row in rows
@@ -1738,6 +1739,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
 
         ItemSearchRows.AddRange(pending);
+        span.Complete(pending.Count);
     }
 
     private static string RowKey(ItemSearchDisplayRow row) =>
@@ -3137,7 +3139,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      ConfirmQuotationBasketCommand, ExportQuotationCommand,
                      ExportQuotationPackageCommand, ImportQuotationPackageCommand,
                      PreviousQuotationBasketPageCommand, NextQuotationBasketPageCommand,
-                     NewQuotationCommand, RenameQuotationCommand, DeleteQuotationCommand,
+                     NewQuotationCommand, NewQuotationItemCommand,
+                     RenameQuotationCommand, DeleteQuotationCommand,
                      DeleteQuotationLineCommand, ImportQuotationCommand, AiQuotationCommand,
                      RenameQuotationLineCommand,
                      ResumeQuotationAutomationCommand, CancelQuotationAutomationCommand,

@@ -7,6 +7,55 @@ namespace PNCPKing.Tests;
 
 public sealed class PncpRequestSchedulingTests
 {
+    [Theory]
+    [InlineData(SystemResourcePressure.Critical, 8, 1)]
+    [InlineData(SystemResourcePressure.Constrained, 16, 8)]
+    [InlineData(SystemResourcePressure.Normal, 48, 16)]
+    public void ResourceProfile_SelectsResponsiveInitialAndMaximumConcurrency(
+        SystemResourcePressure pressure,
+        int expectedMaximum,
+        int expectedInitial)
+    {
+        var profile = PncpRequestScheduler.GetRecommendedConcurrency(pressure);
+        var scheduler = new PncpRequestScheduler(
+            profile.MaximumConcurrency,
+            initialConcurrency: profile.InitialConcurrency);
+
+        var snapshot = scheduler.GetSnapshot();
+
+        Assert.Equal(expectedMaximum, snapshot.MaximumConcurrency);
+        Assert.Equal(expectedInitial, snapshot.InitialConcurrency);
+        Assert.Equal(expectedInitial, snapshot.EffectiveConcurrency);
+    }
+
+    [Theory]
+    [InlineData(SystemResourcePressure.Critical, 8)]
+    [InlineData(SystemResourcePressure.Constrained, 16)]
+    [InlineData(SystemResourcePressure.Normal, 48)]
+    public void ResourceProfile_AdaptiveGrowthStopsAtItsMaximum(
+        SystemResourcePressure pressure,
+        int expectedMaximum)
+    {
+        var clock = new ManualTimeProvider();
+        var profile = PncpRequestScheduler.GetRecommendedConcurrency(pressure);
+        var scheduler = new PncpRequestScheduler(
+            profile.MaximumConcurrency,
+            clock,
+            profile.InitialConcurrency);
+
+        for (var index = 0; index < 32 * 5; index++)
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(50));
+            scheduler.ReportOutcome(
+                PncpRequestCategory.ItemLists,
+                HttpStatusCode.OK,
+                TimeSpan.FromSeconds(1));
+            Assert.InRange(scheduler.GetSnapshot().EffectiveConcurrency, 1, expectedMaximum);
+        }
+
+        Assert.Equal(expectedMaximum, scheduler.GetSnapshot().EffectiveConcurrency);
+    }
+
     [Fact]
     public async Task Scheduler_ServesHigherPrioritiesFirstWhenAllQueuesAreWaiting()
     {

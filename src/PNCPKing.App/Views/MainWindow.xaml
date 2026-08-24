@@ -13,7 +13,7 @@
         <services:WindowHeightFractionConverter x:Key="WindowHeightFractionConverter" />
     </Window.Resources>
     <Grid>
-    <Grid Margin="10" IsEnabled="{Binding IsApplicationReady}">
+    <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -580,6 +580,7 @@
                                         <MenuItem Header="Renomear" Command="{Binding RenameQuotationCommand}" />
                                         <MenuItem Header="Excluir cotação" Command="{Binding DeleteQuotationCommand}" />
                                         <Separator />
+                                        <MenuItem Header="Novo item" Command="{Binding NewQuotationItemCommand}" />
                                         <MenuItem Header="Excluir item" Command="{Binding DeleteQuotationLineCommand}" />
                                         <MenuItem Header="Editar nome" Command="{Binding RenameQuotationLineCommand}"
                                                   ToolTip="Altera somente o nome visível; pesquisas, preços e cestas permanecem intactos." />
@@ -883,22 +884,28 @@
             </StatusBarItem>
         </StatusBar>
     </Grid>
-        <Border Background="#EAF3FA" BorderBrush="#2F80D0" BorderThickness="1"
-                CornerRadius="8" Padding="24" Width="470" HorizontalAlignment="Center"
-                VerticalAlignment="Center"
-                Visibility="{Binding IsInitializing, Converter={StaticResource BooleanToVisibilityConverter}}">
-            <StackPanel>
-                <Image Source="/PNCPKing;component/Assets/Branding/PNCPKingLogo.png"
-                       Width="112" Height="112" Stretch="Uniform"
-                       HorizontalAlignment="Center"
-                       AutomationProperties.Name="Logo PNCP King" />
-                <ProgressBar Height="8" Margin="0,18,0,12" Minimum="0" Maximum="100"
-                             Value="{Binding StartupProgress, Mode=OneWay}" />
-                <TextBlock Text="{Binding StartupStatus}" TextWrapping="Wrap"
-                           TextAlignment="Center" FontSize="14" />
-                <Button Content="Cancelar inicialização" Command="{Binding CancelStartupCommand}"
-                        HorizontalAlignment="Center" Margin="0,18,0,0" />
-            </StackPanel>
-        </Border>
+        <Grid Panel.ZIndex="100" Background="#CCFFFFFF"
+              KeyboardNavigation.TabNavigation="Cycle"
+              FocusManager.IsFocusScope="True"
+              FocusManager.FocusedElement="{Binding ElementName=CancelStartupButton}"
+              Visibility="{Binding IsInitializing, Converter={StaticResource BooleanToVisibilityConverter}}">
+            <Border Background="#EAF3FA" BorderBrush="#2F80D0" BorderThickness="1"
+                    CornerRadius="8" Padding="24" Width="470" HorizontalAlignment="Center"
+                    VerticalAlignment="Center">
+                <StackPanel>
+                    <Image Source="/PNCPKing;component/Assets/Branding/PNCPKingLogo.png"
+                           Width="112" Height="112" Stretch="Uniform"
+                           HorizontalAlignment="Center"
+                           AutomationProperties.Name="Logo PNCP King" />
+                    <ProgressBar Height="8" Margin="0,18,0,12" Minimum="0" Maximum="100"
+                                 Value="{Binding StartupProgress, Mode=OneWay}" />
+                    <TextBlock Text="{Binding StartupStatus}" TextWrapping="Wrap"
+                               TextAlignment="Center" FontSize="14" />
+                    <Button x:Name="CancelStartupButton" Content="Cancelar inicialização"
+                            Command="{Binding CancelStartupCommand}"
+                            HorizontalAlignment="Center" Margin="0,18,0,0" />
+                </StackPanel>
+            </Border>
+        </Grid>
     </Grid>
 </Window>

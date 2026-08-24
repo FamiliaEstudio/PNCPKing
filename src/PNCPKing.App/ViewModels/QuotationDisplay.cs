@@ -51,9 +51,11 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis)
     public int ContractsExamined => Line.SearchCheckpoint.ContractsExamined;
     public int BatchesCompleted => Line.SearchCheckpoint.BatchesCompleted;
     public int SampleVersion => Line.SampleVersion;
-    public DateTimeOffset SampledAt => Line.SampledAt;
+    public DateTimeOffset? SampledAt => Line.SampleVersion == 0 ? null : Line.SampledAt;
     public string WeightSummary => Line.Weights.ToString();
-    public string Status => Line.SelectionConfirmed && Analysis.SelectedBasket is { } selected
+    public string Status => Analysis.CollectedCount == 0
+        ? "Aguardando preços"
+        : Line.SelectionConfirmed && Analysis.SelectedBasket is { } selected
         ? selected.IsIncomplete || !selected.IsValid
             ? "Resolvido com ressalva"
             : "Resolvido"
@@ -63,7 +65,7 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis)
                 ? "Requer reconfirmação"
                 : Line.SelectedBasketKey is not null
                     ? "Escolha anterior inválida"
-                : "Aguardando escolha";
+                    : "Aguardando escolha";
     public decimal? SelectedAveragePrice => Analysis.SelectedBasket?.AdoptedPrice;
     public string AutomationStatus => Line.AutomationState switch
     {

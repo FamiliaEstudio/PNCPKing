@@ -25,6 +25,10 @@
              Link="AppLogic/AppSettingsService.cs" />
     <Compile Include="../../src/PNCPKing.App/Services/DesktopShortcutService.cs"
              Link="AppLogic/DesktopShortcutService.cs" />
+    <Compile Include="../../src/PNCPKing.App/ViewModels/ObservableObject.cs"
+             Link="AppLogic/ObservableObject.cs" />
+    <Compile Include="../../src/PNCPKing.App/ViewModels/QuotationDisplay.cs"
+             Link="AppLogic/QuotationDisplay.cs" />
     <None Include="../../src/PNCPKing.App/Views/QuotationItemWindow.xaml"
           Link="Views/QuotationItemWindow.xaml"
           CopyToOutputDirectory="PreserveNewest" />
@@ -36,6 +40,9 @@
           CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../src/PNCPKing.App/Views/ColumnChooserWindow.xaml"
           Link="Views/ColumnChooserWindow.xaml"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/PNCPKing.App/Views/NewQuotationItemWindow.xaml"
+          Link="Views/NewQuotationItemWindow.xaml"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -38,6 +38,16 @@ public sealed class QuotationService(
     public Task DeleteLineAsync(Guid lineId, CancellationToken cancellationToken = default) =>
         repository.DeleteLineAsync(lineId, cancellationToken);
 
+    public async Task<QuotationLineAnalysis> CreateLineAsync(
+        Guid projectId,
+        QuotationLineInput input,
+        CancellationToken cancellationToken = default)
+    {
+        var line = await repository.CreateLineAsync(projectId, input, cancellationToken)
+            .ConfigureAwait(false);
+        return analyzer.Analyze(line, [], []);
+    }
+
     public Task<QuotationAutomationRun> CreateAutomationRunAsync(
         Guid projectId,
         string outputPath,

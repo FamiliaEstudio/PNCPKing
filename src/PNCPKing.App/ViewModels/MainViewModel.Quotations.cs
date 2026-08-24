@@ -60,6 +60,7 @@ public sealed partial class MainViewModel
     public ICommand OpenQuotationReferenceCommand { get; private set; } = null!;
     public ICommand AccessQuotationDocumentsCommand { get; private set; } = null!;
     public ICommand NewQuotationCommand { get; private set; } = null!;
+    public ICommand NewQuotationItemCommand { get; private set; } = null!;
     public ICommand RenameQuotationCommand { get; private set; } = null!;
     public ICommand DeleteQuotationCommand { get; private set; } = null!;
     public ICommand DeleteQuotationLineCommand { get; private set; } = null!;
@@ -249,6 +250,9 @@ public sealed partial class MainViewModel
                              reference.Source.PortalUrl,
                              out _));
         NewQuotationCommand = new AsyncRelayCommand(NewQuotationAsync, () => !IsFileBusy && !IsPriceBusy);
+        NewQuotationItemCommand = new AsyncRelayCommand(
+            NewQuotationItemAsync,
+            () => !IsFileBusy && !IsPriceBusy && SelectedQuotationProject is not null);
         RenameQuotationCommand = new AsyncRelayCommand(
             RenameQuotationAsync,
             () => !IsFileBusy && !IsPriceBusy && SelectedQuotationProject is not null);
@@ -670,6 +674,54 @@ public sealed partial class MainViewModel
         var project = await _quotationService.CreateProjectAsync(window.Value).ConfigureAwait(true);
         await RefreshQuotationProjectsAsync(project.Id).ConfigureAwait(true);
         StatusText = $"Cotação '{project.Name}' criada.";
+    }
+
+    private async Task NewQuotationItemAsync()
+    {
+        var project = SelectedQuotationProject;
+        if (project is null)
+        {
+            return;
+        }
+
+        var window = new NewQuotationItemWindow
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (window.ShowDialog() != true || window.Input is null)
+        {
+            return;
+        }
+
+        Guid? createdLineId = null;
+        IsFileBusy = true;
+        NotifyCommands();
+        try
+        {
+            var analysis = await _quotationService.CreateLineAsync(project.Id, window.Input)
+                .ConfigureAwait(true);
+            createdLineId = analysis.Line.Id;
+            await LoadQuotationProjectAsync(project.Id, analysis.Line.Id).ConfigureAwait(true);
+            StatusText = $"Item '{analysis.Line.EffectiveDisplayName}' criado; pesquise os preços para formar a cesta.";
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                $"Não foi possível criar o item.\n\n{exception.Message}",
+                "Novo item",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+        finally
+        {
+            IsFileBusy = false;
+            NotifyCommands();
+        }
+
+        if (createdLineId is { } lineId && SelectedQuotationLine?.Line.Id == lineId)
+        {
+            OpenSelectedQuotationItem();
+        }
     }
 
     private async Task RenameQuotationAsync()

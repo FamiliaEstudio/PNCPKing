@@ -1,3 +1,5 @@
+using PNCPKing.Core.Models;
+
 namespace PNCPKing.Infrastructure.Api;
 
 /// <summary>
@@ -33,6 +35,8 @@ public sealed record PncpSchedulerSnapshot(
     string? LastReductionReason = null,
     DateTimeOffset? LastConcurrencyChangeAt = null)
 {
+    public int InitialConcurrency { get; init; }
+
     public int CurrentTier => EffectiveConcurrency;
 
     public int TotalQueued =>
@@ -74,6 +78,7 @@ public sealed class PncpRequestScheduler
         Enumerable.Range(0, 5).Select(_ => new LinkedList<Waiter>()).ToArray();
     private readonly int[] _activeByPriority = new int[5];
     private readonly int _maximumConcurrency;
+    private readonly int _initialConcurrency;
     private readonly TimeProvider _timeProvider;
     private readonly Queue<SuccessfulOutcome> _successfulOutcomes = new();
     private int _effectiveConcurrency;
@@ -107,8 +112,17 @@ public sealed class PncpRequestScheduler
             initialConcurrency ?? maximumConcurrency,
             1,
             maximumConcurrency);
+        _initialConcurrency = _effectiveConcurrency;
         _lastConcurrencyChangeAt = _timeProvider.GetUtcNow();
     }
+
+    internal static (int MaximumConcurrency, int InitialConcurrency) GetRecommendedConcurrency(
+        SystemResourcePressure pressure) => pressure switch
+        {
+            SystemResourcePressure.Critical => (8, 1),
+            SystemResourcePressure.Constrained => (16, 8),
+            _ => (48, 16)
+        };
 
     public Task<IDisposable> AcquireAsync(
         PncpRequestPriority priority,
@@ -179,7 +193,10 @@ public sealed class PncpRequestScheduler
                 p95,
                 throughput,
                 _lastReductionReason,
-                _lastConcurrencyChangeAt);
+                _lastConcurrencyChangeAt)
+            {
+                InitialConcurrency = _initialConcurrency
+            };
         }
     }
 

@@ -528,7 +528,10 @@ public sealed class ItemSearchSessionTests
         await using var service = new ItemSearchSessionService(
             client,
             database.Repository,
-            Path.Combine(database.Directory, "continuous.db"));
+            Path.Combine(database.Directory, "continuous.db"),
+            requestScheduler: new PncpRequestScheduler(
+                maximumConcurrency: 16,
+                initialConcurrency: 8));
         await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
         var streamed = new List<ItemSearchRow>();
         var progressValues = new List<int>();

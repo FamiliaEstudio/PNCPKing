@@ -26,6 +26,10 @@ public interface IQuotationRepository
     Task<IReadOnlyList<QuotationManualBasket>> GetManualBasketsAsync(
         Guid lineId,
         CancellationToken cancellationToken = default);
+    Task<QuotationLine> CreateLineAsync(
+        Guid projectId,
+        QuotationLineInput input,
+        CancellationToken cancellationToken = default);
     Task<QuotationLine> SaveSampleAsync(
         Guid projectId,
         Guid? lineId,

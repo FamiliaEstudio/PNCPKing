@@ -156,9 +156,36 @@ public sealed class DataGridColumnLayoutService
 
     public async Task FlushAsync()
     {
-        _saveTimer.Stop();
-        CaptureAll();
-        await SaveNowAsync().ConfigureAwait(false);
+        using var span = _telemetry.Begin("ui", "column-layout-flush");
+        try
+        {
+            int columnCount;
+            if (_saveTimer.Dispatcher.CheckAccess())
+            {
+                _saveTimer.Stop();
+                CaptureAll();
+                columnCount = _registrations.Values.Sum(item => item.Columns.Count);
+            }
+            else
+            {
+                columnCount = await _saveTimer.Dispatcher.InvokeAsync(() =>
+                        {
+                            _saveTimer.Stop();
+                            CaptureAll();
+                            return _registrations.Values.Sum(item => item.Columns.Count);
+                        }, DispatcherPriority.Send)
+                    .Task
+                    .ConfigureAwait(false);
+            }
+
+            await SaveNowAsync().ConfigureAwait(false);
+            span.Complete(columnCount);
+        }
+        catch (Exception exception)
+        {
+            span.Fail(exception);
+            throw;
+        }
     }
 
     private void ApplySaved(Registration registration)

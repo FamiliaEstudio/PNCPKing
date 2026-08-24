@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Threading;
 using PNCPKing.App.Services;
 using PNCPKing.App.ViewModels;
 using PNCPKing.App.Views;
@@ -32,6 +33,7 @@ public partial class App : Application
         _diagnosticLog = new AppDiagnosticLog(resourceProbe);
         _performanceTelemetry = new AppPerformanceTelemetry(resourceProbe);
         using var startupSpan = _performanceTelemetry.Begin("startup", "application");
+        using var interactiveReadySpan = _performanceTelemetry.Begin("startup", "interactive-ready");
         _diagnosticLog.WriteStartupHeader();
         AsyncCommandRuntime.Configure(
             HandleRecoverableCommandException,
@@ -147,14 +149,25 @@ public partial class App : Application
             var quotationRepository = new SqliteQuotationRepository(sqliteConnections);
             var internetEvidenceStore = new InternetEvidenceStore(settings.DataFolder);
 
+            var resourceSnapshot = resourceProbe.GetSnapshot();
+            var requestConcurrency = PncpRequestScheduler.GetRecommendedConcurrency(
+                resourceSnapshot.Pressure);
             var socketsHandler = new SocketsHttpHandler
             {
                 AutomaticDecompression = DecompressionMethods.All,
                 ConnectTimeout = TimeSpan.FromSeconds(30),
                 PooledConnectionLifetime = TimeSpan.FromMinutes(10),
-                MaxConnectionsPerServer = 48
+                MaxConnectionsPerServer = requestConcurrency.MaximumConcurrency
             };
-            var requestScheduler = new PncpRequestScheduler(maximumConcurrency: 48);
+            var requestScheduler = new PncpRequestScheduler(
+                requestConcurrency.MaximumConcurrency,
+                initialConcurrency: requestConcurrency.InitialConcurrency);
+            _performanceTelemetry.SetPncpSchedulerSnapshotProvider(requestScheduler.GetSnapshot);
+            _diagnosticLog.Info(
+                "network",
+                $"Concorrência PNCP configurada. pressão={resourceSnapshot.Pressure}; " +
+                $"inicial={requestConcurrency.InitialConcurrency}; " +
+                $"máxima={requestConcurrency.MaximumConcurrency}.");
             var requestTelemetry = new PncpRequestTelemetry();
             var handler = new PncpSchedulingHandler(requestScheduler, requestTelemetry, _performanceTelemetry)
             {
@@ -360,9 +373,23 @@ public partial class App : Application
                 $"migracoes={string.Join(',', initialization.AppliedMigrations)}; " +
                 $"duracao_ms={initialization.Duration.TotalMilliseconds:N1}; " +
                 $"perfil_sqlite={sqliteConnections.ProfileName}.");
-            viewModel.SetStartupPhase("Carregando a pesquisa essencial…");
+            viewModel.SetStartupPhase("Carregando configurações essenciais…");
             await viewModel.InitializeAsync(viewModel.StartupCancellationToken).ConfigureAwait(true);
-            viewModel.CompleteStartup();
+            using (var readyRenderSpan = _performanceTelemetry.Begin("ui", "startup-ready-render"))
+            {
+                viewModel.CompleteStartup();
+                await Dispatcher.InvokeAsync(
+                        static () => { },
+                        DispatcherPriority.ContextIdle)
+                    .Task
+                    .ConfigureAwait(true);
+                readyRenderSpan.Complete();
+            }
+
+            interactiveReadySpan.Complete();
+            _diagnosticLog.Info("startup", "Janela principal interativa; carga secundária iniciada.");
+            await viewModel.InitializeDeferredAsync(viewModel.StartupCancellationToken).ConfigureAwait(true);
+            viewModel.StartBackgroundMaintenance();
             startupSpan.Complete();
             _diagnosticLog.Info("startup", "Janela principal inicializada com sucesso.");
         }

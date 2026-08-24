@@ -43,14 +43,16 @@ public sealed class SystemResourceTests
     }
 
     [Fact]
-    public void MaintenanceDecision_UsesFifteenAndSixtySecondSlices()
+    public void MaintenanceDecision_UsesTenAndSixtySecondSlices()
     {
         var constrained = new AdaptiveMaintenanceCoordinator(new FixedProbe(
             SystemResourceProbe.CreateSnapshot(8 * Gibibyte, 2 * Gibibyte, 75, 4)));
         var normal = new AdaptiveMaintenanceCoordinator(new FixedProbe(
             SystemResourceProbe.CreateSnapshot(16 * Gibibyte, 4 * Gibibyte, 75, 8)));
 
-        Assert.Equal(TimeSpan.FromSeconds(15), constrained.GetDecision().SliceDuration);
+        var constrainedDecision = constrained.GetDecision();
+        Assert.Equal(TimeSpan.FromSeconds(10), constrainedDecision.SliceDuration);
+        Assert.Equal(TimeSpan.FromSeconds(60), constrainedDecision.RetryDelay);
         Assert.Equal(TimeSpan.FromSeconds(60), normal.GetDecision().SliceDuration);
     }
 
@@ -93,6 +95,29 @@ public sealed class SystemResourceTests
         Assert.InRange(immediate.RetryDelay, TimeSpan.FromSeconds(29), TimeSpan.FromSeconds(30));
 
         time.Advance(TimeSpan.FromSeconds(29));
+        Assert.False(coordinator.GetDecision().CanRun);
+        time.Advance(TimeSpan.FromSeconds(1));
+        Assert.True(coordinator.GetDecision().CanRun);
+    }
+
+    [Fact]
+    public void ConstrainedMaintenance_RequiresSixtyIdleSeconds()
+    {
+        var time = new ManualTimeProvider(DateTimeOffset.Parse("2026-08-24T12:00:00Z"));
+        var coordinator = new AdaptiveMaintenanceCoordinator(
+            new FixedProbe(SystemResourceProbe.CreateSnapshot(
+                8 * Gibibyte,
+                2 * Gibibyte,
+                75,
+                4)),
+            time);
+
+        coordinator.NotifyVisibleActivity();
+
+        var immediate = coordinator.GetDecision();
+        Assert.False(immediate.CanRun);
+        Assert.Equal(TimeSpan.FromSeconds(60), immediate.RetryDelay);
+        time.Advance(TimeSpan.FromSeconds(59));
         Assert.False(coordinator.GetDecision().CanRun);
         time.Advance(TimeSpan.FromSeconds(1));
         Assert.True(coordinator.GetDecision().CanRun);

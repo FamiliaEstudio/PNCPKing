@@ -14,7 +14,8 @@ namespace PNCPKing.Infrastructure.Services;
 /// </summary>
 public sealed class ItemSearchSessionService : IAsyncDisposable
 {
-    private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan NormalProgressInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan ConstrainedProgressInterval = TimeSpan.FromMilliseconds(500);
     private const int DefaultNetworkConcurrency = 4;
     private const int MaximumPersistenceConcurrency = 4;
     private static readonly SemaphoreSlim PersistenceGate = new(
@@ -85,6 +86,11 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         _requestScheduler?.GetSnapshot().EffectiveConcurrency ?? DefaultNetworkConcurrency,
         1,
         48);
+
+    private TimeSpan CurrentProgressInterval =>
+        (_requestScheduler?.GetSnapshot().MaximumConcurrency ?? 48) <= 16
+            ? ConstrainedProgressInterval
+            : NormalProgressInterval;
 
     /// <summary>
     /// Opens one contract once, compares its cached item list with every pending
@@ -952,8 +958,9 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
 
         using var linked = CreateLinkedCancellation(cancellationToken);
         await _operationGate.WaitAsync(linked.Token).ConfigureAwait(false);
-        var throttledProgress = new ThrottledProgress<PriceBatchProgress>(progress, ProgressInterval);
-        var throttledRows = new CoalescingRowProgress(rowProgress, ProgressInterval);
+        var progressInterval = CurrentProgressInterval;
+        var throttledProgress = new ThrottledProgress<PriceBatchProgress>(progress, progressInterval);
+        var throttledRows = new CoalescingRowProgress(rowProgress, progressInterval);
         try
         {
             var callsAtStart = Volatile.Read(ref _completedResultCalls);
