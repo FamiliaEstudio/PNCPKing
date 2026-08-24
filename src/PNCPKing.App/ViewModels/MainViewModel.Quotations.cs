@@ -1149,7 +1149,7 @@ public sealed partial class MainViewModel
                     MaximumPriceText = line.MaximumUnitPrice?.ToString("N4") ?? string.Empty;
                     ItemSearchRows.Clear();
                     PriceSearchProgress = 0;
-                    _itemSearchService.Stop();
+                    _transientItemSearchService.Stop();
                     var automationQuery = new SearchQuery(
                         line.SearchText,
                         run.GeoFilter,
@@ -1163,7 +1163,7 @@ public sealed partial class MainViewModel
                         SearchText.Parse(line.SearchText),
                         cancellationToken).ConfigureAwait(true);
                     _searchTelemetryBaseline = _telemetry.GetSnapshot();
-                    await _itemSearchService.StartAsync(
+                    await _transientItemSearchService.StartAsync(
                         automationQuery,
                         cancellationToken).ConfigureAwait(true);
                     SetItemSearchActive(true);
@@ -1174,14 +1174,17 @@ public sealed partial class MainViewModel
                         ItemSearchSummary = prefix + ItemSearchSummary;
                     });
                     var rowsProgress = new Progress<IReadOnlyList<ItemSearchRow>>(AppendUniqueRows);
-                    await _itemSearchService.RunContinuousAsync(
-                        new PriceBatchRequest(line.RequestedBatchCount, true),
+                    await _transientItemSearchService.RunContinuousAsync(
+                        new PriceBatchRequest(
+                            line.RequestedBatchCount,
+                            true,
+                            PriceBatchBudgetMode.CandidateContracts),
                         line.MinimumUnitPrice,
                         line.MaximumUnitPrice,
                         progress,
                         rowsProgress,
                         cancellationToken).ConfigureAwait(true);
-                    var rows = await _itemSearchService.GetDiscoveredRowsAsync(
+                    var rows = await _transientItemSearchService.GetDiscoveredRowsAsync(
                         line.MinimumUnitPrice,
                         line.MaximumUnitPrice,
                         cancellationToken).ConfigureAwait(true);

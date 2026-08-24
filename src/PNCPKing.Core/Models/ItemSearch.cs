@@ -83,9 +83,16 @@ public sealed record ItemSearchPage(
     string GeographicStage = "",
     int CachedItemListsReused = 0);
 
+public enum PriceBatchBudgetMode
+{
+    CandidateContracts = 0,
+    UnresolvedContracts = 1
+}
+
 public sealed record PriceBatchRequest(
     int BatchCount,
-    bool LargeRequestConfirmed = false)
+    bool LargeRequestConfirmed = false,
+    PriceBatchBudgetMode BudgetMode = PriceBatchBudgetMode.CandidateContracts)
 {
     public int RequestedContracts => checked(BatchCount * ItemSearchDefaults.ContractsPerBatch);
 }
@@ -108,7 +115,12 @@ public sealed record PriceBatchProgress(
     int RequestedContracts = 0,
     int ProcessedContracts = 0,
     int MatchedItems = 0,
-    int RevealedPrices = 0);
+    int RevealedPrices = 0,
+    int ExpandedContracts = 0,
+    int FullyResolvedContracts = 0,
+    long RemainingCandidateContracts = -1,
+    int ItemResultCalls = 0,
+    int TotalFailedCalls = 0);
 
 public sealed record TimedPriceBatchResult(
     IReadOnlyList<ItemSearchRow> Rows,

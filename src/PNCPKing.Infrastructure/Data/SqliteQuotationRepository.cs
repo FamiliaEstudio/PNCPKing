@@ -183,7 +183,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                    cursor_random_key, cursor_pncp_id, contracts_examined, batches_completed,
                    candidate_set_exhausted, matched_items, revealed_prices,
                    item_lists_from_cache, item_lists_from_api, item_result_api_calls,
-                   failed_calls, status_message, updated_at
+                   failed_calls, status_message, updated_at,
+                   expanded_contracts, fully_resolved_contracts
               FROM quotation_item_search_workspaces
              WHERE line_id = $lineId AND prompt_slot = $slot;
             """;
@@ -230,6 +231,84 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         }
 
         return values;
+    }
+
+    public async Task<IReadOnlyList<QuotationItemSearchFailure>> GetWorkspaceFailuresAsync(
+        Guid lineId,
+        ItemSearchPromptSlot slot,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT line_id, prompt_slot, contract_id, attempts, last_error, updated_at
+              FROM quotation_item_search_failures
+             WHERE line_id = $lineId AND prompt_slot = $slot
+             ORDER BY updated_at, contract_id;
+            """;
+        command.Parameters.AddWithValue("$lineId", lineId.ToString("N"));
+        command.Parameters.AddWithValue("$slot", (int)slot);
+        var values = new List<QuotationItemSearchFailure>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            values.Add(new QuotationItemSearchFailure
+            {
+                LineId = Guid.ParseExact(reader.GetString(0), "N"),
+                Slot = (ItemSearchPromptSlot)reader.GetInt32(1),
+                ContractId = reader.GetString(2),
+                Attempts = reader.GetInt32(3),
+                LastError = reader.GetString(4),
+                UpdatedAt = ParseDateTime(reader.GetString(5))
+            });
+        }
+
+        return values;
+    }
+
+    public async Task SaveWorkspaceFailureAsync(
+        Guid lineId,
+        ItemSearchPromptSlot slot,
+        string contractId,
+        string error,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(contractId);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO quotation_item_search_failures(
+                line_id, prompt_slot, contract_id, attempts, last_error, updated_at)
+            VALUES($lineId, $slot, $contractId, 1, $error, $updated)
+            ON CONFLICT(line_id, prompt_slot, contract_id) DO UPDATE SET
+                attempts = quotation_item_search_failures.attempts + 1,
+                last_error = excluded.last_error,
+                updated_at = excluded.updated_at;
+            """;
+        command.Parameters.AddWithValue("$lineId", lineId.ToString("N"));
+        command.Parameters.AddWithValue("$slot", (int)slot);
+        command.Parameters.AddWithValue("$contractId", contractId);
+        command.Parameters.AddWithValue("$error", error ?? string.Empty);
+        command.Parameters.AddWithValue("$updated", FormatDateTime(DateTimeOffset.UtcNow));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task RemoveWorkspaceFailureAsync(
+        Guid lineId,
+        ItemSearchPromptSlot slot,
+        string contractId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            DELETE FROM quotation_item_search_failures
+             WHERE line_id = $lineId AND prompt_slot = $slot AND contract_id = $contractId;
+            """;
+        command.Parameters.AddWithValue("$lineId", lineId.ToString("N"));
+        command.Parameters.AddWithValue("$slot", (int)slot);
+        command.Parameters.AddWithValue("$contractId", contractId);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task SaveWorkspaceAsync(
@@ -316,6 +395,18 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             delete.Parameters.AddWithValue("$lineId", workspace.LineId.ToString("N"));
             delete.Parameters.AddWithValue("$slot", (int)workspace.Slot);
             await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var deleteFailures = connection.CreateCommand())
+        {
+            deleteFailures.Transaction = (SqliteTransaction)transaction;
+            deleteFailures.CommandText = """
+                DELETE FROM quotation_item_search_failures
+                 WHERE line_id = $lineId AND prompt_slot = $slot;
+                """;
+            deleteFailures.Parameters.AddWithValue("$lineId", workspace.LineId.ToString("N"));
+            deleteFailures.Parameters.AddWithValue("$slot", (int)workspace.Slot);
+            await deleteFailures.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
         await using (var save = connection.CreateCommand())
@@ -2578,7 +2669,9 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             ItemResultApiCalls = reader.GetInt32(24),
             FailedCalls = reader.GetInt32(25),
             StatusMessage = reader.GetString(26),
-            UpdatedAt = ParseDateTime(reader.GetString(27))
+            UpdatedAt = ParseDateTime(reader.GetString(27)),
+            ExpandedContracts = reader.GetInt32(28),
+            FullyResolvedContracts = reader.GetInt32(29)
         };
     }
 
@@ -2616,13 +2709,15 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                 cursor_random_key, cursor_pncp_id, contracts_examined,
                 batches_completed, candidate_set_exhausted, matched_items,
                 revealed_prices, item_lists_from_cache, item_lists_from_api,
-                item_result_api_calls, failed_calls, status_message, updated_at)
+                item_result_api_calls, failed_calls, status_message, updated_at,
+                expanded_contracts, fully_resolved_contracts)
             VALUES(
                 $lineId, $slot, $text, $geoKind, $geoUf, $start, $end, $sort,
                 $minimum, $maximum, $batches, $pivot, $cursorLayer, $cursorGroup,
                 $cursorBand, $cursorRandom, $cursorPncp, $examined, $completed,
                 $exhausted, $matched, $revealed, $cacheLists, $apiLists,
-                $resultCalls, $failed, $message, $updated)
+                $resultCalls, $failed, $message, $updated, $expandedContracts,
+                $fullyResolvedContracts)
             ON CONFLICT(line_id, prompt_slot) DO UPDATE SET
                 search_text = excluded.search_text,
                 geo_filter_kind = excluded.geo_filter_kind,
@@ -2649,7 +2744,9 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                 item_result_api_calls = excluded.item_result_api_calls,
                 failed_calls = excluded.failed_calls,
                 status_message = excluded.status_message,
-                updated_at = excluded.updated_at;
+                updated_at = excluded.updated_at,
+                expanded_contracts = excluded.expanded_contracts,
+                fully_resolved_contracts = excluded.fully_resolved_contracts;
             """;
         command.Parameters.AddWithValue("$lineId", workspace.LineId.ToString("N"));
         command.Parameters.AddWithValue("$slot", (int)workspace.Slot);
@@ -2679,6 +2776,10 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         command.Parameters.AddWithValue("$failed", Math.Max(0, workspace.FailedCalls));
         command.Parameters.AddWithValue("$message", workspace.StatusMessage);
         command.Parameters.AddWithValue("$updated", FormatDateTime(workspace.UpdatedAt));
+        command.Parameters.AddWithValue("$expandedContracts", Math.Max(0, workspace.ExpandedContracts));
+        command.Parameters.AddWithValue(
+            "$fullyResolvedContracts",
+            Math.Max(0, workspace.FullyResolvedContracts));
     }
 
     private static DateOnly? ParseDate(SqliteDataReader reader, int ordinal) =>

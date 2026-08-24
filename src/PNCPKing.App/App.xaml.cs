@@ -193,12 +193,18 @@ public partial class App : Application
             var itemSearchService = new ItemSearchSessionService(
                 client,
                 repository,
+                Path.Combine(settings.DataFolder, "pncpking-general-search.db"),
+                requestTelemetry,
+                persistentSession: true);
+            var transientItemSearchService = new ItemSearchSessionService(
+                client,
+                repository,
                 Path.Combine(settings.DataFolder, "pncpking-search-session.db"),
                 requestTelemetry);
             var quotationItemSearchService = new QuotationItemSearchService(
                 repository,
                 quotationRepository,
-                itemSearchService);
+                transientItemSearchService);
             var quotationService = new QuotationService(
                 quotationRepository,
                 new QuotationAnalyzer(),
@@ -251,7 +257,7 @@ public partial class App : Application
                 new BcbExchangeRateClient(aiHttpClient, settings.DataFolder));
             var timedAutomation = new TimedQuotationAutomationService(
                 repository,
-                itemSearchService,
+                transientItemSearchService,
                 quotationService);
             var maintenanceCoordinator = new AdaptiveMaintenanceCoordinator(resourceProbe);
             _maintenanceCoordinator = maintenanceCoordinator;
@@ -274,6 +280,7 @@ public partial class App : Application
                 priceCacheService,
                 new ItemHydrationService(client, repository),
                 itemSearchService,
+                transientItemSearchService,
                 quotationItemSearchService,
                 new BackupService(repository, _performanceTelemetry),
                 quotationService,

@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 18;
+    public const int CurrentSchemaVersion = 19;
 
     private const string GeographicGroupExpression = "CASE WHEN c.geo_layer = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -421,6 +421,25 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             span.Complete();
             version = 18;
+        }
+
+        if (version < 19)
+        {
+            using var span = _performance.Begin("startup", "schema-v19");
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await ApplySchemaV19Async(
+                    connection,
+                    (SqliteTransaction)transaction,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 19 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            span.Complete();
+            version = 19;
         }
 
         stopwatch.Stop();
@@ -881,6 +900,40 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         return false;
     }
 
+    private static async Task ApplySchemaV19Async(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        foreach (var (column, definition) in new[]
+                 {
+                     ("expanded_contracts", "INTEGER NOT NULL DEFAULT 0"),
+                     ("fully_resolved_contracts", "INTEGER NOT NULL DEFAULT 0")
+                 })
+        {
+            if (await HasColumnAsync(
+                    connection,
+                    transaction,
+                    "quotation_item_search_workspaces",
+                    column,
+                    cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            await using var add = connection.CreateCommand();
+            add.Transaction = transaction;
+            add.CommandText =
+                $"ALTER TABLE quotation_item_search_workspaces ADD COLUMN {column} {definition};";
+            await add.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using var schema = connection.CreateCommand();
+        schema.Transaction = transaction;
+        schema.CommandText = SchemaV19Sql;
+        await schema.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task UpsertContractsAsync(
         IReadOnlyList<ContractRecord> contracts,
         CancellationToken cancellationToken = default)
@@ -1180,13 +1233,6 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
               ) THEN -1 ELSE COALESCE(c.geo_layer, 1) END
               """
             : "COALESCE(c.geo_layer, 1)";
-        var cachedItemMatch = expression.ItemMatchQuery;
-        var cachedFtsJoin = cachedItemMatch.Length > 0
-            ? "JOIN items_fts ON items_fts.rowid = cached_i.rowid"
-            : string.Empty;
-        var cachedFtsWhere = cachedItemMatch.Length > 0
-            ? "AND items_fts MATCH $cachedItemMatch"
-            : string.Empty;
         var cursorWhere = cursor is null
             ? string.Empty
             : """
@@ -1202,31 +1248,18 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = $"""
-            WITH priced_contracts AS (
-                SELECT DISTINCT cached_i.contract_id
-                  FROM items cached_i
-                  JOIN item_results cached_r
-                    ON cached_r.contract_id = cached_i.contract_id
-                   AND cached_r.item_number = cached_i.item_number
-                  {cachedFtsJoin}
-                 WHERE cached_i.hydration_status = $complete
-                   AND cached_r.result_status_id = 1
-                   AND cached_r.unit_value_scaled > 0
-                   {cachedFtsWhere}
-            ), ranked AS (
+            WITH ranked AS (
                 SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
                        c.additional_information, c.process, c.organization, c.unit, c.municipality,
                        c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
                        c.publication_date, c.global_updated_at, c.total_homologated_scaled,
                        c.distance_from_ribeirao_km,
-                       CASE WHEN priced.contract_id IS NOT NULL THEN -10 ELSE 0 END +
-                           ({geographicLayerExpression}) AS geographic_layer,
+                       ({geographicLayerExpression}) AS geographic_layer,
                        {GeographicGroupExpression} AS group_rank,
                        CASE WHEN COALESCE(c.random_order_key, 0) >= $randomPivot THEN 0 ELSE 1 END AS rotation_band,
                        COALESCE(c.random_order_key, 0) AS random_order_key
                   FROM contracts c
                   {ftsJoin}
-                  LEFT JOIN priced_contracts priced ON priced.contract_id = c.pncp_id
                   {where}
             )
             SELECT * FROM ranked
@@ -1242,11 +1275,6 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         {
             command.Parameters.AddWithValue("$explicitMatch", explicitMatch);
         }
-        if (cachedItemMatch.Length > 0)
-        {
-            command.Parameters.AddWithValue("$cachedItemMatch", cachedItemMatch);
-        }
-        command.Parameters.AddWithValue("$complete", (int)ItemHydrationStatus.Complete);
         command.Parameters.AddWithValue("$randomPivot", randomPivot);
         command.Parameters.AddWithValue("$limit", pageSize + 1);
         AddFilterParameters(command, filters);
@@ -1341,29 +1369,18 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = $"""
-            WITH priced_contracts AS (
-                SELECT DISTINCT cached_i.contract_id
-                  FROM items cached_i
-                  JOIN item_results cached_r
-                    ON cached_r.contract_id = cached_i.contract_id
-                   AND cached_r.item_number = cached_i.item_number
-                 WHERE cached_i.hydration_status = $complete
-                   AND cached_r.result_status_id = 1
-                   AND cached_r.unit_value_scaled > 0
-            ), ranked AS (
+            WITH ranked AS (
                 SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
                        c.additional_information, c.process, c.organization, c.unit, c.municipality,
                        c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
                        c.publication_date, c.global_updated_at, c.total_homologated_scaled,
                        c.distance_from_ribeirao_km,
-                       CASE WHEN priced.contract_id IS NOT NULL THEN -10 ELSE 0 END +
-                           ({geographicPriorityExpression}) AS geographic_layer,
+                       ({geographicPriorityExpression}) AS geographic_layer,
                        {GeographicGroupExpression} AS group_rank,
                        CASE WHEN COALESCE(c.random_order_key, 0) >= $randomPivot THEN 0 ELSE 1 END AS rotation_band,
                        COALESCE(c.random_order_key, 0) AS random_order_key
                   FROM contracts c
                   JOIN contracts_fts ON contracts_fts.rowid = c.rowid
-                  LEFT JOIN priced_contracts priced ON priced.contract_id = c.pncp_id
                   {where}
             )
             SELECT * FROM ranked
@@ -1372,7 +1389,6 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
              LIMIT $limit;
             """;
         command.Parameters.AddWithValue("$contractMatch", contractMatch);
-        command.Parameters.AddWithValue("$complete", (int)ItemHydrationStatus.Complete);
         command.Parameters.AddWithValue("$randomPivot", randomPivot);
         command.Parameters.AddWithValue("$limit", pageSize + 1);
         AddFilterParameters(command, filters);
@@ -4340,6 +4356,23 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                 END,
                 publication_date DESC,
                 pncp_id);
+        """;
+
+    private const string SchemaV19Sql = """
+        CREATE TABLE IF NOT EXISTS quotation_item_search_failures(
+            line_id TEXT NOT NULL,
+            prompt_slot INTEGER NOT NULL,
+            contract_id TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 1,
+            last_error TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(line_id, prompt_slot, contract_id),
+            FOREIGN KEY(line_id, prompt_slot)
+                REFERENCES quotation_item_search_workspaces(line_id, prompt_slot)
+                ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_quotation_item_search_failures_order
+            ON quotation_item_search_failures(line_id, prompt_slot, updated_at, contract_id);
         """;
 
 }

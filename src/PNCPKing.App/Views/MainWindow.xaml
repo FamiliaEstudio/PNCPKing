@@ -342,9 +342,14 @@
                          ToolTip="Preço máximo inclusivo" />
                 <Button Content="Aplicar faixa" Command="{Binding ApplyPriceFilterCommand}" />
                 <TextBox Width="65" Text="{Binding BatchCount, UpdateSourceTrigger=LostFocus}"
-                         HorizontalContentAlignment="Center" ToolTip="1 a 100 lotes de 50 contratações" />
-                <Button Content="Mostrar valores das próximas contratações" Command="{Binding FireBatchesCommand}"
-                        ToolTip="Examina os próximos lotes de 50 contratações e revela todos os itens compatíveis." />
+                         HorizontalContentAlignment="Center"
+                         ToolTip="1 a 100 lotes de até 50 contratações ainda não resolvidas" />
+                <Button Content="Ampliar cobertura" Command="{Binding FireBatchesCommand}"
+                        ToolTip="Avança pelo cursor e usa a cota somente com contratações que ainda exigem rede." />
+                <Button Content="Carregar mais do cache" Command="{Binding LoadNextItemPageCommand}"
+                        ToolTip="Exibe outra página local sem fazer chamadas ao PNCP." />
+                <Button Content="Reiniciar pesquisa" Command="{Binding RestartItemSearchCommand}"
+                        ToolTip="Cria uma nova rotação sem apagar o cache permanente." />
                 <Button Content="Parar preços" Command="{Binding StopItemSearchCommand}" />
             </WrapPanel>
             <Grid Grid.Row="1">

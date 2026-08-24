@@ -782,6 +782,8 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                     $"total: {value.ContractsExamined:N0} contratos, {value.MatchedItems:N0} itens, " +
                     $"{value.RevealedPrices:N0} preços; listas cache/API " +
                     $"{value.ItemListsFromCache:N0}/{value.ItemListsFromApi:N0}; " +
+                    $"contratos cache/API {value.FullyResolvedContracts:N0}/{value.ExpandedContracts:N0}; " +
+                    $"restantes estimadas {Math.Max(0, local.CandidateContracts - value.ContractsExamined):N0}; " +
                     $"resultados API {value.ItemResultApiCalls:N0}; falhas {value.FailedCalls:N0}.";
             });
             var rowProgress = new Progress<IReadOnlyList<ItemSearchRow>>(AppendSearchRows);

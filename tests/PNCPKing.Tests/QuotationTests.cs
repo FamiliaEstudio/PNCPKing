@@ -789,8 +789,9 @@ public sealed class QuotationTests
                 "IFERROR(SUM(J13:J15)/COUNTIF(J13:J15,\">0\"),\"\")",
                 sheet.Cell("C16").FormulaA1);
             Assert.True(sheet.Cell("C16").IsMerged());
+            Assert.Equal("Responsável pela cotação:", sheet.Cell("B25").GetString());
             Assert.Equal(
-                16,
+                25,
                 sheet.LastCellUsed(XLCellsUsedOptions.Contents)!.Address.RowNumber);
             Assert.Equal(6, sheet.ConditionalFormats.Count());
             Assert.Equal(XLCalculateMode.Auto, workbook.CalculateMode);

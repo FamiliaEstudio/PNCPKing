@@ -248,7 +248,8 @@ public partial class QuotationItemWindow : Window
         MessageBox.Show(
             this,
             $"Examinar as próximas {ViewModel.BatchCount * ItemSearchDefaults.ContractsPerBatch:N0} " +
-            "contratações nesta pesquisa individual?",
+            "contratações ainda não resolvidas nesta pesquisa individual? " +
+            "Candidatas já cobertas pelo cache serão avançadas sem consumir essa cota.",
             "Confirmar lotes",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question) == MessageBoxResult.Yes;

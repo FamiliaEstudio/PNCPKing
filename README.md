@@ -22,11 +22,11 @@ A distribuição autocontida mais recente para Windows x64 está em `artifacts\w
 - catálogo nacional embutido das localidades oficiais de 2022 do IBGE, usado somente para distância e ordem geográfica, sem consultas remotas por município;
 - percurso fixo de candidatos: Ribeirão Preto e os outros 49 municípios mais próximos por distância, restante de SP em amostra aleatória estável e depois cada UF pela proximidade de sua sede municipal mais próxima;
 - sorteio estável durante cada pesquisa, paginação por cursor sem repetição e nova rotação aleatória ao iniciar outra pesquisa;
-- três lotes automáticos de 50 contratações e pesquisa contínua de 1 a 100 lotes adicionais; cada lote examina 50 contratações e consulta todos os itens compatíveis encontrados nelas;
+- três lotes automáticos de 50 candidatas e pesquisa interativa de 1 a 100 lotes; na pesquisa interativa, cada lote cobre até 50 contratações ainda não resolvidas e avança gratuitamente pelas já completas no cache;
 - resultados acrescentados progressivamente em uma única grade virtualizada, com percentual, contratações solicitadas/processadas, itens compatíveis, preços revelados e chamadas reais de listas/resultados;
 - grade de preços inicialmente enxuta com as nove colunas principais e layouts de visibilidade, ordem e largura persistidos por grade; o seletor permite restaurar o padrão;
 - biblioteca opcional Sweet Code, persistida no backup, com um crivo por linha e autocomplete por prefixo usando setas e `TAB`;
-- banco temporário separado para os preços automáticos, apagado ao pesquisar novamente, fechar ou reabrir após encerramento inesperado;
+- sessão retomável separada para a última pesquisa geral, com cursor, resultados e falhas preservados ao fechar; a automação continua usando armazenamento temporário isolado;
 - cache permanente opcional e móvel das listas de itens e resultados homologados dos 90 dias mais recentes, autorizado somente após estimativa de espaço/tempo, com checkpoint por contratação, pausa, retomada, poda seletiva e reserva mínima de disco;
 - faixa inclusiva de preço unitário homologado, aplicada somente a resultados ativos e sem conversão entre unidades;
 - projetos persistentes de cotação que copiam a amostra já coletada, respeitando a faixa informada e sem novas chamadas ao PNCP;
@@ -88,7 +88,7 @@ A suíte automatizada cobre pesquisa por objeto e item, geografia, faixa de pre�
 6. Digite o objeto, escolha geografia, período e ordenação e clique em **Pesquisar**.
 7. Você pode combinar termos: `café filtro` ou `café + filtro` exigem ambos; `café OU chá` aceita qualquer um; `"café torrado"` busca a frase; `café -cafeteira -"filtro de papel"` exclui descrições; `"pacote "unidade` aceita qualquer uma dessas unidades estruturadas do item. Acrescente `C:(alimentação escolar, gêneros alimentícios)` para examinar primeiro contratações cujos títulos correspondam a esses crivos; o bloco `C:` seleciona contratos, mas não substitui os termos que identificam o item.
 8. Ao clicar em **Pesquisar**, confira o resumo local exibido na própria tela. O aplicativo examinará automaticamente os três lotes visíveis — até 150 contratações candidatas — e revelará todos os itens compatíveis encontrados.
-9. Para ampliar a sessão atual sem repetir contratações, informe de 1 a 100 lotes e use **Mostrar valores das próximas contratações**. Cada lote contém 50 contratações. Use **Parar preços** para interromper preservando os resultados concluídos.
+9. Para ampliar a sessão atual sem repetir contratações, informe de 1 a 100 lotes e use **Ampliar cobertura**. Cada lote cobre até 50 contratações que ainda exijam rede; as já resolvidas no cache não consomem a cota. Use **Carregar mais do cache** para paginar somente resultados locais, **Reiniciar pesquisa** para criar nova rotação e **Parar preços** para interromper preservando o checkpoint.
 10. Use os campos de preço mínimo/máximo para filtrar o valor unitário homologado ativo.
 11. Para iniciar uma cotação, clique em **Usar esta amostra em uma cotação**, selecione ou crie um projeto e informe quantidade, unidade, alvo automático de 3 a 10 preços e faixa opcional.
 12. Para montar sua própria composição, selecione uma ou mais linhas homologadas com `Ctrl`/`Shift` e use **Criar/adicionar à cesta manual**. Na aba **Cotações**, você pode ampliar, renomear, revisar, confirmar ou excluir essas cestas.

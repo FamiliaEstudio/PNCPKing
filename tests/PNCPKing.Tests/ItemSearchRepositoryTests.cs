@@ -138,6 +138,59 @@ public sealed class ItemSearchRepositoryTests
     }
 
     [Fact]
+    public async Task CandidateCursor_RemainsCompleteWhenCacheChangesBetweenPages()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contracts = Enumerable.Range(1, 12)
+            .Select(number => LocatedContract(
+                $"stable-{number:00}",
+                "São Paulo",
+                "3550308",
+                "SP",
+                number))
+            .ToArray();
+        await database.Repository.UpsertContractsAsync(contracts);
+        var query = new SearchQuery("pincel", GeoScope.All, Sort: SearchSort.Nearest);
+        var expression = PNCPKing.Core.Search.SearchText.Parse(query.Text);
+        var expected = await ReadAllCandidatesAsync(database.Repository, query, expression, 0, 50);
+
+        var first = await database.Repository.SearchItemCandidatesAsync(
+            query,
+            expression,
+            0,
+            null,
+            3);
+        var cachedLater = expected[7].Contract;
+        await database.Repository.UpsertItemsAsync(cachedLater.PncpId, [
+            Item(cachedLater.PncpId, 1, "Pincel escolar", true)
+        ], false);
+        await database.Repository.ReplaceItemResultsAsync(cachedLater.PncpId, 1, [
+            Result(cachedLater.PncpId, 1, 12m)
+        ]);
+
+        var actual = new List<ItemContractCandidate>(first.Results);
+        var cursor = first.NextCursor;
+        var hasMore = first.HasMore;
+        while (hasMore)
+        {
+            var page = await database.Repository.SearchItemCandidatesAsync(
+                query,
+                expression,
+                0,
+                cursor,
+                3);
+            actual.AddRange(page.Results);
+            cursor = page.NextCursor;
+            hasMore = page.HasMore;
+        }
+
+        Assert.Equal(
+            expected.Select(value => value.Contract.PncpId),
+            actual.Select(value => value.Contract.PncpId));
+        Assert.Equal(actual.Count, actual.Select(value => value.Contract.PncpId).Distinct().Count());
+    }
+
+    [Fact]
     public async Task ExplicitContractCandidates_ArePrioritizedDeduplicatedAndDoNotMatchItems()
     {
         await using var database = await TestDatabase.CreateAsync();

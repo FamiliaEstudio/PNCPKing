@@ -1,3 +1,4 @@
+using Microsoft.Data.Sqlite;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
 using PNCPKing.Infrastructure.Data;
@@ -7,6 +8,34 @@ namespace PNCPKing.Tests;
 
 public sealed class QuotationItemSearchTests
 {
+    [Fact]
+    public async Task Migration18To19_AddsCoverageCountersAndFailureQueue()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        SqliteConnection.ClearAllPools();
+        await using (var connection = new SqliteConnection(
+                         $"Data Source={database.Repository.DatabasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var downgrade = connection.CreateCommand();
+            downgrade.CommandText = """
+                DROP TABLE quotation_item_search_failures;
+                ALTER TABLE quotation_item_search_workspaces DROP COLUMN expanded_contracts;
+                ALTER TABLE quotation_item_search_workspaces DROP COLUMN fully_resolved_contracts;
+                UPDATE schema_info SET version = 18 WHERE id = 1;
+                """;
+            await downgrade.ExecuteNonQueryAsync();
+        }
+
+        var initialization = await new SqliteContractRepository(
+                database.Repository.DatabasePath)
+            .InitializeAsync();
+
+        Assert.Equal(18, initialization.PreviousVersion);
+        Assert.Equal(19, initialization.CurrentVersion);
+        Assert.Equal([19], initialization.AppliedMigrations);
+    }
+
     [Fact]
     public async Task WorkspaceRepository_PersistsSlotsFiltersCursorHitsAndResetIndependently()
     {
@@ -50,6 +79,11 @@ public sealed class QuotationItemSearchTests
         };
 
         await quotation.SaveProcessedContractAsync(restrictive, [hit]);
+        await quotation.SaveWorkspaceFailureAsync(
+            lineId,
+            ItemSearchPromptSlot.Restrictive,
+            "contrato-falho",
+            "falha transitória");
         await quotation.SaveWorkspaceAsync(
             Workspace(lineId, ItemSearchPromptSlot.Custom, "agulha bordado"));
 
@@ -69,6 +103,9 @@ public sealed class QuotationItemSearchTests
         Assert.Empty(await quotation.GetWorkspaceHitsAsync(
             lineId,
             ItemSearchPromptSlot.Custom));
+        Assert.Single(await quotation.GetWorkspaceFailuresAsync(
+            lineId,
+            ItemSearchPromptSlot.Restrictive));
 
         await quotation.ResetWorkspaceAsync(restrictive with
         {
@@ -79,6 +116,9 @@ public sealed class QuotationItemSearchTests
         });
 
         Assert.Empty(await quotation.GetWorkspaceHitsAsync(
+            lineId,
+            ItemSearchPromptSlot.Restrictive));
+        Assert.Empty(await quotation.GetWorkspaceFailuresAsync(
             lineId,
             ItemSearchPromptSlot.Restrictive));
         Assert.Equal(
@@ -240,6 +280,167 @@ public sealed class QuotationItemSearchTests
                 ItemSearchPromptSlot.Restrictive)).Count);
     }
 
+    [Fact]
+    public async Task IndependentSearch_RetriesFailuresAfterUnseenCandidatesAndDoesNotBlockCoverage()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await database.Repository.UpsertContractsAsync([Contract(1), Contract(2)]);
+        var quotation = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var project = await quotation.CreateProjectAsync("Falhas retomáveis");
+        var lineId = Guid.NewGuid();
+        await quotation.SaveSampleAsync(
+            project.Id,
+            lineId,
+            new QuotationLineInput("Agulha", 10, "unidade", null, null),
+            []);
+        var client = new CountingClient(failFirstItemList: true);
+        await using var itemSearch = new ItemSearchSessionService(
+            client,
+            database.Repository,
+            Path.Combine(database.Directory, "quotation-failures.db"));
+        var service = new QuotationItemSearchService(database.Repository, quotation, itemSearch);
+        var seed = Workspace(lineId, ItemSearchPromptSlot.Restrictive, "agulha") with
+        {
+            BatchCount = 1
+        };
+
+        var first = await service.RunAsync(seed, restart: true);
+
+        Assert.True(first.Workspace.Checkpoint.CandidateSetExhausted);
+        Assert.Equal(2, first.Workspace.ExpandedContracts);
+        Assert.Single(first.Rows);
+        Assert.Single(await quotation.GetWorkspaceFailuresAsync(
+            lineId,
+            ItemSearchPromptSlot.Restrictive));
+
+        var resumed = await service.RunAsync(seed, restart: false);
+
+        Assert.Equal(2, resumed.Rows.Count);
+        Assert.Empty(await quotation.GetWorkspaceFailuresAsync(
+            lineId,
+            ItemSearchPromptSlot.Restrictive));
+        Assert.Equal(3, client.ItemListCalls);
+        Assert.Equal(2, client.ResultCalls);
+    }
+
+    [Fact]
+    public async Task IndependentSearch_CachedContractsDoNotConsumeTheUnresolvedQuota()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contracts = Enumerable.Range(1, 60).Select(Contract).ToArray();
+        await database.Repository.UpsertContractsAsync(contracts);
+        var quotation = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var project = await quotation.CreateProjectAsync("Orçamento por não resolvidas");
+        var lineId = Guid.NewGuid();
+        await quotation.SaveSampleAsync(
+            project.Id,
+            lineId,
+            new QuotationLineInput("Agulha", 10, "unidade", null, null),
+            []);
+        var seed = Workspace(lineId, ItemSearchPromptSlot.Restrictive, "agulha") with
+        {
+            BatchCount = 1,
+            Checkpoint = new QuotationItemSearchCheckpoint { RandomPivot = 1 }
+        };
+        var candidateOrder = await database.Repository.SearchItemCandidatesAsync(
+            new SearchQuery(
+                seed.SearchText,
+                seed.GeoFilter,
+                seed.StartDate,
+                seed.EndDate,
+                seed.Sort,
+                1,
+                100),
+            PNCPKing.Core.Search.SearchText.Parse(seed.SearchText),
+            seed.Checkpoint.RandomPivot,
+            null,
+            100);
+        foreach (var candidate in candidateOrder.Results.Take(10))
+        {
+            await database.Repository.UpsertItemsAsync(candidate.Contract.PncpId, [
+                SearchItem(candidate.Contract.PncpId)
+            ], false);
+            await database.Repository.ReplaceItemResultsAsync(candidate.Contract.PncpId, 1, [
+                SearchResult(candidate.Contract)
+            ]);
+        }
+
+        var client = new CountingClient();
+        await using var itemSearch = new ItemSearchSessionService(
+            client,
+            database.Repository,
+            Path.Combine(database.Directory, "quotation-unresolved.db"));
+        var service = new QuotationItemSearchService(database.Repository, quotation, itemSearch);
+
+        var completed = await service.RunAsync(seed, restart: false);
+
+        Assert.Equal(60, completed.Workspace.Checkpoint.ContractsExamined);
+        Assert.Equal(50, completed.Workspace.ExpandedContracts);
+        Assert.Equal(10, completed.Workspace.FullyResolvedContracts);
+        Assert.Equal(50, client.ItemListCalls);
+        Assert.Equal(50, client.ResultCalls);
+        Assert.True(completed.Workspace.Checkpoint.CandidateSetExhausted);
+    }
+
+    [Fact]
+    public async Task IndependentSearch_ShowsOnlyPositivePricesAndPreservesRawCachedResults()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contracts = Enumerable.Range(1, 3).Select(Contract).ToArray();
+        await database.Repository.UpsertContractsAsync(contracts);
+        var quotation = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var project = await quotation.CreateProjectAsync("Preços úteis");
+        var lineId = Guid.NewGuid();
+        await quotation.SaveSampleAsync(
+            project.Id,
+            lineId,
+            new QuotationLineInput("Agulha", 10, "unidade", null, null),
+            []);
+        var client = new CountingClient(resultFactory: contract => contract.PurchaseSequence switch
+        {
+            1 => [SearchResult(contract) with { HomologatedUnitValueScaled = null }],
+            2 => [SearchResult(contract) with { HomologatedUnitValueScaled = DecimalScale.ToScaled(0m) }],
+            3 =>
+            [
+                SearchResult(contract) with
+                {
+                    HomologatedUnitValueScaled = DecimalScale.ToScaled(0.01m)
+                },
+                SearchResult(contract) with
+                {
+                    ResultSequence = 2,
+                    HomologatedUnitValueScaled = DecimalScale.ToScaled(0.10m),
+                    ResultStatusId = 2,
+                    ResultStatusName = "Cancelado"
+                }
+            ],
+            _ => throw new InvalidOperationException()
+        });
+        await using var itemSearch = new ItemSearchSessionService(
+            client,
+            database.Repository,
+            Path.Combine(database.Directory, "quotation-useful-prices.db"));
+        var service = new QuotationItemSearchService(database.Repository, quotation, itemSearch);
+
+        var completed = await service.RunAsync(
+            Workspace(lineId, ItemSearchPromptSlot.Restrictive, "agulha") with { BatchCount = 1 },
+            restart: true);
+
+        Assert.Equal(3, completed.Workspace.MatchedItems);
+        Assert.Equal(1, completed.Workspace.RevealedPrices);
+        Assert.Equal([0.01m, 0.10m], completed.Rows
+            .Select(row => row.HomologatedUnitValue!.Value)
+            .Order()
+            .ToArray());
+        Assert.Single(completed.Rows, row => row.PriceState == ItemSearchPriceState.Cancelled);
+        var missingPrice = Assert.IsType<CachedItemResults>(
+            await database.Repository.GetCachedItemResultsAsync(contracts[0].PncpId, 1));
+        var zeroPrice = Assert.IsType<CachedItemResults>(
+            await database.Repository.GetCachedItemResultsAsync(contracts[1].PncpId, 1));
+        Assert.Null(Assert.Single(missingPrice.Results).HomologatedUnitValue);
+        Assert.Equal(0m, Assert.Single(zeroPrice.Results).HomologatedUnitValue);
+    }
+
     private static QuotationItemSearchWorkspace Workspace(
         Guid lineId,
         ItemSearchPromptSlot slot,
@@ -274,7 +475,32 @@ public sealed class QuotationItemSearchTests
                 .AddMinutes(number)
         };
 
-    private sealed class CountingClient : IPncpClient
+    private static ProcurementItem SearchItem(string contractId) => new()
+    {
+        ContractId = contractId,
+        ItemNumber = 1,
+        Description = "Agulha para bordado",
+        Unit = "unidade",
+        RequestedQuantityScaled = DecimalScale.ToScaled(10),
+        Status = "Ativo",
+        HasResult = true,
+        HydrationStatus = ItemHydrationStatus.NotLoaded
+    };
+
+    private static HomologationResult SearchResult(ContractRecord contract) => new()
+    {
+        ContractId = contract.PncpId,
+        ItemNumber = 1,
+        ResultSequence = 1,
+        SupplierName = $"Fornecedor {contract.PurchaseSequence}",
+        HomologatedUnitValueScaled = DecimalScale.ToScaled(contract.PurchaseSequence),
+        ResultStatusId = 1,
+        ResultStatusName = "Informado"
+    };
+
+    private sealed class CountingClient(
+        bool failFirstItemList = false,
+        Func<ContractRecord, IReadOnlyList<HomologationResult>>? resultFactory = null) : IPncpClient
     {
         public int ItemListCalls { get; private set; }
         public int ResultCalls { get; private set; }
@@ -304,6 +530,11 @@ public sealed class QuotationItemSearchTests
             CancellationToken cancellationToken = default)
         {
             ItemListCalls++;
+            if (failFirstItemList && ItemListCalls == 1)
+            {
+                throw new HttpRequestException("falha definitiva simulada");
+            }
+
             return Task.FromResult<IReadOnlyList<ProcurementItem>>(
             [
                 new ProcurementItem
@@ -326,24 +557,26 @@ public sealed class QuotationItemSearchTests
             CancellationToken cancellationToken = default)
         {
             ResultCalls++;
-            return Task.FromResult<IReadOnlyList<HomologationResult>>(
-            [
-                new HomologationResult
-                {
-                    ContractId = contract.PncpId,
-                    ItemNumber = itemNumber,
-                    ResultSequence = 1,
-                    SupplierName = $"Fornecedor {contract.PurchaseSequence}",
-                    SupplierTaxId = "11222333000181",
-                    HomologatedQuantityScaled = DecimalScale.ToScaled(10),
-                    HomologatedUnitValueScaled = DecimalScale.ToScaled(contract.PurchaseSequence),
-                    HomologatedTotalValueScaled = DecimalScale.ToScaled(
-                        contract.PurchaseSequence * 10m),
-                    ResultDate = new DateOnly(2026, 7, 2),
-                    ResultStatusId = 1,
-                    ResultStatusName = "Informado"
-                }
-            ]);
+            return Task.FromResult(
+                resultFactory?.Invoke(contract) ??
+                (IReadOnlyList<HomologationResult>)
+                [
+                    new HomologationResult
+                    {
+                        ContractId = contract.PncpId,
+                        ItemNumber = itemNumber,
+                        ResultSequence = 1,
+                        SupplierName = $"Fornecedor {contract.PurchaseSequence}",
+                        SupplierTaxId = "11222333000181",
+                        HomologatedQuantityScaled = DecimalScale.ToScaled(10),
+                        HomologatedUnitValueScaled = DecimalScale.ToScaled(contract.PurchaseSequence),
+                        HomologatedTotalValueScaled = DecimalScale.ToScaled(
+                            contract.PurchaseSequence * 10m),
+                        ResultDate = new DateOnly(2026, 7, 2),
+                        ResultStatusId = 1,
+                        ResultStatusName = "Informado"
+                    }
+                ]);
         }
     }
 

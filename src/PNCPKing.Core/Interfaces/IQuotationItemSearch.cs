@@ -12,6 +12,10 @@ public interface IQuotationItemSearchRepository
         Guid lineId,
         ItemSearchPromptSlot slot,
         CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<QuotationItemSearchFailure>> GetWorkspaceFailuresAsync(
+        Guid lineId,
+        ItemSearchPromptSlot slot,
+        CancellationToken cancellationToken = default);
     Task SaveWorkspaceAsync(
         QuotationItemSearchWorkspace workspace,
         CancellationToken cancellationToken = default);
@@ -21,6 +25,17 @@ public interface IQuotationItemSearchRepository
         CancellationToken cancellationToken = default);
     Task ResetWorkspaceAsync(
         QuotationItemSearchWorkspace workspace,
+        CancellationToken cancellationToken = default);
+    Task SaveWorkspaceFailureAsync(
+        Guid lineId,
+        ItemSearchPromptSlot slot,
+        string contractId,
+        string error,
+        CancellationToken cancellationToken = default);
+    Task RemoveWorkspaceFailureAsync(
+        Guid lineId,
+        ItemSearchPromptSlot slot,
+        string contractId,
         CancellationToken cancellationToken = default);
 }
 

@@ -227,7 +227,7 @@
                         <TextBlock Text="Preço máximo" VerticalAlignment="Center" Margin="10,0,0,0" />
                         <TextBox Width="105" Text="{Binding MaximumPriceText, UpdateSourceTrigger=PropertyChanged}" />
                         <Button Content="Aplicar faixa" Click="ApplyPriceFilter_Click" />
-                        <TextBlock Text="Lotes de 50" VerticalAlignment="Center" Margin="16,0,0,0" />
+                        <TextBlock Text="Lotes de até 50 não resolvidas" VerticalAlignment="Center" Margin="16,0,0,0" />
                         <TextBox Width="55" Text="{Binding BatchCount, UpdateSourceTrigger=LostFocus}"
                                  HorizontalContentAlignment="Center" />
                         <Button Content="Pesquisar" Click="Search_Click" MinWidth="95" />

@@ -44,6 +44,8 @@ public sealed record QuotationItemSearchWorkspace
     public int ItemListsFromApi { get; init; }
     public int ItemResultApiCalls { get; init; }
     public int FailedCalls { get; init; }
+    public int ExpandedContracts { get; init; }
+    public int FullyResolvedContracts { get; init; }
     public string StatusMessage { get; init; } = string.Empty;
     public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
 }
@@ -57,6 +59,16 @@ public sealed record QuotationItemSearchHit
     public PromptMatchLevel? MatchedPromptLevel { get; init; }
     public string MatchedSearchText { get; init; } = string.Empty;
     public long DiscoveredOrder { get; init; }
+}
+
+public sealed record QuotationItemSearchFailure
+{
+    public required Guid LineId { get; init; }
+    public ItemSearchPromptSlot Slot { get; init; }
+    public required string ContractId { get; init; }
+    public int Attempts { get; init; }
+    public string LastError { get; init; } = string.Empty;
+    public DateTimeOffset UpdatedAt { get; init; }
 }
 
 public sealed record QuotationItemSearchState(
@@ -76,6 +88,8 @@ public sealed record QuotationItemSearchProgress
     public int ItemListsFromApi { get; init; }
     public int ItemResultApiCalls { get; init; }
     public int FailedCalls { get; init; }
+    public int ExpandedContracts { get; init; }
+    public int FullyResolvedContracts { get; init; }
     public bool CandidateSetExhausted { get; init; }
     public string Message { get; init; } = string.Empty;
 
