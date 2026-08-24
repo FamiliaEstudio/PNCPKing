@@ -50,6 +50,16 @@ public sealed class BackupService(
                 await CompactSnapshotAsync(snapshotPath, cancellationToken).ConfigureAwait(false);
             }
 
+            using (var integritySpan = _performance.Begin("backup", "export-integrity"))
+            {
+                await ValidateDatabaseAsync(
+                    snapshotPath,
+                    SqliteContractRepository.CurrentSchemaVersion,
+                    checkIntegrity: true,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                integritySpan.Complete(bytes: new FileInfo(snapshotPath).Length);
+            }
+
             var hash = await ComputeSha256Async(snapshotPath, cancellationToken).ConfigureAwait(false);
             var evidenceAssets = await ReadReferencedEvidenceAssetsAsync(snapshotPath, cancellationToken)
                 .ConfigureAwait(false);
@@ -75,6 +85,7 @@ public sealed class BackupService(
                 ResultCount = snapshotCounts.Results,
                 CreatedAt = DateTimeOffset.UtcNow,
                 DatabaseSha256 = hash,
+                DatabaseIntegrityValidatedAtExport = true,
                 EvidenceAssets = evidenceAssets
                     .Select(asset => new EvidenceAssetManifest
                     {
@@ -233,6 +244,7 @@ public sealed class BackupService(
             var stagedEvidenceFolder = Path.Combine(temporaryDirectory, "internet-evidence");
             DatasetManifest manifest;
             string actualHash;
+            using var extractionSpan = _performance.Begin("backup", "import-extraction");
             using (var archive = ZipFile.OpenRead(sourcePath))
             {
                 var manifestEntry = archive.GetEntry("manifest.json")
@@ -301,6 +313,7 @@ public sealed class BackupService(
                         cancellationToken).ConfigureAwait(false);
                 }
             }
+            extractionSpan.Complete(bytes: inspection.DatabaseBytes);
 
             Report(progress, BackupImportStage.VerifyingChecksum, 43, "Checksum calculado durante a extração.");
             if (!CryptographicOperations.FixedTimeEquals(
@@ -310,16 +323,42 @@ public sealed class BackupService(
                 throw new InvalidDataException("O checksum do banco não corresponde ao manifesto.");
             }
 
-            Report(
-                progress,
-                BackupImportStage.CheckingIntegrity,
-                45,
-                "Verificando a integridade SQLite; esta etapa pode demorar em discos lentos…");
-            await ValidateDatabaseAsync(
-                importedDatabase,
-                manifest.SchemaVersion,
-                cancellationToken).ConfigureAwait(false);
-            Report(progress, BackupImportStage.CheckingIntegrity, 58, "Integridade original confirmada.");
+            if (manifest.DatabaseIntegrityValidatedAtExport == true)
+            {
+                Report(
+                    progress,
+                    BackupImportStage.CheckingIntegrity,
+                    45,
+                    "Backup validado integralmente na origem; confirmando a versão interna…");
+                using var validationSpan = _performance.Begin("backup", "import-origin-validation");
+                await ValidateDatabaseAsync(
+                    importedDatabase,
+                    manifest.SchemaVersion,
+                    checkIntegrity: false,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                validationSpan.Complete(bytes: inspection.DatabaseBytes);
+                Report(
+                    progress,
+                    BackupImportStage.CheckingIntegrity,
+                    58,
+                    "Integridade confirmada na origem e protegida pelo checksum SHA-256.");
+            }
+            else
+            {
+                Report(
+                    progress,
+                    BackupImportStage.CheckingIntegrity,
+                    45,
+                    "Backup legado; verificando integralmente o SQLite neste computador…");
+                using var integritySpan = _performance.Begin("backup", "import-full-integrity");
+                await ValidateDatabaseAsync(
+                    importedDatabase,
+                    manifest.SchemaVersion,
+                    checkIntegrity: true,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                integritySpan.Complete(bytes: inspection.DatabaseBytes);
+                Report(progress, BackupImportStage.CheckingIntegrity, 58, "Integridade local confirmada.");
+            }
 
             var databaseAssets = await ReadReferencedEvidenceAssetsAsync(
                 importedDatabase,
@@ -355,10 +394,13 @@ public sealed class BackupService(
                     BackupImportStage.CheckingIntegrity,
                     70,
                     "Migração concluída; verificando novamente a integridade…");
+                using var integritySpan = _performance.Begin("backup", "import-full-integrity");
                 await ValidateDatabaseAsync(
                     importedDatabase,
                     SqliteContractRepository.CurrentSchemaVersion,
-                    cancellationToken).ConfigureAwait(false);
+                    checkIntegrity: true,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                integritySpan.Complete(bytes: inspection.DatabaseBytes);
             }
 
             if (manifest.BackupProfile == BackupProfile.Compact)
@@ -366,6 +408,7 @@ public sealed class BackupService(
                 await DisableImportedCompactCacheAsync(importedDatabase, cancellationToken).ConfigureAwait(false);
             }
 
+            using var installationSpan = _performance.Begin("backup", "import-installation");
             var dataFolder = Path.GetDirectoryName(repository.DatabasePath)!;
             Report(progress, BackupImportStage.InstallingEvidence, 80, "Validando e instalando evidências…");
             await InstallStagedEvidenceAsync(
@@ -420,6 +463,7 @@ public sealed class BackupService(
 
                 throw;
             }
+            installationSpan.Complete(bytes: inspection.DatabaseBytes);
 
             span.Complete(bytes: inspection.DatabaseBytes);
             return recoverableBackup;
@@ -564,7 +608,8 @@ public sealed class BackupService(
         await ValidateDatabaseAsync(
             databasePath,
             SqliteContractRepository.CurrentSchemaVersion,
-            cancellationToken).ConfigureAwait(false);
+            checkIntegrity: false,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task<(long Items, long Results, long PriceCacheContracts)> ReadDatabaseCountsAsync(
@@ -593,6 +638,7 @@ public sealed class BackupService(
     private static async Task ValidateDatabaseAsync(
         string path,
         int expectedSchemaVersion,
+        bool checkIntegrity,
         CancellationToken cancellationToken)
     {
         var connectionString = new SqliteConnectionStringBuilder
@@ -603,14 +649,17 @@ public sealed class BackupService(
         }.ToString();
         await using var connection = new SqliteConnection(connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var integrity = connection.CreateCommand();
-        integrity.CommandText = "PRAGMA integrity_check;";
-        var result = Convert.ToString(
-            await integrity.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
-            CultureInfo.InvariantCulture);
-        if (!string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
+        if (checkIntegrity)
         {
-            throw new InvalidDataException($"Falha de integridade do SQLite: {result}");
+            await using var integrity = connection.CreateCommand();
+            integrity.CommandText = "PRAGMA integrity_check;";
+            var result = Convert.ToString(
+                await integrity.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                CultureInfo.InvariantCulture);
+            if (!string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException($"Falha de integridade do SQLite: {result}");
+            }
         }
 
         await using var version = connection.CreateCommand();

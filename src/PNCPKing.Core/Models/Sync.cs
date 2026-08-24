@@ -110,6 +110,7 @@ public sealed record DatasetManifest
     public long ResultCount { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
     public string DatabaseSha256 { get; init; } = string.Empty;
+    public bool? DatabaseIntegrityValidatedAtExport { get; init; }
     public IReadOnlyList<EvidenceAssetManifest> EvidenceAssets { get; init; } = [];
     public BackupProfile? BackupProfile { get; init; }
     public bool? ContainsPriceCache { get; init; }

@@ -1,5 +1,8 @@
 using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
+using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
 using PNCPKing.Infrastructure.Data;
 using PNCPKing.Infrastructure.Services;
@@ -18,6 +21,7 @@ public sealed class BackupTests
         var service = new BackupService(database.Repository);
         var backupPath = Path.Combine(database.Directory, "backup.pncpking");
         await service.ExportAsync(backupPath);
+        var manifest = await ReadManifestAsync(backupPath);
 
         await database.Repository.UpsertContractsAsync([
             RepositorySearchTests.Contract("later", "Registro posterior", "BA", 2)
@@ -26,6 +30,7 @@ public sealed class BackupTests
         var result = await database.Repository.SearchAsync(new SearchQuery(string.Empty, GeoScope.All));
 
         Assert.True(File.Exists(recoveryPath));
+        Assert.True(manifest.DatabaseIntegrityValidatedAtExport is true);
         Assert.Single(result.Results);
         Assert.Equal("original", result.Results[0].PncpId);
     }
@@ -37,9 +42,12 @@ public sealed class BackupTests
         await database.Repository.UpsertContractsAsync([
             RepositorySearchTests.Contract("progress", "Progresso de importação", "SP", 1)
         ]);
-        var service = new BackupService(database.Repository);
+        var telemetry = new RecordingPerformanceTelemetry();
+        var service = new BackupService(database.Repository, telemetry);
         var backupPath = Path.Combine(database.Directory, "progress.pncpking");
         await service.ExportAsync(backupPath, BackupProfile.Compact);
+        Assert.Contains(("backup", "export-integrity"), telemetry.Measurements);
+        telemetry.Clear();
         var inspection = await service.InspectAsync(backupPath);
         var progress = new RecordingProgress<BackupImportProgress>();
 
@@ -53,6 +61,49 @@ public sealed class BackupTests
         Assert.Contains(progress.Values, item => item.Stage == BackupImportStage.VerifyingChecksum);
         Assert.Contains(progress.Values, item => item.Stage == BackupImportStage.CheckingIntegrity);
         Assert.Contains(progress.Values, item => item.Stage == BackupImportStage.Completed && item.Percentage == 100d);
+        Assert.Contains(("backup", "import-extraction"), telemetry.Measurements);
+        Assert.Contains(("backup", "import-origin-validation"), telemetry.Measurements);
+        Assert.Contains(("backup", "import-installation"), telemetry.Measurements);
+        Assert.DoesNotContain(("backup", "import-full-integrity"), telemetry.Measurements);
+    }
+
+    [Fact]
+    public async Task Import_LegacyBackupKeepsFullLocalIntegrityCheck()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var backupPath = Path.Combine(database.Directory, "legacy.pncpking");
+        await new BackupService(database.Repository).ExportAsync(backupPath);
+        ReplaceEntry(backupPath, "manifest.json", bytes =>
+        {
+            var manifest = JsonSerializer.Deserialize<DatasetManifest>(bytes)! with
+            {
+                DatabaseIntegrityValidatedAtExport = null
+            };
+            return JsonSerializer.SerializeToUtf8Bytes(manifest);
+        });
+        var telemetry = new RecordingPerformanceTelemetry();
+
+        await new BackupService(database.Repository, telemetry).ImportAsync(backupPath);
+
+        Assert.Contains(("backup", "import-full-integrity"), telemetry.Measurements);
+        Assert.DoesNotContain(("backup", "import-origin-validation"), telemetry.Measurements);
+    }
+
+    [Fact]
+    public async Task Import_ValidatesAgainAfterMigratingOriginValidatedBackup()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var backupPath = Path.Combine(database.Directory, "schema-20.pncpking");
+        await new BackupService(database.Repository).ExportAsync(backupPath);
+        await RewriteBackupSchemaVersionAsync(backupPath, 20);
+        var telemetry = new RecordingPerformanceTelemetry();
+
+        await new BackupService(database.Repository, telemetry).ImportAsync(backupPath);
+        var initialization = await database.Repository.InitializeAsync();
+
+        Assert.Equal(SqliteContractRepository.CurrentSchemaVersion, initialization.CurrentVersion);
+        Assert.Contains(("backup", "import-origin-validation"), telemetry.Measurements);
+        Assert.Contains(("backup", "import-full-integrity"), telemetry.Measurements);
     }
 
     [Fact]
@@ -138,6 +189,7 @@ public sealed class BackupTests
             await using var stream = archive.GetEntry("manifest.json")!.Open();
             var manifest = await JsonSerializer.DeserializeAsync<DatasetManifest>(stream);
             Assert.Equal(BackupProfile.Compact, manifest!.BackupProfile);
+            Assert.True(manifest.DatabaseIntegrityValidatedAtExport is true);
             Assert.False(manifest.ContainsPriceCache);
             Assert.Equal(0, manifest.ItemCount);
             Assert.Equal(0, manifest.ResultCount);
@@ -152,6 +204,60 @@ public sealed class BackupTests
         Assert.False(policy.Enabled);
         Assert.Equal(0, counts.Items);
         Assert.Equal(0, counts.Results);
+    }
+
+    private static async Task<DatasetManifest> ReadManifestAsync(string archivePath)
+    {
+        using var archive = ZipFile.OpenRead(archivePath);
+        await using var stream = archive.GetEntry("manifest.json")!.Open();
+        return (await JsonSerializer.DeserializeAsync<DatasetManifest>(stream))!;
+    }
+
+    private static async Task RewriteBackupSchemaVersionAsync(string archivePath, int schemaVersion)
+    {
+        byte[] databaseBytes;
+        using (var archive = ZipFile.OpenRead(archivePath))
+        {
+            await using var input = archive.GetEntry("data.db")!.Open();
+            using var memory = new MemoryStream();
+            await input.CopyToAsync(memory);
+            databaseBytes = memory.ToArray();
+        }
+
+        var temporaryDatabase = Path.Combine(
+            Path.GetDirectoryName(archivePath)!,
+            $"rewrite-{Guid.NewGuid():N}.db");
+        try
+        {
+            await File.WriteAllBytesAsync(temporaryDatabase, databaseBytes);
+            await using (var connection = new SqliteConnection($"Data Source={temporaryDatabase};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = "UPDATE schema_info SET version = $version WHERE id = 1;";
+                command.Parameters.AddWithValue("$version", schemaVersion);
+                await command.ExecuteNonQueryAsync();
+            }
+
+            databaseBytes = await File.ReadAllBytesAsync(temporaryDatabase);
+        }
+        finally
+        {
+            File.Delete(temporaryDatabase);
+        }
+
+        var hash = Convert.ToHexString(SHA256.HashData(databaseBytes));
+        ReplaceEntry(archivePath, "data.db", _ => databaseBytes);
+        ReplaceEntry(archivePath, "manifest.json", bytes =>
+        {
+            var manifest = JsonSerializer.Deserialize<DatasetManifest>(bytes)! with
+            {
+                SchemaVersion = schemaVersion,
+                DatabaseSha256 = hash,
+                DatabaseIntegrityValidatedAtExport = true
+            };
+            return JsonSerializer.SerializeToUtf8Bytes(manifest);
+        });
     }
 
     private static void ReplaceEntry(string archivePath, string entryName, Func<byte[], byte[]> transform)
@@ -178,5 +284,27 @@ public sealed class BackupTests
         public List<T> Values { get; } = [];
 
         public void Report(T value) => Values.Add(value);
+    }
+
+    private sealed class RecordingPerformanceTelemetry : IPerformanceTelemetry
+    {
+        public List<(string Operation, string Phase)> Measurements { get; } = [];
+
+        public PerformanceSpan Begin(string operation, string phase = "total") =>
+            new(this, operation, phase);
+
+        public void Record(
+            string operation,
+            string phase,
+            TimeSpan duration,
+            long rows = 0,
+            long bytes = 0,
+            bool succeeded = true,
+            string? errorKind = null) =>
+            Measurements.Add((operation, phase));
+
+        public PerformanceReport CreateReport() => throw new NotSupportedException();
+
+        public void Clear() => Measurements.Clear();
     }
 }
