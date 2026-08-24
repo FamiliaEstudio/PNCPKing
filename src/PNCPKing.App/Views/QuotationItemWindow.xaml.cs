@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -309,6 +310,54 @@ public partial class QuotationItemWindow : Window
         }
 
         await RunAsync(ViewModel.ConfirmSelectedBasketAsync).ConfigureAwait(true);
+    }
+
+    private async void UseMean_Click(object sender, RoutedEventArgs e) =>
+        await RunAsync(() => ViewModel.SetAggregationMethodAsync(
+            QuotationAggregationMethod.Mean)).ConfigureAwait(true);
+
+    private async void UseMedian_Click(object sender, RoutedEventArgs e) =>
+        await RunAsync(() => ViewModel.SetAggregationMethodAsync(
+            QuotationAggregationMethod.Median)).ConfigureAwait(true);
+
+    private async void PriceFactor_Click(object sender, RoutedEventArgs e)
+    {
+        var row = ViewModel.SelectedPrice;
+        if (row is null || !row.IsInSelectedBasket)
+        {
+            MessageBox.Show(this, "Selecione um preço da cesta atual.", "Fator de conversão",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var prompt = new TextPromptWindow(
+            "Fator de conversão",
+            "Fator positivo, com até seis casas decimais:",
+            row.ConversionFactor.ToString("0.######", CultureInfo.CurrentCulture))
+        {
+            Owner = this
+        };
+        if (prompt.ShowDialog() != true)
+        {
+            return;
+        }
+
+        if (!decimal.TryParse(prompt.Value, NumberStyles.Number, CultureInfo.CurrentCulture, out var factor))
+        {
+            MessageBox.Show(this, "O fator de conversão não é válido.", "Fator de conversão",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        await RunAsync(() => ViewModel.SetConversionFactorAsync(row, factor)).ConfigureAwait(true);
+    }
+
+    private async void PriceResetFactor_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel.SelectedPrice is { } row)
+        {
+            await RunAsync(() => ViewModel.SetConversionFactorAsync(row, 1m)).ConfigureAwait(true);
+        }
     }
 
     private void ScopeInBasket_Click(object sender, RoutedEventArgs e) =>

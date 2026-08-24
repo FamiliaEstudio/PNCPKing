@@ -47,6 +47,15 @@ public interface IQuotationRepository
         Guid basketId,
         string referenceId,
         CancellationToken cancellationToken = default);
+    Task SetManualBasketAggregationMethodAsync(
+        Guid basketId,
+        QuotationAggregationMethod aggregationMethod,
+        CancellationToken cancellationToken = default);
+    Task SetManualBasketConversionFactorAsync(
+        Guid basketId,
+        string referenceId,
+        decimal conversionFactor,
+        CancellationToken cancellationToken = default);
     Task DeleteManualBasketAsync(Guid basketId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<InternetPriceDraft>> GetInternetPriceDraftsAsync(
         Guid lineId,

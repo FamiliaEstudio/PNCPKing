@@ -456,12 +456,12 @@ public sealed class AiQuotationDraftService : IAiQuotationDraftService
         var estimateEvidence = MapEvidence(raw.EstimateEvidence);
         if (unitPrice is null && totalPrice is > 0 && quantity is > 0)
         {
-            unitPrice = decimal.Round(totalPrice.Value / quantity.Value, 4, MidpointRounding.AwayFromZero);
+            unitPrice = QuotationMoney.TruncateToCents(totalPrice.Value / quantity.Value);
             estimateEvidence = estimateEvidence with { Origin = AiFieldOrigin.Calculated };
         }
         else if (totalPrice is null && unitPrice is > 0 && quantity is > 0)
         {
-            totalPrice = decimal.Round(unitPrice.Value * quantity.Value, 4, MidpointRounding.AwayFromZero);
+            totalPrice = QuotationMoney.TruncateToCents(unitPrice.Value * quantity.Value);
             estimateEvidence = estimateEvidence with { Origin = AiFieldOrigin.Calculated };
         }
 

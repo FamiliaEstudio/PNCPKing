@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 20;
+    public const int CurrentSchemaVersion = 21;
 
     private const string GeographicGroupExpression = "CASE WHEN c.geo_layer = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -467,6 +467,51 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             span.Complete();
             version = 20;
+        }
+
+        if (version < 21)
+        {
+            using var span = _performance.Begin("startup", "schema-v21");
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            if (!await HasColumnAsync(
+                    connection,
+                    (SqliteTransaction)transaction,
+                    "quotation_manual_baskets",
+                    "calculation_method",
+                    cancellationToken).ConfigureAwait(false))
+            {
+                await using var migration = connection.CreateCommand();
+                migration.Transaction = (SqliteTransaction)transaction;
+                migration.CommandText =
+                    "ALTER TABLE quotation_manual_baskets " +
+                    "ADD COLUMN calculation_method INTEGER NOT NULL DEFAULT 0 " +
+                    "CHECK(calculation_method IN (0, 1));";
+                await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            if (!await HasColumnAsync(
+                    connection,
+                    (SqliteTransaction)transaction,
+                    "quotation_manual_basket_references",
+                    "conversion_factor_millionths",
+                    cancellationToken).ConfigureAwait(false))
+            {
+                await using var migration = connection.CreateCommand();
+                migration.Transaction = (SqliteTransaction)transaction;
+                migration.CommandText =
+                    "ALTER TABLE quotation_manual_basket_references " +
+                    "ADD COLUMN conversion_factor_millionths INTEGER NOT NULL DEFAULT 1000000 " +
+                    "CHECK(conversion_factor_millionths > 0);";
+                await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 21 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            span.Complete();
+            version = 21;
         }
 
         stopwatch.Stop();

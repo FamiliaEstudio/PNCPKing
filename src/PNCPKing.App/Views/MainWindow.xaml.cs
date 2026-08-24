@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -336,6 +337,71 @@ public partial class MainWindow : Window
         if (row is not null)
         {
             await ToggleMainReferenceAsync(row, !row.IsInSelectedBasket).ConfigureAwait(true);
+        }
+    }
+
+    private async void MainUseMean_Click(object sender, RoutedEventArgs e) =>
+        await SetMainAggregationMethodAsync(QuotationAggregationMethod.Mean).ConfigureAwait(true);
+
+    private async void MainUseMedian_Click(object sender, RoutedEventArgs e) =>
+        await SetMainAggregationMethodAsync(QuotationAggregationMethod.Median).ConfigureAwait(true);
+
+    private async Task SetMainAggregationMethodAsync(QuotationAggregationMethod method)
+    {
+        try
+        {
+            await _viewModel.SetSelectedBasketAggregationMethodAsync(method).ConfigureAwait(true);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(this, exception.Message, "Critério da cesta", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async void MainReferenceFactor_Click(object sender, RoutedEventArgs e)
+    {
+        var row = _viewModel.SelectedVisibleQuotationReference;
+        if (row is null || !row.IsInSelectedBasket)
+        {
+            MessageBox.Show(this, "Selecione um preço da cesta atual.", "Fator de conversão",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var prompt = new TextPromptWindow(
+            "Fator de conversão",
+            "Fator positivo, com até seis casas decimais:",
+            row.ConversionFactor.ToString("0.######", CultureInfo.CurrentCulture))
+        {
+            Owner = this
+        };
+        if (prompt.ShowDialog() != true)
+        {
+            return;
+        }
+
+        if (!decimal.TryParse(prompt.Value, NumberStyles.Number, CultureInfo.CurrentCulture, out var factor))
+        {
+            MessageBox.Show(this, "O fator de conversão não é válido.", "Fator de conversão",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        await SetMainConversionFactorAsync(factor).ConfigureAwait(true);
+    }
+
+    private async void MainReferenceResetFactor_Click(object sender, RoutedEventArgs e) =>
+        await SetMainConversionFactorAsync(1m).ConfigureAwait(true);
+
+    private async Task SetMainConversionFactorAsync(decimal factor)
+    {
+        try
+        {
+            await _viewModel.SetSelectedReferenceConversionFactorAsync(factor).ConfigureAwait(true);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(this, exception.Message, "Fator de conversão", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 

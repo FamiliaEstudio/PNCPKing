@@ -520,11 +520,12 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         CancellationToken cancellationToken = default)
     {
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        var baskets = new List<(Guid Id, string Name, int DisplayOrder, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt)>();
+        var baskets = new List<(Guid Id, string Name, int DisplayOrder, DateTimeOffset CreatedAt,
+            DateTimeOffset UpdatedAt, QuotationAggregationMethod AggregationMethod)>();
         await using (var command = connection.CreateCommand())
         {
             command.CommandText = """
-                SELECT id, name, display_order, created_at, updated_at
+                SELECT id, name, display_order, created_at, updated_at, calculation_method
                   FROM quotation_manual_baskets
                  WHERE line_id = $lineId
                  ORDER BY display_order, name, id;
@@ -538,7 +539,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                     reader.GetString(1),
                     reader.GetInt32(2),
                     ParseDateTime(reader.GetString(3)),
-                    ParseDateTime(reader.GetString(4))));
+                    ParseDateTime(reader.GetString(4)),
+                    (QuotationAggregationMethod)reader.GetInt32(5)));
             }
         }
 
@@ -547,17 +549,20 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         {
             await using var references = connection.CreateCommand();
             references.CommandText = """
-                SELECT reference_id
+                SELECT reference_id, conversion_factor_millionths
                   FROM quotation_manual_basket_references
                  WHERE basket_id = $basketId
                  ORDER BY display_order, reference_id;
                 """;
             references.Parameters.AddWithValue("$basketId", basket.Id.ToString("N"));
             var referenceIds = new List<string>();
+            var conversionFactors = new Dictionary<string, decimal>(StringComparer.Ordinal);
             await using var reader = await references.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                referenceIds.Add(reader.GetString(0));
+                var referenceId = reader.GetString(0);
+                referenceIds.Add(referenceId);
+                conversionFactors[referenceId] = reader.GetInt64(1) / 1_000_000m;
             }
 
             result.Add(new QuotationManualBasket
@@ -566,6 +571,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                 LineId = lineId,
                 Name = basket.Name,
                 ReferenceIds = referenceIds,
+                AggregationMethod = basket.AggregationMethod,
+                ConversionFactors = conversionFactors,
                 DisplayOrder = basket.DisplayOrder,
                 CreatedAt = basket.CreatedAt,
                 UpdatedAt = basket.UpdatedAt
@@ -694,6 +701,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         var now = DateTimeOffset.UtcNow;
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        var existingFactors = new Dictionary<string, long>(StringComparer.Ordinal);
         if (basketId is not null)
         {
             await using var ownership = connection.CreateCommand();
@@ -704,6 +712,20 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             if (owner is not string ownerId || ownerId != lineId.ToString("N"))
             {
                 throw new InvalidOperationException("A cesta manual não pertence ao item selecionado.");
+            }
+
+            await using var factors = connection.CreateCommand();
+            factors.Transaction = (SqliteTransaction)transaction;
+            factors.CommandText = """
+                SELECT reference_id, conversion_factor_millionths
+                  FROM quotation_manual_basket_references
+                 WHERE basket_id = $id;
+                """;
+            factors.Parameters.AddWithValue("$id", id.ToString("N"));
+            await using var factorReader = await factors.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await factorReader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                existingFactors[factorReader.GetString(0)] = factorReader.GetInt64(1);
             }
         }
 
@@ -768,19 +790,22 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             insert.Transaction = (SqliteTransaction)transaction;
             insert.CommandText = """
                 INSERT INTO quotation_manual_basket_references(
-                    basket_id, line_id, reference_id, display_order)
-                VALUES($basketId, $lineId, $referenceId, $displayOrder);
+                    basket_id, line_id, reference_id, display_order, conversion_factor_millionths)
+                VALUES($basketId, $lineId, $referenceId, $displayOrder, $conversionFactor);
                 """;
             insert.Parameters.Add("$basketId", SqliteType.Text);
             insert.Parameters.Add("$lineId", SqliteType.Text);
             insert.Parameters.Add("$referenceId", SqliteType.Text);
             insert.Parameters.Add("$displayOrder", SqliteType.Integer);
+            insert.Parameters.Add("$conversionFactor", SqliteType.Integer);
             for (var index = 0; index < uniqueReferenceIds.Length; index++)
             {
                 insert.Parameters["$basketId"].Value = id.ToString("N");
                 insert.Parameters["$lineId"].Value = lineId.ToString("N");
                 insert.Parameters["$referenceId"].Value = uniqueReferenceIds[index];
                 insert.Parameters["$displayOrder"].Value = index;
+                insert.Parameters["$conversionFactor"].Value =
+                    existingFactors.GetValueOrDefault(uniqueReferenceIds[index], 1_000_000L);
                 await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
         }
@@ -871,6 +896,130 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             clearSelection: true,
             cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task SetManualBasketAggregationMethodAsync(
+        Guid basketId,
+        QuotationAggregationMethod aggregationMethod,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Enum.IsDefined(aggregationMethod))
+        {
+            throw new ArgumentOutOfRangeException(nameof(aggregationMethod));
+        }
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        var lineId = await GetManualBasketLineIdAsync(
+            connection,
+            (SqliteTransaction)transaction,
+            basketId,
+            cancellationToken).ConfigureAwait(false);
+        await using (var update = connection.CreateCommand())
+        {
+            update.Transaction = (SqliteTransaction)transaction;
+            update.CommandText = """
+                UPDATE quotation_manual_baskets
+                   SET calculation_method = $method, updated_at = $updated
+                 WHERE id = $id;
+                """;
+            update.Parameters.AddWithValue("$method", (int)aggregationMethod);
+            update.Parameters.AddWithValue("$updated", FormatDateTime(DateTimeOffset.UtcNow));
+            update.Parameters.AddWithValue("$id", basketId.ToString("N"));
+            await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await TouchLineAndProjectAsync(
+            connection,
+            (SqliteTransaction)transaction,
+            lineId,
+            clearSelection: true,
+            cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task SetManualBasketConversionFactorAsync(
+        Guid basketId,
+        string referenceId,
+        decimal conversionFactor,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(referenceId);
+        var scaledFactor = ScaleConversionFactor(conversionFactor);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        var lineId = await GetManualBasketLineIdAsync(
+            connection,
+            (SqliteTransaction)transaction,
+            basketId,
+            cancellationToken).ConfigureAwait(false);
+        await using (var update = connection.CreateCommand())
+        {
+            update.Transaction = (SqliteTransaction)transaction;
+            update.CommandText = """
+                UPDATE quotation_manual_basket_references
+                   SET conversion_factor_millionths = $factor
+                 WHERE basket_id = $basketId AND reference_id = $referenceId;
+                """;
+            update.Parameters.AddWithValue("$factor", scaledFactor);
+            update.Parameters.AddWithValue("$basketId", basketId.ToString("N"));
+            update.Parameters.AddWithValue("$referenceId", referenceId);
+            if (await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+            {
+                throw new InvalidOperationException("O preço não pertence à cesta manual selecionada.");
+            }
+        }
+
+        await using (var updated = connection.CreateCommand())
+        {
+            updated.Transaction = (SqliteTransaction)transaction;
+            updated.CommandText =
+                "UPDATE quotation_manual_baskets SET updated_at = $updated WHERE id = $id;";
+            updated.Parameters.AddWithValue("$updated", FormatDateTime(DateTimeOffset.UtcNow));
+            updated.Parameters.AddWithValue("$id", basketId.ToString("N"));
+            await updated.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await TouchLineAndProjectAsync(
+            connection,
+            (SqliteTransaction)transaction,
+            lineId,
+            clearSelection: true,
+            cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<Guid> GetManualBasketLineIdAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        Guid basketId,
+        CancellationToken cancellationToken)
+    {
+        await using var owner = connection.CreateCommand();
+        owner.Transaction = transaction;
+        owner.CommandText = "SELECT line_id FROM quotation_manual_baskets WHERE id = $id;";
+        owner.Parameters.AddWithValue("$id", basketId.ToString("N"));
+        var value = await owner.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        return value is string text
+            ? Guid.ParseExact(text, "N")
+            : throw new InvalidOperationException("A cesta manual não existe mais.");
+    }
+
+    private static long ScaleConversionFactor(decimal conversionFactor)
+    {
+        QuotationMoney.ValidateConversionFactor(conversionFactor);
+        var scaled = conversionFactor * 1_000_000m;
+        try
+        {
+            return checked((long)scaled);
+        }
+        catch (OverflowException exception)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(conversionFactor),
+                conversionFactor,
+                $"O fator de conversão é grande demais: {exception.Message}");
+        }
     }
 
     public async Task DeleteManualBasketAsync(Guid basketId, CancellationToken cancellationToken = default)

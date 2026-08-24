@@ -312,6 +312,63 @@ public sealed class QuotationTests
     }
 
     [Fact]
+    public void ManualBasket_AppliesPerBasketFactorsAndMedianWithCentTruncation()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var line = Line("Café", 100m, "pacote");
+        var references = new[]
+        {
+            Reference("a", "ca", "11222333000181", 10.999m),
+            Reference("b", "cb", "60701190000104", 10.02m),
+            Reference("c", "cc", "33000167000101", 20.01m)
+        };
+        var converted = Manual(line, "Convertida", "a", "b", "c") with
+        {
+            AggregationMethod = QuotationAggregationMethod.Median,
+            ConversionFactors = new Dictionary<string, decimal>(StringComparer.Ordinal)
+            {
+                ["a"] = 1.5m,
+                ["b"] = 1m,
+                ["c"] = 0.5m
+            }
+        };
+        var unchanged = Manual(line, "Sem conversão", "a", "b", "c");
+
+        var analysis = analyzer.Analyze(line, references, [converted, unchanged]);
+        var basket = analysis.Baskets.Single(value => value.Name == "Convertida");
+        var originalBasket = analysis.Baskets.Single(value => value.Name == "Sem conversão");
+
+        Assert.Equal(QuotationAggregationMethod.Median, basket.AggregationMethod);
+        Assert.Equal(16.49m, basket.PriceEntries.Single(entry => entry.Reference.Id == "a").EffectiveUnitPrice);
+        Assert.Equal(10.00m, basket.PriceEntries.Single(entry => entry.Reference.Id == "c").EffectiveUnitPrice);
+        Assert.Equal(12.17m, basket.AveragePrice);
+        Assert.Equal(10.02m, basket.MedianPrice);
+        Assert.Equal(10.02m, basket.AdoptedPrice);
+        Assert.Equal(10.99m, originalBasket.PriceEntries.Single(entry => entry.Reference.Id == "a").EffectiveUnitPrice);
+        Assert.Equal(10.999m, references[0].UnitPrice);
+    }
+
+    [Fact]
+    public void MedianWithEvenPrices_TruncatesInsteadOfRounding()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var line = Line("Café", 100m, "pacote");
+        var manual = Manual(line, "Mediana", "a", "b") with
+        {
+            AggregationMethod = QuotationAggregationMethod.Median
+        };
+
+        var basket = analyzer.Analyze(line, [
+            Reference("a", "ca", "11222333000181", 10.01m),
+            Reference("b", "cb", "60701190000104", 10.02m)
+        ], [manual]).Baskets.Single(value => value.IsManual);
+
+        Assert.Equal(10.01m, basket.AveragePrice);
+        Assert.Equal(10.01m, basket.MedianPrice);
+        Assert.Equal(10.01m, basket.AdoptedPrice);
+    }
+
+    [Fact]
     public void BasketOrigin_IsInformativeAndDoesNotPreventCombination()
     {
         var analyzer = new QuotationAnalyzer(Today);
@@ -503,7 +560,37 @@ public sealed class QuotationTests
             first.Basket.Id,
             "Minha seleção",
             [Row("c2", "60701190000104", 100m), Row("c3", "33000167000101", 102m)]);
-        await service.ConfirmBasketAsync(expanded.Analysis, expanded.Basket.Key);
+        var convertedReferenceId = expanded.Basket.ReferenceIds[0];
+        await service.SetManualBasketAggregationMethodAsync(
+            expanded.Basket.Id,
+            QuotationAggregationMethod.Median);
+        await service.SetManualBasketConversionFactorAsync(
+            expanded.Basket.Id,
+            convertedReferenceId,
+            1.5m);
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+            service.SetManualBasketConversionFactorAsync(
+                expanded.Basket.Id,
+                convertedReferenceId,
+                0m));
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            service.SetManualBasketConversionFactorAsync(
+                expanded.Basket.Id,
+                convertedReferenceId,
+                1.0000001m));
+        var configured = Assert.IsType<QuotationLineAnalysis>(
+            await service.GetAnalysisAsync(project.Id, analysis.Line.Id));
+        await service.ConfirmBasketAsync(configured, expanded.Basket.Key);
+        Assert.True(Assert.IsType<QuotationLineAnalysis>(
+            await service.GetAnalysisAsync(project.Id, analysis.Line.Id)).Line.SelectionConfirmed);
+        await service.SetManualBasketConversionFactorAsync(
+            expanded.Basket.Id,
+            convertedReferenceId,
+            1.5m);
+        var requiresConfirmation = Assert.IsType<QuotationLineAnalysis>(
+            await service.GetAnalysisAsync(project.Id, analysis.Line.Id));
+        Assert.False(requiresConfirmation.Line.SelectionConfirmed);
+        await service.ConfirmBasketAsync(requiresConfirmation, expanded.Basket.Key);
         await service.UpdateWeightsAsync(analysis.Line.Id, new AdequacyWeights(40, 20, 10, 25, 5));
 
         var reopened = new QuotationService(
@@ -512,7 +599,11 @@ public sealed class QuotationTests
         var restored = Assert.Single(await reopened.GetAnalysesAsync(project.Id));
         var manual = restored.Baskets.Single(basket => basket.ManualBasketId == first.Basket.Id);
         Assert.Equal(3, manual.References.Count);
-        Assert.Equal(QuotationBasketVisualState.ManualRegular, manual.VisualState);
+        Assert.Equal(QuotationBasketVisualState.ManualInvalid, manual.VisualState);
+        Assert.Contains("permanecem no cálculo", manual.ValidationMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(QuotationAggregationMethod.Median, manual.AggregationMethod);
+        Assert.Equal(1.5m, manual.PriceEntries.Single(entry =>
+            entry.Reference.Id == convertedReferenceId).ConversionFactor);
         Assert.False(restored.Line.SelectionConfirmed);
 
         await reopened.RenameManualBasketAsync(first.Basket.Id, "Renomeada");
@@ -721,7 +812,8 @@ public sealed class QuotationTests
                 "Maria de Souza");
 
             using var workbook = new XLWorkbook(path);
-            var sheet = Assert.Single(workbook.Worksheets);
+            Assert.Equal(2, workbook.Worksheets.Count);
+            var sheet = workbook.Worksheet(1);
             Assert.Equal(" Análise 1 a 5", sheet.Name);
             Assert.Equal("PLANILHA DE AVALIAÇÃO DE PREÇOS", sheet.Cell("B2").GetString());
             var picture = Assert.Single(sheet.Pictures);
@@ -764,7 +856,7 @@ public sealed class QuotationTests
                 sheet.Cell("I12").GetString());
             Assert.Equal(90m, sheet.Cell("E6").GetValue<decimal>());
             Assert.Equal(
-                "IF(E6=\"\",\"\",IFERROR(AVERAGE(E7:E8),\"\"))",
+                "IF(E6=\"\",\"\",IFERROR(TRUNC(AVERAGE(E7:E8),2),\"\"))",
                 sheet.Cell("F6").FormulaA1);
             Assert.Equal(
                 "IF(OR(E6=\"\",F6=\"\"),\"\",E6/F6-1)",
@@ -773,7 +865,7 @@ public sealed class QuotationTests
                 "IF(E6=\"\",\"\",IF(OR(H6=\"EXCESSIVO\",I6=\"INEXEQUÍVEL\"),\"\",E6))",
                 sheet.Cell("J6").FormulaA1);
             Assert.Equal(
-                "IFERROR(SUM(J6:J8)/COUNTIF(J6:J8,\">0\"),\"\")",
+                "IFERROR(TRUNC(SUM(J6:J8)/COUNTIF(J6:J8,\">0\"),2),\"\")",
                 sheet.Cell("C9").FormulaA1);
             Assert.True(sheet.Cell("C9").IsMerged());
             Assert.True(sheet.Cell("E9").IsMerged());
@@ -787,10 +879,10 @@ public sealed class QuotationTests
             Assert.Equal("Preço 3 não obtido", sheet.Cell("B15").GetString());
             Assert.True(sheet.Cell("E13").IsEmpty());
             Assert.Equal(
-                "IF(E13=\"\",\"\",IFERROR(AVERAGE(E14:E15),\"\"))",
+                "IF(E13=\"\",\"\",IFERROR(TRUNC(AVERAGE(E14:E15),2),\"\"))",
                 sheet.Cell("F13").FormulaA1);
             Assert.Equal(
-                "IFERROR(SUM(J13:J15)/COUNTIF(J13:J15,\">0\"),\"\")",
+                "IFERROR(TRUNC(SUM(J13:J15)/COUNTIF(J13:J15,\">0\"),2),\"\")",
                 sheet.Cell("C16").FormulaA1);
             Assert.True(sheet.Cell("C16").IsMerged());
             Assert.All(sheet.Range("A17:J17").Cells(), cell => Assert.True(cell.IsEmpty()));
@@ -894,7 +986,8 @@ public sealed class QuotationTests
                 "Maria de Souza");
 
             using var workbook = new XLWorkbook(path);
-            var sheet = Assert.Single(workbook.Worksheets);
+            Assert.Equal(2, workbook.Worksheets.Count);
+            var sheet = workbook.Worksheet(1);
             var expectedComplete = $"{longSupplierName} (Ribeirão Preto/SP)";
             const string expectedBuyerFallback = "Fornecedor missing (Ribeirão Preto/SP)";
             var supplierCells = sheet.Range("B6:B8").Cells().ToArray();
@@ -944,7 +1037,8 @@ public sealed class QuotationTests
                 "Maria de Souza");
 
             using var workbook = new XLWorkbook(path);
-            var sheet = Assert.Single(workbook.Worksheets);
+            Assert.Equal(2, workbook.Worksheets.Count);
+            var sheet = workbook.Worksheet(1);
             var taxIds = sheet.Range("C6:C8").Cells().Select(cell => cell.GetString()).ToArray();
             Assert.Contains("03.370.573/0001-03", taxIds);
             Assert.Contains("12.ABC.345/01DE-35", taxIds);
@@ -954,7 +1048,8 @@ public sealed class QuotationTests
             Assert.Equal(XLDataType.Text, sheet.Cell("D6").DataType);
             Assert.False(sheet.Hyperlinks.TryGet(sheet.Cell("D6").Address, out _));
             Assert.InRange(sheet.Column(4).Width, 44.8, 45.0);
-            Assert.Equal("\"R$\"\\ #,##0.0000;\\-\"R$\"\\ #,##0.0000", sheet.Cell("E6").Style.NumberFormat.Format);
+            Assert.Contains("0.00", sheet.Cell("E6").Style.NumberFormat.Format, StringComparison.Ordinal);
+            Assert.DoesNotContain("0.0000", sheet.Cell("E6").Style.NumberFormat.Format, StringComparison.Ordinal);
         }
         finally
         {
@@ -982,7 +1077,8 @@ public sealed class QuotationTests
                 "Maria de Souza");
 
             using var workbook = new XLWorkbook(path);
-            var sheet = Assert.Single(workbook.Worksheets);
+            Assert.Equal(2, workbook.Worksheets.Count);
+            var sheet = workbook.Worksheet(1);
             Assert.Equal("Item 1 - Café", sheet.Cell("B4").GetString());
             Assert.Equal(
                 "Fornecedor melhor (Ribeirão Preto/SP)",
@@ -997,10 +1093,10 @@ public sealed class QuotationTests
             Assert.True(sheet.Cell("B8").Style.Font.Italic);
             Assert.Equal(XLColor.DarkRed, sheet.Cell("B8").Style.Font.FontColor);
             Assert.Equal(
-                "IF(E8=\"\",\"\",IFERROR(AVERAGE(E6:E7),\"\"))",
+                "IF(E8=\"\",\"\",IFERROR(TRUNC(AVERAGE(E6:E7),2),\"\"))",
                 sheet.Cell("F8").FormulaA1);
             Assert.Equal(
-                "IFERROR(SUM(J6:J8)/COUNTIF(J6:J8,\">0\"),\"\")",
+                "IFERROR(TRUNC(SUM(J6:J8)/COUNTIF(J6:J8,\">0\"),2),\"\")",
                 sheet.Cell("C9").FormulaA1);
         }
         finally
@@ -1041,18 +1137,19 @@ public sealed class QuotationTests
                 "Maria de Souza");
 
             using var workbook = new XLWorkbook(path);
-            var sheet = Assert.Single(workbook.Worksheets);
+            Assert.Equal(2, workbook.Worksheets.Count);
+            var sheet = workbook.Worksheet(1);
             Assert.Equal("Item 1 - Item com vinte preços", sheet.Cell("B4").GetString());
             Assert.Equal(81m, sheet.Cell("E6").GetValue<decimal>());
             Assert.Equal(100m, sheet.Cell("E25").GetValue<decimal>());
             Assert.Equal(
-                "IF(E6=\"\",\"\",IFERROR(AVERAGE(E7:E25),\"\"))",
+                "IF(E6=\"\",\"\",IFERROR(TRUNC(AVERAGE(E7:E25),2),\"\"))",
                 sheet.Cell("F6").FormulaA1);
             Assert.Equal(
-                "IF(E25=\"\",\"\",IFERROR(AVERAGE(E6:E24),\"\"))",
+                "IF(E25=\"\",\"\",IFERROR(TRUNC(AVERAGE(E6:E24),2),\"\"))",
                 sheet.Cell("F25").FormulaA1);
             Assert.Equal(
-                "IFERROR(SUM(J6:J25)/COUNTIF(J6:J25,\">0\"),\"\")",
+                "IFERROR(TRUNC(SUM(J6:J25)/COUNTIF(J6:J25,\">0\"),2),\"\")",
                 sheet.Cell("C26").FormulaA1);
             Assert.True(sheet.Cell("C26").IsMerged());
             Assert.NotEqual("Responsável pela cotação:", sheet.Cell("B25").GetString());
@@ -1067,6 +1164,66 @@ public sealed class QuotationTests
                 28,
                 sheet.LastCellUsed(XLCellsUsedOptions.Contents)!.Address.RowNumber);
             Assert.Equal(3, sheet.ConditionalFormats.Count());
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            var directory = Path.GetDirectoryName(path)!;
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public async Task Workbook_UsesConvertedManualPricesAndMedianWithoutExcludingWarnings()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var project = new QuotationProject(
+            Guid.NewGuid(), "Conversão", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+        var line = Line("Café", 10m, "pacote") with { MaximumUnitPrice = 15m };
+        var references = new[]
+        {
+            Reference("a", "ca", "11222333000181", 10.999m),
+            Reference("b", "cb", "60701190000104", 10.02m),
+            Reference("c", "cc", "33000167000101", 20.01m)
+        };
+        var manual = Manual(line, "Convertida", "a", "b", "c") with
+        {
+            AggregationMethod = QuotationAggregationMethod.Median,
+            ConversionFactors = new Dictionary<string, decimal>(StringComparer.Ordinal)
+            {
+                ["a"] = 1.5m,
+                ["b"] = 1m,
+                ["c"] = 0.5m
+            }
+        };
+        var analysis = analyzer.Analyze(line, references, [manual]);
+        analysis = Confirm(analysis, analysis.Baskets.Single(value => value.IsManual));
+        var path = Path.Combine(
+            Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"), "converted.xlsx");
+        try
+        {
+            await new QuotationWorkbookService().ExportAsync(
+                path,
+                new QuotationProjectReport(project, [analysis]),
+                "Maria de Souza");
+
+            using var workbook = new XLWorkbook(path);
+            Assert.Equal(2, workbook.Worksheets.Count);
+            var sheet = workbook.Worksheet(1);
+            Assert.Equal([10m, 10.02m, 16.49m],
+                sheet.Range("E6:E8").Cells().Select(cell => cell.GetValue<decimal>()).ToArray());
+            Assert.Equal("IF(E6=\"\",\"\",E6)", sheet.Cell("J6").FormulaA1);
+            Assert.Equal("Mediana dos preços válidos", sheet.Cell("B9").GetString());
+            Assert.Equal(
+                "IF(COUNTIF(J6:J8,\">0\")=0,\"\",TRUNC(MEDIAN(J6:J8),2))",
+                sheet.Cell("C9").FormulaA1);
+
+            var referencesSheet = workbook.Worksheet("Referências");
+            Assert.Equal([10m, 10.02m, 16.49m],
+                referencesSheet.Range("G2:G4").Cells()
+                    .Select(cell => cell.GetValue<decimal>()).ToArray());
+            Assert.DoesNotContain(referencesSheet.CellsUsed(), cell =>
+                cell.GetString().Contains("1.5", StringComparison.Ordinal));
         }
         finally
         {

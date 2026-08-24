@@ -473,8 +473,8 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
 
     public string BasketCalculation => SelectedBasket is null
         ? "Nenhuma cesta selecionada."
-        : $"Média {SelectedBasket.AveragePrice:C4} · menor {SelectedBasket.MinimumPrice:C4} · " +
-          $"maior {SelectedBasket.MaximumPrice:C4} · " +
+        : $"{SelectedBasket.AggregationMethod} {SelectedBasket.AdoptedPrice:C2} · " +
+          $"menor {SelectedBasket.MinimumPrice:C2} · maior {SelectedBasket.MaximumPrice:C2} · " +
           $"desvio máximo {SelectedBasket.MaximumDeviationPercent:N2}% · " +
           $"{SelectedBasket.Status}";
 
@@ -950,6 +950,44 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         await LoadAsync(SelectedBasket.Key).ConfigureAwait(true);
     }
 
+    public async Task SetAggregationMethodAsync(QuotationAggregationMethod aggregationMethod)
+    {
+        if (Line is null || SelectedBasket is null)
+        {
+            return;
+        }
+
+        if (!SelectedBasket.Source.IsManual && aggregationMethod == QuotationAggregationMethod.Mean)
+        {
+            return;
+        }
+
+        var basket = await EnsureManualBasketAsync(copyAutomatic: true).ConfigureAwait(true)
+                     ?? throw new InvalidOperationException("Não foi possível criar a cesta manual.");
+        await _quotations.SetManualBasketAggregationMethodAsync(
+            basket.Id,
+            aggregationMethod).ConfigureAwait(true);
+        await LoadAsync(basket.Key).ConfigureAwait(true);
+    }
+
+    public async Task SetConversionFactorAsync(QuotationPriceDisplayRow row, decimal conversionFactor)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        if (Line is null || SelectedBasket is null || !row.IsInSelectedBasket)
+        {
+            throw new InvalidOperationException("Selecione um preço que pertença à cesta atual.");
+        }
+
+        var basket = await EnsureManualBasketAsync(copyAutomatic: true).ConfigureAwait(true)
+                     ?? throw new InvalidOperationException("Não foi possível criar a cesta manual.");
+        await _quotations.SetManualBasketConversionFactorAsync(
+            basket.Id,
+            row.Id,
+            conversionFactor).ConfigureAwait(true);
+        await LoadAsync(basket.Key).ConfigureAwait(true);
+        SelectedPrice = VisibleReferences.FirstOrDefault(value => value.Id == row.Id);
+    }
+
     public async Task<QuotationManualBasket?> EnsureManualBasketAsync(bool copyAutomatic)
     {
         if (Line is null)
@@ -1299,6 +1337,8 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         var selectedIds = SelectedBasket?.Source.References
             .Select(reference => reference.Id)
             .ToHashSet(StringComparer.Ordinal) ?? [];
+        var selectedPrices = SelectedBasket?.Source.PriceEntries
+            .ToDictionary(entry => entry.Reference.Id, StringComparer.Ordinal) ?? [];
         var selectedId = SelectedPrice?.Id;
         VisibleReferences.Clear();
         foreach (var reference in Line.Analysis.References)
@@ -1315,7 +1355,12 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             };
             if (visible)
             {
-                VisibleReferences.Add(new QuotationPriceDisplayRow(reference, inBasket));
+                selectedPrices.TryGetValue(reference.Id, out var price);
+                VisibleReferences.Add(new QuotationPriceDisplayRow(
+                    reference,
+                    inBasket,
+                    price?.ConversionFactor ?? 1m,
+                    price?.EffectiveUnitPrice));
             }
         }
 

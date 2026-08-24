@@ -316,9 +316,18 @@ public sealed record InternetPriceInput(
 
 public sealed record QuotationBasket
 {
+    private decimal? _adoptedPrice;
+
     public required string Key { get; init; }
     public required IReadOnlyList<QuotationReference> References { get; init; }
     public required decimal AveragePrice { get; init; }
+    public decimal MedianPrice { get; init; }
+    public decimal AdoptedPrice
+    {
+        get => _adoptedPrice ??
+               (AggregationMethod == QuotationAggregationMethod.Median ? MedianPrice : AveragePrice);
+        init => _adoptedPrice = value;
+    }
     public required decimal MinimumPrice { get; init; }
     public required decimal MaximumPrice { get; init; }
     public required decimal MaximumDeviationPercent { get; init; }
@@ -332,11 +341,26 @@ public sealed record QuotationBasket
     public bool IsRecommended { get; init; }
     public bool IsCheapest { get; init; }
     public bool IsMostExpensive { get; init; }
+    public QuotationAggregationMethod AggregationMethod { get; init; } = QuotationAggregationMethod.Mean;
+    public IReadOnlyList<QuotationBasketPrice> PriceEntries { get; init; } = [];
 
     public bool IsManual => Kind == QuotationBasketKind.Manual;
     public bool IsIncomplete => IsManual ? References.Count < 3 : References.Count < RequestedSize;
     public bool IsValid => !IsManual ||
         VisualState == QuotationBasketVisualState.ManualRegular;
+}
+
+public enum QuotationAggregationMethod
+{
+    Mean,
+    Median
+}
+
+public sealed record QuotationBasketPrice
+{
+    public required QuotationReference Reference { get; init; }
+    public decimal ConversionFactor { get; init; } = 1m;
+    public required decimal EffectiveUnitPrice { get; init; }
 }
 
 public enum QuotationBasketKind
@@ -360,11 +384,17 @@ public sealed record QuotationManualBasket
     public required Guid LineId { get; init; }
     public required string Name { get; init; }
     public required IReadOnlyList<string> ReferenceIds { get; init; }
+    public QuotationAggregationMethod AggregationMethod { get; init; } = QuotationAggregationMethod.Mean;
+    public IReadOnlyDictionary<string, decimal> ConversionFactors { get; init; } =
+        new Dictionary<string, decimal>(StringComparer.Ordinal);
     public int DisplayOrder { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }
 
     public string Key => $"manual:{Id:N}";
+
+    public decimal GetConversionFactor(string referenceId) =>
+        ConversionFactors.TryGetValue(referenceId, out var factor) ? factor : 1m;
 }
 
 public sealed record QuotationLineAnalysis(

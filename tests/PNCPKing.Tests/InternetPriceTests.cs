@@ -85,7 +85,8 @@ public sealed class InternetPriceTests
             "Maria de Souza");
         using (var workbook = new XLWorkbook(workbookPath))
         {
-            var sheet = Assert.Single(workbook.Worksheets);
+            Assert.Equal(2, workbook.Worksheets.Count);
+            var sheet = workbook.Worksheet(1);
             var internetRow = sheet.Column(2).CellsUsed()
                 .Single(cell => cell.GetString() == "Loja Exemplo").Address.RowNumber;
             Assert.Equal("11.222.333/0001-81", sheet.Cell(internetRow, 3).GetString());

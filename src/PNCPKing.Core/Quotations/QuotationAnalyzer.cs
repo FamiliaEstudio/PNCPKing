@@ -394,7 +394,9 @@ public sealed partial class QuotationAnalyzer
                             QuotationBasketKind.Automatic,
                             string.Empty,
                             null,
-                            requestedSize)
+                            requestedSize,
+                            QuotationAggregationMethod.Mean,
+                            null)
                     })
                     .OrderByDescending(candidate => candidate.Basket.Score)
                     .ThenBy(candidate => BasketPromptRank(candidate.Basket))
@@ -472,7 +474,9 @@ public sealed partial class QuotationAnalyzer
             QuotationBasketKind.Automatic,
             string.Empty,
             null,
-            requestedSize);
+            requestedSize,
+            QuotationAggregationMethod.Mean,
+            null);
         candidates.TryAdd(basket.Key, basket);
     }
 
@@ -499,7 +503,9 @@ public sealed partial class QuotationAnalyzer
                 QuotationBasketKind.Manual,
                 manual.Name,
                 manual.Id,
-                requestedSize: 3));
+                requestedSize: 3,
+                manual.AggregationMethod,
+                manual.ConversionFactors));
         }
 
         return result;
@@ -510,16 +516,38 @@ public sealed partial class QuotationAnalyzer
         QuotationBasketKind kind,
         string name,
         Guid? manualBasketId,
-        int requestedSize)
+        int requestedSize,
+        QuotationAggregationMethod aggregationMethod,
+        IReadOnlyDictionary<string, decimal>? conversionFactors)
     {
-        var ordered = references
-            .OrderBy(reference => reference.UnitPrice)
-            .ThenBy(reference => reference.Id, StringComparer.Ordinal)
+        var orderedPrices = references
+            .Select(reference =>
+            {
+                var factor = conversionFactors is not null &&
+                             conversionFactors.TryGetValue(reference.Id, out var configured)
+                    ? configured
+                    : 1m;
+                QuotationMoney.ValidateConversionFactor(factor);
+                return new QuotationBasketPrice
+                {
+                    Reference = reference,
+                    ConversionFactor = factor,
+                    EffectiveUnitPrice = QuotationMoney.TruncateToCents(
+                        checked(reference.UnitPrice * factor))
+                };
+            })
+            .OrderBy(entry => entry.EffectiveUnitPrice)
+            .ThenBy(entry => entry.Reference.Id, StringComparer.Ordinal)
             .ToArray();
-        var average = ordered.Average(reference => reference.UnitPrice);
+        var ordered = orderedPrices.Select(entry => entry.Reference).ToArray();
+        var average = QuotationMoney.TruncateToCents(
+            orderedPrices.Average(entry => entry.EffectiveUnitPrice));
+        var median = CalculateMedian(orderedPrices.Select(entry => entry.EffectiveUnitPrice).ToArray());
+        var adopted = aggregationMethod == QuotationAggregationMethod.Median ? median : average;
         var maximumDeviation = average <= 0
             ? 0
-            : ordered.Max(reference => Math.Abs(reference.UnitPrice - average) / average * 100m);
+            : orderedPrices.Max(entry =>
+                Math.Abs(entry.EffectiveUnitPrice - average) / average * 100m);
         var averageAdequacy = ordered.Average(reference => reference.Adequacy.Total);
         var minimumAdequacy = ordered.Min(reference => reference.Adequacy.Total);
         var cohesion = Math.Clamp(100m * (1m - maximumDeviation / 25m), 0m, 100m);
@@ -554,8 +582,10 @@ public sealed partial class QuotationAnalyzer
                 : string.Join("||", ids),
             References = ordered,
             AveragePrice = average,
-            MinimumPrice = ordered.Min(reference => reference.UnitPrice),
-            MaximumPrice = ordered.Max(reference => reference.UnitPrice),
+            MedianPrice = median,
+            AdoptedPrice = adopted,
+            MinimumPrice = orderedPrices.Min(entry => entry.EffectiveUnitPrice),
+            MaximumPrice = orderedPrices.Max(entry => entry.EffectiveUnitPrice),
             MaximumDeviationPercent = maximumDeviation,
             Score = 0.70m * averageAdequacy + 0.20m * minimumAdequacy + 0.10m * cohesion,
             Kind = kind,
@@ -563,8 +593,19 @@ public sealed partial class QuotationAnalyzer
             ManualBasketId = manualBasketId,
             RequestedSize = requestedSize,
             VisualState = visualState,
-            ValidationMessage = validationMessage
+            ValidationMessage = validationMessage,
+            AggregationMethod = aggregationMethod,
+            PriceEntries = orderedPrices
         };
+    }
+
+    private static decimal CalculateMedian(IReadOnlyList<decimal> orderedValues)
+    {
+        var middle = orderedValues.Count / 2;
+        return orderedValues.Count % 2 == 1
+            ? orderedValues[middle]
+            : QuotationMoney.TruncateToCents(
+                (orderedValues[middle - 1] + orderedValues[middle]) / 2m);
     }
 
     private static int PromptRank(QuotationReference reference)
@@ -597,7 +638,8 @@ public sealed partial class QuotationAnalyzer
             reasons.Add($"desvio máximo de {maximumDeviation:N2}%");
         }
 
-        return $"Cesta manual inválida: {string.Join("; ", reasons)}.";
+        return $"Cesta manual com ressalva: {string.Join("; ", reasons)}. " +
+               "Todos os preços escolhidos permanecem no cálculo.";
     }
 
     private static (decimal Score, string Explanation) CalculateDescriptionScore(string requested, string found)

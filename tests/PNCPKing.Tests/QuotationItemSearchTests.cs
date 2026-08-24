@@ -32,8 +32,8 @@ public sealed class QuotationItemSearchTests
             .InitializeAsync();
 
         Assert.Equal(18, initialization.PreviousVersion);
-        Assert.Equal(20, initialization.CurrentVersion);
-        Assert.Equal([19, 20], initialization.AppliedMigrations);
+        Assert.Equal(21, initialization.CurrentVersion);
+        Assert.Equal([19, 20, 21], initialization.AppliedMigrations);
     }
 
     [Fact]

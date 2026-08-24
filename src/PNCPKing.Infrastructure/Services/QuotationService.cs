@@ -430,6 +430,26 @@ public sealed class QuotationService(
         CancellationToken cancellationToken = default) =>
         repository.RemoveManualBasketReferenceAsync(basketId, referenceId, cancellationToken);
 
+    public Task SetManualBasketAggregationMethodAsync(
+        Guid basketId,
+        QuotationAggregationMethod aggregationMethod,
+        CancellationToken cancellationToken = default) =>
+        repository.SetManualBasketAggregationMethodAsync(
+            basketId,
+            aggregationMethod,
+            cancellationToken);
+
+    public Task SetManualBasketConversionFactorAsync(
+        Guid basketId,
+        string referenceId,
+        decimal conversionFactor,
+        CancellationToken cancellationToken = default) =>
+        repository.SetManualBasketConversionFactorAsync(
+            basketId,
+            referenceId,
+            conversionFactor,
+            cancellationToken);
+
     public async Task<QuotationManualBasket> AddManualBasketReferenceAsync(
         Guid lineId,
         Guid basketId,

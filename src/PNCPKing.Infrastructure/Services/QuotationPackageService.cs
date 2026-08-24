@@ -729,6 +729,25 @@ public sealed class QuotationPackageService : IQuotationPackageService
                 compatibleColumns.Remove("responsible_name");
             }
 
+            if (manifest?.DatabaseSchemaVersion < 21)
+            {
+                if (string.Equals(
+                        definition.Name,
+                        "quotation_manual_baskets",
+                        StringComparison.Ordinal))
+                {
+                    compatibleColumns.Remove("calculation_method");
+                }
+
+                if (string.Equals(
+                        definition.Name,
+                        "quotation_manual_basket_references",
+                        StringComparison.Ordinal))
+                {
+                    compatibleColumns.Remove("conversion_factor_millionths");
+                }
+            }
+
             var rows = GetRowsFromTables(tables, definition.Name);
             foreach (var row in rows)
             {
@@ -865,6 +884,13 @@ public sealed class QuotationPackageService : IQuotationPackageService
             EnsureGuid(basket, "id", "cesta manual");
             var lineId = GetRequiredText(basket, "line_id");
             EnsureContains(lineIds, lineId, "Uma cesta aponta para um item ausente.");
+            var calculationMethod = basket.ContainsKey("calculation_method")
+                ? GetRequiredLong(basket, "calculation_method")
+                : 0;
+            if (calculationMethod is < 0 or > 1)
+            {
+                throw new InvalidDataException("Uma cesta possui método de cálculo inválido.");
+            }
             basketLines.Add(basketId, lineId);
         }
 
@@ -883,6 +909,13 @@ public sealed class QuotationPackageService : IQuotationPackageService
                 referenceKeys,
                 Composite(lineId, GetRequiredText(member, "reference_id")),
                 "Uma cesta manual aponta para uma referência ausente.");
+            var factor = member.ContainsKey("conversion_factor_millionths")
+                ? GetRequiredLong(member, "conversion_factor_millionths")
+                : 1_000_000;
+            if (factor <= 0)
+            {
+                throw new InvalidDataException("Uma cesta manual possui fator de conversão inválido.");
+            }
         }
 
         foreach (var prompt in GetRows(payload, "quotation_line_search_prompts"))
@@ -990,6 +1023,17 @@ public sealed class QuotationPackageService : IQuotationPackageService
                     .Select(row => GetRequiredText(row, "reference_id"))
                     .ToArray(),
                 StringComparer.Ordinal);
+        var conversionFactors = GetRows(payload, "quotation_manual_basket_references")
+            .GroupBy(row => GetRequiredText(row, "basket_id"), StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlyDictionary<string, decimal>)group.ToDictionary(
+                    row => GetRequiredText(row, "reference_id"),
+                    row => (row.ContainsKey("conversion_factor_millionths")
+                               ? GetRequiredLong(row, "conversion_factor_millionths")
+                               : 1_000_000) / 1_000_000m,
+                    StringComparer.Ordinal),
+                StringComparer.Ordinal);
         var baskets = GetRows(payload, "quotation_manual_baskets")
             .GroupBy(row => GetRequiredText(row, "line_id"), StringComparer.Ordinal)
             .ToDictionary(
@@ -1002,10 +1046,17 @@ public sealed class QuotationPackageService : IQuotationPackageService
                         Id = id,
                         LineId = ParseGuid(GetRequiredText(row, "line_id"), "item da cesta"),
                         Name = GetRequiredText(row, "name"),
+                        AggregationMethod = (QuotationAggregationMethod)(
+                            row.ContainsKey("calculation_method")
+                                ? GetRequiredLong(row, "calculation_method")
+                                : 0),
                         DisplayOrder = checked((int)GetRequiredLong(row, "display_order")),
                         CreatedAt = ParseDateTime(GetRequiredText(row, "created_at")),
                         UpdatedAt = ParseDateTime(GetRequiredText(row, "updated_at")),
-                        ReferenceIds = members.GetValueOrDefault(id.ToString("N"), [])
+                        ReferenceIds = members.GetValueOrDefault(id.ToString("N"), []),
+                        ConversionFactors = conversionFactors.GetValueOrDefault(
+                            id.ToString("N"),
+                            new Dictionary<string, decimal>(StringComparer.Ordinal))
                     };
                 }).ToArray(),
                 StringComparer.Ordinal);
@@ -1184,6 +1235,20 @@ public sealed class QuotationPackageService : IQuotationPackageService
             foreach (var run in GetRows(payload, "quotation_automation_runs"))
             {
                 run["responsible_name"] = string.Empty;
+            }
+        }
+
+
+        if (databaseSchemaVersion < 21)
+        {
+            foreach (var basket in GetRows(payload, "quotation_manual_baskets"))
+            {
+                basket["calculation_method"] = (int)QuotationAggregationMethod.Mean;
+            }
+
+            foreach (var member in GetRows(payload, "quotation_manual_basket_references"))
+            {
+                member["conversion_factor_millionths"] = 1_000_000;
             }
         }
     }

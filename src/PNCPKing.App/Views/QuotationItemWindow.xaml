@@ -61,9 +61,10 @@
                             <DataGridTextColumn Header="Nome" Binding="{Binding Name}" Width="150" />
                             <DataGridTextColumn Header="Situação" Binding="{Binding Status}" Width="125" />
                             <DataGridTextColumn Header="Preços" Binding="{Binding ReferenceCount}" Width="65" />
-                            <DataGridTextColumn Header="Média" Binding="{Binding AveragePrice, StringFormat=C4}" Width="115" />
-                            <DataGridTextColumn Header="Menor" Binding="{Binding MinimumPrice, StringFormat=C4}" Width="110" />
-                            <DataGridTextColumn Header="Maior" Binding="{Binding MaximumPrice, StringFormat=C4}" Width="110" />
+                            <DataGridTextColumn Header="Critério" Binding="{Binding AggregationMethod}" Width="80" />
+                            <DataGridTextColumn Header="Valor adotado" Binding="{Binding AdoptedPrice, StringFormat=C2}" Width="115" />
+                            <DataGridTextColumn Header="Menor" Binding="{Binding MinimumPrice, StringFormat=C2}" Width="110" />
+                            <DataGridTextColumn Header="Maior" Binding="{Binding MaximumPrice, StringFormat=C2}" Width="110" />
                             <DataGridTextColumn Header="Desvio máximo" Binding="{Binding MaximumDeviationPercent, StringFormat={}{0:N2}%}" Width="105" />
                             <DataGridTextColumn Header="Classificação" Binding="{Binding Tags}" Width="*" MinWidth="180" />
                         </DataGrid.Columns>
@@ -80,6 +81,8 @@
                                        Margin="10,0" Foreground="#5F6871" />
                         </StackPanel>
                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <Button Content="Usar média" Click="UseMean_Click" />
+                            <Button Content="Usar mediana" Click="UseMedian_Click" />
                             <Button Content="Confirmar cesta" Click="ConfirmBasket_Click" />
                             <Button Content="Inserir preço da internet" Click="NewInternetPrice_Click" />
                         </StackPanel>
@@ -100,6 +103,8 @@
                                 <MenuItem Header="Ver páginas relevantes" Click="PriceRelevantPages_Click" />
                                 <Separator />
                                 <MenuItem Header="Adicionar/retirar da cesta" Click="PriceToggleBasket_Click" />
+                                <MenuItem Header="Definir fator de conversão" Click="PriceFactor_Click" />
+                                <MenuItem Header="Restaurar fator para 1" Click="PriceResetFactor_Click" />
                                 <MenuItem Header="Editar preço da internet" Click="EditInternetReference_Click" />
                                 <MenuItem Header="Excluir preço da internet" Click="DeleteInternetReference_Click" />
                             </ContextMenu>
@@ -125,7 +130,9 @@
                             <DataGridTextColumn Header="Quantidade" Binding="{Binding Quantity, StringFormat=N4}" Width="105" />
                             <DataGridTextColumn Header="CNPJ/NI" Binding="{Binding SupplierTaxId}" Width="145" />
                             <DataGridTextColumn Header="Empresa" Binding="{Binding SupplierName}" Width="210" />
-                            <DataGridTextColumn Header="Unitário" Binding="{Binding UnitPrice, StringFormat=C4}" Width="115" />
+                            <DataGridTextColumn Header="Preço PNCP" Binding="{Binding UnitPrice, StringFormat=C4}" Width="115" />
+                            <DataGridTextColumn Header="Fator" Binding="{Binding ConversionFactor, StringFormat=N6}" Width="85" />
+                            <DataGridTextColumn Header="Preço efetivo" Binding="{Binding EffectiveUnitPrice, StringFormat=C2}" Width="115" />
                             <DataGridTextColumn Header="Situação" Binding="{Binding State}" Width="90" />
                             <DataGridTemplateColumn Header="Ações" Width="82"
                                                     services:DataGridColumnLayoutService.Key="actions">

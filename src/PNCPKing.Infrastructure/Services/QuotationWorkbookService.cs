@@ -8,6 +8,10 @@ namespace PNCPKing.Infrastructure.Services;
 
 public sealed class QuotationWorkbookService : IQuotationWorkbookService
 {
+    private sealed record ExportedBasketPrice(
+        QuotationBasket Basket,
+        QuotationBasketPrice Entry);
+
     private const string TemplateResourceName =
         "PNCPKing.Infrastructure.Assets.QuotationWorkbookTemplate.xlsx";
     private const int FirstBlockRow = 4;
@@ -81,6 +85,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             using var templateStream = OpenTemplateStream();
             using var workbook = new XLWorkbook(templateStream);
             WriteQuotationFromTemplate(workbook, report, responsibleName, cancellationToken);
+            WriteReferences(workbook, report);
             workbook.CalculateMode = XLCalculateMode.Auto;
             workbook.CalculationOnSave = true;
             workbook.ForceFullCalculation = true;
@@ -206,7 +211,12 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                     sheet.Range(row, 2, row, 9).Style.Font.Italic = true;
                 }
 
-                WritePriceFormulas(sheet, row, firstPriceRow, lastPriceRow);
+                WritePriceFormulas(
+                    sheet,
+                    row,
+                    firstPriceRow,
+                    lastPriceRow,
+                    references.Count > 0 && references[0].Basket.IsManual);
                 row++;
             }
 
@@ -218,11 +228,19 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 row,
                 templateRowHeights,
                 clearContents: true);
-            sheet.Cell(row, 2).Value = "Valor médio dos preços válidos";
+            var aggregationMethod = references.Count > 0
+                ? references[0].Basket.AggregationMethod
+                : QuotationAggregationMethod.Mean;
+            sheet.Cell(row, 2).Value = aggregationMethod == QuotationAggregationMethod.Median
+                ? "Mediana dos preços válidos"
+                : "Valor médio dos preços válidos";
             sheet.Range(row, 3, row, 5).Merge();
-            sheet.Cell(row, 3).FormulaA1 =
-                $"IFERROR(SUM(J{firstPriceRow}:J{lastPriceRow})/" +
-                $"COUNTIF(J{firstPriceRow}:J{lastPriceRow},\">0\"),\"\")";
+            sheet.Cell(row, 3).FormulaA1 = aggregationMethod == QuotationAggregationMethod.Median
+                ? $"IF(COUNTIF(J{firstPriceRow}:J{lastPriceRow},\">0\")=0,\"\"," +
+                  $"TRUNC(MEDIAN(J{firstPriceRow}:J{lastPriceRow}),2))"
+                : $"IFERROR(TRUNC(SUM(J{firstPriceRow}:J{lastPriceRow})/" +
+                  $"COUNTIF(J{firstPriceRow}:J{lastPriceRow},\">0\"),2),\"\")";
+            sheet.Cell(row, 3).Style.NumberFormat.Format = "R$ #,##0.00";
             row++;
 
             if (itemIndex < analyses.Length - 1)
@@ -289,15 +307,28 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         picture.MoveTo(sheet.Cell("B2"));
     }
 
-    private static IReadOnlyList<QuotationReference> SelectExportedReferences(
+    private static IReadOnlyList<ExportedBasketPrice> SelectExportedReferences(
         QuotationLineAnalysis analysis)
     {
         var selectedBasket = analysis.Line.SelectionConfirmed
             ? analysis.SelectedBasket
             : null;
         selectedBasket ??= analysis.Baskets.FirstOrDefault(basket => basket.IsRecommended);
-        return (selectedBasket?.References
-            ?? analysis.References
+        if (selectedBasket is not null)
+        {
+            var entries = selectedBasket.PriceEntries.Count > 0
+                ? selectedBasket.PriceEntries
+                : selectedBasket.References.Select(reference => new QuotationBasketPrice
+                {
+                    Reference = reference,
+                    EffectiveUnitPrice = QuotationMoney.TruncateToCents(reference.UnitPrice)
+                }).ToArray();
+            return entries
+                .Select(entry => new ExportedBasketPrice(selectedBasket, entry))
+                .ToArray();
+        }
+
+        var fallbackReferences = analysis.References
                 .Where(reference =>
                     reference.State == QuotationReferenceState.Eligible &&
                     reference.Source == QuotationReferenceSource.PncpIncisoII)
@@ -306,7 +337,34 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 .ThenByDescending(reference => reference.ResultDate)
                 .ThenBy(reference => reference.Id, StringComparer.Ordinal)
                 .Take(analysis.Line.RequestedBasketSize)
-                .ToArray())
+                .ToArray();
+        if (fallbackReferences.Length == 0)
+        {
+            return [];
+        }
+
+        var fallbackBasket = new QuotationBasket
+        {
+            Key = "fallback",
+            References = fallbackReferences,
+            AveragePrice = QuotationMoney.TruncateToCents(
+                fallbackReferences.Average(reference => reference.UnitPrice)),
+            MedianPrice = 0,
+            AdoptedPrice = 0,
+            MinimumPrice = fallbackReferences.Min(reference =>
+                QuotationMoney.TruncateToCents(reference.UnitPrice)),
+            MaximumPrice = fallbackReferences.Max(reference =>
+                QuotationMoney.TruncateToCents(reference.UnitPrice)),
+            MaximumDeviationPercent = 0,
+            Score = 0,
+            PriceEntries = fallbackReferences.Select(reference => new QuotationBasketPrice
+            {
+                Reference = reference,
+                EffectiveUnitPrice = QuotationMoney.TruncateToCents(reference.UnitPrice)
+            }).ToArray()
+        };
+        return fallbackBasket.PriceEntries
+            .Select(entry => new ExportedBasketPrice(fallbackBasket, entry))
             .ToArray();
     }
 
@@ -340,8 +398,9 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
     private static void WriteReference(
         IXLWorksheet sheet,
         int row,
-        QuotationReference reference)
+        ExportedBasketPrice exported)
     {
+        var reference = exported.Entry.Reference;
         var supplierCell = sheet.Cell(row, 2);
         supplierCell.Value = FormatSupplierName(reference);
         supplierCell.Style.Alignment.WrapText = true;
@@ -356,7 +415,8 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             sheet.Cell(row, 4).Style.NumberFormat.Format = "@";
         }
 
-        sheet.Cell(row, 5).Value = reference.UnitPrice;
+        sheet.Cell(row, 5).Value = exported.Entry.EffectiveUnitPrice;
+        sheet.Cell(row, 5).Style.NumberFormat.Format = "R$ #,##0.00";
     }
 
     private static string FormatSupplierName(QuotationReference reference)
@@ -397,7 +457,8 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         IXLWorksheet sheet,
         int row,
         int firstPriceRow,
-        int lastPriceRow)
+        int lastPriceRow,
+        bool isManualBasket)
     {
         var otherPrices = new List<string>(2);
         if (row > firstPriceRow)
@@ -411,15 +472,17 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         }
 
         sheet.Cell(row, 6).FormulaA1 =
-            $"IF(E{row}=\"\",\"\",IFERROR(AVERAGE({string.Join(",", otherPrices)}),\"\"))";
+            $"IF(E{row}=\"\",\"\",IFERROR(TRUNC(AVERAGE({string.Join(",", otherPrices)}),2),\"\"))";
+        sheet.Cell(row, 6).Style.NumberFormat.Format = "R$ #,##0.00";
         sheet.Cell(row, 7).FormulaA1 =
             $"IF(OR(E{row}=\"\",F{row}=\"\"),\"\",E{row}/F{row}-1)";
         sheet.Cell(row, 8).FormulaA1 =
             $"IF(F{row}=\"\",\"\",IF(G{row}>0.25,\"EXCESSIVO\",\"VÁLIDO\"))";
         sheet.Cell(row, 9).FormulaA1 =
             $"IF(F{row}=\"\",\"\",IF(G{row}<-0.25,\"INEXEQUÍVEL\",\"VÁLIDO\"))";
-        sheet.Cell(row, 10).FormulaA1 =
-            $"IF(E{row}=\"\",\"\",IF(OR(H{row}=\"EXCESSIVO\",I{row}=\"INEXEQUÍVEL\"),\"\",E{row}))";
+        sheet.Cell(row, 10).FormulaA1 = isManualBasket
+            ? $"IF(E{row}=\"\",\"\",E{row})"
+            : $"IF(E{row}=\"\",\"\",IF(OR(H{row}=\"EXCESSIVO\",I{row}=\"INEXEQUÍVEL\"),\"\",E{row}))";
     }
 
     private static void AddPriceConditionalFormatting(
@@ -451,7 +514,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         sheet.Cell(2, 2).Style.DateFormat.Format = "dd/mm/yyyy hh:mm";
         var headers = new[]
         {
-            "Item", "Descrição solicitada", "Quantidade", "Unidade", "Situação", "Média",
+            "Item", "Descrição solicitada", "Quantidade", "Unidade", "Situação", "Valor adotado",
             "Menor preço", "Maior preço", "Desvio máximo (%)", "Índice da cesta",
             "Amostra", "Elegíveis", "Duplicados", "Descartados", "Versão", "Pesos do índice"
         };
@@ -470,7 +533,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 : analysis.Baskets.Count == 0 ? "Sem cesta válida" : "Aguardando confirmação";
             if (basket is not null)
             {
-                sheet.Cell(row, 6).Value = basket.AveragePrice;
+                sheet.Cell(row, 6).Value = basket.AdoptedPrice;
                 sheet.Cell(row, 7).Value = basket.MinimumPrice;
                 sheet.Cell(row, 8).Value = basket.MaximumPrice;
                 sheet.Cell(row, 9).Value = basket.MaximumDeviationPercent;
@@ -486,7 +549,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             row++;
         }
 
-        sheet.Range(5, 6, Math.Max(5, row - 1), 8).Style.NumberFormat.Format = "R$ #,##0.0000";
+        sheet.Range(5, 6, Math.Max(5, row - 1), 8).Style.NumberFormat.Format = "R$ #,##0.00";
         sheet.Range(5, 9, Math.Max(5, row - 1), 10).Style.NumberFormat.Format = "0.00";
         FinishTable(sheet, 4, row - 1, headers.Length);
     }
@@ -500,7 +563,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             "Preço unitário", "Descrição encontrada", "Unidade encontrada", "Qtd. homologada",
             "Qtd. do item", "Data", "Órgão", "Município", "UF", "Distância de Ribeirão (km)",
             "Adequação total", "Descrição", "Unidade/embalagem", "Quantidade", "Proximidade",
-            "Atualidade", "Média da cesta", "Desvio máximo (%)", "Fonte", "Link da fonte",
+            "Atualidade", "Valor adotado da cesta", "Desvio máximo (%)", "Fonte", "Link da fonte",
             "Pesos do índice"
         };
         WriteHeaders(sheet, 1, headers);
@@ -515,8 +578,16 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 continue;
             }
 
-            foreach (var reference in basket.References)
+            var entries = basket.PriceEntries.Count > 0
+                ? basket.PriceEntries
+                : basket.References.Select(reference => new QuotationBasketPrice
+                {
+                    Reference = reference,
+                    EffectiveUnitPrice = QuotationMoney.TruncateToCents(reference.UnitPrice)
+                }).ToArray();
+            foreach (var entry in entries)
             {
+                var reference = entry.Reference;
                 sheet.Cell(row, 1).Value = itemNumber;
                 sheet.Cell(row, 2).Value = FormatLineName(analysis.Line);
                 sheet.Cell(row, 3).Value = analysis.Line.RequestedQuantity;
@@ -524,7 +595,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 sheet.Cell(row, 5).Value = reference.SupplierName;
                 sheet.Cell(row, 6).Value = FormatBrazilianTaxId(reference.SupplierTaxId);
                 sheet.Cell(row, 6).Style.NumberFormat.Format = "@";
-                sheet.Cell(row, 7).Value = reference.UnitPrice;
+                sheet.Cell(row, 7).Value = entry.EffectiveUnitPrice;
                 sheet.Cell(row, 8).Value = reference.ItemDescription;
                 sheet.Cell(row, 9).Value = reference.ItemUnit;
                 if (reference.HomologatedQuantity is not null) sheet.Cell(row, 10).Value = reference.HomologatedQuantity.Value;
@@ -540,7 +611,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 sheet.Cell(row, 20).Value = reference.Adequacy.QuantityScore;
                 sheet.Cell(row, 21).Value = reference.Adequacy.ProximityScore;
                 sheet.Cell(row, 22).Value = reference.Adequacy.RecencyScore;
-                sheet.Cell(row, 23).Value = basket.AveragePrice;
+                sheet.Cell(row, 23).Value = basket.AdoptedPrice;
                 sheet.Cell(row, 24).Value = basket.MaximumDeviationPercent;
                 sheet.Cell(row, 25).Value = FormatSource(reference.Source);
                 if (Uri.TryCreate(reference.PortalUrl, UriKind.Absolute, out _))
@@ -555,10 +626,11 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             itemNumber++;
         }
 
-        sheet.Range(2, 7, Math.Max(2, row - 1), 7).Style.NumberFormat.Format = "R$ #,##0.0000";
-        sheet.Range(2, 23, Math.Max(2, row - 1), 23).Style.NumberFormat.Format = "R$ #,##0.0000";
+        sheet.Range(2, 7, Math.Max(2, row - 1), 7).Style.NumberFormat.Format = "R$ #,##0.00";
+        sheet.Range(2, 23, Math.Max(2, row - 1), 23).Style.NumberFormat.Format = "R$ #,##0.00";
         sheet.Range(2, 12, Math.Max(2, row - 1), 12).Style.DateFormat.Format = "dd/mm/yyyy";
-        sheet.Range(2, 16, Math.Max(2, row - 1), 24).Style.NumberFormat.Format = "0.00";
+        sheet.Range(2, 16, Math.Max(2, row - 1), 22).Style.NumberFormat.Format = "0.00";
+        sheet.Range(2, 24, Math.Max(2, row - 1), 24).Style.NumberFormat.Format = "0.00";
         FinishTable(sheet, 1, row - 1, headers.Length);
         FormatPlainUrlColumn(sheet, 26, minimumWidth: 28);
     }

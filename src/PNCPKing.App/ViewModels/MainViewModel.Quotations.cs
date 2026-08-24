@@ -1619,6 +1619,74 @@ public sealed partial class MainViewModel
         }
     }
 
+    public async Task SetSelectedBasketAggregationMethodAsync(
+        QuotationAggregationMethod aggregationMethod)
+    {
+        var line = SelectedQuotationLine;
+        var selected = SelectedQuotationBasket;
+        var project = SelectedQuotationProject;
+        if (line is null || selected is null || project is null)
+        {
+            return;
+        }
+
+        if (!selected.Source.IsManual && aggregationMethod == QuotationAggregationMethod.Mean)
+        {
+            return;
+        }
+
+        var manualId = selected.Source.ManualBasketId;
+        if (manualId is null)
+        {
+            var copied = await _quotationService.CreateManualCopyAsync(
+                line.Analysis,
+                selected.Source).ConfigureAwait(true);
+            manualId = copied.Id;
+        }
+
+        await _quotationService.SetManualBasketAggregationMethodAsync(
+            manualId.Value,
+            aggregationMethod).ConfigureAwait(true);
+        await LoadQuotationProjectAsync(project.Id, line.Line.Id).ConfigureAwait(true);
+        SelectedQuotationBasket = QuotationBaskets.FirstOrDefault(value =>
+            value.Key == $"manual:{manualId.Value:N}");
+    }
+
+    public async Task SetSelectedReferenceConversionFactorAsync(decimal conversionFactor)
+    {
+        var line = SelectedQuotationLine;
+        var selected = SelectedQuotationBasket;
+        var row = SelectedVisibleQuotationReference;
+        var project = SelectedQuotationProject;
+        if (line is null || selected is null || row is null || project is null || !row.IsInSelectedBasket)
+        {
+            throw new InvalidOperationException("Selecione um preço que pertença à cesta atual.");
+        }
+
+        Guid manualId;
+        if (selected.Source.IsManual && selected.Source.ManualBasketId is { } basketId)
+        {
+            manualId = basketId;
+        }
+        else
+        {
+            var copied = await _quotationService.CreateManualCopyAsync(
+                line.Analysis,
+                selected.Source).ConfigureAwait(true);
+            manualId = copied.Id;
+        }
+
+        await _quotationService.SetManualBasketConversionFactorAsync(
+            manualId,
+            row.Id,
+            conversionFactor).ConfigureAwait(true);
+        await LoadQuotationProjectAsync(project.Id, line.Line.Id).ConfigureAwait(true);
+        SelectedQuotationBasket = QuotationBaskets.FirstOrDefault(value =>
+            value.Key == $"manual:{manualId:N}");
+        SelectedVisibleQuotationReference = VisibleQuotationReferences.FirstOrDefault(value =>
+            value.Id == row.Id);
+    }
+
     private async Task RenameSelectedManualBasketAsync()
     {
         var basket = SelectedQuotationBasket?.Source;
@@ -2103,6 +2171,8 @@ public sealed partial class MainViewModel
         var selectedIds = SelectedQuotationBasket?.Source.References
             .Select(reference => reference.Id)
             .ToHashSet(StringComparer.Ordinal) ?? [];
+        var selectedPrices = SelectedQuotationBasket?.Source.PriceEntries
+            .ToDictionary(entry => entry.Reference.Id, StringComparer.Ordinal) ?? [];
         var visibleReferences = SelectedQuotationLine?.Analysis.References
             .Select(reference =>
             {
@@ -2119,7 +2189,15 @@ public sealed partial class MainViewModel
                 return (Reference: reference, InBasket: inBasket, Visible: visible);
             })
             .Where(value => value.Visible)
-            .Select(value => new QuotationPriceDisplayRow(value.Reference, value.InBasket)) ?? [];
+            .Select(value =>
+            {
+                selectedPrices.TryGetValue(value.Reference.Id, out var price);
+                return new QuotationPriceDisplayRow(
+                    value.Reference,
+                    value.InBasket,
+                    price?.ConversionFactor ?? 1m,
+                    price?.EffectiveUnitPrice);
+            }) ?? [];
         VisibleQuotationReferences.ReplaceAll(visibleReferences);
 
         SelectedVisibleQuotationReference =

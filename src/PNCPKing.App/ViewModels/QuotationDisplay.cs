@@ -64,7 +64,7 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis)
                 : Line.SelectedBasketKey is not null
                     ? "Escolha anterior inválida"
                 : "Aguardando escolha";
-    public decimal? SelectedAveragePrice => Analysis.SelectedBasket?.AveragePrice;
+    public decimal? SelectedAveragePrice => Analysis.SelectedBasket?.AdoptedPrice;
     public string AutomationStatus => Line.AutomationState switch
     {
         QuotationAutomationItemState.Manual => "Manual",
@@ -86,6 +86,10 @@ public sealed class QuotationBasketDisplay(QuotationBasket source, bool wasPrevi
     public bool WasPreviouslySelected { get; } = wasPreviouslySelected;
     public string Key => Source.Key;
     public decimal AveragePrice => Source.AveragePrice;
+    public decimal AdoptedPrice => Source.AdoptedPrice;
+    public string AggregationMethod => Source.AggregationMethod == QuotationAggregationMethod.Median
+        ? "Mediana"
+        : "Média";
     public decimal MinimumPrice => Source.MinimumPrice;
     public decimal MaximumPrice => Source.MaximumPrice;
     public decimal MaximumDeviationPercent => Source.MaximumDeviationPercent;
@@ -101,7 +105,7 @@ public sealed class QuotationBasketDisplay(QuotationBasket source, bool wasPrevi
         QuotationBasketVisualState.AutomaticHighDispersion => "Desvio > 25%",
         QuotationBasketVisualState.ManualIncomplete => "Incompleta",
         QuotationBasketVisualState.ManualRegular => "Regular",
-        QuotationBasketVisualState.ManualInvalid => "Inválida",
+        QuotationBasketVisualState.ManualInvalid => "Com ressalva",
         _ => string.Empty
     };
     public string ValidationMessage => Source.ValidationMessage;
@@ -176,7 +180,9 @@ public sealed class QuotationReferenceDisplay(QuotationReference source)
 
 public sealed class QuotationPriceDisplayRow(
     QuotationReference source,
-    bool isInSelectedBasket) : ObservableObject
+    bool isInSelectedBasket,
+    decimal conversionFactor = 1m,
+    decimal? effectiveUnitPrice = null) : ObservableObject
 {
     private bool _isInSelectedBasket = isInSelectedBasket;
 
@@ -194,6 +200,9 @@ public sealed class QuotationPriceDisplayRow(
     public string SupplierTaxId => Source.SupplierTaxId;
     public string SupplierName => Source.SupplierName;
     public decimal UnitPrice => Source.UnitPrice;
+    public decimal ConversionFactor { get; } = conversionFactor;
+    public decimal EffectiveUnitPrice { get; } = effectiveUnitPrice ??
+        QuotationMoney.TruncateToCents(source.UnitPrice * conversionFactor);
     public string State => Source.State switch
     {
         QuotationReferenceState.Eligible => "Elegível",

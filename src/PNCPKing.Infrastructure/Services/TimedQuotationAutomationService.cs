@@ -643,8 +643,10 @@ public sealed class TimedQuotationAutomationService(
         estimate is not > 0 || stage is EstimateResolutionStage.NotApplicable or EstimateResolutionStage.Unrestricted
             ? (null, null)
             : stage == EstimateResolutionStage.Within25Percent
-                ? (estimate.Value * 0.75m, estimate.Value * 1.25m)
-                : (estimate.Value * 0.50m, estimate.Value * 1.50m);
+                ? (QuotationMoney.TruncateToCents(estimate.Value * 0.75m),
+                    QuotationMoney.TruncateToCents(estimate.Value * 1.25m))
+                : (QuotationMoney.TruncateToCents(estimate.Value * 0.50m),
+                    QuotationMoney.TruncateToCents(estimate.Value * 1.50m));
 
     private static bool IsStrictlyResolved(QuotationLineAnalysis analysis) =>
         analysis.Baskets

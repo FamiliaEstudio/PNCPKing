@@ -664,8 +664,8 @@
                                 <DataGridTextColumn Header="Descartados" Binding="{Binding RejectedCount}" Width="75" />
                                 <DataGridTextColumn Header="Cestas" Binding="{Binding BasketCount}" Width="62" />
                                 <DataGridTextColumn Header="Alvo auto." Binding="{Binding RequestedBasketSize}" Width="72" />
-                                <DataGridTextColumn Header="Estimativa unit." Binding="{Binding EstimatedUnitPrice, StringFormat=C4}" Width="105" />
-                                <DataGridTextColumn Header="Estimativa total" Binding="{Binding EstimatedTotalPrice, StringFormat=C4}" Width="105" />
+                                <DataGridTextColumn Header="Estimativa unit." Binding="{Binding EstimatedUnitPrice, StringFormat=C2}" Width="105" />
+                                <DataGridTextColumn Header="Estimativa total" Binding="{Binding EstimatedTotalPrice, StringFormat=C2}" Width="105" />
                                 <DataGridTextColumn Header="Faixa estimada" Binding="{Binding EstimateStage}" Width="115" />
                                 <DataGridTextColumn Header="Contratos exam." Binding="{Binding ContractsExamined}" Width="95" />
                                 <DataGridTextColumn Header="Lotes feitos" Binding="{Binding BatchesCompleted}" Width="78" />
@@ -675,7 +675,7 @@
                                 <DataGridTextColumn Header="Situação" Binding="{Binding Status}" Width="135" />
                                 <DataGridTextColumn Header="Automação" Binding="{Binding AutomationStatus}" Width="135" />
                                 <DataGridTextColumn Header="Mensagem" Binding="{Binding AutomationMessage}" Width="220" />
-                                <DataGridTextColumn Header="Média escolhida/anterior" Binding="{Binding SelectedAveragePrice, StringFormat=C4}" Width="145" />
+                                <DataGridTextColumn Header="Valor escolhido/anterior" Binding="{Binding SelectedAveragePrice, StringFormat=C2}" Width="150" />
                             </DataGrid.Columns>
                         </DataGrid>
 
@@ -708,9 +708,10 @@
                                             <DataGridTextColumn Header="Situação" Binding="{Binding Status}" Width="105" />
                                             <DataGridTextColumn Header="Preços" Binding="{Binding ReferenceCount}" Width="58" />
                                             <DataGridTextColumn Header="Classificação" Binding="{Binding Tags}" Width="150" />
-                                            <DataGridTextColumn Header="Média" Binding="{Binding AveragePrice, StringFormat=C4}" Width="105" />
-                                            <DataGridTextColumn Header="Menor" Binding="{Binding MinimumPrice, StringFormat=C4}" Width="100" />
-                                            <DataGridTextColumn Header="Maior" Binding="{Binding MaximumPrice, StringFormat=C4}" Width="100" />
+                                            <DataGridTextColumn Header="Critério" Binding="{Binding AggregationMethod}" Width="76" />
+                                            <DataGridTextColumn Header="Valor adotado" Binding="{Binding AdoptedPrice, StringFormat=C2}" Width="110" />
+                                            <DataGridTextColumn Header="Menor" Binding="{Binding MinimumPrice, StringFormat=C2}" Width="100" />
+                                            <DataGridTextColumn Header="Maior" Binding="{Binding MaximumPrice, StringFormat=C2}" Width="100" />
                                             <DataGridTextColumn Header="Desvio máx." Binding="{Binding MaximumDeviationPercent, StringFormat={}{0:N2}%}" Width="92" />
                                             <DataGridTextColumn Header="Índice" Binding="{Binding Score, StringFormat=N2}" Width="75" />
                                         </DataGrid.Columns>
@@ -726,6 +727,8 @@
                                             <Button Content="Próxima página" Command="{Binding NextQuotationBasketPageCommand}" />
                                             <Button Content="Renomear manual" Command="{Binding RenameManualBasketCommand}" />
                                             <Button Content="Excluir manual" Command="{Binding DeleteManualBasketCommand}" />
+                                            <Button Content="Usar média" Click="MainUseMean_Click" />
+                                            <Button Content="Usar mediana" Click="MainUseMedian_Click" />
                                             <Button Content="Confirmar cesta escolhida" Command="{Binding ConfirmQuotationBasketCommand}" />
                                         </WrapPanel>
                                     </DockPanel>
@@ -758,6 +761,8 @@
                                                 <MenuItem Header="Ver páginas relevantes" Click="MainReferenceRelevant_Click" />
                                                 <Separator />
                                                 <MenuItem Header="Adicionar/retirar da cesta" Click="MainReferenceToggle_Click" />
+                                                <MenuItem Header="Definir fator de conversão" Click="MainReferenceFactor_Click" />
+                                                <MenuItem Header="Restaurar fator para 1" Click="MainReferenceResetFactor_Click" />
                                                 <MenuItem Header="Abrir item detalhado" Click="MainReferenceOpenItem_Click" />
                                             </ContextMenu>
                                         </DataGrid.ContextMenu>
@@ -784,7 +789,9 @@
                                                                 Width="105" />
                                             <DataGridTextColumn Header="CNPJ/NI" Binding="{Binding SupplierTaxId}" Width="135" />
                                             <DataGridTextColumn Header="Empresa" Binding="{Binding SupplierName}" Width="180" />
-                                            <DataGridTextColumn Header="Unitário" Binding="{Binding UnitPrice, StringFormat=C4}" Width="105" />
+                                            <DataGridTextColumn Header="Preço PNCP" Binding="{Binding UnitPrice, StringFormat=C4}" Width="105" />
+                                            <DataGridTextColumn Header="Fator" Binding="{Binding ConversionFactor, StringFormat=N6}" Width="82" />
+                                            <DataGridTextColumn Header="Preço efetivo" Binding="{Binding EffectiveUnitPrice, StringFormat=C2}" Width="108" />
                                             <DataGridTextColumn Header="Situação" Binding="{Binding State}" Width="90" />
                                             <DataGridTemplateColumn Header="Ações" Width="82"
                                                                     services:DataGridColumnLayoutService.Key="actions">
