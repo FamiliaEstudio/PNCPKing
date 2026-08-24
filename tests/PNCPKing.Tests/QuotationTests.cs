@@ -828,70 +828,75 @@ public sealed class QuotationTests
                 0,
                 0.01);
             Assert.True(sheet.Cell("B2").IsMerged());
-            Assert.True(sheet.Cell("I2").IsMerged());
+            Assert.True(sheet.Cell("J2").IsMerged());
             Assert.Equal(180d, sheet.Row(2).Height);
-            Assert.True(sheet.Column(6).IsHidden);
             Assert.True(sheet.Column(7).IsHidden);
-            Assert.True(sheet.Column(10).IsHidden);
+            Assert.True(sheet.Column(8).IsHidden);
+            Assert.True(sheet.Column(11).IsHidden);
             Assert.False(sheet.ShowGridLines);
 
             Assert.Equal("Item 1 - Café torrado", sheet.Cell("B4").GetString());
             Assert.True(sheet.Cell("B4").IsMerged());
             Assert.Equal("EMPRESA", sheet.Cell("B5").GetString());
             Assert.Equal("CNPJ", sheet.Cell("C5").GetString());
-            Assert.Equal("LINK PNCP", sheet.Cell("D5").GetString());
-            Assert.Equal("VALOR DA COTAÇÃO", sheet.Cell("E5").GetString());
+            Assert.Equal(
+                "FONTE DE PESQUISA                                                  IN SEGES Nº 65, ART. 5º",
+                sheet.Cell("D5").GetString());
+            Assert.Equal("LINK PNCP", sheet.Cell("E5").GetString());
+            Assert.Equal("VALOR DA COTAÇÃO", sheet.Cell("F5").GetString());
             Assert.Equal(
                 "Fornecedor a (Ribeirão Preto/SP)",
                 sheet.Cell("B6").GetString());
             Assert.True(sheet.Row(5).Height >= 64.5d);
             Assert.True(sheet.Row(12).Height >= 64.5d);
-            Assert.True(sheet.Cell("E5").Style.Alignment.WrapText);
-            Assert.True(sheet.Cell("H12").Style.Alignment.WrapText);
+            Assert.True(sheet.Cell("F5").Style.Alignment.WrapText);
+            Assert.True(sheet.Cell("I12").Style.Alignment.WrapText);
             Assert.Equal(
                 "UTILIZAÇÃO DO MÉTODO DE IDENTIFICAÇÃO DE PREÇO EXCESSIVO",
-                sheet.Cell("H12").GetString());
+                sheet.Cell("I12").GetString());
             Assert.Equal(
                 "UTILIZAÇÃO DO MÉTODO DE IDENTIFICAÇÃO DE PREÇO INEXEQUÍVEL",
-                sheet.Cell("I12").GetString());
-            Assert.Equal(90m, sheet.Cell("E6").GetValue<decimal>());
+                sheet.Cell("J12").GetString());
+            Assert.All(sheet.Range("D6:D8").Cells(), cell =>
+                Assert.Equal("Inciso II", cell.GetString()));
+            Assert.Equal(90m, sheet.Cell("F6").GetValue<decimal>());
             Assert.Equal(
-                "IF(E6=\"\",\"\",IFERROR(TRUNC(AVERAGE(E7:E8),2),\"\"))",
-                sheet.Cell("F6").FormulaA1);
-            Assert.Equal(
-                "IF(OR(E6=\"\",F6=\"\"),\"\",E6/F6-1)",
+                "IF(F6=\"\",\"\",IFERROR(TRUNC(AVERAGE(F7:F8),2),\"\"))",
                 sheet.Cell("G6").FormulaA1);
             Assert.Equal(
-                "IF(E6=\"\",\"\",IF(OR(H6=\"EXCESSIVO\",I6=\"INEXEQUÍVEL\"),\"\",E6))",
-                sheet.Cell("J6").FormulaA1);
+                "IF(OR(F6=\"\",G6=\"\"),\"\",F6/G6-1)",
+                sheet.Cell("H6").FormulaA1);
             Assert.Equal(
-                "IFERROR(TRUNC(SUM(J6:J8)/COUNTIF(J6:J8,\">0\"),2),\"\")",
+                "IF(F6=\"\",\"\",IF(OR(I6=\"EXCESSIVO\",J6=\"INEXEQUÍVEL\"),\"\",F6))",
+                sheet.Cell("K6").FormulaA1);
+            Assert.Equal(
+                "IFERROR(TRUNC(SUM(K6:K8)/COUNTIF(K6:K8,\">0\"),2),\"\")",
                 sheet.Cell("C9").FormulaA1);
             Assert.True(sheet.Cell("C9").IsMerged());
-            Assert.True(sheet.Cell("E9").IsMerged());
+            Assert.True(sheet.Cell("F9").IsMerged());
 
-            Assert.All(sheet.Range("A10:J10").Cells(), cell => Assert.True(cell.IsEmpty()));
+            Assert.All(sheet.Range("A10:K10").Cells(), cell => Assert.True(cell.IsEmpty()));
             Assert.DoesNotContain(sheet.MergedRanges, range =>
                 range.RangeAddress.FirstAddress.RowNumber == 10);
             Assert.Equal("Item 2 - Açúcar", sheet.Cell("B11").GetString());
             Assert.Equal("Preço 1 não obtido", sheet.Cell("B13").GetString());
             Assert.Equal("Preço 2 não obtido", sheet.Cell("B14").GetString());
             Assert.Equal("Preço 3 não obtido", sheet.Cell("B15").GetString());
-            Assert.True(sheet.Cell("E13").IsEmpty());
+            Assert.True(sheet.Cell("F13").IsEmpty());
             Assert.Equal(
-                "IF(E13=\"\",\"\",IFERROR(TRUNC(AVERAGE(E14:E15),2),\"\"))",
-                sheet.Cell("F13").FormulaA1);
+                "IF(F13=\"\",\"\",IFERROR(TRUNC(AVERAGE(F14:F15),2),\"\"))",
+                sheet.Cell("G13").FormulaA1);
             Assert.Equal(
-                "IFERROR(TRUNC(SUM(J13:J15)/COUNTIF(J13:J15,\">0\"),2),\"\")",
+                "IFERROR(TRUNC(SUM(K13:K15)/COUNTIF(K13:K15,\">0\"),2),\"\")",
                 sheet.Cell("C16").FormulaA1);
             Assert.True(sheet.Cell("C16").IsMerged());
-            Assert.All(sheet.Range("A17:J17").Cells(), cell => Assert.True(cell.IsEmpty()));
+            Assert.All(sheet.Range("A17:K17").Cells(), cell => Assert.True(cell.IsEmpty()));
             Assert.Equal("Responsável pela cotação:", sheet.Cell("B18").GetString());
             Assert.Equal(
                 "Maria de Souza\nAgente de Administração",
                 sheet.Cell("C18").GetString());
             Assert.True(sheet.Cell("C18").IsMerged());
-            Assert.True(sheet.Cell("H18").IsMerged());
+            Assert.True(sheet.Cell("I18").IsMerged());
             Assert.Equal(
                 XLAlignmentHorizontalValues.Center,
                 sheet.Cell("C18").Style.Alignment.Horizontal);
@@ -1044,12 +1049,13 @@ public sealed class QuotationTests
             Assert.Contains("12.ABC.345/01DE-35", taxIds);
             Assert.Contains("NI123", taxIds);
             Assert.All(sheet.Range("C6:C8").Cells(), cell => Assert.Equal(XLDataType.Text, cell.DataType));
-            Assert.Equal(longUrl, sheet.Cell("D6").GetString());
-            Assert.Equal(XLDataType.Text, sheet.Cell("D6").DataType);
-            Assert.False(sheet.Hyperlinks.TryGet(sheet.Cell("D6").Address, out _));
-            Assert.InRange(sheet.Column(4).Width, 44.8, 45.0);
-            Assert.Contains("0.00", sheet.Cell("E6").Style.NumberFormat.Format, StringComparison.Ordinal);
-            Assert.DoesNotContain("0.0000", sheet.Cell("E6").Style.NumberFormat.Format, StringComparison.Ordinal);
+            Assert.Equal("Inciso II", sheet.Cell("D6").GetString());
+            Assert.Equal(longUrl, sheet.Cell("E6").GetString());
+            Assert.Equal(XLDataType.Text, sheet.Cell("E6").DataType);
+            Assert.False(sheet.Hyperlinks.TryGet(sheet.Cell("E6").Address, out _));
+            Assert.InRange(sheet.Column(5).Width, 44.8, 45.0);
+            Assert.Contains("0.00", sheet.Cell("F6").Style.NumberFormat.Format, StringComparison.Ordinal);
+            Assert.DoesNotContain("0.0000", sheet.Cell("F6").Style.NumberFormat.Format, StringComparison.Ordinal);
         }
         finally
         {
@@ -1090,13 +1096,14 @@ public sealed class QuotationTests
             Assert.True(sheet.Cell("C8").IsEmpty());
             Assert.True(sheet.Cell("D8").IsEmpty());
             Assert.True(sheet.Cell("E8").IsEmpty());
+            Assert.True(sheet.Cell("F8").IsEmpty());
             Assert.True(sheet.Cell("B8").Style.Font.Italic);
             Assert.Equal(XLColor.DarkRed, sheet.Cell("B8").Style.Font.FontColor);
             Assert.Equal(
-                "IF(E8=\"\",\"\",IFERROR(TRUNC(AVERAGE(E6:E7),2),\"\"))",
-                sheet.Cell("F8").FormulaA1);
+                "IF(F8=\"\",\"\",IFERROR(TRUNC(AVERAGE(F6:F7),2),\"\"))",
+                sheet.Cell("G8").FormulaA1);
             Assert.Equal(
-                "IFERROR(TRUNC(SUM(J6:J8)/COUNTIF(J6:J8,\">0\"),2),\"\")",
+                "IFERROR(TRUNC(SUM(K6:K8)/COUNTIF(K6:K8,\">0\"),2),\"\")",
                 sheet.Cell("C9").FormulaA1);
         }
         finally
@@ -1140,26 +1147,28 @@ public sealed class QuotationTests
             Assert.Equal(2, workbook.Worksheets.Count);
             var sheet = workbook.Worksheet(1);
             Assert.Equal("Item 1 - Item com vinte preços", sheet.Cell("B4").GetString());
-            Assert.Equal(81m, sheet.Cell("E6").GetValue<decimal>());
-            Assert.Equal(100m, sheet.Cell("E25").GetValue<decimal>());
+            Assert.All(sheet.Range("D6:D25").Cells(), cell =>
+                Assert.Equal("Inciso II", cell.GetString()));
+            Assert.Equal(81m, sheet.Cell("F6").GetValue<decimal>());
+            Assert.Equal(100m, sheet.Cell("F25").GetValue<decimal>());
             Assert.Equal(
-                "IF(E6=\"\",\"\",IFERROR(TRUNC(AVERAGE(E7:E25),2),\"\"))",
-                sheet.Cell("F6").FormulaA1);
+                "IF(F6=\"\",\"\",IFERROR(TRUNC(AVERAGE(F7:F25),2),\"\"))",
+                sheet.Cell("G6").FormulaA1);
             Assert.Equal(
-                "IF(E25=\"\",\"\",IFERROR(TRUNC(AVERAGE(E6:E24),2),\"\"))",
-                sheet.Cell("F25").FormulaA1);
+                "IF(F25=\"\",\"\",IFERROR(TRUNC(AVERAGE(F6:F24),2),\"\"))",
+                sheet.Cell("G25").FormulaA1);
             Assert.Equal(
-                "IFERROR(TRUNC(SUM(J6:J25)/COUNTIF(J6:J25,\">0\"),2),\"\")",
+                "IFERROR(TRUNC(SUM(K6:K25)/COUNTIF(K6:K25,\">0\"),2),\"\")",
                 sheet.Cell("C26").FormulaA1);
             Assert.True(sheet.Cell("C26").IsMerged());
             Assert.NotEqual("Responsável pela cotação:", sheet.Cell("B25").GetString());
-            Assert.All(sheet.Range("A27:J27").Cells(), cell => Assert.True(cell.IsEmpty()));
+            Assert.All(sheet.Range("A27:K27").Cells(), cell => Assert.True(cell.IsEmpty()));
             Assert.Equal("Responsável pela cotação:", sheet.Cell("B28").GetString());
             Assert.Equal(
                 "Maria de Souza\nAgente de Administração",
                 sheet.Cell("C28").GetString());
             Assert.True(sheet.Cell("C28").IsMerged());
-            Assert.True(sheet.Cell("H28").IsMerged());
+            Assert.True(sheet.Cell("I28").IsMerged());
             Assert.Equal(
                 28,
                 sheet.LastCellUsed(XLCellsUsedOptions.Contents)!.Address.RowNumber);
@@ -1210,12 +1219,14 @@ public sealed class QuotationTests
             using var workbook = new XLWorkbook(path);
             Assert.Equal(2, workbook.Worksheets.Count);
             var sheet = workbook.Worksheet(1);
+            Assert.All(sheet.Range("D6:D8").Cells(), cell =>
+                Assert.Equal("Inciso II", cell.GetString()));
             Assert.Equal([10m, 10.02m, 16.49m],
-                sheet.Range("E6:E8").Cells().Select(cell => cell.GetValue<decimal>()).ToArray());
-            Assert.Equal("IF(E6=\"\",\"\",E6)", sheet.Cell("J6").FormulaA1);
+                sheet.Range("F6:F8").Cells().Select(cell => cell.GetValue<decimal>()).ToArray());
+            Assert.Equal("IF(F6=\"\",\"\",F6)", sheet.Cell("K6").FormulaA1);
             Assert.Equal("Mediana dos preços válidos", sheet.Cell("B9").GetString());
             Assert.Equal(
-                "IF(COUNTIF(J6:J8,\">0\")=0,\"\",TRUNC(MEDIAN(J6:J8),2))",
+                "IF(COUNTIF(K6:K8,\">0\")=0,\"\",TRUNC(MEDIAN(K6:K8),2))",
                 sheet.Cell("C9").FormulaA1);
 
             var referencesSheet = workbook.Worksheet("Referências");

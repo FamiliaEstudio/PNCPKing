@@ -16,6 +16,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         "PNCPKing.Infrastructure.Assets.QuotationWorkbookTemplate.xlsx";
     private const int FirstBlockRow = 4;
     private const int TemplateLastRow = 25;
+    private const int TemplateLastColumn = 11;
     private const int FirstPriceTemplateRow = 6;
     private const int MiddlePriceTemplateRow = 7;
     private const int LastPriceTemplateRow = 22;
@@ -135,7 +136,8 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         var sheet = workbook.Worksheet(1);
         ResizeHeaderPicture(sheet);
         var prototype = workbook.Worksheets.Add("__PNCPKing_Block_Template");
-        sheet.Range(FirstBlockRow, 1, TemplateLastRow, 10).CopyTo(prototype.Cell(1, 1));
+        sheet.Range(FirstBlockRow, 1, TemplateLastRow, TemplateLastColumn)
+            .CopyTo(prototype.Cell(1, 1));
         prototype.ConditionalFormats.RemoveAll();
         var templateRowHeights = Enumerable.Range(FirstBlockRow, TemplateLastRow - FirstBlockRow + 1)
             .ToDictionary(row => row, row => sheet.Row(row).Height);
@@ -148,7 +150,8 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         }
 
         sheet.ConditionalFormats.RemoveAll();
-        sheet.Range(FirstBlockRow, 1, TemplateLastRow, 10).Clear(XLClearOptions.All);
+        sheet.Range(FirstBlockRow, 1, TemplateLastRow, TemplateLastColumn)
+            .Clear(XLClearOptions.All);
 
         var analyses = report.Lines
             .OrderBy(line => line.Line.DisplayOrder)
@@ -165,7 +168,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 row,
                 templateRowHeights,
                 clearContents: true);
-            var itemRange = sheet.Range(row, 2, row, 9);
+            var itemRange = sheet.Range(row, 2, row, 10);
             itemRange.Merge();
             itemRange.FirstCell().Value = $"Item {itemIndex + 1} - {FormatLineName(analysis.Line)}";
             row++;
@@ -207,8 +210,8 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 else
                 {
                     sheet.Cell(row, 2).Value = $"Preço {index + 1:N0} não obtido";
-                    sheet.Range(row, 2, row, 9).Style.Font.FontColor = XLColor.DarkRed;
-                    sheet.Range(row, 2, row, 9).Style.Font.Italic = true;
+                    sheet.Range(row, 2, row, 10).Style.Font.FontColor = XLColor.DarkRed;
+                    sheet.Range(row, 2, row, 10).Style.Font.Italic = true;
                 }
 
                 WritePriceFormulas(
@@ -234,12 +237,12 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             sheet.Cell(row, 2).Value = aggregationMethod == QuotationAggregationMethod.Median
                 ? "Mediana dos preços válidos"
                 : "Valor médio dos preços válidos";
-            sheet.Range(row, 3, row, 5).Merge();
+            sheet.Range(row, 3, row, 6).Merge();
             sheet.Cell(row, 3).FormulaA1 = aggregationMethod == QuotationAggregationMethod.Median
-                ? $"IF(COUNTIF(J{firstPriceRow}:J{lastPriceRow},\">0\")=0,\"\"," +
-                  $"TRUNC(MEDIAN(J{firstPriceRow}:J{lastPriceRow}),2))"
-                : $"IFERROR(TRUNC(SUM(J{firstPriceRow}:J{lastPriceRow})/" +
-                  $"COUNTIF(J{firstPriceRow}:J{lastPriceRow},\">0\"),2),\"\")";
+                ? $"IF(COUNTIF(K{firstPriceRow}:K{lastPriceRow},\">0\")=0,\"\"," +
+                  $"TRUNC(MEDIAN(K{firstPriceRow}:K{lastPriceRow}),2))"
+                : $"IFERROR(TRUNC(SUM(K{firstPriceRow}:K{lastPriceRow})/" +
+                  $"COUNTIF(K{firstPriceRow}:K{lastPriceRow},\">0\"),2),\"\")";
             sheet.Cell(row, 3).Style.NumberFormat.Format = "R$ #,##0.00";
             row++;
 
@@ -271,7 +274,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             row,
             templateRowHeights,
             clearContents: false);
-        var responsibleRange = sheet.Range(row, 3, row, 8);
+        var responsibleRange = sheet.Range(row, 3, row, 9);
         responsibleRange.Merge();
         var responsibleCell = responsibleRange.FirstCell();
         responsibleCell.Value = $"{responsibleName}\nAgente de Administração";
@@ -279,7 +282,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         responsibleCell.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
         responsibleCell.Style.Alignment.WrapText = true;
 
-        sheet.Column(10).Hide();
+        sheet.Column(11).Hide();
         workbook.Worksheets.Delete(prototype.Name);
     }
 
@@ -376,21 +379,25 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         IReadOnlyDictionary<int, double> templateRowHeights,
         bool clearContents)
     {
-        prototype.Range(sourceRow - FirstBlockRow + 1, 1, sourceRow - FirstBlockRow + 1, 10)
+        prototype.Range(
+                sourceRow - FirstBlockRow + 1,
+                1,
+                sourceRow - FirstBlockRow + 1,
+                TemplateLastColumn)
             .CopyTo(destination.Cell(destinationRow, 1));
         destination.Row(destinationRow).Height = sourceRow == 5
             ? Math.Max(templateRowHeights[sourceRow], MinimumHeaderRowHeight)
             : templateRowHeights[sourceRow];
         if (sourceRow == 5)
         {
-            var header = destination.Range(destinationRow, 2, destinationRow, 9);
+            var header = destination.Range(destinationRow, 2, destinationRow, 10);
             header.Style.Alignment.WrapText = true;
             header.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
         }
 
         if (clearContents)
         {
-            destination.Range(destinationRow, 1, destinationRow, 10)
+            destination.Range(destinationRow, 1, destinationRow, TemplateLastColumn)
                 .Clear(XLClearOptions.Contents);
         }
     }
@@ -409,14 +416,15 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         sheet.Row(row).Height = Math.Max(minimumHeight, sheet.Row(row).Height);
         sheet.Cell(row, 3).Value = FormatBrazilianTaxId(reference.SupplierTaxId);
         sheet.Cell(row, 3).Style.NumberFormat.Format = "@";
+        sheet.Cell(row, 4).Value = FormatResearchSource(reference.Source);
         if (Uri.TryCreate(reference.PortalUrl, UriKind.Absolute, out _))
         {
-            sheet.Cell(row, 4).Value = reference.PortalUrl;
-            sheet.Cell(row, 4).Style.NumberFormat.Format = "@";
+            sheet.Cell(row, 5).Value = reference.PortalUrl;
+            sheet.Cell(row, 5).Style.NumberFormat.Format = "@";
         }
 
-        sheet.Cell(row, 5).Value = exported.Entry.EffectiveUnitPrice;
-        sheet.Cell(row, 5).Style.NumberFormat.Format = "R$ #,##0.00";
+        sheet.Cell(row, 6).Value = exported.Entry.EffectiveUnitPrice;
+        sheet.Cell(row, 6).Style.NumberFormat.Format = "R$ #,##0.00";
     }
 
     private static string FormatSupplierName(QuotationReference reference)
@@ -463,26 +471,26 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         var otherPrices = new List<string>(2);
         if (row > firstPriceRow)
         {
-            otherPrices.Add($"E{firstPriceRow}:E{row - 1}");
+            otherPrices.Add($"F{firstPriceRow}:F{row - 1}");
         }
 
         if (row < lastPriceRow)
         {
-            otherPrices.Add($"E{row + 1}:E{lastPriceRow}");
+            otherPrices.Add($"F{row + 1}:F{lastPriceRow}");
         }
 
-        sheet.Cell(row, 6).FormulaA1 =
-            $"IF(E{row}=\"\",\"\",IFERROR(TRUNC(AVERAGE({string.Join(",", otherPrices)}),2),\"\"))";
-        sheet.Cell(row, 6).Style.NumberFormat.Format = "R$ #,##0.00";
         sheet.Cell(row, 7).FormulaA1 =
-            $"IF(OR(E{row}=\"\",F{row}=\"\"),\"\",E{row}/F{row}-1)";
+            $"IF(F{row}=\"\",\"\",IFERROR(TRUNC(AVERAGE({string.Join(",", otherPrices)}),2),\"\"))";
+        sheet.Cell(row, 7).Style.NumberFormat.Format = "R$ #,##0.00";
         sheet.Cell(row, 8).FormulaA1 =
-            $"IF(F{row}=\"\",\"\",IF(G{row}>0.25,\"EXCESSIVO\",\"VÁLIDO\"))";
+            $"IF(OR(F{row}=\"\",G{row}=\"\"),\"\",F{row}/G{row}-1)";
         sheet.Cell(row, 9).FormulaA1 =
-            $"IF(F{row}=\"\",\"\",IF(G{row}<-0.25,\"INEXEQUÍVEL\",\"VÁLIDO\"))";
-        sheet.Cell(row, 10).FormulaA1 = isManualBasket
-            ? $"IF(E{row}=\"\",\"\",E{row})"
-            : $"IF(E{row}=\"\",\"\",IF(OR(H{row}=\"EXCESSIVO\",I{row}=\"INEXEQUÍVEL\"),\"\",E{row}))";
+            $"IF(G{row}=\"\",\"\",IF(H{row}>0.25,\"EXCESSIVO\",\"VÁLIDO\"))";
+        sheet.Cell(row, 10).FormulaA1 =
+            $"IF(G{row}=\"\",\"\",IF(H{row}<-0.25,\"INEXEQUÍVEL\",\"VÁLIDO\"))";
+        sheet.Cell(row, 11).FormulaA1 = isManualBasket
+            ? $"IF(F{row}=\"\",\"\",F{row})"
+            : $"IF(F{row}=\"\",\"\",IF(OR(I{row}=\"EXCESSIVO\",J{row}=\"INEXEQUÍVEL\"),\"\",F{row}))";
     }
 
     private static void AddPriceConditionalFormatting(
@@ -490,15 +498,15 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         int firstPriceRow,
         int lastPriceRow)
     {
-        sheet.Range(firstPriceRow, 8, lastPriceRow, 8)
+        sheet.Range(firstPriceRow, 9, lastPriceRow, 9)
             .AddConditionalFormat()
             .WhenContains("EXCESSIVO")
             .Font.SetFontColor(XLColor.Red);
-        sheet.Range(firstPriceRow, 8, lastPriceRow, 9)
+        sheet.Range(firstPriceRow, 9, lastPriceRow, 10)
             .AddConditionalFormat()
             .WhenContains("VÁLIDO")
             .Font.SetFontColor(XLColor.FromHtml("#548135"));
-        sheet.Range(firstPriceRow, 9, lastPriceRow, 9)
+        sheet.Range(firstPriceRow, 10, lastPriceRow, 10)
             .AddConditionalFormat()
             .WhenContains("INEXEQUÍVEL")
             .Font.SetFontColor(XLColor.Red);
@@ -776,6 +784,11 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         source == QuotationReferenceSource.InternetIncisoIII
             ? "INCISO III"
             : "INCISO II";
+
+    private static string FormatResearchSource(QuotationReferenceSource source) =>
+        source == QuotationReferenceSource.InternetIncisoIII
+            ? "Inciso III"
+            : "Inciso II";
 
     private static void FormatPlainUrlColumn(
         IXLWorksheet sheet,

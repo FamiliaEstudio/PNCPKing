@@ -89,10 +89,16 @@ public sealed class InternetPriceTests
             var sheet = workbook.Worksheet(1);
             var internetRow = sheet.Column(2).CellsUsed()
                 .Single(cell => cell.GetString() == "Loja Exemplo").Address.RowNumber;
+            var sourceLabels = sheet.Range("D6:D9").Cells()
+                .Select(cell => cell.GetString())
+                .ToArray();
+            Assert.Equal(3, sourceLabels.Count(value => value == "Inciso II"));
+            Assert.Single(sourceLabels, value => value == "Inciso III");
             Assert.Equal("11.222.333/0001-81", sheet.Cell(internetRow, 3).GetString());
-            Assert.Equal(draft.SourceUrl, sheet.Cell(internetRow, 4).GetString());
-            Assert.Equal(105m, sheet.Cell(internetRow, 5).GetValue<decimal>());
-            Assert.False(sheet.Hyperlinks.TryGet(sheet.Cell(internetRow, 4).Address, out _));
+            Assert.Equal("Inciso III", sheet.Cell(internetRow, 4).GetString());
+            Assert.Equal(draft.SourceUrl, sheet.Cell(internetRow, 5).GetString());
+            Assert.Equal(105m, sheet.Cell(internetRow, 6).GetValue<decimal>());
+            Assert.False(sheet.Hyperlinks.TryGet(sheet.Cell(internetRow, 5).Address, out _));
         }
 
         var evidencePath = Path.Combine(database.Directory, "evidencias.pdf");
