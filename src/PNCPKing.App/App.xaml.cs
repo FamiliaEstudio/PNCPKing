@@ -152,9 +152,9 @@ public partial class App : Application
                 AutomaticDecompression = DecompressionMethods.All,
                 ConnectTimeout = TimeSpan.FromSeconds(30),
                 PooledConnectionLifetime = TimeSpan.FromMinutes(10),
-                MaxConnectionsPerServer = 2
+                MaxConnectionsPerServer = 32
             };
-            var requestScheduler = new PncpRequestScheduler(maximumConcurrency: 2);
+            var requestScheduler = new PncpRequestScheduler(maximumConcurrency: 32);
             var requestTelemetry = new PncpRequestTelemetry();
             var handler = new PncpSchedulingHandler(requestScheduler, requestTelemetry, _performanceTelemetry)
             {
@@ -195,12 +195,14 @@ public partial class App : Application
                 repository,
                 Path.Combine(settings.DataFolder, "pncpking-general-search.db"),
                 requestTelemetry,
-                persistentSession: true);
+                persistentSession: true,
+                requestScheduler: requestScheduler);
             var transientItemSearchService = new ItemSearchSessionService(
                 client,
                 repository,
                 Path.Combine(settings.DataFolder, "pncpking-search-session.db"),
-                requestTelemetry);
+                requestTelemetry,
+                requestScheduler: requestScheduler);
             var quotationItemSearchService = new QuotationItemSearchService(
                 repository,
                 quotationRepository,

@@ -92,9 +92,12 @@ public enum PriceBatchBudgetMode
 public sealed record PriceBatchRequest(
     int BatchCount,
     bool LargeRequestConfirmed = false,
-    PriceBatchBudgetMode BudgetMode = PriceBatchBudgetMode.CandidateContracts)
+    PriceBatchBudgetMode BudgetMode = PriceBatchBudgetMode.CandidateContracts,
+    int? ExactContractCount = null)
 {
-    public int RequestedContracts => checked(BatchCount * ItemSearchDefaults.ContractsPerBatch);
+    public int RequestedContracts => ExactContractCount is > 0
+        ? ExactContractCount.Value
+        : checked(BatchCount * ItemSearchDefaults.ContractsPerBatch);
 }
 
 public sealed record PriceBatchProgress(

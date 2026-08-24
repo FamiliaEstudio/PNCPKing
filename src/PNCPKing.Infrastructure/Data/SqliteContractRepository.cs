@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 19;
+    public const int CurrentSchemaVersion = 20;
 
     private const string GeographicGroupExpression = "CASE WHEN c.geo_layer = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -440,6 +440,33 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             span.Complete();
             version = 19;
+        }
+
+        if (version < 20)
+        {
+            using var span = _performance.Begin("startup", "schema-v20");
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            if (!await HasColumnAsync(
+                    connection,
+                    (SqliteTransaction)transaction,
+                    "quotation_automation_runs",
+                    "responsible_name",
+                    cancellationToken).ConfigureAwait(false))
+            {
+                await using var migration = connection.CreateCommand();
+                migration.Transaction = (SqliteTransaction)transaction;
+                migration.CommandText =
+                    "ALTER TABLE quotation_automation_runs ADD COLUMN responsible_name TEXT NOT NULL DEFAULT '';";
+                await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 20 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            span.Complete();
+            version = 20;
         }
 
         stopwatch.Stop();
@@ -1846,6 +1873,90 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         }
 
         return items;
+    }
+
+    public async Task<IReadOnlyList<ItemSearchHit>> SearchItemsAsync(
+        IReadOnlyList<ContractRecord> contracts,
+        string text,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(contracts);
+        if (contracts.Count == 0)
+        {
+            return [];
+        }
+
+        var expression = SearchText.Parse(text);
+        var match = expression.ItemMatchQuery;
+        var byId = contracts
+            .DistinctBy(contract => contract.PncpId)
+            .ToDictionary(contract => contract.PncpId, StringComparer.Ordinal);
+        await using var readerLease = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using (var selection = connection.CreateCommand())
+        {
+            selection.CommandText = """
+                CREATE TEMP TABLE IF NOT EXISTS selected_item_search_contracts(
+                    contract_id TEXT PRIMARY KEY,
+                    selected_order INTEGER NOT NULL
+                ) WITHOUT ROWID;
+                DELETE FROM selected_item_search_contracts;
+                """;
+            await selection.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = """
+                INSERT OR IGNORE INTO selected_item_search_contracts(contract_id, selected_order)
+                VALUES($contractId, $order);
+                """;
+            insert.Parameters.Add("$contractId", SqliteType.Text);
+            insert.Parameters.Add("$order", SqliteType.Integer);
+            for (var index = 0; index < contracts.Count; index++)
+            {
+                insert.Parameters["$contractId"].Value = contracts[index].PncpId;
+                insert.Parameters["$order"].Value = index;
+                await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        await using var command = connection.CreateCommand();
+        var itemFtsJoin = match.Length > 0
+            ? "JOIN items_fts ON items_fts.rowid = i.rowid"
+            : string.Empty;
+        var itemMatch = match.Length > 0 ? "AND items_fts MATCH $match" : string.Empty;
+        command.CommandText = $"""
+            SELECT i.contract_id, i.item_number, i.description, i.unit, i.requested_quantity_scaled,
+                   i.additional_information, i.item_category, i.ncm_nbs_code, i.ncm_nbs_description,
+                   i.catalog_code, i.catalog_name, i.catalog_category, i.status,
+                   i.has_result, i.source_updated_at, i.hydration_status, i.last_error
+              FROM selected_item_search_contracts selected
+              JOIN items i ON i.contract_id = selected.contract_id
+              {itemFtsJoin}
+             WHERE 1 = 1 {itemMatch}
+             ORDER BY selected.selected_order, i.item_number;
+            """;
+        if (match.Length > 0)
+        {
+            command.Parameters.AddWithValue("$match", match);
+        }
+
+        var hits = new List<ItemSearchHit>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var item = ReadItem(reader);
+            if (byId.TryGetValue(item.ContractId, out var contract) &&
+                expression.MatchesItem(item.Description, item.Unit))
+            {
+                hits.Add(new ItemSearchHit(contract, item));
+            }
+        }
+
+        return hits;
     }
 
     public async Task<CachedItemResults?> GetCachedItemResultsAsync(

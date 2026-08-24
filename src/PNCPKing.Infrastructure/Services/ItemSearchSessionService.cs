@@ -14,6 +14,12 @@ namespace PNCPKing.Infrastructure.Services;
 /// </summary>
 public sealed class ItemSearchSessionService : IAsyncDisposable
 {
+    private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(250);
+    private const int DefaultNetworkConcurrency = 4;
+    private const int MaximumPersistenceConcurrency = 4;
+    private static readonly SemaphoreSlim PersistenceGate = new(
+        MaximumPersistenceConcurrency,
+        MaximumPersistenceConcurrency);
     public const int DefaultPageSize = ItemSearchDefaults.ContractsPerBatch;
     public const int MaximumBatchCount = 100;
     public const int MaximumFreshItemListsPerAction = ItemSearchDefaults.ContractsPerBatch;
@@ -22,16 +28,20 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
     private readonly IContractRepository _repository;
     private readonly TemporaryItemResultStore _temporaryResults;
     private readonly IPncpRequestTelemetry? _telemetry;
+    private readonly PncpRequestScheduler? _requestScheduler;
     private readonly SemaphoreSlim _operationGate = new(1, 1);
     private readonly List<ItemSearchHit> _hits = [];
     private readonly HashSet<(string ContractId, long ItemNumber)> _hitKeys = [];
     private readonly List<ItemContractCandidate> _candidates = [];
     private readonly HashSet<string> _candidateKeys = new(StringComparer.Ordinal);
+    private readonly List<ContractRecord> _processedContracts = [];
+    private readonly HashSet<string> _processedContractKeys = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<(string ContractId, long ItemNumber), PriceAvailability> _priceAvailability = [];
     private CancellationTokenSource? _sessionCancellation;
     private ItemSearchSession? _session;
     private SearchQuery? _contractSearchQuery;
     private SearchExpression? _searchExpression;
+    private SearchExpression? _candidateExpression;
     private ItemCandidateCursor? _candidateCursor;
     private ItemCandidateCursor? _processedCandidateCursor;
     private bool _candidateSourceExhausted;
@@ -42,6 +52,8 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
     private int _fullyResolvedContracts;
     private int _cachedItemLists;
     private long _randomPivot;
+    private string _anchorKey = string.Empty;
+    private string _scopeKey = string.Empty;
     private string _currentGeographicStage = "50 cidades próximas";
     private int _itemListCalls;
     private int _resultCalls;
@@ -55,7 +67,8 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         IContractRepository repository,
         string temporaryDatabasePath,
         IPncpRequestTelemetry? telemetry = null,
-        bool persistentSession = false)
+        bool persistentSession = false,
+        PncpRequestScheduler? requestScheduler = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(temporaryDatabasePath);
         _client = client;
@@ -63,9 +76,15 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         _temporaryResults = new TemporaryItemResultStore(temporaryDatabasePath, persistentSession);
         _temporaryResults.ClearAbandonedSession();
         _telemetry = telemetry;
+        _requestScheduler = requestScheduler;
     }
 
     public ItemSearchSession? CurrentSession => _session;
+
+    private int CurrentNetworkConcurrency => Math.Clamp(
+        _requestScheduler?.GetSnapshot().EffectiveConcurrency ?? DefaultNetworkConcurrency,
+        1,
+        32);
 
     /// <summary>
     /// Opens one contract once, compares its cached item list with every pending
@@ -102,11 +121,14 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                     priority,
                     PncpRequestCategory.ItemLists);
                 var items = await _client.GetItemsAsync(contract, cancellationToken).ConfigureAwait(false);
-                await _repository.UpsertItemsAsync(
-                    contract.PncpId,
-                    items,
-                    false,
-                    cancellationToken).ConfigureAwait(false);
+                await PersistAsync(
+                        token => _repository.UpsertItemsAsync(
+                            contract.PncpId,
+                            items,
+                            false,
+                            token),
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -166,7 +188,8 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             .GroupBy(item => item.ItemNumber)
             .Select(group => group.First())
             .ToArray();
-        using var semaphore = new SemaphoreSlim(2, 2);
+        var networkConcurrency = CurrentNetworkConcurrency;
+        using var semaphore = new SemaphoreSlim(networkConcurrency, networkConcurrency);
         var hydrationTasks = itemsToHydrate.Select(async item =>
         {
             var cached = await _repository.GetCachedItemResultsAsync(
@@ -192,11 +215,14 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                         item.ItemNumber,
                         cancellationToken)
                     .ConfigureAwait(false);
-                await _repository.ReplaceItemResultsAsync(
-                    contract.PncpId,
-                    item.ItemNumber,
-                    results,
-                    cancellationToken).ConfigureAwait(false);
+                await PersistAsync(
+                        token => _repository.ReplaceItemResultsAsync(
+                            contract.PncpId,
+                            item.ItemNumber,
+                            results,
+                            token),
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
                 resultByItem[item.ItemNumber] = new CachedItemResults(
                     item with { HydrationStatus = ItemHydrationStatus.Complete },
                     results);
@@ -208,12 +234,15 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             catch (Exception exception)
             {
                 Interlocked.Increment(ref failedCalls);
-                await _repository.SetItemHydrationStatusAsync(
-                    contract.PncpId,
-                    item.ItemNumber,
-                    ItemHydrationStatus.Failed,
-                    exception.Message,
-                    CancellationToken.None).ConfigureAwait(false);
+                await PersistAsync(
+                        token => _repository.SetItemHydrationStatusAsync(
+                            contract.PncpId,
+                            item.ItemNumber,
+                            ItemHydrationStatus.Failed,
+                            exception.Message,
+                            token),
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
             }
             finally
             {
@@ -322,10 +351,15 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             _hitKeys.Clear();
             _candidates.Clear();
             _candidateKeys.Clear();
+            _processedContracts.Clear();
+            _processedContractKeys.Clear();
             _priceAvailability.Clear();
             AddCandidates(candidateContracts);
             _contractSearchQuery = null;
             _searchExpression = expression;
+            _candidateExpression = expression;
+            _anchorKey = CreateAnchorKey(expression, text);
+            _scopeKey = string.Empty;
             _candidateCursor = null;
             _processedCandidateCursor = null;
             _candidateSourceExhausted = true;
@@ -350,7 +384,15 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 _candidates.Count,
                 DefaultPageSize,
                 _randomPivot);
-            await _temporaryResults.ResetAsync(newSession.Id, cancellationToken).ConfigureAwait(false);
+            await _temporaryResults.ResetAsync(
+                    newSession.Id,
+                    _anchorKey,
+                    _scopeKey,
+                    text ?? string.Empty,
+                    _randomPivot,
+                    newSession.StartedAt,
+                    cancellationToken)
+                .ConfigureAwait(false);
             _session = newSession;
             return newSession;
         }
@@ -376,13 +418,13 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(contractSearch);
         var expression = SearchText.Parse(contractSearch.Text);
-        var searchKey = CreateSearchKey(contractSearch);
+        var anchorKey = CreateAnchorKey(expression, contractSearch.Text);
+        var scopeKey = CreateScopeKey(contractSearch, expression);
+        var candidateExpression = CreateCandidateExpression(expression);
         _sessionCancellation?.Cancel();
         await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            // Do this before the first repository page so even a failed new
-            // search cannot leave prices from the previous text on disk.
             _temporaryResults.ClearAbandonedSession();
             _session = null;
             _sessionCancellation?.Dispose();
@@ -391,6 +433,8 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             _hitKeys.Clear();
             _candidates.Clear();
             _candidateKeys.Clear();
+            _processedContracts.Clear();
+            _processedContractKeys.Clear();
             _priceAvailability.Clear();
             _nextCandidateIndex = 0;
             _deliveredHitCount = 0;
@@ -407,19 +451,46 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
 
             _contractSearchQuery = contractSearch with { Page = 1, PageSize = 200 };
             _searchExpression = expression;
+            _candidateExpression = candidateExpression;
+            _anchorKey = anchorKey;
+            _scopeKey = scopeKey;
             _candidateCursor = null;
             _processedCandidateCursor = null;
-            var stored = restart
-                ? null
-                : await _temporaryResults.TryRestoreAsync(searchKey, cancellationToken)
+            var stored = await _temporaryResults.TryRestoreAsync(anchorKey, cancellationToken)
+                .ConfigureAwait(false);
+            if (stored is not null &&
+                (restart || !string.Equals(stored.ScopeKey, scopeKey, StringComparison.Ordinal)))
+            {
+                stored = null;
+                _randomPivot = Random.Shared.NextInt64(1, long.MaxValue);
+                var resetStartedAt = DateTimeOffset.UtcNow;
+                var resetSessionId = Guid.NewGuid();
+                await _temporaryResults.ResetTraversalAsync(
+                        resetSessionId,
+                        anchorKey,
+                        scopeKey,
+                        contractSearch.Text ?? string.Empty,
+                        _randomPivot,
+                        resetStartedAt,
+                        cancellationToken)
                     .ConfigureAwait(false);
+                return await StartFreshTraversalAsync(
+                        resetSessionId,
+                        resetStartedAt,
+                        contractSearch,
+                        candidateExpression,
+                        resetStore: false,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
             if (stored is not null)
             {
-                foreach (var hit in stored.Hits)
+                foreach (var contract in stored.ProcessedContracts)
                 {
-                    if (_hitKeys.Add((hit.Contract.PncpId, hit.Item.ItemNumber)))
+                    if (_processedContractKeys.Add(contract.PncpId))
                     {
-                        _hits.Add(hit);
+                        _processedContracts.Add(contract);
                     }
                 }
 
@@ -436,6 +507,49 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 _completedResultCalls = stored.CompletedResultCalls;
                 _failedResultCalls = stored.FailedCalls;
                 _randomPivot = stored.RandomPivot;
+                if (_processedContracts.Count == 0 &&
+                    stored.ContractsScanned > 0 &&
+                    !await ReconstructMigratedContractsAsync(
+                            stored,
+                            contractSearch,
+                            candidateExpression,
+                            cancellationToken)
+                        .ConfigureAwait(false))
+                {
+                    _randomPivot = Random.Shared.NextInt64(1, long.MaxValue);
+                    var resetStartedAt = DateTimeOffset.UtcNow;
+                    var resetSessionId = Guid.NewGuid();
+                    await _temporaryResults.ResetTraversalAsync(
+                            resetSessionId,
+                            anchorKey,
+                            scopeKey,
+                            contractSearch.Text ?? string.Empty,
+                            _randomPivot,
+                            resetStartedAt,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    return await StartFreshTraversalAsync(
+                            resetSessionId,
+                            resetStartedAt,
+                            contractSearch,
+                            candidateExpression,
+                            resetStore: false,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                if (!string.Equals(stored.CriteriaText, contractSearch.Text, StringComparison.Ordinal))
+                {
+                    await RefilterProcessedContractsAsync(contractSearch.Text, cancellationToken)
+                        .ConfigureAwait(false);
+                    await _temporaryResults.UpdateCriteriaAsync(contractSearch.Text, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    RestoreHits(stored.Hits);
+                }
+
                 _currentGeographicStage = stored.CandidateSetExhausted
                     ? "conjunto esgotado"
                     : "pesquisa retomada";
@@ -453,46 +567,160 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             _randomPivot = Random.Shared.NextInt64(1, long.MaxValue);
             var startedAt = DateTimeOffset.UtcNow;
             var sessionId = Guid.NewGuid();
-            await _temporaryResults.ResetAsync(
+            return await StartFreshTraversalAsync(
                     sessionId,
-                    searchKey,
-                    _randomPivot,
                     startedAt,
+                    contractSearch,
+                    candidateExpression,
+                    resetStore: true,
                     cancellationToken)
                 .ConfigureAwait(false);
-            var firstPage = await _repository.SearchItemCandidatesAsync(
-                    _contractSearchQuery,
-                    expression,
-                    _randomPivot,
-                    null,
-                    200,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            AddCandidates(firstPage.Results);
-            _candidateCursor = firstPage.NextCursor;
-            _candidateSourceExhausted = !firstPage.HasMore;
-            _currentGeographicStage = firstPage.Results.Count == 0
-                ? "conjunto esgotado"
-                : DescribeGeographicStage(firstPage.Results[0].Contract);
-            var newSession = new ItemSearchSession(
-                sessionId,
-                contractSearch.Text ?? string.Empty,
-                startedAt,
-                firstPage.Results.Count + (firstPage.HasMore ? 1 : 0),
-                DefaultPageSize,
-                _randomPivot);
-            _session = newSession;
-            if (!HasMoreContractCandidates)
-            {
-                await SaveCheckpointAsync(true, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            return newSession;
         }
         finally
         {
             _operationGate.Release();
         }
+    }
+
+    private async Task<ItemSearchSession> StartFreshTraversalAsync(
+        Guid sessionId,
+        DateTimeOffset startedAt,
+        SearchQuery contractSearch,
+        SearchExpression candidateExpression,
+        bool resetStore,
+        CancellationToken cancellationToken)
+    {
+        if (resetStore)
+        {
+            await _temporaryResults.ResetAsync(
+                    sessionId,
+                    _anchorKey,
+                    _scopeKey,
+                    contractSearch.Text ?? string.Empty,
+                    _randomPivot,
+                    startedAt,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        var firstPage = await _repository.SearchItemCandidatesAsync(
+                _contractSearchQuery!,
+                candidateExpression,
+                _randomPivot,
+                null,
+                200,
+                cancellationToken)
+            .ConfigureAwait(false);
+        AddCandidates(firstPage.Results);
+        _candidateCursor = firstPage.NextCursor;
+        _candidateSourceExhausted = !firstPage.HasMore;
+        _currentGeographicStage = firstPage.Results.Count == 0
+            ? "conjunto esgotado"
+            : DescribeGeographicStage(firstPage.Results[0].Contract);
+        var newSession = new ItemSearchSession(
+            sessionId,
+            contractSearch.Text ?? string.Empty,
+            startedAt,
+            firstPage.Results.Count + (firstPage.HasMore ? 1 : 0),
+            DefaultPageSize,
+            _randomPivot);
+        _session = newSession;
+        if (!HasMoreContractCandidates)
+        {
+            await SaveCheckpointAsync(true, cancellationToken).ConfigureAwait(false);
+        }
+
+        return newSession;
+    }
+
+    private void RestoreHits(IEnumerable<ItemSearchHit> hits)
+    {
+        foreach (var hit in hits)
+        {
+            if (_hitKeys.Add((hit.Contract.PncpId, hit.Item.ItemNumber)))
+            {
+                _hits.Add(hit);
+            }
+        }
+
+        _deliveredHitCount = _hits.Count;
+    }
+
+    private async Task RefilterProcessedContractsAsync(
+        string criteriaText,
+        CancellationToken cancellationToken)
+    {
+        var hits = await _repository.SearchItemsAsync(
+                _processedContracts,
+                criteriaText,
+                cancellationToken)
+            .ConfigureAwait(false);
+        _hits.Clear();
+        _hitKeys.Clear();
+        foreach (var hit in hits)
+        {
+            if (_hitKeys.Add((hit.Contract.PncpId, hit.Item.ItemNumber)))
+            {
+                _hits.Add(hit);
+            }
+        }
+
+        _deliveredHitCount = _hits.Count;
+        await _temporaryResults.ReplaceHitsAsync(_hits, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<bool> ReconstructMigratedContractsAsync(
+        StoredItemSearchSession stored,
+        SearchQuery contractSearch,
+        SearchExpression candidateExpression,
+        CancellationToken cancellationToken)
+    {
+        var storedExpression = SearchText.Parse(stored.CriteriaText);
+        if (!string.Equals(
+                storedExpression.CandidateMatchQuery,
+                candidateExpression.CandidateMatchQuery,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                storedExpression.ExplicitContractMatchQuery,
+                candidateExpression.ExplicitContractMatchQuery,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        ItemCandidateCursor? cursor = null;
+        while (_processedContracts.Count < stored.ContractsScanned)
+        {
+            var page = await _repository.SearchItemCandidatesAsync(
+                    contractSearch with { Page = 1, PageSize = 200 },
+                    candidateExpression,
+                    stored.RandomPivot,
+                    cursor,
+                    Math.Min(200, stored.ContractsScanned - _processedContracts.Count),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (page.Results.Count == 0)
+            {
+                return false;
+            }
+
+            foreach (var candidate in page.Results)
+            {
+                if (_processedContractKeys.Add(candidate.Contract.PncpId))
+                {
+                    _processedContracts.Add(candidate.Contract);
+                    await _temporaryResults.SaveProcessedContractAsync(
+                            candidate.Contract,
+                            _processedContracts.Count,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+
+            cursor = page.NextCursor;
+        }
+
+        return Equals(cursor, stored.Cursor);
     }
 
     public async Task<ItemSearchPage> LoadPageAsync(
@@ -696,7 +924,14 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 $"A quantidade de disparos deve estar entre 1 e {MaximumBatchCount}.");
         }
 
-        if (request.BatchCount > 10 && !request.LargeRequestConfirmed)
+        if (request.ExactContractCount is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(request),
+                "A quantidade exata de contratações deve ser positiva.");
+        }
+
+        if (request.RequestedContracts > 500 && !request.LargeRequestConfirmed)
         {
             throw new InvalidOperationException(
                 "Mais de 500 contratações exigem confirmação explícita do usuário.");
@@ -717,6 +952,8 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
 
         using var linked = CreateLinkedCancellation(cancellationToken);
         await _operationGate.WaitAsync(linked.Token).ConfigureAwait(false);
+        var throttledProgress = new ThrottledProgress<PriceBatchProgress>(progress, ProgressInterval);
+        var throttledRows = new CoalescingRowProgress(rowProgress, ProgressInterval);
         try
         {
             var callsAtStart = Volatile.Read(ref _completedResultCalls);
@@ -737,103 +974,170 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 : _contractsScanned - contractsAtStart;
             while (BudgetUsed() < request.RequestedContracts)
             {
-                if (!await EnsureNextCandidateAvailableAsync(linked.Token).ConfigureAwait(false))
+                var networkConcurrency = CurrentNetworkConcurrency;
+                var window = new List<ItemContractCandidate>(networkConcurrency);
+                var windowSize = Math.Min(
+                    networkConcurrency,
+                    request.RequestedContracts - BudgetUsed());
+                while (window.Count < windowSize &&
+                       await EnsureNextCandidateAvailableAsync(linked.Token).ConfigureAwait(false))
+                {
+                    window.Add(_candidates[_nextCandidateIndex++]);
+                }
+
+                if (window.Count == 0)
                 {
                     break;
                 }
 
-                var discovery = await DiscoverNextContractAsync(
-                        linked.Token,
-                        PncpRequestPriority.AdditionalBatches,
-                        allowFreshItemList: true)
-                    .ConfigureAwait(false);
-                var matchingHits = discovery.MatchingHits;
-                IReadOnlyList<ItemSearchHit> toHydrate = [];
-                if (matchingHits.Count > 0)
+                var preparedWindow = new PreparedCandidate?[window.Count];
+                var pendingPreparations = window
+                    .Select((candidate, index) => (
+                        Task: PrepareCandidateAsync(
+                            candidate,
+                            PncpRequestPriority.AdditionalBatches,
+                            linked.Token),
+                        Index: index))
+                    .ToDictionary(value => value.Task, value => value.Index);
+                var preparedIndex = 0;
+                var completedPreparations = 0;
+                var budgetReached = false;
+                try
                 {
-                    if (rowProgress is not null)
+                    while (pendingPreparations.Count > 0)
                     {
-                        var availableRows = (await BuildRowsAsync(
-                                matchingHits,
-                                minimumUnitPrice,
-                                maximumUnitPrice,
-                                linked.Token)
-                            .ConfigureAwait(false))
-                            .Where(row => row.PriceState != ItemSearchPriceState.Pending)
-                            .ToArray();
-                        if (availableRows.Length > 0)
+                        var completedTask = await Task.WhenAny(pendingPreparations.Keys).ConfigureAwait(false);
+                        var completedIndex = pendingPreparations[completedTask];
+                        pendingPreparations.Remove(completedTask);
+                        preparedWindow[completedIndex] = await completedTask.ConfigureAwait(false);
+                        completedPreparations++;
+                        throttledProgress.Report(CreateProgress(
+                            Volatile.Read(ref _completedResultCalls) - callsAtStart,
+                            Volatile.Read(ref _completedResultCalls) - callsAtStart,
+                            Volatile.Read(ref _failedResultCalls) - failuresAtStart,
+                            false,
+                            $"Janela de rede: {completedPreparations:N0}/{window.Count:N0} resposta(s) concluída(s); " +
+                            $"{BudgetUsed():N0}/{request.RequestedContracts:N0} contratação(ões) confirmada(s).",
+                            requestedContracts: request.RequestedContracts,
+                            processedContracts: BudgetUsed()));
+
+                        while (!budgetReached &&
+                               preparedIndex < preparedWindow.Length &&
+                               preparedWindow[preparedIndex] is { } prepared)
                         {
-                            rowProgress.Report(availableRows);
+                            var discovery = await CompletePreparedCandidateAsync(prepared, linked.Token)
+                                .ConfigureAwait(false);
+                            var matchingHits = discovery.MatchingHits;
+                            IReadOnlyList<ItemSearchHit> toHydrate = [];
+                            if (matchingHits.Count > 0)
+                            {
+                                var availableRows = (await BuildRowsAsync(
+                                    matchingHits,
+                                    minimumUnitPrice,
+                                    maximumUnitPrice,
+                                    linked.Token)
+                                    .ConfigureAwait(false))
+                                    .Where(row => row.PriceState != ItemSearchPriceState.Pending)
+                                    .ToArray();
+                                if (availableRows.Length > 0)
+                                {
+                                    throttledRows.Report(availableRows);
+                                }
+
+                                toHydrate = await FilterItemsNeedingApiAsync(
+                                        matchingHits.Where(hit => hit.Item.HasResult),
+                                        retryFailures: true,
+                                        excludedKeys: null,
+                                        cancellationToken: linked.Token)
+                                    .ConfigureAwait(false);
+                                await HydrateSelectedAsync(
+                                        toHydrate,
+                                        PncpRequestPriority.AdditionalBatches,
+                                        progress: null,
+                                        requestedCalls: toHydrate.Count,
+                                        completedBaseline: callsAtStart,
+                                        failedBaseline: failuresAtStart,
+                                        retryFailures: true,
+                                        cancellationToken: linked.Token,
+                                        completedRowProgress: throttledRows,
+                                        minimumUnitPrice: minimumUnitPrice,
+                                        maximumUnitPrice: maximumUnitPrice)
+                                    .ConfigureAwait(false);
+
+                                var finalRows = (await BuildRowsAsync(
+                                        matchingHits,
+                                        minimumUnitPrice,
+                                        maximumUnitPrice,
+                                        linked.Token)
+                                    .ConfigureAwait(false))
+                                    .ToArray();
+                                throttledRows.Report(finalRows);
+                            }
+
+                            if (discovery.FreshItemListUsed || toHydrate.Count > 0)
+                            {
+                                _contractsExpanded = checked(_contractsExpanded + 1);
+                            }
+                            else
+                            {
+                                _fullyResolvedContracts = checked(_fullyResolvedContracts + 1);
+                            }
+
+                            _processedCandidateCursor = discovery.Cursor;
+                            var nextPreparedIndex = preparedIndex + 1;
+                            var windowHasPending = nextPreparedIndex < preparedWindow.Length;
+                            await SaveCheckpointAsync(
+                                    !windowHasPending && !HasMoreContractCandidates,
+                                    linked.Token)
+                                .ConfigureAwait(false);
+                            preparedIndex = nextPreparedIndex;
+                            var examinedContracts = _contractsScanned - contractsAtStart;
+                            var expandedContracts = _contractsExpanded - expandedAtStart;
+                            var resolvedContracts = _fullyResolvedContracts - resolvedAtStart;
+                            var processedContracts = BudgetUsed();
+                            throttledProgress.Report(CreateProgress(
+                                Volatile.Read(ref _completedResultCalls) - callsAtStart,
+                                Volatile.Read(ref _completedResultCalls) - callsAtStart,
+                                Volatile.Read(ref _failedResultCalls) - failuresAtStart,
+                                false,
+                                $"Cobertura nova: {expandedContracts:N0} de {request.RequestedContracts:N0}; " +
+                                $"janela {completedPreparations:N0}/{window.Count:N0}; " +
+                                $"{examinedContracts:N0} candidata(s) examinada(s), " +
+                                $"{resolvedContracts:N0} já resolvida(s) localmente; " +
+                                $"{_hits.Count:N0} item(ns) compatível(is) descoberto(s).",
+                                requestedContracts: request.RequestedContracts,
+                                processedContracts: processedContracts));
+                            budgetReached = BudgetUsed() >= request.RequestedContracts;
                         }
                     }
-
-                    toHydrate = await FilterItemsNeedingApiAsync(
-                            matchingHits.Where(hit => hit.Item.HasResult),
-                            retryFailures: true,
-                            excludedKeys: null,
-                            cancellationToken: linked.Token)
-                        .ConfigureAwait(false);
-                    await HydrateSelectedAsync(
-                            toHydrate,
-                            PncpRequestPriority.AdditionalBatches,
-                            progress: null,
-                            requestedCalls: toHydrate.Count,
-                            completedBaseline: callsAtStart,
-                            failedBaseline: failuresAtStart,
-                            retryFailures: true,
-                            cancellationToken: linked.Token,
-                            completedRowProgress: rowProgress,
-                            minimumUnitPrice: minimumUnitPrice,
-                            maximumUnitPrice: maximumUnitPrice)
-                        .ConfigureAwait(false);
-
-                    if (rowProgress is not null)
+                }
+                catch
+                {
+                    try
                     {
-                        var finalRows = (await BuildRowsAsync(
-                            matchingHits,
-                            minimumUnitPrice,
-                            maximumUnitPrice,
-                            linked.Token)
-                        .ConfigureAwait(false))
-                        .ToArray();
-                        rowProgress.Report(finalRows);
+                        await Task.WhenAll(pendingPreparations.Keys).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // Preserve the original cancellation or failure.
+                    }
+
+                    throw;
+                }
+                finally
+                {
+                    if (preparedIndex < window.Count)
+                    {
+                        _nextCandidateIndex -= window.Count - preparedIndex;
                     }
                 }
-
-                if (discovery.FreshItemListUsed || toHydrate.Count > 0)
-                {
-                    _contractsExpanded = checked(_contractsExpanded + 1);
-                }
-                else
-                {
-                    _fullyResolvedContracts = checked(_fullyResolvedContracts + 1);
-                }
-
-                _processedCandidateCursor = discovery.Cursor;
-                await SaveCheckpointAsync(!HasMoreContractCandidates, linked.Token)
-                    .ConfigureAwait(false);
-                var examinedContracts = _contractsScanned - contractsAtStart;
-                var expandedContracts = _contractsExpanded - expandedAtStart;
-                var resolvedContracts = _fullyResolvedContracts - resolvedAtStart;
-                var processedContracts = BudgetUsed();
-                progress?.Report(CreateProgress(
-                    Volatile.Read(ref _completedResultCalls) - callsAtStart,
-                    Volatile.Read(ref _completedResultCalls) - callsAtStart,
-                    Volatile.Read(ref _failedResultCalls) - failuresAtStart,
-                    false,
-                    $"Cobertura nova: {expandedContracts:N0} de {request.RequestedContracts:N0}; " +
-                    $"{examinedContracts:N0} candidata(s) examinada(s), " +
-                    $"{resolvedContracts:N0} já resolvida(s) localmente; " +
-                    $"{_hits.Count:N0} item(ns) compatível(is) descoberto(s).",
-                    requestedContracts: request.RequestedContracts,
-                    processedContracts: processedContracts));
             }
 
             if (previousContractFailures.Count > 0)
             {
                 await RetryPreviousContractFailuresAsync(
                         previousContractFailures,
-                        rowProgress,
+                        throttledRows,
                         minimumUnitPrice,
                         maximumUnitPrice,
                         linked.Token)
@@ -851,7 +1155,7 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                         failedBaseline: failuresAtStart,
                         retryFailures: true,
                         cancellationToken: linked.Token,
-                        completedRowProgress: rowProgress,
+                        completedRowProgress: throttledRows,
                         minimumUnitPrice: minimumUnitPrice,
                         maximumUnitPrice: maximumUnitPrice)
                     .ConfigureAwait(false);
@@ -878,11 +1182,14 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 message,
                 requestedContracts: request.RequestedContracts,
                 processedContracts: processed);
-            progress?.Report(result);
+            throttledRows.Flush();
+            throttledProgress.Report(result, force: true);
             return result;
         }
         finally
         {
+            throttledRows.Flush();
+            throttledProgress.Flush();
             _operationGate.Release();
         }
     }
@@ -985,7 +1292,14 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             {
                 using var requestScope = PncpRequestOptions.BeginScope(priority, PncpRequestCategory.ItemLists);
                 var items = await _client.GetItemsAsync(contract, cancellationToken).ConfigureAwait(false);
-                await _repository.UpsertItemsAsync(contract.PncpId, items, false, cancellationToken).ConfigureAwait(false);
+                await PersistAsync(
+                        token => _repository.UpsertItemsAsync(
+                            contract.PncpId,
+                            items,
+                            false,
+                            token),
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
                 await _temporaryResults.RemoveContractFailureAsync(contract.PncpId, cancellationToken)
                     .ConfigureAwait(false);
             }
@@ -1021,12 +1335,108 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
 
         var matchingHits = await AddMatchingHitsAsync(contract, session.Text, cancellationToken)
             .ConfigureAwait(false);
+        if (_processedContractKeys.Add(contract.PncpId))
+        {
+            _processedContracts.Add(contract);
+            await _temporaryResults.SaveProcessedContractAsync(
+                    contract,
+                    _processedContracts.Count,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
 
         return new DiscoveryAttempt(
             true,
             needsFreshItemList,
             false,
             candidate.Cursor,
+            matchingHits);
+    }
+
+    private async Task<PreparedCandidate> PrepareCandidateAsync(
+        ItemContractCandidate candidate,
+        PncpRequestPriority priority,
+        CancellationToken cancellationToken)
+    {
+        var contract = candidate.Contract;
+        var snapshot = await _repository.GetItemSnapshotAsync(contract.PncpId, cancellationToken)
+            .ConfigureAwait(false);
+        var needsFreshItemList = snapshot is null || !snapshot.IsCurrentFor(contract);
+        if (!needsFreshItemList)
+        {
+            return new PreparedCandidate(candidate, false, null);
+        }
+
+        Interlocked.Increment(ref _itemListCalls);
+        try
+        {
+            using var requestScope = PncpRequestOptions.BeginScope(priority, PncpRequestCategory.ItemLists);
+            var items = await _client.GetItemsAsync(contract, cancellationToken).ConfigureAwait(false);
+            await PersistAsync(
+                    token => _repository.UpsertItemsAsync(
+                        contract.PncpId,
+                        items,
+                        false,
+                        token),
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            return new PreparedCandidate(candidate, true, null);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            return new PreparedCandidate(candidate, true, exception);
+        }
+    }
+
+    private async Task<DiscoveryAttempt> CompletePreparedCandidateAsync(
+        PreparedCandidate prepared,
+        CancellationToken cancellationToken)
+    {
+        var session = GetRequiredSession();
+        var contract = prepared.Candidate.Contract;
+        _contractsScanned++;
+        _currentGeographicStage = DescribeGeographicStage(contract);
+        if (prepared.Failure is not null)
+        {
+            Interlocked.Increment(ref _failedResultCalls);
+            await _temporaryResults.SaveContractFailureAsync(
+                    contract.PncpId,
+                    prepared.Failure.Message,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        else
+        {
+            if (!prepared.FreshItemListUsed)
+            {
+                _cachedItemLists++;
+            }
+
+            await _temporaryResults.RemoveContractFailureAsync(contract.PncpId, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        var matchingHits = await AddMatchingHitsAsync(contract, session.Text, cancellationToken)
+            .ConfigureAwait(false);
+        if (_processedContractKeys.Add(contract.PncpId))
+        {
+            _processedContracts.Add(contract);
+            await _temporaryResults.SaveProcessedContractAsync(
+                    contract,
+                    _processedContracts.Count,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return new DiscoveryAttempt(
+            true,
+            prepared.FreshItemListUsed,
+            false,
+            prepared.Candidate.Cursor,
             matchingHits);
     }
 
@@ -1063,11 +1473,13 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                         PncpRequestPriority.AdditionalBatches,
                         PncpRequestCategory.ItemLists);
                     var items = await _client.GetItemsAsync(contract, cancellationToken).ConfigureAwait(false);
-                    await _repository.UpsertItemsAsync(
-                            contract.PncpId,
-                            items,
-                            false,
-                            cancellationToken)
+                    await PersistAsync(
+                            token => _repository.UpsertItemsAsync(
+                                contract.PncpId,
+                                items,
+                                false,
+                                token),
+                            CancellationToken.None)
                         .ConfigureAwait(false);
                     await _temporaryResults.RemoveContractFailureAsync(
                             contract.PncpId,
@@ -1181,6 +1593,21 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
     private bool HasMoreContractCandidates =>
         _nextCandidateIndex < _candidates.Count || !_candidateSourceExhausted;
 
+    private async Task PersistAsync(
+        Func<CancellationToken, Task> action,
+        CancellationToken cancellationToken)
+    {
+        await PersistenceGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await action(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            PersistenceGate.Release();
+        }
+    }
+
     private Task SaveCheckpointAsync(
         bool candidateSetExhausted,
         CancellationToken cancellationToken) =>
@@ -1203,7 +1630,7 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         {
             var query = _contractSearchQuery
                 ?? throw new InvalidOperationException("Fonte paginada de contratações ausente.");
-            var expression = _searchExpression
+            var expression = _candidateExpression
                 ?? throw new InvalidOperationException("Expressão da pesquisa ausente.");
             var previousCursor = _candidateCursor;
             var next = await _repository.SearchItemCandidatesAsync(
@@ -1377,7 +1804,8 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         decimal? minimumUnitPrice = null,
         decimal? maximumUnitPrice = null)
     {
-        using var semaphore = new SemaphoreSlim(2, 2);
+        var networkConcurrency = CurrentNetworkConcurrency;
+        using var semaphore = new SemaphoreSlim(networkConcurrency, networkConcurrency);
         var progressGate = new object();
         var lastReportedCompleted = -1;
         var tasks = hits.Select(async hit =>
@@ -1460,11 +1888,13 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                     hit.Item.ItemNumber,
                     cancellationToken)
                 .ConfigureAwait(false);
-            await _temporaryResults.SaveSuccessAsync(
-                    hit.Contract.PncpId,
-                    hit.Item.ItemNumber,
-                    results,
-                    cancellationToken)
+            await PersistAsync(
+                    token => _temporaryResults.SaveSuccessAsync(
+                        hit.Contract.PncpId,
+                        hit.Item.ItemNumber,
+                        results,
+                        token),
+                    CancellationToken.None)
                 .ConfigureAwait(false);
             _priceAvailability[(hit.Contract.PncpId, hit.Item.ItemNumber)] =
                 PriceAvailability.FromTemporary(new TemporaryItemResultEntry(true, null, results));
@@ -1480,10 +1910,12 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             Interlocked.Increment(ref _failedResultCalls);
             try
             {
-                await _temporaryResults.SaveFailureAsync(
-                        hit.Contract.PncpId,
-                        hit.Item.ItemNumber,
-                        exception.Message,
+                await PersistAsync(
+                        token => _temporaryResults.SaveFailureAsync(
+                            hit.Contract.PncpId,
+                            hit.Item.ItemNumber,
+                            exception.Message,
+                            token),
                         CancellationToken.None)
                     .ConfigureAwait(false);
             }
@@ -1740,17 +2172,33 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         }
     }
 
-    private static string CreateSearchKey(SearchQuery query)
+    private static string CreateAnchorKey(SearchExpression expression, string? text) =>
+        expression.AnchorTerm.Length > 0
+            ? expression.AnchorTerm
+            : $"exact:{SearchText.Normalize(text)}";
+
+    private static string CreateScopeKey(SearchQuery query, SearchExpression expression)
     {
         var geo = query.EffectiveGeoFilter;
         return string.Join(
             '\u001F',
-            (query.Text ?? string.Empty).Trim(),
             ((int)geo.Kind).ToString(System.Globalization.CultureInfo.InvariantCulture),
             geo.Uf ?? string.Empty,
             query.StartDate?.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty,
             query.EndDate?.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty,
-            ((int)query.Sort).ToString(System.Globalization.CultureInfo.InvariantCulture));
+            expression.ExplicitContractMatchQuery);
+    }
+
+    private static SearchExpression CreateCandidateExpression(SearchExpression expression)
+    {
+        if (expression.AnchorTerm.Length == 0)
+        {
+            return expression;
+        }
+
+        return SearchText.Parse(SearchText.ReplaceContractCandidates(
+            expression.AnchorTerm,
+            expression.ContractCandidates.Select(candidate => candidate.Text)));
     }
 
     private enum PriceAvailabilityKind
@@ -1774,6 +2222,137 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
     {
         public static DiscoveryAttempt NoCandidate { get; } = new(false, false, false, null, []);
         public static DiscoveryAttempt BudgetLimit { get; } = new(false, false, true, null, []);
+    }
+
+    private sealed record PreparedCandidate(
+        ItemContractCandidate Candidate,
+        bool FreshItemListUsed,
+        Exception? Failure);
+
+    private sealed class ThrottledProgress<T>(IProgress<T>? inner, TimeSpan interval)
+    {
+        private readonly object _gate = new();
+        private long _lastReportTimestamp;
+        private T? _pending;
+        private bool _hasPending;
+
+        public void Report(T value, bool force = false)
+        {
+            if (inner is null)
+            {
+                return;
+            }
+
+            T? toReport = default;
+            var shouldReport = false;
+            lock (_gate)
+            {
+                var now = Stopwatch.GetTimestamp();
+                if (force ||
+                    _lastReportTimestamp == 0 ||
+                    Stopwatch.GetElapsedTime(_lastReportTimestamp, now) >= interval)
+                {
+                    _lastReportTimestamp = now;
+                    _pending = default;
+                    _hasPending = false;
+                    toReport = value;
+                    shouldReport = true;
+                }
+                else
+                {
+                    _pending = value;
+                    _hasPending = true;
+                }
+            }
+
+            if (shouldReport)
+            {
+                inner.Report(toReport!);
+            }
+        }
+
+        public void Flush()
+        {
+            if (inner is null)
+            {
+                return;
+            }
+
+            T? toReport = default;
+            lock (_gate)
+            {
+                if (!_hasPending)
+                {
+                    return;
+                }
+
+                toReport = _pending;
+                _pending = default;
+                _hasPending = false;
+                _lastReportTimestamp = Stopwatch.GetTimestamp();
+            }
+
+            inner.Report(toReport!);
+        }
+    }
+
+    private sealed class CoalescingRowProgress(
+        IProgress<IReadOnlyList<ItemSearchRow>>? inner,
+        TimeSpan interval) : IProgress<IReadOnlyList<ItemSearchRow>>
+    {
+        private readonly object _gate = new();
+        private readonly List<ItemSearchRow> _pending = [];
+        private long _lastReportTimestamp;
+
+        public void Report(IReadOnlyList<ItemSearchRow> value)
+        {
+            if (inner is null || value.Count == 0)
+            {
+                return;
+            }
+
+            IReadOnlyList<ItemSearchRow>? toReport = null;
+            lock (_gate)
+            {
+                _pending.AddRange(value);
+                var now = Stopwatch.GetTimestamp();
+                if (_lastReportTimestamp == 0 ||
+                    Stopwatch.GetElapsedTime(_lastReportTimestamp, now) >= interval)
+                {
+                    toReport = _pending.ToArray();
+                    _pending.Clear();
+                    _lastReportTimestamp = now;
+                }
+            }
+
+            if (toReport is not null)
+            {
+                inner.Report(toReport);
+            }
+        }
+
+        public void Flush()
+        {
+            if (inner is null)
+            {
+                return;
+            }
+
+            IReadOnlyList<ItemSearchRow>? toReport = null;
+            lock (_gate)
+            {
+                if (_pending.Count == 0)
+                {
+                    return;
+                }
+
+                toReport = _pending.ToArray();
+                _pending.Clear();
+                _lastReportTimestamp = Stopwatch.GetTimestamp();
+            }
+
+            inner.Report(toReport);
+        }
     }
 
     private sealed record MatchedContractItem(

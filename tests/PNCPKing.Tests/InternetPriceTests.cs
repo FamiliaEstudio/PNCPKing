@@ -79,7 +79,10 @@ public sealed class InternetPriceTests
 
         var report = await quotations.GetReportAsync(project.Id);
         var workbookPath = Path.Combine(database.Directory, "inciso-iii.xlsx");
-        await new QuotationWorkbookService().ExportAsync(workbookPath, report);
+        await new QuotationWorkbookService().ExportAsync(
+            workbookPath,
+            report,
+            "Maria de Souza");
         using (var workbook = new XLWorkbook(workbookPath))
         {
             var sheet = Assert.Single(workbook.Worksheets);

@@ -1274,6 +1274,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
     public Task<QuotationAutomationRun> CreateAutomationRunAsync(
         Guid projectId,
         string outputPath,
+        string responsibleName,
         SearchGeoFilter geoFilter,
         DateOnly startDate,
         DateOnly endDate,
@@ -1283,6 +1284,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         CreateAutomationRunCoreAsync(
             projectId,
             outputPath,
+            responsibleName,
             geoFilter,
             startDate,
             endDate,
@@ -1310,6 +1312,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         CreateAutomationRunCoreAsync(
             projectId,
             string.Empty,
+            string.Empty,
             geoFilter,
             startDate,
             endDate,
@@ -1325,6 +1328,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
     private async Task<QuotationAutomationRun> CreateAutomationRunCoreAsync(
         Guid projectId,
         string outputPath,
+        string responsibleName,
         SearchGeoFilter geoFilter,
         DateOnly startDate,
         DateOnly endDate,
@@ -1342,6 +1346,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         if (mode == QuotationAutomationMode.FixedBatches)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+            ArgumentException.ThrowIfNullOrWhiteSpace(responsibleName);
         }
         else if (timeBudget < TimeSpan.FromMinutes(5) || timeBudget > TimeSpan.FromHours(24))
         {
@@ -1362,6 +1367,9 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             Id = Guid.NewGuid(),
             ProjectId = projectId,
             OutputPath = mode == QuotationAutomationMode.FixedBatches ? Path.GetFullPath(outputPath) : string.Empty,
+            ResponsibleName = mode == QuotationAutomationMode.FixedBatches
+                ? responsibleName.Trim()
+                : string.Empty,
             GeoFilter = geoFilter,
             StartDate = startDate,
             EndDate = endDate,
@@ -1385,9 +1393,10 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                     id, project_id, output_path, geo_filter_kind, geo_filter_uf,
                     start_date, end_date, state, message, created_at, updated_at,
                     automation_mode, time_budget_seconds, active_elapsed_seconds,
-                    source_draft_id, source_pdf_sha256, strategy_version)
+                    source_draft_id, source_pdf_sha256, strategy_version, responsible_name)
                 VALUES($id, $projectId, $output, $geoKind, $geoUf, $start, $end, $state, '', $created, $updated,
-                       $mode, $timeBudget, 0, $sourceDraftId, $sourcePdfSha256, $strategyVersion);
+                       $mode, $timeBudget, 0, $sourceDraftId, $sourcePdfSha256, $strategyVersion,
+                       $responsibleName);
                 """;
             runCommand.Parameters.AddWithValue("$id", run.Id.ToString("N"));
             runCommand.Parameters.AddWithValue("$projectId", projectId.ToString("N"));
@@ -1402,6 +1411,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             runCommand.Parameters.AddWithValue("$sourceDraftId", DbValue(sourceDraftId?.ToString("N")));
             runCommand.Parameters.AddWithValue("$sourcePdfSha256", run.SourcePdfSha256);
             runCommand.Parameters.AddWithValue("$strategyVersion", run.StrategyVersion);
+            runCommand.Parameters.AddWithValue("$responsibleName", run.ResponsibleName);
             runCommand.Parameters.AddWithValue("$created", FormatDateTime(now));
             runCommand.Parameters.AddWithValue("$updated", FormatDateTime(now));
             await runCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -1569,7 +1579,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                    source_draft_id, source_pdf_sha256, strategy_version,
                    unique_contracts_processed, matched_items, revealed_prices,
                    item_list_cache_hits, item_list_api_calls, item_result_api_calls,
-                   failed_calls, consecutive_no_results
+                   failed_calls, consecutive_no_results, responsible_name
               FROM quotation_automation_runs
              WHERE project_id = $projectId AND state <> $completed
              ORDER BY updated_at DESC LIMIT 1;
@@ -1738,6 +1748,29 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
              WHERE id = $id;
             """;
         command.Parameters.AddWithValue("$output", normalized);
+        command.Parameters.AddWithValue("$updated", FormatDateTime(DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$id", runId.ToString("N"));
+        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+        {
+            throw new InvalidOperationException("A automação não existe mais.");
+        }
+    }
+
+    public async Task UpdateAutomationResponsibleNameAsync(
+        Guid runId,
+        string responsibleName,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(responsibleName);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE quotation_automation_runs
+               SET responsible_name = $responsibleName,
+                   updated_at = $updated
+             WHERE id = $id;
+            """;
+        command.Parameters.AddWithValue("$responsibleName", responsibleName.Trim());
         command.Parameters.AddWithValue("$updated", FormatDateTime(DateTimeOffset.UtcNow));
         command.Parameters.AddWithValue("$id", runId.ToString("N"));
         if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
@@ -2482,7 +2515,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             ItemListApiCalls = reader.GetInt32(21),
             ItemResultApiCalls = reader.GetInt32(22),
             FailedCalls = reader.GetInt32(23),
-            ConsecutiveContractsWithoutResult = reader.GetInt32(24)
+            ConsecutiveContractsWithoutResult = reader.GetInt32(24),
+            ResponsibleName = reader.GetString(25)
         };
     }
 

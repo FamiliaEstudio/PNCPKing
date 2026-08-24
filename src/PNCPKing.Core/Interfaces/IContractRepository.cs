@@ -43,6 +43,10 @@ public interface IContractRepository
         long itemNumber,
         CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ProcurementItem>> SearchItemsAsync(string contractId, string text, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ItemSearchHit>> SearchItemsAsync(
+        IReadOnlyList<ContractRecord> contracts,
+        string text,
+        CancellationToken cancellationToken = default);
     Task<CachedItemResults?> GetCachedItemResultsAsync(string contractId, long itemNumber, CancellationToken cancellationToken = default);
     Task ReplaceItemResultsAsync(string contractId, long itemNumber, IReadOnlyList<HomologationResult> results, CancellationToken cancellationToken = default);
     Task SetItemHydrationStatusAsync(string contractId, long itemNumber, ItemHydrationStatus status, string? error = null, CancellationToken cancellationToken = default);

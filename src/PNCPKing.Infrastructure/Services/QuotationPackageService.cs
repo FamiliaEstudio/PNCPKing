@@ -720,6 +720,15 @@ public sealed class QuotationPackageService : IQuotationPackageService
                 compatibleColumns.Remove("display_name");
             }
 
+            if (manifest?.DatabaseSchemaVersion < 20 &&
+                string.Equals(
+                    definition.Name,
+                    "quotation_automation_runs",
+                    StringComparison.Ordinal))
+            {
+                compatibleColumns.Remove("responsible_name");
+            }
+
             var rows = GetRowsFromTables(tables, definition.Name);
             foreach (var row in rows)
             {
@@ -1168,6 +1177,14 @@ public sealed class QuotationPackageService : IQuotationPackageService
             var tables = payload["tables"] as JsonObject
                          ?? throw new InvalidDataException("O pacote não contém tabelas.");
             tables["quotation_catalog_selections"] = new JsonArray();
+        }
+
+        if (databaseSchemaVersion < 20)
+        {
+            foreach (var run in GetRows(payload, "quotation_automation_runs"))
+            {
+                run["responsible_name"] = string.Empty;
+            }
         }
     }
 

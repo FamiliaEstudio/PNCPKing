@@ -15,6 +15,7 @@ public enum PncpRequestPriority
 
 public sealed record PncpSchedulerSnapshot(
     int MaximumConcurrency,
+    int EffectiveConcurrency,
     int ActiveRequests,
     int QueuedUserSelectedItems,
     int QueuedVisiblePrices,
@@ -22,8 +23,18 @@ public sealed record PncpSchedulerSnapshot(
     int QueuedIndexMaintenance,
     int QueuedBackgroundPriceCache,
     int ActiveBackgroundPriceCache,
-    int BackgroundSuppressions)
+    int BackgroundSuppressions,
+    int ConsecutiveSuccesses,
+    int ConcurrencyReductions,
+    DateTimeOffset? GrowthBlockedUntil,
+    TimeSpan? RollingP50 = null,
+    TimeSpan? RollingP95 = null,
+    double RollingThroughput = 0,
+    string? LastReductionReason = null,
+    DateTimeOffset? LastConcurrencyChangeAt = null)
 {
+    public int CurrentTier => EffectiveConcurrency;
+
     public int TotalQueued =>
         QueuedUserSelectedItems +
         QueuedVisiblePrices +
@@ -38,6 +49,9 @@ public sealed record PncpSchedulerSnapshot(
 /// </summary>
 public sealed class PncpRequestScheduler
 {
+    private const int OutcomeWindowSize = 32;
+    private static readonly int[] ConcurrencyTiers = [1, 8, 16, 24, 32];
+
     // Five user-selected requests, two visible-price requests, one additional
     // batch, one maintenance request and one background opportunity per cycle.
     // The background queue has an additional strict-idle gate below.
@@ -60,11 +74,25 @@ public sealed class PncpRequestScheduler
         Enumerable.Range(0, 5).Select(_ => new LinkedList<Waiter>()).ToArray();
     private readonly int[] _activeByPriority = new int[5];
     private readonly int _maximumConcurrency;
+    private readonly TimeProvider _timeProvider;
+    private readonly Queue<SuccessfulOutcome> _successfulOutcomes = new();
+    private int _effectiveConcurrency;
     private int _activeRequests;
     private int _schedulePosition;
     private int _backgroundSuppressions;
+    private int _consecutiveSuccesses;
+    private int _concurrencyReductions;
+    private int _successesSinceLatencyEvaluation;
+    private int _consecutiveSlowWindows;
+    private int _pressureEventsAtNormalFloor;
+    private DateTimeOffset? _growthBlockedUntil;
+    private string? _lastReductionReason;
+    private DateTimeOffset? _lastConcurrencyChangeAt;
 
-    public PncpRequestScheduler(int maximumConcurrency = 2)
+    public PncpRequestScheduler(
+        int maximumConcurrency = 2,
+        TimeProvider? timeProvider = null,
+        int? initialConcurrency = null)
     {
         if (maximumConcurrency < 1)
         {
@@ -73,7 +101,13 @@ public sealed class PncpRequestScheduler
                 "A concorrência máxima deve ser pelo menos 1.");
         }
 
+        _timeProvider = timeProvider ?? TimeProvider.System;
         _maximumConcurrency = maximumConcurrency;
+        _effectiveConcurrency = Math.Clamp(
+            initialConcurrency ?? maximumConcurrency,
+            1,
+            maximumConcurrency);
+        _lastConcurrencyChangeAt = _timeProvider.GetUtcNow();
     }
 
     public Task<IDisposable> AcquireAsync(
@@ -126,8 +160,10 @@ public sealed class PncpRequestScheduler
     {
         lock (_gate)
         {
+            var (p50, p95, throughput) = CalculateRollingMetricsLocked();
             return new PncpSchedulerSnapshot(
                 _maximumConcurrency,
+                _effectiveConcurrency,
                 _activeRequests,
                 _queues[0].Count,
                 _queues[1].Count,
@@ -135,8 +171,230 @@ public sealed class PncpRequestScheduler
                 _queues[3].Count,
                 _queues[4].Count,
                 _activeByPriority[(int)PncpRequestPriority.BackgroundPriceCache],
-                _backgroundSuppressions);
+                _backgroundSuppressions,
+                _consecutiveSuccesses,
+                _concurrencyReductions,
+                _growthBlockedUntil,
+                p50,
+                p95,
+                throughput,
+                _lastReductionReason,
+                _lastConcurrencyChangeAt);
         }
+    }
+
+    internal void ReportOutcome(
+        PncpRequestCategory category,
+        System.Net.HttpStatusCode? statusCode,
+        TimeSpan duration,
+        TimeSpan? retryAfter = null,
+        bool transportFailure = false)
+    {
+        if (category is not (PncpRequestCategory.ItemLists or PncpRequestCategory.ItemResults))
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            var now = _timeProvider.GetUtcNow();
+            if (transportFailure ||
+                statusCode == System.Net.HttpStatusCode.RequestTimeout ||
+                statusCode is >= System.Net.HttpStatusCode.InternalServerError)
+            {
+                ApplyPressureLocked(
+                    transportFailure
+                        ? "falha de transporte"
+                        : statusCode == System.Net.HttpStatusCode.RequestTimeout
+                            ? "timeout"
+                            : $"HTTP {(int)statusCode.GetValueOrDefault()}",
+                    now,
+                    now.AddMinutes(1));
+                return;
+            }
+
+            if (statusCode == System.Net.HttpStatusCode.TooManyRequests)
+            {
+                var cooldown = retryAfter.GetValueOrDefault() > TimeSpan.FromMinutes(2)
+                    ? retryAfter.GetValueOrDefault()
+                    : TimeSpan.FromMinutes(2);
+                SetConcurrencyLocked(1, "HTTP 429", now, countAsReduction: true);
+                BlockGrowthUntilLocked(now.Add(cooldown));
+                ResetSuccessWindowLocked();
+                return;
+            }
+
+            if (statusCode is < System.Net.HttpStatusCode.OK or >= System.Net.HttpStatusCode.MultipleChoices)
+            {
+                return;
+            }
+
+            RecordSuccessLocked(duration, now);
+        }
+    }
+
+    private void RecordSuccessLocked(TimeSpan duration, DateTimeOffset now)
+    {
+        _consecutiveSuccesses++;
+        _successesSinceLatencyEvaluation++;
+        _successfulOutcomes.Enqueue(new SuccessfulOutcome(duration, now));
+        while (_successfulOutcomes.Count > OutcomeWindowSize)
+        {
+            _successfulOutcomes.Dequeue();
+        }
+
+        if (_successesSinceLatencyEvaluation >= OutcomeWindowSize &&
+            _successfulOutcomes.Count == OutcomeWindowSize)
+        {
+            _successesSinceLatencyEvaluation = 0;
+            var (_, p95, _) = CalculateRollingMetricsLocked();
+            _consecutiveSlowWindows = p95 is { } value && value > TimeSpan.FromSeconds(30)
+                ? _consecutiveSlowWindows + 1
+                : 0;
+            if (_consecutiveSlowWindows >= 2)
+            {
+                ApplyPressureLocked(
+                    $"latência p95 de {p95!.Value.TotalSeconds:N0}s",
+                    now,
+                    now.AddMinutes(1));
+                return;
+            }
+        }
+
+        if (_effectiveConcurrency >= _maximumConcurrency ||
+            _consecutiveSuccesses < OutcomeWindowSize ||
+            _successfulOutcomes.Count < OutcomeWindowSize ||
+            (_growthBlockedUntil is { } blockedUntil && blockedUntil > now))
+        {
+            return;
+        }
+
+        var (_, rollingP95, _) = CalculateRollingMetricsLocked();
+        if (rollingP95 is null || rollingP95 > TimeSpan.FromSeconds(30))
+        {
+            return;
+        }
+
+        var next = NextHigherTier(_effectiveConcurrency, _maximumConcurrency);
+        SetConcurrencyLocked(next, reason: null, now, countAsReduction: false);
+        _pressureEventsAtNormalFloor = 0;
+        ResetSuccessWindowLocked();
+        DispatchLocked();
+    }
+
+    private void ApplyPressureLocked(
+        string reason,
+        DateTimeOffset now,
+        DateTimeOffset blockedUntil)
+    {
+        var next = _effectiveConcurrency;
+        if (_effectiveConcurrency > 24)
+        {
+            next = Math.Min(24, _maximumConcurrency);
+        }
+        else if (_effectiveConcurrency > 16)
+        {
+            next = Math.Min(16, _maximumConcurrency);
+        }
+        else if (_effectiveConcurrency == 16)
+        {
+            _pressureEventsAtNormalFloor++;
+            if (_pressureEventsAtNormalFloor >= 2)
+            {
+                next = Math.Min(8, _maximumConcurrency);
+                _pressureEventsAtNormalFloor = 0;
+            }
+        }
+        else if (_effectiveConcurrency > 8)
+        {
+            next = Math.Min(8, _maximumConcurrency);
+        }
+
+        SetConcurrencyLocked(next, reason, now, countAsReduction: true);
+        BlockGrowthUntilLocked(blockedUntil);
+        ResetSuccessWindowLocked();
+    }
+
+    private void SetConcurrencyLocked(
+        int next,
+        string? reason,
+        DateTimeOffset now,
+        bool countAsReduction)
+    {
+        next = Math.Clamp(next, 1, _maximumConcurrency);
+        if (next == _effectiveConcurrency)
+        {
+            return;
+        }
+
+        var reduced = next < _effectiveConcurrency;
+        _effectiveConcurrency = next;
+        _lastConcurrencyChangeAt = now;
+        if (reduced && countAsReduction)
+        {
+            _concurrencyReductions++;
+            _lastReductionReason = reason;
+        }
+    }
+
+    private void BlockGrowthUntilLocked(DateTimeOffset blockedUntil)
+    {
+        _growthBlockedUntil = _growthBlockedUntil is { } current && current > blockedUntil
+            ? current
+            : blockedUntil;
+    }
+
+    private void ResetSuccessWindowLocked()
+    {
+        _consecutiveSuccesses = 0;
+        _successesSinceLatencyEvaluation = 0;
+        _consecutiveSlowWindows = 0;
+        _successfulOutcomes.Clear();
+    }
+
+    private (TimeSpan? P50, TimeSpan? P95, double Throughput) CalculateRollingMetricsLocked()
+    {
+        if (_successfulOutcomes.Count == 0)
+        {
+            return (null, null, 0);
+        }
+
+        var outcomes = _successfulOutcomes.ToArray();
+        var durations = outcomes
+            .Select(outcome => outcome.Duration)
+            .OrderBy(value => value)
+            .ToArray();
+        var earliestStart = outcomes.Min(outcome => outcome.CompletedAt - outcome.Duration);
+        var latestCompletion = outcomes.Max(outcome => outcome.CompletedAt);
+        var elapsedSeconds = Math.Max(
+            0.001,
+            (latestCompletion - earliestStart).TotalSeconds);
+        return (
+            Percentile(durations, 0.50),
+            Percentile(durations, 0.95),
+            outcomes.Length / elapsedSeconds);
+    }
+
+    private static TimeSpan Percentile(TimeSpan[] values, double percentile)
+    {
+        var index = Math.Clamp(
+            (int)Math.Ceiling(values.Length * percentile) - 1,
+            0,
+            values.Length - 1);
+        return values[index];
+    }
+
+    private static int NextHigherTier(int current, int maximum)
+    {
+        foreach (var tier in ConcurrencyTiers)
+        {
+            if (tier > current && tier <= maximum)
+            {
+                return tier;
+            }
+        }
+
+        return maximum > current ? maximum : current;
     }
 
     private void Cancel(Waiter waiter)
@@ -155,7 +413,7 @@ public sealed class PncpRequestScheduler
 
     private void DispatchLocked()
     {
-        while (_activeRequests < _maximumConcurrency && TryTakeNextLocked() is { } waiter)
+        while (_activeRequests < _effectiveConcurrency && TryTakeNextLocked() is { } waiter)
         {
             _activeRequests++;
             _activeByPriority[(int)waiter.Priority]++;
@@ -180,6 +438,12 @@ public sealed class PncpRequestScheduler
                 (_backgroundSuppressions > 0 ||
                  _activeByPriority[(int)priority] > 0 ||
                  HasForegroundWorkLocked()))
+            {
+                continue;
+            }
+
+            if (priority == PncpRequestPriority.IndexMaintenance &&
+                _activeByPriority[(int)priority] >= 2)
             {
                 continue;
             }
@@ -275,4 +539,6 @@ public sealed class PncpRequestScheduler
         public void Dispose() =>
             Interlocked.Exchange(ref _owner, null)?.ReleaseBackgroundSuppression();
     }
+
+    private sealed record SuccessfulOutcome(TimeSpan Duration, DateTimeOffset CompletedAt);
 }

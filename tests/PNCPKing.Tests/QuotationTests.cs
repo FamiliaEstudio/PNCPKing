@@ -572,6 +572,7 @@ public sealed class QuotationTests
         var run = await service.CreateAutomationRunAsync(
             project.Id,
             Path.Combine(database.Directory, "saida.xlsx"),
+            "Maria de Souza",
             SearchGeoFilter.Southeast,
             new DateOnly(2026, 1, 1),
             new DateOnly(2026, 7, 1),
@@ -607,6 +608,7 @@ public sealed class QuotationTests
         Assert.NotNull(recovered);
         Assert.Equal(QuotationAutomationRunState.Pending, recovered.State);
         Assert.Equal(SearchGeoFilterKind.Southeast, recovered.GeoFilter.Kind);
+        Assert.Equal("Maria de Souza", recovered.ResponsibleName);
     }
 
     [Fact]
@@ -673,7 +675,8 @@ public sealed class QuotationTests
                 path,
                 new QuotationProjectReport(
                     new QuotationProject(Guid.NewGuid(), "Catálogo", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
-                    [analysis]));
+                    [analysis]),
+                "Maria de Souza");
             using var workbook = new XLWorkbook(path);
             Assert.Equal("Item 1 - Nome amigável (CATSER 9876)", workbook.Worksheet(1).Cell("B4").GetString());
         }
@@ -714,7 +717,8 @@ public sealed class QuotationTests
         {
             await new QuotationWorkbookService().ExportAsync(
                 path,
-                new QuotationProjectReport(project, [resolved, pending]));
+                new QuotationProjectReport(project, [resolved, pending]),
+                "Maria de Souza");
 
             using var workbook = new XLWorkbook(path);
             var sheet = Assert.Single(workbook.Worksheets);
@@ -789,9 +793,23 @@ public sealed class QuotationTests
                 "IFERROR(SUM(J13:J15)/COUNTIF(J13:J15,\">0\"),\"\")",
                 sheet.Cell("C16").FormulaA1);
             Assert.True(sheet.Cell("C16").IsMerged());
-            Assert.Equal("Responsável pela cotação:", sheet.Cell("B25").GetString());
+            Assert.All(sheet.Range("A17:J17").Cells(), cell => Assert.True(cell.IsEmpty()));
+            Assert.Equal("Responsável pela cotação:", sheet.Cell("B18").GetString());
             Assert.Equal(
-                25,
+                "Maria de Souza\nAgente de Administração",
+                sheet.Cell("C18").GetString());
+            Assert.True(sheet.Cell("C18").IsMerged());
+            Assert.True(sheet.Cell("H18").IsMerged());
+            Assert.Equal(
+                XLAlignmentHorizontalValues.Center,
+                sheet.Cell("C18").Style.Alignment.Horizontal);
+            Assert.Equal(
+                XLAlignmentVerticalValues.Center,
+                sheet.Cell("C18").Style.Alignment.Vertical);
+            Assert.True(sheet.Cell("C18").Style.Alignment.WrapText);
+            Assert.True(sheet.Cell("B25").IsEmpty());
+            Assert.Equal(
+                18,
                 sheet.LastCellUsed(XLCellsUsedOptions.Contents)!.Address.RowNumber);
             Assert.Equal(6, sheet.ConditionalFormats.Count());
             Assert.Equal(XLCalculateMode.Auto, workbook.CalculateMode);
@@ -805,6 +823,29 @@ public sealed class QuotationTests
             var directory = Path.GetDirectoryName(path)!;
             if (Directory.Exists(directory)) Directory.Delete(directory, true);
         }
+    }
+
+    [Fact]
+    public async Task Workbook_RejectsAnEmptyResponsibleNameBeforeCreatingTheFile()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            "PNCPKing.Tests",
+            Guid.NewGuid().ToString("N"),
+            "invalid-responsible.xlsx");
+        var report = new QuotationProjectReport(
+            new QuotationProject(
+                Guid.NewGuid(),
+                "Responsável obrigatório",
+                DateTimeOffset.UtcNow,
+                DateTimeOffset.UtcNow),
+            []);
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(() =>
+            new QuotationWorkbookService().ExportAsync(path, report, "   "));
+
+        Assert.Equal("responsibleName", exception.ParamName);
+        Assert.False(File.Exists(path));
     }
 
     [Fact]
@@ -849,7 +890,8 @@ public sealed class QuotationTests
         {
             await new QuotationWorkbookService().ExportAsync(
                 path,
-                new QuotationProjectReport(project, [analysis]));
+                new QuotationProjectReport(project, [analysis]),
+                "Maria de Souza");
 
             using var workbook = new XLWorkbook(path);
             var sheet = Assert.Single(workbook.Worksheets);
@@ -898,7 +940,8 @@ public sealed class QuotationTests
         {
             await new QuotationWorkbookService().ExportAsync(
                 path,
-                new QuotationProjectReport(project, [analysis]));
+                new QuotationProjectReport(project, [analysis]),
+                "Maria de Souza");
 
             using var workbook = new XLWorkbook(path);
             var sheet = Assert.Single(workbook.Worksheets);
@@ -935,7 +978,8 @@ public sealed class QuotationTests
         {
             await new QuotationWorkbookService().ExportAsync(
                 path,
-                new QuotationProjectReport(project, [analysis]));
+                new QuotationProjectReport(project, [analysis]),
+                "Maria de Souza");
 
             using var workbook = new XLWorkbook(path);
             var sheet = Assert.Single(workbook.Worksheets);
@@ -993,7 +1037,8 @@ public sealed class QuotationTests
         {
             await new QuotationWorkbookService().ExportAsync(
                 path,
-                new QuotationProjectReport(project, [analysis]));
+                new QuotationProjectReport(project, [analysis]),
+                "Maria de Souza");
 
             using var workbook = new XLWorkbook(path);
             var sheet = Assert.Single(workbook.Worksheets);
@@ -1010,6 +1055,17 @@ public sealed class QuotationTests
                 "IFERROR(SUM(J6:J25)/COUNTIF(J6:J25,\">0\"),\"\")",
                 sheet.Cell("C26").FormulaA1);
             Assert.True(sheet.Cell("C26").IsMerged());
+            Assert.NotEqual("Responsável pela cotação:", sheet.Cell("B25").GetString());
+            Assert.All(sheet.Range("A27:J27").Cells(), cell => Assert.True(cell.IsEmpty()));
+            Assert.Equal("Responsável pela cotação:", sheet.Cell("B28").GetString());
+            Assert.Equal(
+                "Maria de Souza\nAgente de Administração",
+                sheet.Cell("C28").GetString());
+            Assert.True(sheet.Cell("C28").IsMerged());
+            Assert.True(sheet.Cell("H28").IsMerged());
+            Assert.Equal(
+                28,
+                sheet.LastCellUsed(XLCellsUsedOptions.Contents)!.Address.RowNumber);
             Assert.Equal(3, sheet.ConditionalFormats.Count());
         }
         finally

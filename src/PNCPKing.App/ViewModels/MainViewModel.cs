@@ -81,6 +81,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _hasMoreLocalPriceRows;
     private int _localPriceRowsLoaded;
     private bool _remotePriceExpansionStarted;
+    private int _activeExpansionRemaining;
+    private int _priceRunGeneration;
     private PncpRequestTelemetrySnapshot? _searchTelemetryBaseline;
     private string _queryText = string.Empty;
     private SearchGeoFilter _selectedGeoFilter = SearchGeoFilter.All;
@@ -266,7 +268,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
         SearchCommand = new AsyncRelayCommand(
             () => SearchAsync(resetSession: true, restartPriceSession: false),
-            () => !IsFileBusy && !IsPriceBusy);
+            () => !IsFileBusy,
+            allowConcurrentExecutions: true);
         RestartItemSearchCommand = new AsyncRelayCommand(
             RestartItemSearchAsync,
             () => !IsFileBusy && !IsPriceBusy && !string.IsNullOrWhiteSpace(QueryText));
@@ -1092,6 +1095,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         bool resetSession,
         bool restartPriceSession = false)
     {
+        var previousSessionId = _itemSearchService.CurrentSession?.Id;
+        var interruptedBatchRemainder = 0;
         using var visibleActivity = _requestScheduler.SuppressBackgroundRequests();
         _visibleIdleResumeCancellation?.Cancel();
         _visibleIdleResumeCancellation?.Dispose();
@@ -1155,6 +1160,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 return;
             }
 
+            interruptedBatchRemainder = !restartPriceSession && IsPriceBusy
+                ? Math.Max(0, _activeExpansionRemaining)
+                : 0;
             _priceCancellation?.Cancel();
             _itemSearchService.Stop();
             SetItemSearchActive(false);
@@ -1189,7 +1197,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 _priceCancellation.Token);
             var localRows = await LoadLocalPricePageAsync(_priceCancellation.Token).ConfigureAwait(true);
             await Task.Yield();
-            await itemSessionTask.ConfigureAwait(true);
+            var itemSession = await itemSessionTask.ConfigureAwait(true);
             var (minimum, maximum) = ParsePriceRange();
             var restoredRows = await _itemSearchService.GetDiscoveredRowsAsync(
                     minimum,
@@ -1208,7 +1216,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 ? "Resultados locais entregues; ampliando com contratações ainda não resolvidas."
                 : "Ampliando com contratações ainda não resolvidas.";
             _remotePriceExpansionStarted = true;
-            await RunSelectedBatchesAsync(_priceCancellation.Token).ConfigureAwait(true);
+            int? exactRemainder = previousSessionId == itemSession.Id && interruptedBatchRemainder > 0
+                ? interruptedBatchRemainder
+                : null;
+            await RunSelectedBatchesAsync(_priceCancellation.Token, exactRemainder).ConfigureAwait(true);
         }
         catch (OperationCanceledException)
         {
@@ -1492,10 +1503,14 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         await RunSelectedBatchesAsync(cancellation.Token).ConfigureAwait(true);
     }
 
-    private async Task RunSelectedBatchesAsync(CancellationToken cancellationToken)
+    private async Task RunSelectedBatchesAsync(
+        CancellationToken cancellationToken,
+        int? exactContractCount = null)
     {
         var effectiveBatchCount = BatchCount;
-        var requestedContracts = checked(effectiveBatchCount * ItemSearchDefaults.ContractsPerBatch);
+        var requestedContracts = exactContractCount is > 0
+            ? exactContractCount.Value
+            : checked(effectiveBatchCount * ItemSearchDefaults.ContractsPerBatch);
         var largeConfirmed = requestedContracts <= 500;
         if (!largeConfirmed)
         {
@@ -1516,19 +1531,29 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
 
         SetPriceBusy(true, usesNetwork: true);
+        var runGeneration = Interlocked.Increment(ref _priceRunGeneration);
+        _activeExpansionRemaining = requestedContracts;
         try
         {
             _remotePriceExpansionStarted = true;
             PriceSearchProgress = 0;
             var (minimum, maximum) = ParsePriceRange();
             using var requestScope = PncpRequestOptions.BeginScope(PncpRequestPriority.AdditionalBatches);
-            var progress = new Progress<PriceBatchProgress>(UpdateItemSearchProgress);
-            var rowProgress = new Progress<IReadOnlyList<ItemSearchRow>>(AppendUniqueRows);
+            var progress = new Progress<PriceBatchProgress>(value =>
+                UpdateItemSearchProgress(value, runGeneration));
+            var rowProgress = new Progress<IReadOnlyList<ItemSearchRow>>(rows =>
+            {
+                if (runGeneration == Volatile.Read(ref _priceRunGeneration))
+                {
+                    AppendUniqueRows(rows);
+                }
+            });
             var result = await _itemSearchService.RunContinuousAsync(
                 new PriceBatchRequest(
                     effectiveBatchCount,
                     largeConfirmed,
-                    PriceBatchBudgetMode.UnresolvedContracts),
+                    PriceBatchBudgetMode.UnresolvedContracts,
+                    exactContractCount),
                 minimum,
                 maximum,
                 progress,
@@ -1536,6 +1561,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 cancellationToken).ConfigureAwait(true);
             HasMoreItemCandidates = !result.CandidateSetExhausted;
             PriceSearchProgress = 100;
+            if (runGeneration == Volatile.Read(ref _priceRunGeneration))
+            {
+                _activeExpansionRemaining = 0;
+            }
             ItemSearchSummary =
                 $"{BuildLocalSearchSummary()} {result.Message} Etapa {result.GeographicStage}; " +
                 $"{result.ContractsScanned:N0} contratação(ões) examinada(s) na sessão; " +
@@ -1550,15 +1579,24 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
-            ItemSearchSummary = "Lotes interrompidos; o que terminou foi preservado no checkpoint retomável.";
+            if (runGeneration == Volatile.Read(ref _priceRunGeneration))
+            {
+                ItemSearchSummary = "Lotes interrompidos; o que terminou foi preservado no checkpoint retomável.";
+            }
         }
         catch (Exception exception)
         {
-            ItemSearchSummary = $"Falha ao disparar lotes: {exception.Message}";
+            if (runGeneration == Volatile.Read(ref _priceRunGeneration))
+            {
+                ItemSearchSummary = $"Falha ao disparar lotes: {exception.Message}";
+            }
         }
         finally
         {
-            SetPriceBusy(false, usesNetwork: false);
+            if (runGeneration == Volatile.Read(ref _priceRunGeneration))
+            {
+                SetPriceBusy(false, usesNetwork: false);
+            }
         }
     }
 
@@ -1650,8 +1688,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private void StopItemSearch()
     {
         var wasActive = _isItemSearchActive;
+        Interlocked.Increment(ref _priceRunGeneration);
+        _activeExpansionRemaining = 0;
         _priceCancellation?.Cancel();
         _itemSearchService.Stop();
+        SetPriceBusy(false, usesNetwork: false);
         SetItemSearchActive(false);
         HasMoreItemCandidates = false;
         if (wasActive)
@@ -1679,8 +1720,20 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private static string RowKey(ItemSearchDisplayRow row) =>
         $"{row.Contract.PncpId}|{row.Item.ItemNumber}|{row.Result?.ResultSequence.ToString(CultureInfo.InvariantCulture) ?? row.Source.PriceState.ToString()}";
 
-    private void UpdateItemSearchProgress(PriceBatchProgress progress)
+    private void UpdateItemSearchProgress(PriceBatchProgress progress, int? runGeneration = null)
     {
+        if (runGeneration is { } generation &&
+            generation != Volatile.Read(ref _priceRunGeneration))
+        {
+            return;
+        }
+
+        if (runGeneration is not null)
+        {
+            _activeExpansionRemaining = Math.Max(
+                0,
+                progress.RequestedContracts - progress.ProcessedContracts);
+        }
         var remaining = _localItemSearchSummary is null
             ? string.Empty
             : $"; restantes estimadas: {Math.Max(0, _localItemSearchSummary.CandidateContracts - progress.ContractsScanned):N0}";
@@ -1715,9 +1768,29 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     {
         var baseline = _searchTelemetryBaseline;
         var current = _telemetry.GetSnapshot();
+        var scheduler = _requestScheduler.GetSnapshot();
+        var cooldown = scheduler.GrowthBlockedUntil is { } blockedUntil && blockedUntil > DateTimeOffset.UtcNow
+            ? $"cooldown por {Math.Ceiling((blockedUntil - DateTimeOffset.UtcNow).TotalSeconds):N0}s"
+            : "sem cooldown";
+        var latency = scheduler.RollingP50 is { } p50 && scheduler.RollingP95 is { } p95
+            ? $"p50 {p50.TotalSeconds:N1}s; p95 {p95.TotalSeconds:N1}s; " +
+              $"vazão {scheduler.RollingThroughput:N2} req/s"
+            : "latência móvel aguardando amostra";
+        var lastReduction = string.IsNullOrWhiteSpace(scheduler.LastReductionReason)
+            ? "sem recuo registrado"
+            : $"último recuo: {scheduler.LastReductionReason}";
+        var lastChange = scheduler.LastConcurrencyChangeAt is { } changedAt
+            ? $"mudança às {changedAt.ToLocalTime():HH:mm:ss}"
+            : "mudança ainda não registrada";
+        var concurrency =
+            $"Concorrência: {scheduler.EffectiveConcurrency}/{scheduler.MaximumConcurrency}; " +
+            $"ativas/fila: {scheduler.ActiveRequests:N0}/{scheduler.TotalQueued:N0}; " +
+            $"sequência 2xx: {scheduler.ConsecutiveSuccesses:N0}; " +
+            $"reduções: {scheduler.ConcurrencyReductions:N0}; {latency}; " +
+            $"{lastReduction}; {lastChange}; {cooldown}";
         if (baseline is null)
         {
-            return $"Rede da sessão: {FormatBytes(current.TotalBytesReceived)}.";
+            return $"Rede da sessão: {FormatBytes(current.TotalBytesReceived)}. {concurrency}.";
         }
 
         var listCalls = Math.Max(0, current[PncpRequestCategory.ItemLists].Calls - baseline[PncpRequestCategory.ItemLists].Calls);
@@ -1736,7 +1809,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             baseline[PncpRequestCategory.ItemResults].TotalDuration);
         return $"Rede: {FormatBytes(listBytes + resultBytes)} ({listCalls:N0} lista(s), {resultCalls:N0} resultado(s)); " +
                $"médias: lista {FormatCallAverage(listBytes, listDuration, listCalls)}, " +
-               $"resultado {FormatCallAverage(resultBytes, resultDuration, resultCalls)}.";
+               $"resultado {FormatCallAverage(resultBytes, resultDuration, resultCalls)}. {concurrency}.";
     }
 
     private (long Bytes, TimeSpan Duration, long AverageBytes, TimeSpan AverageDuration) BuildPriceBatchProjection(

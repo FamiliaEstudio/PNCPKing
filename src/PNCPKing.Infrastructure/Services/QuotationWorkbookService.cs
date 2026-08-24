@@ -11,12 +11,13 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
     private const string TemplateResourceName =
         "PNCPKing.Infrastructure.Assets.QuotationWorkbookTemplate.xlsx";
     private const int FirstBlockRow = 4;
-    private const int TemplateLastRow = 24;
+    private const int TemplateLastRow = 25;
     private const int FirstPriceTemplateRow = 6;
     private const int MiddlePriceTemplateRow = 7;
     private const int LastPriceTemplateRow = 22;
     private const int SummaryTemplateRow = 23;
     private const int SpacerTemplateRow = 24;
+    private const int ResponsibleTemplateRow = 25;
     private const int MinimumPriceRows = 3;
     private const double MinimumHeaderRowHeight = 64.5d;
 
@@ -55,10 +56,13 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
     public Task ExportAsync(
         string destinationPath,
         QuotationProjectReport report,
+        string responsibleName,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         ArgumentNullException.ThrowIfNull(report);
+        ArgumentException.ThrowIfNullOrWhiteSpace(responsibleName);
+        responsibleName = responsibleName.Trim();
         cancellationToken.ThrowIfCancellationRequested();
         if (!destinationPath.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
         {
@@ -76,7 +80,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         {
             using var templateStream = OpenTemplateStream();
             using var workbook = new XLWorkbook(templateStream);
-            WriteQuotationFromTemplate(workbook, report, cancellationToken);
+            WriteQuotationFromTemplate(workbook, report, responsibleName, cancellationToken);
             workbook.CalculateMode = XLCalculateMode.Auto;
             workbook.CalculationOnSave = true;
             workbook.ForceFullCalculation = true;
@@ -120,6 +124,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
     private static void WriteQuotationFromTemplate(
         XLWorkbook workbook,
         QuotationProjectReport report,
+        string responsibleName,
         CancellationToken cancellationToken)
     {
         var sheet = workbook.Worksheet(1);
@@ -232,6 +237,29 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 row++;
             }
         }
+
+        CopyTemplateRow(
+            prototype,
+            SpacerTemplateRow,
+            sheet,
+            row,
+            templateRowHeights,
+            clearContents: true);
+        row++;
+        CopyTemplateRow(
+            prototype,
+            ResponsibleTemplateRow,
+            sheet,
+            row,
+            templateRowHeights,
+            clearContents: false);
+        var responsibleRange = sheet.Range(row, 3, row, 8);
+        responsibleRange.Merge();
+        var responsibleCell = responsibleRange.FirstCell();
+        responsibleCell.Value = $"{responsibleName}\nAgente de Administração";
+        responsibleCell.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+        responsibleCell.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
+        responsibleCell.Style.Alignment.WrapText = true;
 
         sheet.Column(10).Hide();
         workbook.Worksheets.Delete(prototype.Name);

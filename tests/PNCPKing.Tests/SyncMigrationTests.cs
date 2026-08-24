@@ -416,6 +416,7 @@ public sealed class SyncMigrationTests
             var run = await quotation.CreateAutomationRunAsync(
                 project.Id,
                 Path.Combine(directory, "saida.xlsx"),
+                "Maria de Souza",
                 SearchGeoFilter.All,
                 new DateOnly(2026, 1, 1),
                 new DateOnly(2026, 7, 1),

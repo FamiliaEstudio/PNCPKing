@@ -76,6 +76,7 @@ public interface IQuotationRepository
     Task<QuotationAutomationRun> CreateAutomationRunAsync(
         Guid projectId,
         string outputPath,
+        string responsibleName,
         SearchGeoFilter geoFilter,
         DateOnly startDate,
         DateOnly endDate,
@@ -120,6 +121,10 @@ public interface IQuotationRepository
     Task UpdateAutomationOutputPathAsync(
         Guid runId,
         string outputPath,
+        CancellationToken cancellationToken = default);
+    Task UpdateAutomationResponsibleNameAsync(
+        Guid runId,
+        string responsibleName,
         CancellationToken cancellationToken = default);
     Task UpgradeContractSearchStrategyAsync(
         Guid runId,
@@ -171,6 +176,7 @@ public interface IQuotationWorkbookService
     Task ExportAsync(
         string destinationPath,
         QuotationProjectReport report,
+        string responsibleName,
         CancellationToken cancellationToken = default);
 }
 

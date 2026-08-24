@@ -308,6 +308,49 @@ public sealed class QuotationPackageTests
     }
 
     [Fact]
+    public async Task Package_PreservesResponsibleAndImportsSchemaNineteenWithoutIt()
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await using var currentDestination = await TestDatabase.CreateAsync();
+        await using var legacyDestination = await TestDatabase.CreateAsync();
+        var sourceRepository = new SqliteQuotationRepository(source.Repository.DatabasePath);
+        var project = await sourceRepository.CreateProjectAsync("Responsável portátil");
+        var run = await sourceRepository.CreateAutomationRunAsync(
+            project.Id,
+            Path.Combine(source.Directory, "saida.xlsx"),
+            "Maria de Souza",
+            SearchGeoFilter.All,
+            new DateOnly(2026, 1, 1),
+            new DateOnly(2026, 8, 1),
+            [new QuotationImportItem(1, "cafe", "Café", 1m, "pacote", null, null, 1)],
+            AdequacyWeights.Default);
+        var path = Path.Combine(source.Directory, "responsavel.pncpcotacao");
+        await new QuotationPackageService(source.Repository.DatabasePath, source.Directory)
+            .ExportAsync(path, project.Id);
+
+        await new QuotationPackageService(
+                currentDestination.Repository.DatabasePath,
+                currentDestination.Directory)
+            .ImportAsync(path, QuotationPackageImportMode.PreserveIdentity);
+        var restored = Assert.IsType<QuotationAutomationRun>(
+            await new SqliteQuotationRepository(currentDestination.Repository.DatabasePath)
+                .GetLatestAutomationRunAsync(project.Id));
+        Assert.Equal(run.Id, restored.Id);
+        Assert.Equal("Maria de Souza", restored.ResponsibleName);
+
+        await DowngradePackageToSchemaNineteenAsync(path);
+        await new QuotationPackageService(
+                legacyDestination.Repository.DatabasePath,
+                legacyDestination.Directory)
+            .ImportAsync(path, QuotationPackageImportMode.PreserveIdentity);
+        var legacy = Assert.IsType<QuotationAutomationRun>(
+            await new SqliteQuotationRepository(legacyDestination.Repository.DatabasePath)
+                .GetLatestAutomationRunAsync(project.Id));
+        Assert.Equal(run.Id, legacy.Id);
+        Assert.Empty(legacy.ResponsibleName);
+    }
+
+    [Fact]
     public async Task Package_CopyRemapsRelationshipsAndReplaceKeepsRecoveryAndOtherData()
     {
         await using var source = await TestDatabase.CreateAsync();
@@ -690,6 +733,26 @@ public sealed class QuotationPackageTests
         var manifest = JsonNode.Parse(
             await ReadEntryAsync(archive.GetEntry("manifest.json")!))!.AsObject();
         manifest["databaseSchemaVersion"] = 13;
+        manifest["dataSha256"] = Convert.ToHexString(SHA256.HashData(payloadBytes)).ToLowerInvariant();
+        ReplaceEntry(archive, "manifest.json", Encoding.UTF8.GetBytes(manifest.ToJsonString(jsonOptions)));
+    }
+
+    private static async Task DowngradePackageToSchemaNineteenAsync(string path)
+    {
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
+        var payload = JsonNode.Parse(
+            await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
+        foreach (var run in payload["tables"]!["quotation_automation_runs"]!.AsArray())
+        {
+            run!.AsObject().Remove("responsible_name");
+        }
+
+        var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
+        var payloadBytes = Encoding.UTF8.GetBytes(payload.ToJsonString(jsonOptions));
+        ReplaceEntry(archive, "quotation.json", payloadBytes);
+        var manifest = JsonNode.Parse(
+            await ReadEntryAsync(archive.GetEntry("manifest.json")!))!.AsObject();
+        manifest["databaseSchemaVersion"] = 19;
         manifest["dataSha256"] = Convert.ToHexString(SHA256.HashData(payloadBytes)).ToLowerInvariant();
         ReplaceEntry(archive, "manifest.json", Encoding.UTF8.GetBytes(manifest.ToJsonString(jsonOptions)));
     }

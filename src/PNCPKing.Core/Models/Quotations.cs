@@ -147,6 +147,7 @@ public sealed record QuotationAutomationRun
     public required Guid Id { get; init; }
     public required Guid ProjectId { get; init; }
     public required string OutputPath { get; init; }
+    public string ResponsibleName { get; init; } = string.Empty;
     public required SearchGeoFilter GeoFilter { get; init; }
     public required DateOnly StartDate { get; init; }
     public required DateOnly EndDate { get; init; }

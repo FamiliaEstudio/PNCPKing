@@ -57,24 +57,34 @@ public sealed class RelayCommand<T>(Action<T?> execute, Func<T?, bool>? canExecu
     public void NotifyCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
 }
 
-public sealed class AsyncRelayCommand(Func<Task> execute, Func<bool>? canExecute = null) : ICommand
+public sealed class AsyncRelayCommand(
+    Func<Task> execute,
+    Func<bool>? canExecute = null,
+    bool allowConcurrentExecutions = false) : ICommand
 {
-    private int _isRunning;
+    private int _runningCount;
 
     public event EventHandler? CanExecuteChanged;
 
-    public bool IsRunning => Volatile.Read(ref _isRunning) != 0;
+    public bool IsRunning => Volatile.Read(ref _runningCount) != 0;
 
     public Task? ExecutionTask { get; private set; }
 
-    public bool CanExecute(object? parameter) => !IsRunning && (canExecute?.Invoke() ?? true);
+    public bool CanExecute(object? parameter) =>
+        (allowConcurrentExecutions || !IsRunning) && (canExecute?.Invoke() ?? true);
 
     public async void Execute(object? parameter)
     {
-        if (!(canExecute?.Invoke() ?? true) || Interlocked.CompareExchange(ref _isRunning, 1, 0) != 0)
+        if (!(canExecute?.Invoke() ?? true) ||
+            (!allowConcurrentExecutions && Interlocked.CompareExchange(ref _runningCount, 1, 0) != 0))
         {
             AsyncCommandRuntime.ReportRejected();
             return;
+        }
+
+        if (allowConcurrentExecutions)
+        {
+            Interlocked.Increment(ref _runningCount);
         }
 
         NotifyCanExecuteChanged();
@@ -94,7 +104,14 @@ public sealed class AsyncRelayCommand(Func<Task> execute, Func<bool>? canExecute
         }
         finally
         {
-            Interlocked.Exchange(ref _isRunning, 0);
+            if (allowConcurrentExecutions)
+            {
+                Interlocked.Decrement(ref _runningCount);
+            }
+            else
+            {
+                Interlocked.Exchange(ref _runningCount, 0);
+            }
             NotifyCanExecuteChanged();
         }
     }

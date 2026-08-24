@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using PNCPKing.Core.Models;
+using PNCPKing.Core.Search;
 
 namespace PNCPKing.Infrastructure.Services;
 
@@ -12,7 +13,9 @@ internal sealed record TemporaryItemResultEntry(
 
 internal sealed record StoredItemSearchSession(
     Guid Id,
-    string SearchKey,
+    string AnchorKey,
+    string ScopeKey,
+    string CriteriaText,
     DateTimeOffset StartedAt,
     long RandomPivot,
     ItemCandidateCursor? Cursor,
@@ -25,7 +28,8 @@ internal sealed record StoredItemSearchSession(
     int CompletedResultCalls,
     int FailedCalls,
     bool CandidateSetExhausted,
-    IReadOnlyList<ItemSearchHit> Hits);
+    IReadOnlyList<ItemSearchHit> Hits,
+    IReadOnlyList<ContractRecord> ProcessedContracts);
 
 internal sealed record StoredContractFailure(
     string ContractId,
@@ -41,7 +45,7 @@ internal sealed class TemporaryItemResultStore(
     string databasePath,
     bool persistent = false) : IAsyncDisposable
 {
-    private const int SchemaVersion = 2;
+    private const int SchemaVersion = 3;
     private static readonly JsonSerializerOptions JsonOptions = new();
     private readonly string _databasePath = Path.GetFullPath(databasePath);
     private readonly bool _persistent = persistent;
@@ -67,13 +71,17 @@ internal sealed class TemporaryItemResultStore(
         ResetAsync(
             sessionId,
             string.Empty,
+            string.Empty,
+            string.Empty,
             0,
             DateTimeOffset.UtcNow,
             cancellationToken);
 
     public async Task ResetAsync(
         Guid sessionId,
-        string searchKey,
+        string anchorKey,
+        string scopeKey,
+        string criteriaText,
         long randomPivot,
         DateTimeOffset startedAt,
         CancellationToken cancellationToken)
@@ -86,6 +94,9 @@ internal sealed class TemporaryItemResultStore(
             CREATE TABLE session_info(
                 id TEXT PRIMARY KEY,
                 search_key TEXT NOT NULL,
+                anchor_key TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                criteria_text TEXT NOT NULL,
                 started_at TEXT NOT NULL,
                 random_pivot INTEGER NOT NULL,
                 cursor_geo_layer INTEGER,
@@ -114,6 +125,14 @@ internal sealed class TemporaryItemResultStore(
                 PRIMARY KEY(contract_id, item_number)
             );
             CREATE INDEX idx_search_hits_order ON search_hits(discovered_order);
+
+            CREATE TABLE processed_contracts(
+                contract_id TEXT PRIMARY KEY,
+                processed_order INTEGER NOT NULL,
+                contract_json TEXT NOT NULL
+            );
+            CREATE INDEX idx_processed_contracts_order
+                ON processed_contracts(processed_order, contract_id);
 
             CREATE TABLE queried_items(
                 contract_id TEXT NOT NULL,
@@ -153,14 +172,18 @@ internal sealed class TemporaryItemResultStore(
             CREATE INDEX idx_contract_failures_updated
                 ON contract_failures(updated_at, contract_id);
 
-            PRAGMA user_version=2;
+            PRAGMA user_version=3;
 
             INSERT INTO session_info(
-                id, search_key, started_at, random_pivot, updated_at)
-            VALUES($id, $searchKey, $startedAt, $randomPivot, $updatedAt);
+                id, search_key, anchor_key, scope_key, criteria_text,
+                started_at, random_pivot, updated_at)
+            VALUES($id, $criteriaText, $anchorKey, $scopeKey, $criteriaText,
+                   $startedAt, $randomPivot, $updatedAt);
             """;
         command.Parameters.AddWithValue("$id", sessionId.ToString("N"));
-        command.Parameters.AddWithValue("$searchKey", searchKey);
+        command.Parameters.AddWithValue("$anchorKey", anchorKey);
+        command.Parameters.AddWithValue("$scopeKey", scopeKey);
+        command.Parameters.AddWithValue("$criteriaText", criteriaText);
         command.Parameters.AddWithValue("$startedAt", startedAt.ToString("O", CultureInfo.InvariantCulture));
         command.Parameters.AddWithValue("$randomPivot", randomPivot);
         command.Parameters.AddWithValue("$updatedAt", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
@@ -168,7 +191,7 @@ internal sealed class TemporaryItemResultStore(
     }
 
     public async Task<StoredItemSearchSession?> TryRestoreAsync(
-        string searchKey,
+        string anchorKey,
         CancellationToken cancellationToken)
     {
         if (!_persistent || !File.Exists(_databasePath))
@@ -179,6 +202,7 @@ internal sealed class TemporaryItemResultStore(
         try
         {
             await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            await UpgradeSchemaAsync(connection, cancellationToken).ConfigureAwait(false);
             await using (var version = connection.CreateCommand())
             {
                 version.CommandText = "PRAGMA user_version;";
@@ -192,6 +216,8 @@ internal sealed class TemporaryItemResultStore(
             }
 
             Guid id;
+            string scopeKey;
+            string criteriaText;
             DateTimeOffset startedAt;
             long randomPivot;
             ItemCandidateCursor? cursor;
@@ -207,7 +233,7 @@ internal sealed class TemporaryItemResultStore(
             await using (var session = connection.CreateCommand())
             {
                 session.CommandText = """
-                    SELECT id, search_key, started_at, random_pivot,
+                    SELECT id, anchor_key, scope_key, criteria_text, started_at, random_pivot,
                            cursor_geo_layer, cursor_group_rank, cursor_rotation_band,
                            cursor_random_key, cursor_pncp_id, contracts_scanned,
                            expanded_contracts, fully_resolved_contracts,
@@ -218,34 +244,36 @@ internal sealed class TemporaryItemResultStore(
                     """;
                 await using var reader = await session.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
                 if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ||
-                    !string.Equals(reader.GetString(1), searchKey, StringComparison.Ordinal))
+                    !string.Equals(reader.GetString(1), anchorKey, StringComparison.Ordinal))
                 {
                     return null;
                 }
 
                 id = Guid.ParseExact(reader.GetString(0), "N");
+                scopeKey = reader.GetString(2);
+                criteriaText = reader.GetString(3);
                 startedAt = DateTimeOffset.Parse(
-                    reader.GetString(2),
+                    reader.GetString(4),
                     CultureInfo.InvariantCulture,
                     DateTimeStyles.RoundtripKind);
-                randomPivot = reader.GetInt64(3);
-                cursor = reader.IsDBNull(4)
+                randomPivot = reader.GetInt64(5);
+                cursor = reader.IsDBNull(6)
                     ? null
                     : new ItemCandidateCursor(
-                        reader.GetInt32(4),
-                        reader.GetInt32(5),
                         reader.GetInt32(6),
-                        reader.GetInt64(7),
-                        reader.GetString(8));
-                contractsScanned = reader.GetInt32(9);
-                expandedContracts = reader.GetInt32(10);
-                fullyResolvedContracts = reader.GetInt32(11);
-                cachedItemLists = reader.GetInt32(12);
-                itemListCalls = reader.GetInt32(13);
-                itemResultCalls = reader.GetInt32(14);
-                completedResultCalls = reader.GetInt32(15);
-                failedCalls = reader.GetInt32(16);
-                exhausted = reader.GetInt64(17) == 1;
+                        reader.GetInt32(7),
+                        reader.GetInt32(8),
+                        reader.GetInt64(9),
+                        reader.GetString(10));
+                contractsScanned = reader.GetInt32(11);
+                expandedContracts = reader.GetInt32(12);
+                fullyResolvedContracts = reader.GetInt32(13);
+                cachedItemLists = reader.GetInt32(14);
+                itemListCalls = reader.GetInt32(15);
+                itemResultCalls = reader.GetInt32(16);
+                completedResultCalls = reader.GetInt32(17);
+                failedCalls = reader.GetInt32(18);
+                exhausted = reader.GetInt64(19) == 1;
             }
 
             await using (var resultCounters = connection.CreateCommand())
@@ -286,9 +314,28 @@ internal sealed class TemporaryItemResultStore(
                 }
             }
 
+            var processedContracts = new List<ContractRecord>();
+            await using (var command = connection.CreateCommand())
+            {
+                command.CommandText = """
+                    SELECT contract_json
+                      FROM processed_contracts
+                     ORDER BY processed_order, contract_id;
+                    """;
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    processedContracts.Add(
+                        JsonSerializer.Deserialize<ContractRecord>(reader.GetString(0), JsonOptions)
+                        ?? throw new InvalidDataException("Contratação processada inválida."));
+                }
+            }
+
             return new StoredItemSearchSession(
                 id,
-                searchKey,
+                anchorKey,
+                scopeKey,
+                criteriaText,
                 startedAt,
                 randomPivot,
                 cursor,
@@ -301,7 +348,8 @@ internal sealed class TemporaryItemResultStore(
                 completedResultCalls,
                 failedCalls,
                 exhausted,
-                hits);
+                hits,
+                processedContracts);
         }
         catch (Exception exception) when (
             exception is SqliteException or JsonException or FormatException or InvalidDataException)
@@ -309,6 +357,147 @@ internal sealed class TemporaryItemResultStore(
             DeleteFiles();
             return null;
         }
+    }
+
+    public async Task ResetTraversalAsync(
+        Guid sessionId,
+        string anchorKey,
+        string scopeKey,
+        string criteriaText,
+        long randomPivot,
+        DateTimeOffset startedAt,
+        CancellationToken cancellationToken)
+    {
+        if (!File.Exists(_databasePath))
+        {
+            await ResetAsync(
+                    sessionId,
+                    anchorKey,
+                    scopeKey,
+                    criteriaText,
+                    randomPivot,
+                    startedAt,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await UpgradeSchemaAsync(connection, cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText = """
+            DELETE FROM search_hits;
+            DELETE FROM processed_contracts;
+            DELETE FROM contract_failures;
+            DELETE FROM session_info;
+            INSERT INTO session_info(
+                id, search_key, anchor_key, scope_key, criteria_text,
+                started_at, random_pivot, updated_at)
+            VALUES($id, $criteriaText, $anchorKey, $scopeKey, $criteriaText,
+                   $startedAt, $randomPivot, $updatedAt);
+            """;
+        command.Parameters.AddWithValue("$id", sessionId.ToString("N"));
+        command.Parameters.AddWithValue("$anchorKey", anchorKey);
+        command.Parameters.AddWithValue("$scopeKey", scopeKey);
+        command.Parameters.AddWithValue("$criteriaText", criteriaText);
+        command.Parameters.AddWithValue("$startedAt", startedAt.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$randomPivot", randomPivot);
+        command.Parameters.AddWithValue("$updatedAt", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task UpdateCriteriaAsync(
+        string criteriaText,
+        CancellationToken cancellationToken)
+    {
+        if (!File.Exists(_databasePath))
+        {
+            return;
+        }
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE session_info
+               SET search_key = $criteriaText,
+                   criteria_text = $criteriaText,
+                   updated_at = $updatedAt;
+            """;
+        command.Parameters.AddWithValue("$criteriaText", criteriaText);
+        command.Parameters.AddWithValue("$updatedAt", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task ReplaceHitsAsync(
+        IReadOnlyList<ItemSearchHit> hits,
+        CancellationToken cancellationToken)
+    {
+        if (!_persistent || !File.Exists(_databasePath))
+        {
+            return;
+        }
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var clear = connection.CreateCommand())
+        {
+            clear.Transaction = (SqliteTransaction)transaction;
+            clear.CommandText = "DELETE FROM search_hits;";
+            await clear.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using var insert = connection.CreateCommand();
+        insert.Transaction = (SqliteTransaction)transaction;
+        insert.CommandText = """
+            INSERT INTO search_hits(
+                contract_id, item_number, discovered_order, contract_json, item_json)
+            VALUES($contractId, $itemNumber, $order, $contract, $item);
+            """;
+        insert.Parameters.Add("$contractId", SqliteType.Text);
+        insert.Parameters.Add("$itemNumber", SqliteType.Integer);
+        insert.Parameters.Add("$order", SqliteType.Integer);
+        insert.Parameters.Add("$contract", SqliteType.Text);
+        insert.Parameters.Add("$item", SqliteType.Text);
+        for (var index = 0; index < hits.Count; index++)
+        {
+            var hit = hits[index];
+            insert.Parameters["$contractId"].Value = hit.Contract.PncpId;
+            insert.Parameters["$itemNumber"].Value = hit.Item.ItemNumber;
+            insert.Parameters["$order"].Value = index + 1L;
+            insert.Parameters["$contract"].Value = JsonSerializer.Serialize(hit.Contract, JsonOptions);
+            insert.Parameters["$item"].Value = JsonSerializer.Serialize(hit.Item, JsonOptions);
+            await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task SaveProcessedContractAsync(
+        ContractRecord contract,
+        long processedOrder,
+        CancellationToken cancellationToken)
+    {
+        if (!_persistent || !File.Exists(_databasePath))
+        {
+            return;
+        }
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO processed_contracts(contract_id, processed_order, contract_json)
+            VALUES($contractId, $order, $contract)
+            ON CONFLICT(contract_id) DO UPDATE SET
+                processed_order = MIN(processed_contracts.processed_order, excluded.processed_order),
+                contract_json = excluded.contract_json;
+            """;
+        command.Parameters.AddWithValue("$contractId", contract.PncpId);
+        command.Parameters.AddWithValue("$order", Math.Max(1, processedOrder));
+        command.Parameters.AddWithValue("$contract", JsonSerializer.Serialize(contract, JsonOptions));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task SaveHitsAsync(
@@ -634,6 +823,77 @@ internal sealed class TemporaryItemResultStore(
         command.CommandText = "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000;";
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         return connection;
+    }
+
+    private static async Task UpgradeSchemaAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        int version;
+        await using (var versionCommand = connection.CreateCommand())
+        {
+            versionCommand.CommandText = "PRAGMA user_version;";
+            version = Convert.ToInt32(
+                await versionCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                CultureInfo.InvariantCulture);
+        }
+
+        if (version != 2)
+        {
+            return;
+        }
+
+        string searchKey;
+        await using (var read = connection.CreateCommand())
+        {
+            read.CommandText = "SELECT search_key FROM session_info LIMIT 1;";
+            searchKey = Convert.ToString(
+                await read.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                CultureInfo.InvariantCulture) ?? string.Empty;
+        }
+
+        var parts = searchKey.Split('\u001F');
+        var criteriaText = parts.Length > 0 ? parts[0] : searchKey;
+        var expression = SearchText.Parse(criteriaText);
+        var anchorKey = expression.AnchorTerm.Length > 0
+            ? expression.AnchorTerm
+            : $"exact:{SearchText.Normalize(criteriaText)}";
+        var scopeKey = string.Join(
+            '\u001F',
+            parts.Length > 1 ? parts[1] : string.Empty,
+            parts.Length > 2 ? parts[2] : string.Empty,
+            parts.Length > 3 ? parts[3] : string.Empty,
+            parts.Length > 4 ? parts[4] : string.Empty,
+            expression.ExplicitContractMatchQuery);
+
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var migration = connection.CreateCommand();
+        migration.Transaction = (SqliteTransaction)transaction;
+        migration.CommandText = """
+            ALTER TABLE session_info ADD COLUMN anchor_key TEXT NOT NULL DEFAULT '';
+            ALTER TABLE session_info ADD COLUMN scope_key TEXT NOT NULL DEFAULT '';
+            ALTER TABLE session_info ADD COLUMN criteria_text TEXT NOT NULL DEFAULT '';
+
+            CREATE TABLE processed_contracts(
+                contract_id TEXT PRIMARY KEY,
+                processed_order INTEGER NOT NULL,
+                contract_json TEXT NOT NULL
+            );
+            CREATE INDEX idx_processed_contracts_order
+                ON processed_contracts(processed_order, contract_id);
+
+            UPDATE session_info
+               SET anchor_key = $anchorKey,
+                   scope_key = $scopeKey,
+                   criteria_text = $criteriaText;
+            PRAGMA user_version=3;
+            """;
+        migration.Parameters.AddWithValue("$anchorKey", anchorKey);
+        migration.Parameters.AddWithValue("$scopeKey", scopeKey);
+        migration.Parameters.AddWithValue("$criteriaText", criteriaText);
+        await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task UpsertQueryStateAsync(

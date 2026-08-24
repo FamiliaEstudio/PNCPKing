@@ -115,18 +115,26 @@ public static class PncpRequestOptions
 /// </summary>
 public sealed class PncpSchedulingHandler : DelegatingHandler
 {
+    private static readonly TimeSpan DefaultItemRequestTimeout = TimeSpan.FromSeconds(60);
     private readonly PncpRequestScheduler _scheduler;
     private readonly PncpRequestTelemetry _telemetry;
     private readonly IPerformanceTelemetry _performance;
+    private readonly TimeSpan _itemRequestTimeout;
 
     public PncpSchedulingHandler(
         PncpRequestScheduler scheduler,
         PncpRequestTelemetry telemetry,
-        IPerformanceTelemetry? performance = null)
+        IPerformanceTelemetry? performance = null,
+        TimeSpan? itemRequestTimeout = null)
     {
         _scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
         _telemetry = telemetry ?? throw new ArgumentNullException(nameof(telemetry));
         _performance = performance ?? NullPerformanceTelemetry.Instance;
+        _itemRequestTimeout = itemRequestTimeout ?? DefaultItemRequestTimeout;
+        if (_itemRequestTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(itemRequestTimeout));
+        }
     }
 
     public PncpRequestScheduler Scheduler => _scheduler;
@@ -142,6 +150,7 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
         IDisposable? lease = null;
         RequestCompletion? completion = null;
         PerformanceSpan? networkSpan = null;
+        CancellationTokenSource? requestTimeout = null;
 
         try
         {
@@ -152,14 +161,30 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
                 Stopwatch.GetElapsedTime(queuedAt));
             measurement.MarkDispatched();
             networkSpan = _performance.Begin("pncp-request", $"network-{metadata.Category}");
-            var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            var dispatchedAt = Stopwatch.GetTimestamp();
+            var requestCancellationToken = cancellationToken;
+            if (metadata.Category is PncpRequestCategory.ItemLists or PncpRequestCategory.ItemResults)
+            {
+                requestTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                requestTimeout.CancelAfter(_itemRequestTimeout);
+                requestCancellationToken = requestTimeout.Token;
+            }
+
+            var response = await base.SendAsync(request, requestCancellationToken).ConfigureAwait(false);
             completion = new RequestCompletion(
+                _scheduler,
+                metadata.Category,
                 lease,
                 measurement,
                 networkSpan,
-                response.IsSuccessStatusCode);
+                response.StatusCode,
+                GetRetryAfter(response),
+                dispatchedAt,
+                requestTimeout,
+                cancellationToken);
             lease = null;
             networkSpan = null;
+            requestTimeout = null;
 
             if (response.Content is null)
             {
@@ -175,25 +200,60 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
         catch (Exception exception)
         {
             completion?.Complete(contentSucceeded: false);
+            var requestTimedOut = requestTimeout?.IsCancellationRequested == true &&
+                                  !cancellationToken.IsCancellationRequested;
+            if (completion is null &&
+                !(exception is OperationCanceledException && cancellationToken.IsCancellationRequested))
+            {
+                _scheduler.ReportOutcome(
+                    metadata.Category,
+                    statusCode: requestTimedOut ? HttpStatusCode.RequestTimeout : null,
+                    Stopwatch.GetElapsedTime(queuedAt),
+                    transportFailure: !requestTimedOut);
+            }
             measurement.Complete(succeeded: false);
             networkSpan?.Fail(exception);
             throw;
         }
         finally
         {
+            requestTimeout?.Dispose();
             lease?.Dispose();
         }
     }
 
+    private static TimeSpan? GetRetryAfter(HttpResponseMessage response)
+    {
+        var retryAfter = response.Headers.RetryAfter;
+        if (retryAfter?.Delta is { } delta)
+        {
+            return delta;
+        }
+
+        return retryAfter?.Date is { } date
+            ? TimeSpan.FromTicks(Math.Max(0, (date - DateTimeOffset.UtcNow).Ticks))
+            : null;
+    }
+
     private sealed class RequestCompletion(
+        PncpRequestScheduler scheduler,
+        PncpRequestCategory category,
         IDisposable lease,
         PncpRequestTelemetry.Measurement measurement,
         PerformanceSpan performanceSpan,
-        bool responseSucceeded)
+        HttpStatusCode statusCode,
+        TimeSpan? retryAfter,
+        long dispatchedAt,
+        CancellationTokenSource? requestTimeout,
+        CancellationToken callerCancellationToken)
     {
         private IDisposable? _lease = lease;
+        private CancellationTokenSource? _requestTimeout = requestTimeout;
         private int _completed;
         private long _bytes;
+
+        public CancellationToken RequestCancellationToken =>
+            _requestTimeout?.Token ?? callerCancellationToken;
 
         public void AddBytes(long count)
         {
@@ -211,7 +271,18 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
                 return;
             }
 
+            var responseSucceeded = (int)statusCode is >= 200 and < 300;
             measurement.Complete(responseSucceeded && contentSucceeded);
+            if (!callerCancellationToken.IsCancellationRequested)
+            {
+                var requestTimedOut = _requestTimeout?.IsCancellationRequested == true;
+                scheduler.ReportOutcome(
+                    category,
+                    requestTimedOut ? HttpStatusCode.RequestTimeout : statusCode,
+                    Stopwatch.GetElapsedTime(dispatchedAt),
+                    retryAfter,
+                    transportFailure: !contentSucceeded && !requestTimedOut);
+            }
             if (responseSucceeded && contentSucceeded)
             {
                 performanceSpan.Complete(bytes: Interlocked.Read(ref _bytes));
@@ -220,6 +291,7 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
             {
                 performanceSpan.Fail(new HttpRequestException("PNCP request failed."), bytes: Interlocked.Read(ref _bytes));
             }
+            Interlocked.Exchange(ref _requestTimeout, null)?.Dispose();
             Interlocked.Exchange(ref _lease, null)?.Dispose();
         }
     }
@@ -244,7 +316,10 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
             var countingStream = new CountingWriteStream(stream, _completion);
             try
             {
-                await _inner.CopyToAsync(countingStream).ConfigureAwait(false);
+                await _inner.CopyToAsync(
+                        countingStream,
+                        _completion.RequestCancellationToken)
+                    .ConfigureAwait(false);
                 _completion.Complete();
             }
             catch
@@ -262,7 +337,10 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
             var countingStream = new CountingWriteStream(stream, _completion);
             try
             {
-                await _inner.CopyToAsync(countingStream, cancellationToken).ConfigureAwait(false);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    _completion.RequestCancellationToken);
+                await _inner.CopyToAsync(countingStream, linked.Token).ConfigureAwait(false);
                 _completion.Complete();
             }
             catch
@@ -277,7 +355,7 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
             try
             {
                 return new CountingReadStream(
-                    await _inner.ReadAsStreamAsync().ConfigureAwait(false),
+                    await _inner.ReadAsStreamAsync(_completion.RequestCancellationToken).ConfigureAwait(false),
                     _completion);
             }
             catch
@@ -291,8 +369,11 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
         {
             try
             {
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    _completion.RequestCancellationToken);
                 return new CountingReadStream(
-                    await _inner.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false),
+                    await _inner.ReadAsStreamAsync(linked.Token).ConfigureAwait(false),
                     _completion);
             }
             catch
@@ -356,7 +437,10 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
         {
             try
             {
-                var read = await inner.ReadAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    completion.RequestCancellationToken);
+                var read = await inner.ReadAsync(buffer, offset, count, linked.Token).ConfigureAwait(false);
                 Record(read);
                 return read;
             }
@@ -373,7 +457,10 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
         {
             try
             {
-                var read = await inner.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    completion.RequestCancellationToken);
+                var read = await inner.ReadAsync(buffer, linked.Token).ConfigureAwait(false);
                 Record(read);
                 return read;
             }

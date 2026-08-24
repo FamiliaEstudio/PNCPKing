@@ -247,6 +247,146 @@ public sealed class PncpRequestSchedulingTests
         Assert.Equal(1, scheduler.GetSnapshot().ActiveRequests);
     }
 
+    [Fact]
+    public void AdaptiveConcurrency_StartsAtThirtyTwoAndBacksOffThroughTheDefinedTiers()
+    {
+        var clock = new ManualTimeProvider();
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 32, timeProvider: clock);
+        Assert.Equal(32, scheduler.GetSnapshot().EffectiveConcurrency);
+        scheduler.ReportOutcome(
+            PncpRequestCategory.ItemLists,
+            HttpStatusCode.NotFound,
+            TimeSpan.FromSeconds(1));
+        Assert.Equal(32, scheduler.GetSnapshot().EffectiveConcurrency);
+
+        scheduler.ReportOutcome(
+            PncpRequestCategory.ItemLists,
+            HttpStatusCode.InternalServerError,
+            TimeSpan.FromSeconds(1));
+        Assert.Equal(24, scheduler.GetSnapshot().EffectiveConcurrency);
+        scheduler.ReportOutcome(
+            PncpRequestCategory.ItemResults,
+            HttpStatusCode.RequestTimeout,
+            TimeSpan.FromSeconds(1));
+        Assert.Equal(16, scheduler.GetSnapshot().EffectiveConcurrency);
+        scheduler.ReportOutcome(
+            PncpRequestCategory.ItemLists,
+            statusCode: null,
+            TimeSpan.FromSeconds(1),
+            transportFailure: true);
+        Assert.Equal(16, scheduler.GetSnapshot().EffectiveConcurrency);
+        scheduler.ReportOutcome(
+            PncpRequestCategory.ItemLists,
+            HttpStatusCode.BadGateway,
+            TimeSpan.FromSeconds(1));
+        Assert.Equal(8, scheduler.GetSnapshot().EffectiveConcurrency);
+        scheduler.ReportOutcome(
+            PncpRequestCategory.ItemResults,
+            HttpStatusCode.TooManyRequests,
+            TimeSpan.FromSeconds(1),
+            retryAfter: TimeSpan.FromSeconds(10));
+
+        var reduced = scheduler.GetSnapshot();
+        Assert.Equal(1, reduced.EffectiveConcurrency);
+        Assert.Equal(4, reduced.ConcurrencyReductions);
+        Assert.Equal("HTTP 429", reduced.LastReductionReason);
+        Assert.NotNull(reduced.GrowthBlockedUntil);
+        Assert.True(reduced.GrowthBlockedUntil >= clock.GetUtcNow().AddMinutes(2));
+    }
+
+    [Fact]
+    public void AdaptiveConcurrency_RecoversOneTierAfterThirtyTwoFastSuccesses()
+    {
+        var clock = new ManualTimeProvider();
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 32, timeProvider: clock);
+        scheduler.ReportOutcome(
+            PncpRequestCategory.ItemResults,
+            HttpStatusCode.TooManyRequests,
+            TimeSpan.FromSeconds(1));
+        Assert.Equal(1, scheduler.GetSnapshot().EffectiveConcurrency);
+        clock.Advance(TimeSpan.FromMinutes(2));
+
+        foreach (var expected in new[] { 8, 16, 24, 32 })
+        {
+            for (var index = 0; index < 32; index++)
+            {
+                clock.Advance(TimeSpan.FromMilliseconds(50));
+                scheduler.ReportOutcome(
+                    PncpRequestCategory.ItemLists,
+                    HttpStatusCode.OK,
+                    TimeSpan.FromSeconds(1));
+            }
+
+            Assert.Equal(expected, scheduler.GetSnapshot().EffectiveConcurrency);
+        }
+    }
+
+    [Fact]
+    public void AdaptiveConcurrency_ReducesAfterTwoSlowWindows()
+    {
+        var clock = new ManualTimeProvider();
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 32, timeProvider: clock);
+        for (var index = 0; index < 32; index++)
+        {
+            clock.Advance(TimeSpan.FromSeconds(1));
+            scheduler.ReportOutcome(
+                PncpRequestCategory.ItemLists,
+                HttpStatusCode.OK,
+                TimeSpan.FromSeconds(31));
+        }
+
+        Assert.Equal(32, scheduler.GetSnapshot().EffectiveConcurrency);
+        for (var index = 0; index < 32; index++)
+        {
+            clock.Advance(TimeSpan.FromSeconds(1));
+            scheduler.ReportOutcome(
+                PncpRequestCategory.ItemResults,
+                HttpStatusCode.OK,
+                TimeSpan.FromSeconds(31));
+        }
+
+        var snapshot = scheduler.GetSnapshot();
+        Assert.Equal(24, snapshot.EffectiveConcurrency);
+        Assert.Contains("latência p95", snapshot.LastReductionReason);
+    }
+
+    [Fact]
+    public async Task ItemRequestTimeout_IsReportedAsPressure()
+    {
+        var inner = new BlockingHandler(expectedInitialCalls: 1);
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 32);
+        using var client = new HttpClient(new PncpSchedulingHandler(
+            scheduler,
+            new PncpRequestTelemetry(),
+            itemRequestTimeout: TimeSpan.FromMilliseconds(50))
+        {
+            InnerHandler = inner
+        });
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            client.GetByteArrayAsync(
+                "https://example.test/api/pncp/v1/orgaos/1/compras/2026/1/itens"));
+
+        var snapshot = scheduler.GetSnapshot();
+        Assert.Equal(24, snapshot.EffectiveConcurrency);
+        Assert.Equal("timeout", snapshot.LastReductionReason);
+    }
+
+    [Fact]
+    public async Task MaintenanceRemainsLimitedToTwoWhenAdaptiveCeilingIsThirtyTwo()
+    {
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 32);
+
+        using var first = await scheduler.AcquireAsync(PncpRequestPriority.IndexMaintenance);
+        using var second = await scheduler.AcquireAsync(PncpRequestPriority.IndexMaintenance);
+        var third = scheduler.AcquireAsync(PncpRequestPriority.IndexMaintenance);
+        await Task.Delay(20);
+        Assert.False(third.IsCompleted);
+
+        first.Dispose();
+        (await third).Dispose();
+    }
+
     private static void AssertCategory(
         PncpRequestTelemetrySnapshot snapshot,
         PncpRequestCategory category,
@@ -337,5 +477,14 @@ public sealed class PncpRequestSchedulingTests
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken) => Task.FromResult(responses.Dequeue());
+    }
+
+    private sealed class ManualTimeProvider : TimeProvider
+    {
+        private DateTimeOffset _utcNow = new(2026, 8, 24, 0, 0, 0, TimeSpan.Zero);
+
+        public override DateTimeOffset GetUtcNow() => _utcNow;
+
+        public void Advance(TimeSpan duration) => _utcNow += duration;
     }
 }

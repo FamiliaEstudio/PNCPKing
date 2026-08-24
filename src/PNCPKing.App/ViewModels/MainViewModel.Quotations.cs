@@ -799,6 +799,12 @@ public sealed partial class MainViewModel
             return;
         }
 
+        var responsibleName = PromptQuotationResponsibleName();
+        if (responsibleName is null)
+        {
+            return;
+        }
+
         var projectId = preview.ExistingProjectId;
         if (projectId is null)
         {
@@ -809,6 +815,7 @@ public sealed partial class MainViewModel
         var run = await _quotationService.CreateAutomationRunAsync(
                 projectId.Value,
                 preview.OutputPath,
+                responsibleName,
                 SelectedGeoFilter,
                 startDate,
                 endDate,
@@ -966,6 +973,12 @@ public sealed partial class MainViewModel
             }
 
             await RunTimedQuotationAutomationAsync(run).ConfigureAwait(true);
+            return;
+        }
+
+        run = await EnsureAutomationResponsibleNameAsync(run).ConfigureAwait(true);
+        if (run is null)
+        {
             return;
         }
 
@@ -1259,7 +1272,11 @@ public sealed partial class MainViewModel
                 analysis.Line.AutomationState is QuotationAutomationItemState.Pending or
                     QuotationAutomationItemState.Failed);
             var report = await _quotationService.GetReportAsync(run.ProjectId).ConfigureAwait(true);
-            await _quotationWorkbookService.ExportAsync(run.OutputPath, report, cancellationToken).ConfigureAwait(true);
+            await _quotationWorkbookService.ExportAsync(
+                run.OutputPath,
+                report,
+                run.ResponsibleName,
+                cancellationToken).ConfigureAwait(true);
             workbookExported = true;
             var evidence = await ExportEvidenceAsync(
                 GetEvidencePath(run.OutputPath),
@@ -1716,6 +1733,12 @@ public sealed partial class MainViewModel
             return;
         }
 
+        var responsibleName = PromptQuotationResponsibleName();
+        if (responsibleName is null)
+        {
+            return;
+        }
+
         var dialog = new SaveFileDialog
         {
             Title = "Exportar cotação",
@@ -1734,7 +1757,10 @@ public sealed partial class MainViewModel
         try
         {
             var report = await _quotationService.GetReportAsync(project.Id).ConfigureAwait(true);
-            await _quotationWorkbookService.ExportAsync(dialog.FileName, report).ConfigureAwait(true);
+            await _quotationWorkbookService.ExportAsync(
+                dialog.FileName,
+                report,
+                responsibleName).ConfigureAwait(true);
             workbookExported = true;
             var evidence = await ExportEvidenceAsync(
                 GetEvidencePath(dialog.FileName),
@@ -1767,6 +1793,37 @@ public sealed partial class MainViewModel
         {
             IsFileBusy = false;
         }
+    }
+
+    private static string? PromptQuotationResponsibleName()
+    {
+        var window = new TextPromptWindow(
+            "Responsável pela cotação",
+            "Informe o nome completo de quem realizou a cotação:")
+        {
+            Owner = Application.Current.MainWindow
+        };
+        return window.ShowDialog() == true ? window.Value : null;
+    }
+
+    private async Task<QuotationAutomationRun?> EnsureAutomationResponsibleNameAsync(
+        QuotationAutomationRun run)
+    {
+        if (!string.IsNullOrWhiteSpace(run.ResponsibleName))
+        {
+            return run;
+        }
+
+        var responsibleName = PromptQuotationResponsibleName();
+        if (responsibleName is null)
+        {
+            StatusText = "Retomada cancelada; informe o responsável antes de continuar.";
+            return null;
+        }
+
+        await _quotationService.UpdateAutomationResponsibleNameAsync(run.Id, responsibleName)
+            .ConfigureAwait(true);
+        return run with { ResponsibleName = responsibleName };
     }
 
     private async Task ExportQuotationPackageAsync()

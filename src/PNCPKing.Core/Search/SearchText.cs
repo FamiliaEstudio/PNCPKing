@@ -946,6 +946,11 @@ public sealed record SearchExpression(
 
     public bool HasExplicitContractCandidates => ContractCandidates.Count > 0;
 
+    public string AnchorTerm => PositiveGroups
+        .SelectMany(group => group.Terms)
+        .SelectMany(term => term.Words)
+        .FirstOrDefault() ?? string.Empty;
+
     public string PositiveText => string.Join(
         ' ',
         PositiveGroups.SelectMany(group => group.Terms).SelectMany(term => term.Words));

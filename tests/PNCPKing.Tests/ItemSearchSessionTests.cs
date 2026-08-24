@@ -1,7 +1,10 @@
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
+using PNCPKing.Core.Search;
+using PNCPKing.Infrastructure.Api;
 using PNCPKing.Infrastructure.Services;
 using System.Collections.Concurrent;
+using Microsoft.Data.Sqlite;
 
 namespace PNCPKing.Tests;
 
@@ -761,6 +764,423 @@ public sealed class ItemSearchSessionTests
         Assert.NotEqual(changed.Id, restarted.Id);
     }
 
+    [Fact]
+    public async Task AnchoredSession_RefiltersAndRevertsWithoutNetworkCalls()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contracts = Enumerable.Range(1, 10)
+            .Select(number => RepositorySearchTests.Contract(
+                $"television-{number:D2}",
+                $"Aquisição de televisão {number}",
+                "SP",
+                number))
+            .ToArray();
+        await database.Repository.UpsertContractsAsync(contracts);
+        var client = new SessionPncpClient(contracts.ToDictionary(
+            contract => contract.PncpId,
+            contract => (IReadOnlyList<ProcurementItem>)[
+                Item(
+                    contract.PncpId,
+                    1,
+                    contract.PurchaseSequence % 2 == 0
+                        ? "Televisão smart 50 polegadas"
+                        : "Televisão básica 32 polegadas",
+                    true)
+            ]));
+        await using var service = new ItemSearchSessionService(
+            client,
+            database.Repository,
+            Path.Combine(database.Directory, "anchored-session.db"),
+            persistentSession: true);
+
+        var original = await service.StartAsync(new SearchQuery("Televisão", GeoScope.All));
+        await service.RunContinuousAsync(new PriceBatchRequest(
+            1,
+            true,
+            PriceBatchBudgetMode.CandidateContracts,
+            10));
+        Assert.Equal(10, (await service.GetDiscoveredRowsAsync()).Count);
+        var listCalls = client.ItemListCalls;
+        var resultCalls = client.ResultCalls;
+
+        var narrowed = await service.StartAsync(new SearchQuery("televisao smart", GeoScope.All));
+        var narrowedRows = await service.GetDiscoveredRowsAsync();
+        Assert.Equal(original.Id, narrowed.Id);
+        Assert.Equal(5, narrowedRows.Count);
+        Assert.All(narrowedRows, row => Assert.Contains("smart", row.Item.Description));
+        Assert.Equal(listCalls, client.ItemListCalls);
+        Assert.Equal(resultCalls, client.ResultCalls);
+
+        var reverted = await service.StartAsync(new SearchQuery("TELEVISÃO", GeoScope.All));
+        Assert.Equal(original.Id, reverted.Id);
+        Assert.Equal(10, (await service.GetDiscoveredRowsAsync()).Count);
+        Assert.Equal(listCalls, client.ItemListCalls);
+        Assert.Equal(resultCalls, client.ResultCalls);
+    }
+
+    [Fact]
+    public async Task InterruptedBatch_ResumesTheExactRemainingFortyContracts()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contracts = CandidateContracts(60, "exact-resume");
+        await database.Repository.UpsertContractsAsync(contracts);
+        var items = contracts.ToDictionary(
+            contract => contract.PncpId,
+            contract => (IReadOnlyList<ProcurementItem>)[
+                Item(contract.PncpId, 1, "Café em grãos", true)
+            ]);
+        var path = Path.Combine(database.Directory, "exact-resume.db");
+        var eleventhResultStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstClient = new SessionPncpClient(
+            items,
+            resultAsyncFactory: async (contract, itemNumber, call, cancellationToken) =>
+            {
+                if (call == 11)
+                {
+                    eleventhResultStarted.TrySetResult();
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                }
+
+                return [Result(contract.PncpId, itemNumber, 1, itemNumber, 1)];
+            });
+        await using (var first = new ItemSearchSessionService(
+                         firstClient,
+                         database.Repository,
+                         path,
+                         persistentSession: true))
+        {
+            await first.StartAsync(new SearchQuery("cafe", GeoScope.All));
+            using var cancellation = new CancellationTokenSource();
+            var running = first.RunContinuousAsync(
+                new PriceBatchRequest(1),
+                cancellationToken: cancellation.Token);
+            await eleventhResultStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running);
+        }
+
+        var secondClient = new SessionPncpClient(items);
+        await using (var second = new ItemSearchSessionService(
+                         secondClient,
+                         database.Repository,
+                         path,
+                         persistentSession: true))
+        {
+            await second.StartAsync(new SearchQuery("café em", GeoScope.All));
+            var completed = await second.RunContinuousAsync(new PriceBatchRequest(
+                1,
+                true,
+                PriceBatchBudgetMode.CandidateContracts,
+                40));
+
+            Assert.Equal(40, completed.ProcessedContracts);
+            Assert.Equal(50, completed.ContractsScanned);
+        }
+
+        Assert.Equal(40, secondClient.ResultCalls);
+        Assert.Equal(50, firstClient.ItemListCalls + secondClient.ItemListCalls);
+    }
+
+    [Fact]
+    public async Task ContinuousBatch_UsesAWindowOfThirtyTwoThenEighteen()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contracts = CandidateContracts(50, "window-32");
+        await database.Repository.UpsertContractsAsync(contracts);
+        var firstWindowReady = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondWindowReady = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var active = 0;
+        var maximumActive = 0;
+        var client = new SessionPncpClient(
+            new Dictionary<string, IReadOnlyList<ProcurementItem>>(),
+            itemAsyncFactory: async (contract, call, cancellationToken) =>
+            {
+                var current = Interlocked.Increment(ref active);
+                while (true)
+                {
+                    var maximum = Volatile.Read(ref maximumActive);
+                    if (maximum >= current ||
+                        Interlocked.CompareExchange(ref maximumActive, current, maximum) == maximum)
+                    {
+                        break;
+                    }
+                }
+
+                try
+                {
+                    if (call <= 32)
+                    {
+                        if (call == 32)
+                        {
+                            firstWindowReady.TrySetResult();
+                        }
+
+                        await firstWindowReady.Task.WaitAsync(cancellationToken);
+                    }
+                    else
+                    {
+                        if (call == 50)
+                        {
+                            secondWindowReady.TrySetResult();
+                        }
+
+                        await secondWindowReady.Task.WaitAsync(cancellationToken);
+                    }
+
+                    return [Item(contract.PncpId, 1, "Café em grãos", false)];
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref active);
+                }
+            });
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 32);
+        await using var service = new ItemSearchSessionService(
+            client,
+            database.Repository,
+            Path.Combine(database.Directory, "window-32.db"),
+            requestScheduler: scheduler);
+        await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
+
+        var result = await service.RunContinuousAsync(new PriceBatchRequest(
+            1,
+            true,
+            PriceBatchBudgetMode.CandidateContracts,
+            50));
+
+        Assert.Equal(50, result.ProcessedContracts);
+        Assert.Equal(50, client.ItemListCalls);
+        Assert.Equal(32, maximumActive);
+        Assert.True(firstWindowReady.Task.IsCompletedSuccessfully);
+        Assert.True(secondWindowReady.Task.IsCompletedSuccessfully);
+    }
+
+    [Fact]
+    public async Task OutOfOrderCompletedListsRemainCachedWithoutAdvancingTheCheckpoint()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contracts = CandidateContracts(40, "out-of-order");
+        await database.Repository.UpsertContractsAsync(contracts);
+        var path = Path.Combine(database.Directory, "out-of-order.db");
+        var allCallsStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var blockedContractId = string.Empty;
+        var firstClient = new SessionPncpClient(
+            new Dictionary<string, IReadOnlyList<ProcurementItem>>(),
+            itemAsyncFactory: async (contract, call, cancellationToken) =>
+            {
+                if (call == 32)
+                {
+                    allCallsStarted.TrySetResult();
+                }
+
+                if (string.Equals(contract.PncpId, blockedContractId, StringComparison.Ordinal))
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                }
+
+                return [Item(contract.PncpId, 1, "Café em grãos", false)];
+            });
+        var query = new SearchQuery("cafe", GeoScope.All);
+        await using (var first = new ItemSearchSessionService(
+                         firstClient,
+                         database.Repository,
+                         path,
+                         persistentSession: true,
+                         requestScheduler: new PncpRequestScheduler(maximumConcurrency: 32)))
+        {
+            var session = await first.StartAsync(query);
+            var ordered = await database.Repository.SearchItemCandidatesAsync(
+                query,
+                SearchText.Parse(query.Text),
+                session.RandomPivot,
+                null,
+                32);
+            blockedContractId = ordered.Results[0].Contract.PncpId;
+            using var cancellation = new CancellationTokenSource();
+            var running = first.RunContinuousAsync(
+                new PriceBatchRequest(1, true, PriceBatchBudgetMode.CandidateContracts, 32),
+                cancellationToken: cancellation.Token);
+            await allCallsStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running);
+        }
+
+        var secondClient = new SessionPncpClient(
+            new Dictionary<string, IReadOnlyList<ProcurementItem>>(),
+            itemFactory: contract => [Item(contract.PncpId, 1, "Café em grãos", false)]);
+        await using (var second = new ItemSearchSessionService(
+                         secondClient,
+                         database.Repository,
+                         path,
+                         persistentSession: true,
+                         requestScheduler: new PncpRequestScheduler(maximumConcurrency: 32)))
+        {
+            await second.StartAsync(query);
+            var resumed = await second.RunContinuousAsync(new PriceBatchRequest(
+                1,
+                true,
+                PriceBatchBudgetMode.CandidateContracts,
+                32));
+
+            Assert.Equal(32, resumed.ProcessedContracts);
+            Assert.Equal(32, resumed.ContractsScanned);
+        }
+
+        Assert.Equal(1, secondClient.ItemListCalls);
+    }
+
+    [Fact]
+    public async Task ScopeChangeStartsANewRotationButPreservesTemporaryPrices()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contracts = CandidateContracts(1, "scope");
+        await database.Repository.UpsertContractsAsync(contracts);
+        var client = new SessionPncpClient(contracts.ToDictionary(
+            contract => contract.PncpId,
+            contract => (IReadOnlyList<ProcurementItem>)[
+                Item(contract.PncpId, 1, "Café em grãos", true)
+            ]));
+        await using var service = new ItemSearchSessionService(
+            client,
+            database.Repository,
+            Path.Combine(database.Directory, "scope-session.db"),
+            persistentSession: true);
+        var original = await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
+        await service.RunContinuousAsync(new PriceBatchRequest(
+            1,
+            true,
+            PriceBatchBudgetMode.CandidateContracts,
+            1));
+        var resultCalls = client.ResultCalls;
+
+        var changedScope = await service.StartAsync(new SearchQuery(
+            "cafe",
+            SearchGeoFilter.State("SP")));
+        Assert.NotEqual(original.Id, changedScope.Id);
+        await service.RunContinuousAsync(new PriceBatchRequest(
+            1,
+            true,
+            PriceBatchBudgetMode.CandidateContracts,
+            1));
+        Assert.Equal(resultCalls, client.ResultCalls);
+
+        var changedSort = await service.StartAsync(new SearchQuery(
+            "cafe",
+            SearchGeoFilter.State("SP"),
+            Sort: SearchSort.Newest));
+        Assert.Equal(changedScope.Id, changedSort.Id);
+    }
+
+    [Fact]
+    public async Task VersionTwoSession_IsMigratedAndKeepsItsCursorForSimpleAnchor()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contracts = Enumerable.Range(1, 20)
+            .Select(number => RepositorySearchTests.Contract(
+                $"migration-{number:D2}",
+                $"Aquisição de televisão {number}",
+                "SP",
+                number))
+            .ToArray();
+        await database.Repository.UpsertContractsAsync(contracts);
+        const long pivot = 123456;
+        var query = new SearchQuery("Televisão", GeoScope.All);
+        var candidates = await database.Repository.SearchItemCandidatesAsync(
+            query,
+            SearchText.Parse(query.Text),
+            pivot,
+            null,
+            20);
+        var cursor = candidates.Results[9].Cursor;
+        var sessionId = Guid.NewGuid();
+        var path = Path.Combine(database.Directory, "version-two.db");
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Pooling = false
+        }.ToString();
+        await using (var connection = new SqliteConnection(connectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                CREATE TABLE session_info(
+                    id TEXT PRIMARY KEY, search_key TEXT NOT NULL, started_at TEXT NOT NULL,
+                    random_pivot INTEGER NOT NULL, cursor_geo_layer INTEGER,
+                    cursor_group_rank INTEGER, cursor_rotation_band INTEGER,
+                    cursor_random_key INTEGER, cursor_pncp_id TEXT,
+                    contracts_scanned INTEGER NOT NULL DEFAULT 0,
+                    expanded_contracts INTEGER NOT NULL DEFAULT 0,
+                    fully_resolved_contracts INTEGER NOT NULL DEFAULT 0,
+                    cached_item_lists INTEGER NOT NULL DEFAULT 0,
+                    item_list_calls INTEGER NOT NULL DEFAULT 0,
+                    item_result_calls INTEGER NOT NULL DEFAULT 0,
+                    completed_result_calls INTEGER NOT NULL DEFAULT 0,
+                    failed_calls INTEGER NOT NULL DEFAULT 0,
+                    candidate_set_exhausted INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL);
+                CREATE TABLE search_hits(
+                    contract_id TEXT NOT NULL, item_number INTEGER NOT NULL,
+                    discovered_order INTEGER NOT NULL, contract_json TEXT NOT NULL,
+                    item_json TEXT NOT NULL, PRIMARY KEY(contract_id, item_number));
+                CREATE TABLE queried_items(
+                    contract_id TEXT NOT NULL, item_number INTEGER NOT NULL,
+                    succeeded INTEGER NOT NULL, error TEXT, queried_at TEXT NOT NULL,
+                    PRIMARY KEY(contract_id, item_number));
+                CREATE TABLE contract_failures(
+                    contract_id TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 1,
+                    error TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL);
+                PRAGMA user_version=2;
+                INSERT INTO session_info(
+                    id, search_key, started_at, random_pivot,
+                    cursor_geo_layer, cursor_group_rank, cursor_rotation_band,
+                    cursor_random_key, cursor_pncp_id, contracts_scanned, updated_at)
+                VALUES($id, $searchKey, $startedAt, $pivot,
+                       $layer, $group, $band, $random, $contractId, 10, $updatedAt);
+                """;
+            command.Parameters.AddWithValue("$id", sessionId.ToString("N"));
+            command.Parameters.AddWithValue("$searchKey", "Televisão\u001F0\u001F\u001F\u001F\u001F0");
+            command.Parameters.AddWithValue("$startedAt", DateTimeOffset.UtcNow.ToString("O"));
+            command.Parameters.AddWithValue("$pivot", pivot);
+            command.Parameters.AddWithValue("$layer", cursor.GeographicLayer);
+            command.Parameters.AddWithValue("$group", cursor.GroupRank);
+            command.Parameters.AddWithValue("$band", cursor.RotationBand);
+            command.Parameters.AddWithValue("$random", cursor.RandomOrderKey);
+            command.Parameters.AddWithValue("$contractId", cursor.PncpId);
+            command.Parameters.AddWithValue("$updatedAt", DateTimeOffset.UtcNow.ToString("O"));
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var client = new SessionPncpClient(contracts.ToDictionary(
+            contract => contract.PncpId,
+            contract => (IReadOnlyList<ProcurementItem>)[]));
+        await using var service = new ItemSearchSessionService(
+            client,
+            database.Repository,
+            path,
+            persistentSession: true);
+        var restored = await service.StartAsync(query);
+        var next = await service.RunContinuousAsync(new PriceBatchRequest(
+            1,
+            true,
+            PriceBatchBudgetMode.CandidateContracts,
+            1));
+
+        Assert.Equal(sessionId, restored.Id);
+        Assert.Equal(11, next.ContractsScanned);
+        Assert.Equal(1, next.ProcessedContracts);
+        await using var verification = new SqliteConnection(connectionString);
+        await verification.OpenAsync();
+        await using var version = verification.CreateCommand();
+        version.CommandText = "PRAGMA user_version;";
+        Assert.Equal(3L, (long)(await version.ExecuteScalarAsync())!);
+    }
+
     private static ContractRecord[] CandidateContracts(int count, string prefix)
     {
         var published = new DateTimeOffset(2026, 6, 1, 12, 0, 0, TimeSpan.Zero);
@@ -811,10 +1231,17 @@ public sealed class ItemSearchSessionTests
     private sealed class SessionPncpClient(
         IReadOnlyDictionary<string, IReadOnlyList<ProcurementItem>> items,
         Func<ContractRecord, long, IReadOnlyList<HomologationResult>>? resultFactory = null,
-        Func<ContractRecord, IReadOnlyList<ProcurementItem>>? itemFactory = null) : IPncpClient
+        Func<ContractRecord, IReadOnlyList<ProcurementItem>>? itemFactory = null,
+        Func<ContractRecord, long, int, CancellationToken, Task<IReadOnlyList<HomologationResult>>>?
+            resultAsyncFactory = null,
+        Func<ContractRecord, int, CancellationToken, Task<IReadOnlyList<ProcurementItem>>>?
+            itemAsyncFactory = null) : IPncpClient
     {
-        public int ItemListCalls { get; private set; }
-        public int ResultCalls { get; private set; }
+        private int _itemListCalls;
+        private int _resultCalls;
+
+        public int ItemListCalls => Volatile.Read(ref _itemListCalls);
+        public int ResultCalls => Volatile.Read(ref _resultCalls);
 
         public Task<IReadOnlyList<Modality>> GetModalitiesAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<Modality>>([]);
@@ -837,7 +1264,12 @@ public sealed class ItemSearchSessionTests
             ContractRecord contract,
             CancellationToken cancellationToken = default)
         {
-            ItemListCalls++;
+            var call = Interlocked.Increment(ref _itemListCalls);
+            if (itemAsyncFactory is not null)
+            {
+                return itemAsyncFactory(contract, call, cancellationToken);
+            }
+
             if (itemFactory is not null)
             {
                 return Task.FromResult(itemFactory(contract));
@@ -854,7 +1286,12 @@ public sealed class ItemSearchSessionTests
             long itemNumber,
             CancellationToken cancellationToken = default)
         {
-            ResultCalls++;
+            var call = Interlocked.Increment(ref _resultCalls);
+            if (resultAsyncFactory is not null)
+            {
+                return resultAsyncFactory(contract, itemNumber, call, cancellationToken);
+            }
+
             var values = resultFactory?.Invoke(contract, itemNumber) ?? [
                 Result(contract.PncpId, itemNumber, 1, itemNumber, 1)
             ];

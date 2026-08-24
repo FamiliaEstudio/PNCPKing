@@ -41,6 +41,7 @@ public sealed class QuotationService(
     public Task<QuotationAutomationRun> CreateAutomationRunAsync(
         Guid projectId,
         string outputPath,
+        string responsibleName,
         SearchGeoFilter geoFilter,
         DateOnly startDate,
         DateOnly endDate,
@@ -50,6 +51,7 @@ public sealed class QuotationService(
         repository.CreateAutomationRunAsync(
             projectId,
             outputPath,
+            responsibleName,
             geoFilter,
             startDate,
             endDate,
@@ -126,6 +128,12 @@ public sealed class QuotationService(
         string outputPath,
         CancellationToken cancellationToken = default) =>
         repository.UpdateAutomationOutputPathAsync(runId, outputPath, cancellationToken);
+
+    public Task UpdateAutomationResponsibleNameAsync(
+        Guid runId,
+        string responsibleName,
+        CancellationToken cancellationToken = default) =>
+        repository.UpdateAutomationResponsibleNameAsync(runId, responsibleName, cancellationToken);
 
     public Task UpgradeContractSearchStrategyAsync(
         Guid runId,
