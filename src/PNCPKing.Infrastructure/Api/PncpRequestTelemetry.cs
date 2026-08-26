@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 
@@ -11,10 +12,18 @@ public enum PncpRequestCategory
     Other
 }
 
+public enum PncpRequestOutcome
+{
+    Succeeded,
+    Failed,
+    Canceled
+}
+
 public sealed record PncpRequestCategorySnapshot(
     long Calls,
     long Succeeded,
     long Failed,
+    long Canceled,
     long BytesReceived,
     TimeSpan TotalDuration,
     TimeSpan TotalQueueDuration)
@@ -41,9 +50,21 @@ public sealed record PncpRequestTelemetrySnapshot(
     public TimeSpan TotalDuration => TimeSpan.FromTicks(Categories.Values.Sum(item => item.TotalDuration.Ticks));
 }
 
+public sealed record PncpRecentRequestSnapshot(
+    DateTimeOffset CapturedAt,
+    long Calls,
+    long Succeeded,
+    long Failed,
+    long Canceled,
+    TimeSpan? P50,
+    TimeSpan? P95,
+    TimeSpan? Maximum);
+
 public interface IPncpRequestTelemetry
 {
     PncpRequestTelemetrySnapshot GetSnapshot();
+
+    PncpRecentRequestSnapshot GetRecentSnapshot(TimeSpan window);
 }
 
 /// <summary>
@@ -51,16 +72,52 @@ public interface IPncpRequestTelemetry
 /// </summary>
 public sealed class PncpRequestTelemetry : IPncpRequestTelemetry
 {
+    private const int MaximumRecentSamples = 4_096;
+    private static readonly TimeSpan RecentSampleRetention = TimeSpan.FromMinutes(2);
     private readonly CategoryCounters[] _counters =
         Enumerable.Range(0, 4).Select(_ => new CategoryCounters()).ToArray();
+    private readonly ConcurrentQueue<RecentRequestSample> _recentSamples = new();
+    private readonly TimeProvider _timeProvider;
+
+    public PncpRequestTelemetry(TimeProvider? timeProvider = null) =>
+        _timeProvider = timeProvider ?? TimeProvider.System;
 
     public PncpRequestTelemetrySnapshot GetSnapshot()
     {
         var values = Enum.GetValues<PncpRequestCategory>()
             .ToDictionary(category => category, category => _counters[(int)category].Snapshot());
         return new PncpRequestTelemetrySnapshot(
-            DateTimeOffset.Now,
+            _timeProvider.GetUtcNow(),
             new ReadOnlyDictionary<PncpRequestCategory, PncpRequestCategorySnapshot>(values));
+    }
+
+    public PncpRecentRequestSnapshot GetRecentSnapshot(TimeSpan window)
+    {
+        if (window <= TimeSpan.Zero || window > RecentSampleRetention)
+        {
+            throw new ArgumentOutOfRangeException(nameof(window));
+        }
+
+        var now = _timeProvider.GetUtcNow();
+        TrimRecentSamples(now);
+        var cutoff = now - window;
+        var samples = _recentSamples
+            .Where(sample => sample.CompletedAt >= cutoff)
+            .ToArray();
+        var durations = samples
+            .Where(sample => sample.Outcome != PncpRequestOutcome.Canceled)
+            .Select(sample => sample.Duration)
+            .OrderBy(duration => duration)
+            .ToArray();
+        return new PncpRecentRequestSnapshot(
+            now,
+            samples.LongLength,
+            samples.LongCount(sample => sample.Outcome == PncpRequestOutcome.Succeeded),
+            samples.LongCount(sample => sample.Outcome == PncpRequestOutcome.Failed),
+            samples.LongCount(sample => sample.Outcome == PncpRequestOutcome.Canceled),
+            Percentile(durations, 0.50),
+            Percentile(durations, 0.95),
+            durations.Length == 0 ? null : durations[^1]);
     }
 
     internal Measurement Begin(PncpRequestCategory category)
@@ -70,10 +127,42 @@ public sealed class PncpRequestTelemetry : IPncpRequestTelemetry
             throw new ArgumentOutOfRangeException(nameof(category));
         }
 
-        return new Measurement(_counters[(int)category]);
+        return new Measurement(this, _counters[(int)category]);
     }
 
-    internal sealed class Measurement(CategoryCounters counters)
+    private void RecordRecent(
+        TimeSpan duration,
+        PncpRequestOutcome outcome)
+    {
+        var now = _timeProvider.GetUtcNow();
+        _recentSamples.Enqueue(new RecentRequestSample(now, duration, outcome));
+        TrimRecentSamples(now);
+    }
+
+    private void TrimRecentSamples(DateTimeOffset now)
+    {
+        var cutoff = now - RecentSampleRetention;
+        while (_recentSamples.TryPeek(out var sample) &&
+               (sample.CompletedAt < cutoff || _recentSamples.Count > MaximumRecentSamples))
+        {
+            _recentSamples.TryDequeue(out _);
+        }
+    }
+
+    private static TimeSpan? Percentile(IReadOnlyList<TimeSpan> ordered, double percentile)
+    {
+        if (ordered.Count == 0)
+        {
+            return null;
+        }
+
+        var index = Math.Clamp((int)Math.Ceiling(ordered.Count * percentile) - 1, 0, ordered.Count - 1);
+        return ordered[index];
+    }
+
+    internal sealed class Measurement(
+        PncpRequestTelemetry owner,
+        CategoryCounters counters)
     {
         private readonly long _queuedAt = Stopwatch.GetTimestamp();
         private long _startedAt;
@@ -103,7 +192,7 @@ public sealed class PncpRequestTelemetry : IPncpRequestTelemetry
             }
         }
 
-        public void Complete(bool succeeded)
+        public void Complete(PncpRequestOutcome outcome)
         {
             if (Interlocked.Exchange(ref _completed, 1) != 0 || Volatile.Read(ref _dispatched) == 0)
             {
@@ -111,17 +200,22 @@ public sealed class PncpRequestTelemetry : IPncpRequestTelemetry
             }
 
             var startedAt = Volatile.Read(ref _startedAt);
-            Interlocked.Add(
-                ref counters.DurationTicks,
-                Stopwatch.GetElapsedTime(startedAt, Stopwatch.GetTimestamp()).Ticks);
-            if (succeeded)
+            var duration = Stopwatch.GetElapsedTime(startedAt, Stopwatch.GetTimestamp());
+            Interlocked.Add(ref counters.DurationTicks, duration.Ticks);
+            switch (outcome)
             {
-                Interlocked.Increment(ref counters.Succeeded);
+                case PncpRequestOutcome.Succeeded:
+                    Interlocked.Increment(ref counters.Succeeded);
+                    break;
+                case PncpRequestOutcome.Failed:
+                    Interlocked.Increment(ref counters.Failed);
+                    break;
+                case PncpRequestOutcome.Canceled:
+                    Interlocked.Increment(ref counters.Canceled);
+                    break;
             }
-            else
-            {
-                Interlocked.Increment(ref counters.Failed);
-            }
+
+            owner.RecordRecent(duration, outcome);
         }
     }
 
@@ -130,6 +224,7 @@ public sealed class PncpRequestTelemetry : IPncpRequestTelemetry
         public long Calls;
         public long Succeeded;
         public long Failed;
+        public long Canceled;
         public long BytesReceived;
         public long DurationTicks;
         public long QueueDurationTicks;
@@ -138,8 +233,14 @@ public sealed class PncpRequestTelemetry : IPncpRequestTelemetry
             Interlocked.Read(ref Calls),
             Interlocked.Read(ref Succeeded),
             Interlocked.Read(ref Failed),
+            Interlocked.Read(ref Canceled),
             Interlocked.Read(ref BytesReceived),
             TimeSpan.FromTicks(Interlocked.Read(ref DurationTicks)),
             TimeSpan.FromTicks(Interlocked.Read(ref QueueDurationTicks)));
     }
+
+    private sealed record RecentRequestSample(
+        DateTimeOffset CompletedAt,
+        TimeSpan Duration,
+        PncpRequestOutcome Outcome);
 }

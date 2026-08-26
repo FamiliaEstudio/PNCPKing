@@ -63,7 +63,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private readonly AppPerformanceTelemetry _performanceTelemetry;
     private readonly AdaptiveMaintenanceCoordinator _maintenanceCoordinator;
     private readonly DispatcherTimer _maintenanceTimer;
+    private readonly DispatcherTimer _healthTimer;
     private readonly HashSet<string> _visibleItemKeys = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _currentItemResultKeys = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ItemSearchDisplayRow> _retainedItemRows = new(StringComparer.Ordinal);
     private CancellationTokenSource? _indexCancellation;
     private CancellationTokenSource? _contractSearchCancellation;
     private CancellationTokenSource? _contractCountCancellation;
@@ -82,6 +85,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private int _localPriceRowsLoaded;
     private bool _remotePriceExpansionStarted;
     private int _activeExpansionRemaining;
+    private bool _activeExpansionExhaustive;
     private int _priceRunGeneration;
     private PncpRequestTelemetrySnapshot? _searchTelemetryBaseline;
     private string _queryText = string.Empty;
@@ -122,6 +126,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private int _currentItemPage;
     private bool _hasMoreItemCandidates;
     private int _batchCount = ItemSearchDefaults.InitialBatchCount;
+    private bool _searchUntilCandidateSetExhausted;
     private ResultsWorkspace _selectedResultsWorkspace = ResultsWorkspace.Search;
     private bool _isContractsPanelOpen;
     private int _contractPanelViewIndex;
@@ -136,6 +141,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _preferPriceCacheMaintenance;
     private string _maintenanceActivityText = "Manutenção: aguardando ociosidade";
     private string _resourceStatusText = "RAM física: verificando…";
+    private string _interfaceIndicatorText = "Interface: medindo";
+    private string _interfaceIndicatorBrush = "#6B7280";
+    private string _interfaceIndicatorDetails = "Coletando os primeiros dados da interface.";
+    private string _pncpIndicatorText = "PNCP: aguardando";
+    private string _pncpIndicatorBrush = "#6B7280";
+    private string _pncpIndicatorDetails = "Aguardando chamadas concluídas ao PNCP.";
     private bool _isItemSearchActive;
     private bool _sweetCodeEnabled;
     private bool _isApplicationReady;
@@ -348,7 +359,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         CancelStartupCommand = new RelayCommand(() => _startupCancellation.Cancel());
 
         _maintenanceTimer = new DispatcherTimer { Interval = SyncService.AutomaticRetryDelay };
-        _maintenanceTimer.Tick += async (_, _) => await RunAutomaticMaintenanceCycleAsync().ConfigureAwait(true);
+        _maintenanceTimer.Tick += OnMaintenanceTimerTick;
+        _healthTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+        _healthTimer.Tick += (_, _) => RefreshPerformanceHealth();
     }
 
     public RangeObservableCollection<ContractRecord> ContractResults { get; } = [];
@@ -359,6 +372,14 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public IReadOnlyList<SearchGeoFilter> GeoFilters { get; }
     public IReadOnlyList<SearchSortOption> SortOptions { get; }
     public IReadOnlyList<DateRangeOption> DateRanges { get; }
+
+    public int SelectedBasketPriceCount =>
+        _retainedItemRows.Values.Count(row => row.IsSelectedForBasket);
+
+    public bool HasSelectedBasketPrices => SelectedBasketPriceCount > 0;
+
+    public string ManualBasketButtonText =>
+        $"Criar/adicionar à cesta ({SelectedBasketPriceCount:N0})";
 
     public ICommand SearchCommand { get; }
     public ICommand PreviousContractPageCommand { get; }
@@ -439,6 +460,42 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     public string MaintenancePanelSummary => $"{MaintenanceActivityText} · {ResourceStatusText}";
 
+    public string InterfaceIndicatorText
+    {
+        get => _interfaceIndicatorText;
+        private set => SetProperty(ref _interfaceIndicatorText, value);
+    }
+
+    public string InterfaceIndicatorBrush
+    {
+        get => _interfaceIndicatorBrush;
+        private set => SetProperty(ref _interfaceIndicatorBrush, value);
+    }
+
+    public string InterfaceIndicatorDetails
+    {
+        get => _interfaceIndicatorDetails;
+        private set => SetProperty(ref _interfaceIndicatorDetails, value);
+    }
+
+    public string PncpIndicatorText
+    {
+        get => _pncpIndicatorText;
+        private set => SetProperty(ref _pncpIndicatorText, value);
+    }
+
+    public string PncpIndicatorBrush
+    {
+        get => _pncpIndicatorBrush;
+        private set => SetProperty(ref _pncpIndicatorBrush, value);
+    }
+
+    public string PncpIndicatorDetails
+    {
+        get => _pncpIndicatorDetails;
+        private set => SetProperty(ref _pncpIndicatorDetails, value);
+    }
+
     public bool IsMaintenancePanelOpen
     {
         get => _isMaintenancePanelOpen;
@@ -481,8 +538,98 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         StartupProgress = 100;
         StartupStatus = "Inicialização concluída.";
         StatusText = "Pronto";
+        StartPerformanceHealthMonitoring();
         NotifyCommands();
     }
+
+    private void StartPerformanceHealthMonitoring()
+    {
+        RefreshPerformanceHealth();
+        _healthTimer.Start();
+    }
+
+    private void RefreshPerformanceHealth()
+    {
+        try
+        {
+            var live = _performanceTelemetry.GetLiveSnapshot(PerformanceHealthEvaluator.RollingWindow);
+            var recentPncp = _telemetry.GetRecentSnapshot(PerformanceHealthEvaluator.RollingWindow);
+            var evaluation = PerformanceHealthEvaluator.Evaluate(live, recentPncp);
+            InterfaceIndicatorText = $"Interface: {evaluation.InterfaceLabel}";
+            InterfaceIndicatorBrush = IndicatorBrush(evaluation.Interface);
+            PncpIndicatorText = $"PNCP: {evaluation.PncpLabel}";
+            PncpIndicatorBrush = IndicatorBrush(evaluation.Pncp);
+            ResourceStatusText =
+                $"RAM livre: {FormatBytes(live.Resources.AvailablePhysicalMemoryBytes)} de " +
+                $"{FormatBytes(live.Resources.TotalPhysicalMemoryBytes)} " +
+                $"({live.Resources.MemoryLoadPercent}% em uso)";
+            InterfaceIndicatorDetails = BuildInterfaceIndicatorDetails(live, evaluation);
+            PncpIndicatorDetails = BuildPncpIndicatorDetails(live, recentPncp, evaluation);
+        }
+        catch (Exception exception) when (!AsyncCommandRuntime.IsCritical(exception))
+        {
+            InterfaceIndicatorText = "Interface: indisponível";
+            InterfaceIndicatorBrush = IndicatorBrush(PerformanceIndicatorLevel.Measuring);
+            PncpIndicatorText = "PNCP: indisponível";
+            PncpIndicatorBrush = IndicatorBrush(PerformanceIndicatorLevel.Measuring);
+            InterfaceIndicatorDetails = $"Não foi possível medir a interface: {exception.Message}";
+            PncpIndicatorDetails = $"Não foi possível medir o PNCP: {exception.Message}";
+        }
+    }
+
+    private static string BuildInterfaceIndicatorDetails(
+        LivePerformanceSnapshot live,
+        PerformanceHealthEvaluation evaluation)
+    {
+        var dispatcher = live.DispatcherDelaySamples == 0
+            ? "Nenhum atraso ≥ 25 ms foi observado no último minuto"
+            : $"Atrasos da interface: p95 {live.DispatcherDelayP95.TotalMilliseconds:N0} ms; " +
+              $"máximo {live.DispatcherDelayMaximum.TotalMilliseconds:N0} ms; " +
+              $"amostras {live.DispatcherDelaySamples:N0}";
+        return
+            $"{evaluation.InterfaceReason}\n" +
+            $"{dispatcher}.\n" +
+            $"RAM: {FormatBytes(live.Resources.AvailablePhysicalMemoryBytes)} livre de " +
+            $"{FormatBytes(live.Resources.TotalPhysicalMemoryBytes)}; " +
+            $"{live.Resources.MemoryLoadPercent}% em uso; perfil {live.Resources.Pressure}.";
+    }
+
+    private static string BuildPncpIndicatorDetails(
+        LivePerformanceSnapshot live,
+        PncpRecentRequestSnapshot recentPncp,
+        PerformanceHealthEvaluation evaluation)
+    {
+        var scheduler = live.Scheduler;
+        var network = scheduler is null
+            ? "Fila e concorrência: aguardando medições"
+            : $"Concorrência {scheduler.ActiveRequests:N0}/{scheduler.EffectiveConcurrency:N0}/" +
+              $"{scheduler.MaximumConcurrency:N0} (ativas/efetiva/máxima); fila {scheduler.TotalQueued:N0}";
+        var recovery = scheduler?.GrowthBlockedUntil is { } blockedUntil && blockedUntil > live.CapturedAt
+            ? $"recuperação até {blockedUntil.ToLocalTime():HH:mm:ss}"
+            : "sem recuperação ativa";
+        var lastReduction = string.IsNullOrWhiteSpace(scheduler?.LastReductionReason)
+            ? "sem motivo de recuo registrado"
+            : $"último recuo: {scheduler.LastReductionReason}";
+        return
+            $"{evaluation.PncpReason}\n" +
+            $"Último minuto: {recentPncp.Succeeded:N0} sucesso(s), " +
+            $"{recentPncp.Failed:N0} falha(s) real(is), {recentPncp.Canceled:N0} cancelamento(s); " +
+            $"p50 {FormatOptionalDuration(recentPncp.P50)}, " +
+            $"p95 {FormatOptionalDuration(recentPncp.P95)}.\n" +
+            $"{network}; {lastReduction}; {recovery}. " +
+            "Cancelamentos são apenas diagnósticos e não alteram o estado do PNCP.";
+    }
+
+    private static string FormatOptionalDuration(TimeSpan? duration) =>
+        duration is { } value ? $"{value.TotalSeconds:N1}s" : "aguardando";
+
+    private static string IndicatorBrush(PerformanceIndicatorLevel level) => level switch
+    {
+        PerformanceIndicatorLevel.Good => "#2E7D32",
+        PerformanceIndicatorLevel.Warning => "#B26A00",
+        PerformanceIndicatorLevel.Critical => "#B3261E",
+        _ => "#6B7280"
+    };
 
     public string QueryText
     {
@@ -574,6 +721,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         set => SetProperty(ref _batchCount, Math.Clamp(value, 1, 100));
     }
 
+    public bool SearchUntilCandidateSetExhausted
+    {
+        get => _searchUntilCandidateSetExhausted;
+        set => SetProperty(ref _searchUntilCandidateSetExhausted, value);
+    }
+
     public ContractRecord? SelectedContract
     {
         get => _selectedContract;
@@ -607,6 +760,45 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             }
         }
     }
+
+    public void ToggleItemPricePin(ItemSearchDisplayRow? row)
+    {
+        if (row is null)
+        {
+            return;
+        }
+
+        row.IsPinned = !row.IsPinned;
+        SynchronizeRetainedItemRow(row);
+        StatusText = row.IsPinned
+            ? "Preço fixado; ele continuará visível ao mudar os critérios."
+            : "Fixação removida.";
+    }
+
+    public void ToggleItemPriceBasketSelection(ItemSearchDisplayRow? row)
+    {
+        if (row is null)
+        {
+            return;
+        }
+
+        if (!row.IsBasketEligible)
+        {
+            StatusText = "Somente preços homologados ativos e positivos podem ser selecionados para a cesta.";
+            return;
+        }
+
+        row.IsSelectedForBasket = !row.IsSelectedForBasket;
+        SynchronizeRetainedItemRow(row);
+        StatusText = row.IsSelectedForBasket
+            ? $"Preço selecionado para a cesta ({SelectedBasketPriceCount:N0} marcado(s))."
+            : $"Preço retirado da seleção da cesta ({SelectedBasketPriceCount:N0} marcado(s)).";
+    }
+
+    public IReadOnlyList<ItemSearchDisplayRow> GetSelectedBasketPrices() =>
+        _retainedItemRows.Values
+            .Where(row => row.IsSelectedForBasket)
+            .ToArray();
 
     public string StatusText
     {
@@ -933,6 +1125,15 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _ = RunAutomaticMaintenanceCycleAsync();
     }
 
+    public void NotifyMaintenancePausedForVisibleActivity()
+    {
+        if (!_disposed)
+        {
+            MaintenanceActivityText =
+                "Manutenção: pausada para priorizar sua atividade; retomada após 30 s";
+        }
+    }
+
     private async Task InitializeQuotationsOnDemandAsync()
     {
         if (_quotationsInitialized || _disposed)
@@ -964,6 +1165,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _startupCancellation.Cancel();
         _visibleIdleResumeCancellation?.Cancel();
         _maintenanceTimer.Stop();
+        _healthTimer.Stop();
         _indexCancellation?.Cancel();
         _contractSearchCancellation?.Cancel();
         _contractCountCancellation?.Cancel();
@@ -1093,8 +1295,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         bool resetSession,
         bool restartPriceSession = false)
     {
+        var exhaustCandidateSet = SearchUntilCandidateSetExhausted;
         var previousSessionId = _itemSearchService.CurrentSession?.Id;
-        var interruptedBatchRemainder = resetSession && !restartPriceSession && IsPriceBusy
+        var interruptedBatchRemainder = resetSession && !restartPriceSession && IsPriceBusy &&
+                                        !_activeExpansionExhaustive
             ? Math.Max(0, _activeExpansionRemaining)
             : 0;
         CancellationTokenSource? priceCancellation = null;
@@ -1166,7 +1370,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 if (string.IsNullOrWhiteSpace(activeSearchQuery.Text))
                 {
                     StopItemSearch();
-                    ItemSearchRows.Clear();
+                    ResetCurrentItemRows();
                     CurrentItemPage = 0;
                     HasMoreItemCandidates = false;
                     ItemSearchSummary = "Pesquisa vazia: nenhuma chamada de itens ou preços foi iniciada.";
@@ -1180,8 +1384,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             var activePriceCancellation = priceCancellation ??
                 throw new InvalidOperationException("A pesquisa de itens não possui token de cancelamento.");
             SetItemSearchActive(false);
-            ItemSearchRows.Clear();
-            _visibleItemKeys.Clear();
+            ResetCurrentItemRows();
             CurrentItemPage = 0;
             HasMoreItemCandidates = true;
             SelectedItemSearchRow = null;
@@ -1224,11 +1427,31 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             AppendUniqueRows(restoredRows);
             SetItemSearchActive(true);
             NotifyCommands();
-            _ = localSummaryTask;
+            if (exhaustCandidateSet)
+            {
+                ItemSearchSummary = "Calculando o total de contratações candidatas antes da busca completa…";
+                await localSummaryTask.ConfigureAwait(true);
+                if (!ConfirmExhaustiveItemSearch())
+                {
+                    HasMoreItemCandidates = true;
+                    ItemSearchSummary =
+                        $"{BuildLocalSearchSummary()} Busca completa não iniciada; " +
+                        "os resultados locais foram preservados.";
+                    StatusText = "Busca completa cancelada antes das chamadas de preços.";
+                    return;
+                }
+            }
+            else
+            {
+                _ = localSummaryTask;
+            }
+
             HasMoreItemCandidates = true;
             ItemSearchSummary =
                 $"{BuildLocalSearchSummary()} {restoredRows.Count:N0} linha(s) da sessão retomável; " +
-                "iniciando ampliação da cobertura.";
+                (exhaustCandidateSet
+                    ? "iniciando busca até esgotar as contratações candidatas."
+                    : "iniciando ampliação da cobertura.");
             StatusText = localRows > 0
                 ? "Resultados locais entregues; ampliando com contratações ainda não resolvidas."
                 : "Ampliando com contratações ainda não resolvidas.";
@@ -1236,7 +1459,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             int? exactRemainder = previousSessionId == itemSession.Id && interruptedBatchRemainder > 0
                 ? interruptedBatchRemainder
                 : null;
-            await RunSelectedBatchesAsync(activePriceCancellation.Token, exactRemainder).ConfigureAwait(true);
+            await RunSelectedBatchesAsync(
+                    activePriceCancellation.Token,
+                    exactRemainder,
+                    exhaustCandidateSet)
+                .ConfigureAwait(true);
         }
         catch (OperationCanceledException)
         {
@@ -1524,13 +1751,20 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task RunSelectedBatchesAsync(
         CancellationToken cancellationToken,
-        int? exactContractCount = null)
+        int? exactContractCount = null,
+        bool exhaustCandidateSet = false)
     {
         var effectiveBatchCount = BatchCount;
-        var requestedContracts = exactContractCount is > 0
+        var estimatedCandidateContracts = _localItemSearchSummary?.CandidateContracts;
+        var exhaustiveProgressCount = estimatedCandidateContracts is > 0
+            ? checked((int)Math.Min(int.MaxValue, estimatedCandidateContracts.Value))
+            : (int?)null;
+        var requestedContracts = exhaustCandidateSet
+            ? exhaustiveProgressCount ?? ItemSearchDefaults.ContractsPerBatch
+            : exactContractCount is > 0
             ? exactContractCount.Value
             : checked(effectiveBatchCount * ItemSearchDefaults.ContractsPerBatch);
-        var largeConfirmed = requestedContracts <= 500;
+        var largeConfirmed = exhaustCandidateSet || requestedContracts <= 500;
         if (!largeConfirmed)
         {
             var answer = MessageBox.Show(
@@ -1551,7 +1785,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
         SetPriceBusy(true, usesNetwork: true);
         var runGeneration = Interlocked.Increment(ref _priceRunGeneration);
-        _activeExpansionRemaining = requestedContracts;
+        _activeExpansionExhaustive = exhaustCandidateSet;
+        _activeExpansionRemaining = exhaustCandidateSet ? 0 : requestedContracts;
         try
         {
             _remotePriceExpansionStarted = true;
@@ -1571,8 +1806,13 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 new PriceBatchRequest(
                     effectiveBatchCount,
                     largeConfirmed,
-                    PriceBatchBudgetMode.UnresolvedContracts,
-                    exactContractCount),
+                    exhaustCandidateSet
+                        ? PriceBatchBudgetMode.CandidateContracts
+                        : PriceBatchBudgetMode.UnresolvedContracts,
+                    exhaustCandidateSet ? exhaustiveProgressCount : exactContractCount)
+                {
+                    ExhaustCandidateSet = exhaustCandidateSet
+                },
                 minimum,
                 maximum,
                 progress,
@@ -1583,6 +1823,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             if (runGeneration == Volatile.Read(ref _priceRunGeneration))
             {
                 _activeExpansionRemaining = 0;
+                _activeExpansionExhaustive = false;
             }
             ItemSearchSummary =
                 $"{BuildLocalSearchSummary()} {result.Message} Etapa {result.GeographicStage}; " +
@@ -1614,9 +1855,30 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         {
             if (runGeneration == Volatile.Read(ref _priceRunGeneration))
             {
+                _activeExpansionExhaustive = false;
                 SetPriceBusy(false, usesNetwork: false);
             }
         }
+    }
+
+    private bool ConfirmExhaustiveItemSearch()
+    {
+        var candidateContracts = _localItemSearchSummary?.CandidateContracts;
+        if (candidateContracts is <= 500)
+        {
+            return true;
+        }
+
+        var amount = candidateContracts is { } known
+            ? $"{known:N0} contratações candidatas"
+            : "uma quantidade ainda desconhecida de contratações candidatas";
+        return MessageBox.Show(
+                   $"Esta busca percorrerá {amount} até esgotar o conjunto.\n\n" +
+                   "O cache será reutilizado, mas a operação pode fazer muitas chamadas ao PNCP. " +
+                   "Você poderá interromper e retomar pelo checkpoint. Continuar?",
+                   "Confirmar busca completa de preços",
+                   MessageBoxButton.YesNo,
+                   MessageBoxImage.Question) == MessageBoxResult.Yes;
     }
 
     private async Task ApplyPriceFilterAsync()
@@ -1648,8 +1910,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _localPriceCursor = null;
         _hasMoreLocalPriceRows = false;
         _localPriceRowsLoaded = 0;
-        ItemSearchRows.Clear();
-        _visibleItemKeys.Clear();
+        ResetCurrentItemRows();
         for (var index = 0; index < localPagesToRestore; index++)
         {
             await LoadLocalPricePageAsync(cancellationToken, minimum, maximum).ConfigureAwait(true);
@@ -1709,6 +1970,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         var wasActive = _isItemSearchActive;
         Interlocked.Increment(ref _priceRunGeneration);
         _activeExpansionRemaining = 0;
+        _activeExpansionExhaustive = false;
         _priceCancellation?.Cancel();
         _itemSearchService.Stop();
         SetPriceBusy(false, usesNetwork: false);
@@ -1732,9 +1994,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                                     expression.MatchesItem(item.Item.Description, item.Item.Unit))
                      .Select(item => new ItemSearchDisplayRow(item)))
         {
-            if (_visibleItemKeys.Add(RowKey(row)))
+            var key = RowKey(row);
+            _currentItemResultKeys.Add(key);
+            if (_visibleItemKeys.Add(key))
             {
-                pending.Add(row);
+                pending.Add(_retainedItemRows.TryGetValue(key, out var retained) ? retained : row);
             }
         }
 
@@ -1745,6 +2009,49 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private static string RowKey(ItemSearchDisplayRow row) =>
         $"{row.Contract.PncpId}|{row.Item.ItemNumber}|{row.Result?.ResultSequence.ToString(CultureInfo.InvariantCulture) ?? row.Source.PriceState.ToString()}";
 
+    private void ResetCurrentItemRows()
+    {
+        ItemSearchRows.Clear();
+        _visibleItemKeys.Clear();
+        _currentItemResultKeys.Clear();
+        foreach (var (key, row) in _retainedItemRows)
+        {
+            _visibleItemKeys.Add(key);
+            ItemSearchRows.Add(row);
+        }
+    }
+
+    private void SynchronizeRetainedItemRow(ItemSearchDisplayRow row)
+    {
+        var key = RowKey(row);
+        if (row.IsRetained)
+        {
+            _retainedItemRows[key] = row;
+            var currentIndex = ItemSearchRows.IndexOf(row);
+            if (currentIndex > 0)
+            {
+                ItemSearchRows.Move(currentIndex, 0);
+            }
+        }
+        else
+        {
+            _retainedItemRows.Remove(key);
+            if (!_currentItemResultKeys.Contains(key))
+            {
+                ItemSearchRows.Remove(row);
+                _visibleItemKeys.Remove(key);
+                if (ReferenceEquals(SelectedItemSearchRow, row))
+                {
+                    SelectedItemSearchRow = null;
+                }
+            }
+        }
+
+        OnPropertyChanged(nameof(SelectedBasketPriceCount));
+        OnPropertyChanged(nameof(HasSelectedBasketPrices));
+        OnPropertyChanged(nameof(ManualBasketButtonText));
+    }
+
     private void UpdateItemSearchProgress(PriceBatchProgress progress, int? runGeneration = null)
     {
         if (runGeneration is { } generation &&
@@ -1753,7 +2060,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        if (runGeneration is not null)
+        if (runGeneration is not null && !_activeExpansionExhaustive)
         {
             _activeExpansionRemaining = Math.Max(
                 0,
@@ -2013,23 +2320,38 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return false;
         }
 
-        var state = await _repository.GetDatasetStateAsync().ConfigureAwait(true);
-        var incomplete = await _repository.GetLatestIncompleteSyncAsync().ConfigureAwait(true);
+        var inspection = await Task.Run(async () =>
+        {
+            var state = await _repository.GetDatasetStateAsync(visibleActivityCancellation)
+                .ConfigureAwait(false);
+            var incomplete = await _repository.GetLatestIncompleteSyncAsync(visibleActivityCancellation)
+                .ConfigureAwait(false);
+            var today = DateOnly.FromDateTime(DateTime.Today);
+            var targetStart = today.AddDays(-364);
+            var coverageComplete = _repository is ICoverageRepository coverage &&
+                                   await coverage.IsCoverageCompleteAsync(
+                                           targetStart,
+                                           today,
+                                           visibleActivityCancellation)
+                                       .ConfigureAwait(false);
+            return (State: state, Incomplete: incomplete, Today: today, CoverageComplete: coverageComplete);
+        }, visibleActivityCancellation).ConfigureAwait(true);
+        var state = inspection.State;
+        var incomplete = inspection.Incomplete;
         if (state.LastSuccessfulSync is null && incomplete is null)
         {
             return false;
         }
 
-        var today = DateOnly.FromDateTime(DateTime.Today);
-        var targetStart = today.AddDays(-364);
-        var coverageComplete = _repository is ICoverageRepository coverage &&
-                               await coverage.IsCoverageCompleteAsync(targetStart, today).ConfigureAwait(true);
-        if (state.EndDate >= today && state.LastSuccessfulSync?.LocalDateTime.Date >= DateTime.Today && coverageComplete)
+        if (state.EndDate >= inspection.Today &&
+            state.LastSuccessfulSync?.LocalDateTime.Date >= DateTime.Today &&
+            inspection.CoverageComplete)
         {
             return false;
         }
 
         _automaticMaintenanceRunning = true;
+        using var phaseSpan = _performanceTelemetry.Begin("maintenance", "coverage");
         try
         {
             await RunIndexOperationAsync(async cancellationToken =>
@@ -2041,8 +2363,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 sliceCancellation.CancelAfter(sliceDuration);
                 try
                 {
-                    await _autoSyncCoordinator.SynchronizeAsync(
-                            CreateSyncProgress(),
+                    var progress = CreateSyncProgress();
+                    await Task.Run(
+                            () => _autoSyncCoordinator.SynchronizeAsync(
+                                progress,
+                                sliceCancellation.Token),
                             sliceCancellation.Token)
                         .ConfigureAwait(true);
                     OperationProgress = 100;
@@ -2057,7 +2382,18 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 await RefreshDatasetSummaryAsync().ConfigureAwait(true);
                 await RefreshCoverageAsync().ConfigureAwait(true);
             }, showErrorDialog: false, supportsPause: true).ConfigureAwait(true);
+            phaseSpan.Complete();
             return true;
+        }
+        catch (OperationCanceledException)
+        {
+            phaseSpan.Complete();
+            throw;
+        }
+        catch (Exception exception)
+        {
+            phaseSpan.Fail(exception);
+            throw;
         }
         finally
         {
@@ -2107,11 +2443,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             StatusText = $"Atualização pendente: {message}";
             if (IsGatewayTimeout(exception) && !_disposed)
             {
-                // DispatcherTimer keeps its original cadence after a long HTTP
-                // attempt. Restart it so the next tick agrees with NextRetryAt
-                // instead of hammering PNCP seconds after a 504.
-                _maintenanceTimer.Stop();
-                _maintenanceTimer.Start();
+                if (!_automaticMaintenanceRunning)
+                {
+                    ScheduleNextMaintenance(SyncService.AutomaticRetryDelay);
+                }
             }
 
             if (showErrorDialog)
@@ -2326,18 +2661,37 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task RefreshDatasetSummaryAsync()
     {
-        var state = await _repository.GetDatasetStateAsync().ConfigureAwait(true);
-        var cache = await _repository.GetCacheSizeBytesAsync().ConfigureAwait(true);
+        var state = await Task.Run(() => _repository.GetDatasetStateAsync()).ConfigureAwait(true);
+        var databasePath = Path.Combine(_dataFolder, "pncpking.db");
+        var databaseBytes = GetFileLength(databasePath) + GetFileLength(databasePath + "-wal");
         DatasetSummary = state.LastSuccessfulSync is null
             ? state.ContractCount == 0
-                ? $"Índice vazio. Pasta: {_dataFolder}"
-                : $"Carga parcial: {state.ContractCount:N0} contratações prontas para retomar | Pasta: {_dataFolder}"
+                ? $"Índice vazio | Banco: {FormatBytes(databaseBytes)} | Pasta: {_dataFolder}"
+                : $"Carga parcial: {state.ContractCount:N0} contratações prontas para retomar | " +
+                  $"Banco: {FormatBytes(databaseBytes)} | Pasta: {_dataFolder}"
             : $"{state.ContractCount:N0} contratações | {state.StartDate:dd/MM/yyyy}-{state.EndDate:dd/MM/yyyy} | " +
               $"Atualizado em {state.LastSuccessfulSync:dd/MM/yyyy HH:mm} | " +
-              $"{state.CachedItemCount:N0} itens e {state.CachedResultCount:N0} resultados permanentes ({FormatBytes(cache)})";
+              $"{state.CachedItemCount:N0} itens e {state.CachedResultCount:N0} resultados permanentes | " +
+              $"Banco: {FormatBytes(databaseBytes)}";
         if (state.LastSuccessfulSync is null)
         {
             OpenMaintenanceForIssue("first-load");
+        }
+    }
+
+    private static long GetFileLength(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? new FileInfo(path).Length : 0;
+        }
+        catch (IOException)
+        {
+            return 0;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return 0;
         }
     }
 
@@ -2346,7 +2700,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         var end = DateOnly.FromDateTime(DateTime.Today);
         var start = end.AddDays(-364);
         IReadOnlyList<CoverageDay> stored = _repository is ICoverageRepository coverageRepository
-            ? await coverageRepository.GetCoverageDaysAsync(start, end).ConfigureAwait(true)
+            ? await Task.Run(() => coverageRepository.GetCoverageDaysAsync(start, end)).ConfigureAwait(true)
             : [];
         var byDate = stored.ToDictionary(day => day.Date);
         var displayDays = new List<CoverageDay>(365);
@@ -2402,10 +2756,23 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
         await RunFileOperationAsync(async cancellationToken =>
         {
-            StatusText = profile == BackupProfile.Compact
+            var progressMessage = profile == BackupProfile.Compact
                 ? "Criando e compactando uma cópia temporária do banco…"
                 : "Criando snapshot completo do banco permanente…";
-            await _backupService.ExportAsync(dialog.FileName, profile, cancellationToken).ConfigureAwait(true);
+            StatusText = progressMessage;
+            FileOperationProgressText = progressMessage;
+            _diagnosticLog.Info(
+                "backup-export",
+                $"Exportação iniciada em segundo plano. perfil={profile}; destino={dialog.FileName}");
+            await Task.Run(
+                    () => _backupService.ExportAsync(dialog.FileName, profile, cancellationToken),
+                    cancellationToken)
+                .ConfigureAwait(true);
+            OperationProgress = 100;
+            FileOperationProgressText = "Backup concluído.";
+            _diagnosticLog.Info(
+                "backup-export",
+                $"Exportação concluída. perfil={profile}; destino={dialog.FileName}");
             StatusText = $"Backup {profile.ToString().ToLowerInvariant()} criado em {dialog.FileName}";
         }).ConfigureAwait(true);
     }
@@ -2568,7 +2935,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task ClearCacheAsync()
     {
-        var size = await _repository.GetCacheSizeBytesAsync().ConfigureAwait(true);
+        var size = await Task.Run(() => _repository.GetCacheSizeBytesAsync()).ConfigureAwait(true);
         if (MessageBox.Show(
                 $"Limpar {FormatBytes(size)} do cache permanente de itens e resultados? O índice de contratações será preservado.",
                 "Limpar cache",
@@ -2580,7 +2947,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
         await RunFileOperationAsync(async cancellationToken =>
         {
-            await _repository.ClearItemCacheAsync(cancellationToken).ConfigureAwait(true);
+            await Task.Run(
+                    () => _repository.ClearItemCacheAsync(cancellationToken),
+                    cancellationToken)
+                .ConfigureAwait(true);
             ContractItemRows.Clear();
             ItemSummary = "Cache permanente removido.";
             await RefreshDatasetSummaryAsync().ConfigureAwait(true);

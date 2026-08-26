@@ -14,8 +14,6 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
     private readonly ISqliteConnectionFactory _connections;
     private readonly string _databasePath;
     private readonly IPerformanceTelemetry _performance;
-    private long _lastOccupiedBytes;
-    private long _lastOccupiedMeasurement;
 
     public SqlitePriceCacheRepository(
         string databasePath,
@@ -578,7 +576,7 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
             }
         }
 
-        var occupied = await GetOccupiedBytesCachedAsync(connection, cancellationToken).ConfigureAwait(false);
+        var occupied = checked(items * 900 + (active + cancelled) * 750);
         return new PriceCacheProgress
         {
             Status = policy.Status,
@@ -1023,49 +1021,6 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
         command.Parameters.AddWithValue("$now", FormatDateTime(now));
         addParameters(command, now);
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    private static async Task<long> GetOccupiedBytesAsync(
-        SqliteConnection connection,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            await using var command = connection.CreateCommand();
-            command.CommandText = """
-                SELECT COALESCE(SUM(pgsize), 0) FROM dbstat
-                 WHERE name IN ('items', 'item_results', 'sqlite_autoindex_items_1',
-                                'sqlite_autoindex_item_results_1', 'idx_items_contract_status',
-                                'items_fts', 'items_fts_data', 'items_fts_idx',
-                                'items_fts_docsize', 'items_fts_config',
-                                'contract_item_snapshots', 'price_cache_contracts',
-                                'idx_price_cache_contracts_work', 'idx_price_cache_contracts_ownership');
-                """;
-            return Convert.ToInt64(
-                await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
-                CultureInfo.InvariantCulture);
-        }
-        catch (SqliteException)
-        {
-            return 0;
-        }
-    }
-
-    private async Task<long> GetOccupiedBytesCachedAsync(
-        SqliteConnection connection,
-        CancellationToken cancellationToken)
-    {
-        var now = System.Diagnostics.Stopwatch.GetTimestamp();
-        var last = Interlocked.Read(ref _lastOccupiedMeasurement);
-        if (last != 0 && System.Diagnostics.Stopwatch.GetElapsedTime(last, now) < TimeSpan.FromSeconds(30))
-        {
-            return Interlocked.Read(ref _lastOccupiedBytes);
-        }
-
-        var measured = await GetOccupiedBytesAsync(connection, cancellationToken).ConfigureAwait(false);
-        Interlocked.Exchange(ref _lastOccupiedBytes, measured);
-        Interlocked.Exchange(ref _lastOccupiedMeasurement, now);
-        return measured;
     }
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken)

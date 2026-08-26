@@ -11,6 +11,29 @@ namespace PNCPKing.Tests;
 public sealed class PriceCacheTests
 {
     [Fact]
+    public async Task CacheMeasurements_UseExplicitOrCachedAggregates()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var contract = RecentContract("dbstat-aggregate", today, 1);
+        await database.Repository.UpsertContractsAsync([contract]);
+        await database.Repository.UpsertItemsAsync(contract.PncpId, [Item(contract, 1)], false);
+        await database.Repository.ReplaceItemResultsAsync(
+            contract.PncpId,
+            1,
+            [Result(contract, 1, 1, true)]);
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-89), today);
+        await cache.PrepareWindowAsync(today.AddDays(-89), today);
+
+        var itemCacheBytes = await database.Repository.GetCacheSizeBytesAsync();
+        var priceCacheBytes = (await cache.GetProgressAsync()).OccupiedBytes;
+
+        Assert.True(itemCacheBytes > 0, $"item cache: {itemCacheBytes}; price cache: {priceCacheBytes}");
+        Assert.True(priceCacheBytes > 0, $"item cache: {itemCacheBytes}; price cache: {priceCacheBytes}");
+    }
+
+    [Fact]
     public async Task Migration14ToCurrent_CreatesControlStatisticsAndRecognizesExistingSnapshot()
     {
         await using var database = await TestDatabase.CreateAsync();

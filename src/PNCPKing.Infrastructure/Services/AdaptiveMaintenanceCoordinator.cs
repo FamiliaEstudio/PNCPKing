@@ -30,7 +30,7 @@ public sealed class AdaptiveMaintenanceCoordinator
         _lastVisibleActivity = _timeProvider.GetUtcNow() - ConstrainedVisibleIdleDelay;
     }
 
-    public void NotifyVisibleActivity()
+    public bool NotifyVisibleActivity()
     {
         CancellationTokenSource? active;
         lock (_activityGate)
@@ -40,6 +40,7 @@ public sealed class AdaptiveMaintenanceCoordinator
         }
 
         RequestCancellation(active);
+        return active is not null;
     }
 
     public void CancelActiveSlice()

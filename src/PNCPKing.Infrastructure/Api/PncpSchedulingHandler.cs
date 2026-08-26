@@ -199,7 +199,8 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
         }
         catch (Exception exception)
         {
-            completion?.Complete(contentSucceeded: false);
+            var operationCanceled = exception is OperationCanceledException;
+            completion?.Complete(contentSucceeded: false, operationCanceled);
             var requestTimedOut = requestTimeout?.IsCancellationRequested == true &&
                                   !cancellationToken.IsCancellationRequested;
             if (completion is null &&
@@ -211,7 +212,10 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
                     Stopwatch.GetElapsedTime(queuedAt),
                     transportFailure: !requestTimedOut);
             }
-            measurement.Complete(succeeded: false);
+            measurement.Complete(
+                operationCanceled && cancellationToken.IsCancellationRequested && !requestTimedOut
+                    ? PncpRequestOutcome.Canceled
+                    : PncpRequestOutcome.Failed);
             networkSpan?.Fail(exception);
             throw;
         }
@@ -264,7 +268,7 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
             }
         }
 
-        public void Complete(bool contentSucceeded = true)
+        public void Complete(bool contentSucceeded = true, bool operationCanceled = false)
         {
             if (Interlocked.Exchange(ref _completed, 1) != 0)
             {
@@ -272,10 +276,18 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
             }
 
             var responseSucceeded = (int)statusCode is >= 200 and < 300;
-            measurement.Complete(responseSucceeded && contentSucceeded);
-            if (!callerCancellationToken.IsCancellationRequested)
+            var requestTimedOut = _requestTimeout?.IsCancellationRequested == true &&
+                                  !callerCancellationToken.IsCancellationRequested;
+            var outcome = requestTimedOut
+                ? PncpRequestOutcome.Failed
+                : callerCancellationToken.IsCancellationRequested || operationCanceled
+                    ? PncpRequestOutcome.Canceled
+                    : responseSucceeded && contentSucceeded
+                        ? PncpRequestOutcome.Succeeded
+                        : PncpRequestOutcome.Failed;
+            measurement.Complete(outcome);
+            if (outcome != PncpRequestOutcome.Canceled)
             {
-                var requestTimedOut = _requestTimeout?.IsCancellationRequested == true;
                 scheduler.ReportOutcome(
                     category,
                     requestTimedOut ? HttpStatusCode.RequestTimeout : statusCode,
@@ -283,13 +295,16 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
                     retryAfter,
                     transportFailure: !contentSucceeded && !requestTimedOut);
             }
-            if (responseSucceeded && contentSucceeded)
+            if (outcome == PncpRequestOutcome.Succeeded)
             {
                 performanceSpan.Complete(bytes: Interlocked.Read(ref _bytes));
             }
             else
             {
-                performanceSpan.Fail(new HttpRequestException("PNCP request failed."), bytes: Interlocked.Read(ref _bytes));
+                Exception exception = outcome == PncpRequestOutcome.Canceled
+                    ? new OperationCanceledException("PNCP request canceled by caller.")
+                    : new HttpRequestException("PNCP request failed.");
+                performanceSpan.Fail(exception, bytes: Interlocked.Read(ref _bytes));
             }
             Interlocked.Exchange(ref _requestTimeout, null)?.Dispose();
             Interlocked.Exchange(ref _lease, null)?.Dispose();
@@ -322,9 +337,11 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
                     .ConfigureAwait(false);
                 _completion.Complete();
             }
-            catch
+            catch (Exception exception)
             {
-                _completion.Complete(contentSucceeded: false);
+                _completion.Complete(
+                    contentSucceeded: false,
+                    operationCanceled: exception is OperationCanceledException);
                 throw;
             }
         }
@@ -343,9 +360,11 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
                 await _inner.CopyToAsync(countingStream, linked.Token).ConfigureAwait(false);
                 _completion.Complete();
             }
-            catch
+            catch (Exception exception)
             {
-                _completion.Complete(contentSucceeded: false);
+                _completion.Complete(
+                    contentSucceeded: false,
+                    operationCanceled: exception is OperationCanceledException);
                 throw;
             }
         }
@@ -358,9 +377,11 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
                     await _inner.ReadAsStreamAsync(_completion.RequestCancellationToken).ConfigureAwait(false),
                     _completion);
             }
-            catch
+            catch (Exception exception)
             {
-                _completion.Complete(contentSucceeded: false);
+                _completion.Complete(
+                    contentSucceeded: false,
+                    operationCanceled: exception is OperationCanceledException);
                 throw;
             }
         }
@@ -376,9 +397,11 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
                     await _inner.ReadAsStreamAsync(linked.Token).ConfigureAwait(false),
                     _completion);
             }
-            catch
+            catch (Exception exception)
             {
-                _completion.Complete(contentSucceeded: false);
+                _completion.Complete(
+                    contentSucceeded: false,
+                    operationCanceled: exception is OperationCanceledException);
                 throw;
             }
         }
@@ -444,9 +467,11 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
                 Record(read);
                 return read;
             }
-            catch
+            catch (Exception exception)
             {
-                completion.Complete(contentSucceeded: false);
+                completion.Complete(
+                    contentSucceeded: false,
+                    operationCanceled: exception is OperationCanceledException);
                 throw;
             }
         }
@@ -464,9 +489,11 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
                 Record(read);
                 return read;
             }
-            catch
+            catch (Exception exception)
             {
-                completion.Complete(contentSucceeded: false);
+                completion.Complete(
+                    contentSucceeded: false,
+                    operationCanceled: exception is OperationCanceledException);
                 throw;
             }
         }

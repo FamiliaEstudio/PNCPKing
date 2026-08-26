@@ -14,10 +14,14 @@ namespace PNCPKing.App.Services;
 public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
 {
     private const int MaximumMeasurements = 20_000;
+    private const int MaximumDispatcherDelaySamples = 2_048;
+    private static readonly TimeSpan DispatcherDelayRetention = TimeSpan.FromMinutes(2);
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly ConcurrentQueue<PerformanceMeasurement> _measurements = new();
+    private readonly ConcurrentQueue<DispatcherDelaySample> _dispatcherDelays = new();
     private readonly ConcurrentDictionary<long, ActiveSpan> _activeSpans = new();
     private readonly ISystemResourceProbe _resourceProbe;
+    private readonly TimeProvider _timeProvider;
     private string? _databasePath;
     private string _sqliteProfile = string.Empty;
     private int _databaseSchemaVersion;
@@ -25,9 +29,12 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
     private int _measurementCount;
     private long _nextSpanId;
 
-    public AppPerformanceTelemetry(ISystemResourceProbe? resourceProbe = null)
+    public AppPerformanceTelemetry(
+        ISystemResourceProbe? resourceProbe = null,
+        TimeProvider? timeProvider = null)
     {
         _resourceProbe = resourceProbe ?? new SystemResourceProbe();
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public void SetDatabasePath(string databasePath) =>
@@ -64,11 +71,12 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
         bool succeeded = true,
         string? errorKind = null)
     {
+        var now = _timeProvider.GetUtcNow();
         var measurement = new PerformanceMeasurement
         {
             Operation = SanitizeLabel(operation),
             Phase = SanitizeLabel(phase),
-            StartedAt = DateTimeOffset.UtcNow - duration,
+            StartedAt = now - duration,
             Duration = duration < TimeSpan.Zero ? TimeSpan.Zero : duration,
             Rows = Math.Max(0, rows),
             Bytes = Math.Max(0, bytes),
@@ -82,6 +90,37 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
         {
             count = Interlocked.Decrement(ref _measurementCount);
         }
+
+        if (string.Equals(measurement.Operation, "ui", StringComparison.Ordinal) &&
+            string.Equals(measurement.Phase, "dispatcher-delay", StringComparison.Ordinal))
+        {
+            _dispatcherDelays.Enqueue(new DispatcherDelaySample(now, measurement.Duration));
+            TrimDispatcherDelays(now);
+        }
+    }
+
+    public LivePerformanceSnapshot GetLiveSnapshot(TimeSpan dispatcherWindow)
+    {
+        if (dispatcherWindow <= TimeSpan.Zero || dispatcherWindow > DispatcherDelayRetention)
+        {
+            throw new ArgumentOutOfRangeException(nameof(dispatcherWindow));
+        }
+
+        var now = _timeProvider.GetUtcNow();
+        TrimDispatcherDelays(now);
+        var cutoff = now - dispatcherWindow;
+        var delays = _dispatcherDelays
+            .Where(sample => sample.CapturedAt >= cutoff)
+            .Select(sample => sample.Duration)
+            .OrderBy(duration => duration)
+            .ToArray();
+        return new LivePerformanceSnapshot(
+            now,
+            _resourceProbe.GetSnapshot(),
+            _pncpSchedulerSnapshotProvider?.Invoke(),
+            delays.Length,
+            delays.Length == 0 ? TimeSpan.Zero : delays[PercentileIndex(delays.Length, 0.95)],
+            delays.Length == 0 ? TimeSpan.Zero : delays[^1]);
     }
 
     public PerformanceReport CreateReport()
@@ -349,6 +388,19 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
         return ordered[index];
     }
 
+    private void TrimDispatcherDelays(DateTimeOffset now)
+    {
+        var cutoff = now - DispatcherDelayRetention;
+        while (_dispatcherDelays.TryPeek(out var sample) &&
+               (sample.CapturedAt < cutoff || _dispatcherDelays.Count > MaximumDispatcherDelaySamples))
+        {
+            _dispatcherDelays.TryDequeue(out _);
+        }
+    }
+
+    private static int PercentileIndex(int count, double percentile) =>
+        Math.Clamp((int)Math.Ceiling(count * percentile) - 1, 0, count - 1);
+
     private static string SanitizeLabel(string value)
     {
         var trimmed = value.Trim();
@@ -416,4 +468,14 @@ public sealed class AppPerformanceTelemetry : IPerformanceTelemetry
     }
 
     private sealed record ActiveSpan(string Operation, string Phase, DateTimeOffset StartedAt);
+
+    private sealed record DispatcherDelaySample(DateTimeOffset CapturedAt, TimeSpan Duration);
 }
+
+public sealed record LivePerformanceSnapshot(
+    DateTimeOffset CapturedAt,
+    SystemResourceSnapshot Resources,
+    PncpSchedulerSnapshot? Scheduler,
+    int DispatcherDelaySamples,
+    TimeSpan DispatcherDelayP95,
+    TimeSpan DispatcherDelayMaximum);

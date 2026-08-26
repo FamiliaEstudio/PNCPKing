@@ -25,8 +25,14 @@
              Link="AppLogic/AppSettingsService.cs" />
     <Compile Include="../../src/PNCPKing.App/Services/DesktopShortcutService.cs"
              Link="AppLogic/DesktopShortcutService.cs" />
+    <Compile Include="../../src/PNCPKing.App/Services/AppPerformanceTelemetry.cs"
+             Link="AppLogic/AppPerformanceTelemetry.cs" />
+    <Compile Include="../../src/PNCPKing.App/Services/PerformanceHealthEvaluator.cs"
+             Link="AppLogic/PerformanceHealthEvaluator.cs" />
     <Compile Include="../../src/PNCPKing.App/ViewModels/ObservableObject.cs"
              Link="AppLogic/ObservableObject.cs" />
+    <Compile Include="../../src/PNCPKing.App/ViewModels/SearchOptions.cs"
+             Link="AppLogic/SearchOptions.cs" />
     <Compile Include="../../src/PNCPKing.App/ViewModels/QuotationDisplay.cs"
              Link="AppLogic/QuotationDisplay.cs" />
     <None Include="../../src/PNCPKing.App/Views/QuotationItemWindow.xaml"

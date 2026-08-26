@@ -146,17 +146,39 @@ public sealed partial class MainViewModel
         }
     }
 
+    private async void OnMaintenanceTimerTick(object? sender, EventArgs e)
+    {
+        _maintenanceTimer.Stop();
+        try
+        {
+            await RunAutomaticMaintenanceCycleAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) when (!AsyncCommandRuntime.IsCritical(exception))
+        {
+            MaintenanceActivityText = "Manutenção: adiada após uma falha recuperável";
+            _diagnosticLog.Warning("maintenance", $"Agendamento adiado: {exception.Message}");
+            ScheduleNextMaintenance(SyncService.AutomaticRetryDelay);
+        }
+    }
+
     private async Task RunAutomaticMaintenanceCycleAsync()
     {
-        if (_disposed || DateTimeOffset.UtcNow < _nextMaintenanceAllowedAt)
+        _maintenanceTimer.Stop();
+        if (_disposed)
         {
+            return;
+        }
+
+        var remainingDelay = _nextMaintenanceAllowedAt - DateTimeOffset.UtcNow;
+        if (remainingDelay > TimeSpan.Zero)
+        {
+            ScheduleNextMaintenance(remainingDelay);
             return;
         }
 
         await using var lease = _maintenanceCoordinator.TryEnter();
         if (lease is null)
         {
-            MaintenanceActivityText = "Manutenção: outro ciclo ainda está ativo";
             return;
         }
 
@@ -218,14 +240,17 @@ public sealed partial class MainViewModel
                 MaintenanceActivityText = "Manutenção: banco atualizado; aguardando próximo ciclo";
             }
 
-            await _repository.MaintainWalAsync(slice.Token).ConfigureAwait(true);
+            await Task.Run(
+                    () => _repository.MaintainWalAsync(slice.Token),
+                    slice.Token)
+                .ConfigureAwait(true);
             span.Complete();
         }
         catch (OperationCanceledException) when (_disposed || slice.Token.IsCancellationRequested)
         {
             MaintenanceActivityText = _disposed
                 ? "Manutenção: encerrada com o aplicativo"
-                : "Manutenção: cedendo à interação do usuário; checkpoints preservados";
+                : "Manutenção: pausada para priorizar sua atividade; retomada após 30 s";
             _performanceTelemetry.Record("maintenance", "user-yield", TimeSpan.Zero);
         }
         catch (Exception exception)
@@ -263,28 +288,65 @@ public sealed partial class MainViewModel
         var intervalDays = SelectedCatalogRefreshOption.IntervalDays;
         IReadOnlyList<CatalogKind> dueKinds = intervalDays == 0
             ? []
-            : await _catalogSyncService.GetDueKindsAsync(
-                    TimeSpan.FromDays(intervalDays),
+            : await Task.Run(
+                    () => _catalogSyncService.GetDueKindsAsync(
+                        TimeSpan.FromDays(intervalDays),
+                        cancellationToken),
                     cancellationToken)
                 .ConfigureAwait(true);
         if (dueKinds.Count > 0)
         {
-            await RunCatalogSyncAsync(
-                    showErrorDialog: false,
-                    sliceDuration,
-                    cancellationToken,
-                    dueKinds)
-                .ConfigureAwait(true);
+            using var phaseSpan = _performanceTelemetry.Begin("maintenance", "catalog");
+            try
+            {
+                await RunCatalogSyncAsync(
+                        showErrorDialog: false,
+                        sliceDuration,
+                        cancellationToken,
+                        dueKinds)
+                    .ConfigureAwait(true);
+                phaseSpan.Complete();
+            }
+            catch (OperationCanceledException)
+            {
+                phaseSpan.Complete();
+                throw;
+            }
+            catch (Exception exception)
+            {
+                phaseSpan.Fail(exception);
+                throw;
+            }
             return true;
         }
 
-        var index = await _catalogRepository.GetDescriptionIndexProgressAsync().ConfigureAwait(true);
+        var index = await Task.Run(
+                () => _catalogRepository.GetDescriptionIndexProgressAsync(cancellationToken),
+                cancellationToken)
+            .ConfigureAwait(true);
         if (index.Completed)
         {
             return false;
         }
 
-        await RunCatalogDescriptionIndexAsync(sliceDuration, cancellationToken).ConfigureAwait(true);
+        using (var phaseSpan = _performanceTelemetry.Begin("maintenance", "catalog"))
+        {
+            try
+            {
+                await RunCatalogDescriptionIndexAsync(sliceDuration, cancellationToken).ConfigureAwait(true);
+                phaseSpan.Complete();
+            }
+            catch (OperationCanceledException)
+            {
+                phaseSpan.Complete();
+                throw;
+            }
+            catch (Exception exception)
+            {
+                phaseSpan.Fail(exception);
+                throw;
+            }
+        }
         return true;
     }
 
@@ -310,7 +372,11 @@ public sealed partial class MainViewModel
         });
         try
         {
-            await _catalogSyncService.BuildDescriptionIndexAsync(progress, _catalogCancellation.Token)
+            await Task.Run(
+                    () => _catalogSyncService.BuildDescriptionIndexAsync(
+                        progress,
+                        _catalogCancellation.Token),
+                    _catalogCancellation.Token)
                 .ConfigureAwait(true);
         }
         catch (OperationCanceledException)
@@ -337,7 +403,10 @@ public sealed partial class MainViewModel
             return;
         }
 
-        var states = await _catalogRepository.GetSyncStatesAsync(cancellationToken).ConfigureAwait(true);
+        var states = await Task.Run(
+                () => _catalogRepository.GetSyncStatesAsync(cancellationToken),
+                cancellationToken)
+            .ConfigureAwait(true);
         UpdatePublishedCatalogRecords(states.Sum(state => state.ActiveRecords));
 
         _catalogCancellation = cancellationToken.CanBeCanceled
@@ -365,22 +434,34 @@ public sealed partial class MainViewModel
         {
             if (kinds is null)
             {
-                await _catalogSyncService.SynchronizeAsync(progress, _catalogCancellation.Token)
+                await Task.Run(
+                        () => _catalogSyncService.SynchronizeAsync(
+                            progress,
+                            _catalogCancellation.Token),
+                        _catalogCancellation.Token)
                     .ConfigureAwait(true);
             }
             else
             {
-                await _catalogSyncService.SynchronizeAsync(kinds, progress, _catalogCancellation.Token)
+                await Task.Run(
+                        () => _catalogSyncService.SynchronizeAsync(
+                            kinds,
+                            progress,
+                            _catalogCancellation.Token),
+                        _catalogCancellation.Token)
                     .ConfigureAwait(true);
             }
-            await _catalogSyncService.BuildDescriptionIndexAsync(
-                    new Progress<CatalogDescriptionIndexProgress>(value =>
-                    {
-                        CatalogProgress = value.Percentage;
-                        CatalogProgressText = value.Completed
-                            ? "Índice de descrições oficiais pronto."
-                            : $"Indexando descrições oficiais: {value.Percentage:N1}%";
-                    }),
+            var indexProgress = new Progress<CatalogDescriptionIndexProgress>(value =>
+            {
+                CatalogProgress = value.Percentage;
+                CatalogProgressText = value.Completed
+                    ? "Índice de descrições oficiais pronto."
+                    : $"Indexando descrições oficiais: {value.Percentage:N1}%";
+            });
+            await Task.Run(
+                    () => _catalogSyncService.BuildDescriptionIndexAsync(
+                        indexProgress,
+                        _catalogCancellation.Token),
                     _catalogCancellation.Token)
                 .ConfigureAwait(true);
             CatalogProgress = 100;
@@ -433,7 +514,7 @@ public sealed partial class MainViewModel
 
     private async Task RefreshCatalogCoverageAsync()
     {
-        var states = await _catalogRepository.GetSyncStatesAsync().ConfigureAwait(true);
+        var states = await Task.Run(() => _catalogRepository.GetSyncStatesAsync()).ConfigureAwait(true);
         CatalogCoverage.ReplaceAll(states.Select(state => new CatalogSyncDisplay(state)));
         var publishedRecords = states.Sum(state => state.ActiveRecords);
         UpdatePublishedCatalogRecords(publishedRecords);

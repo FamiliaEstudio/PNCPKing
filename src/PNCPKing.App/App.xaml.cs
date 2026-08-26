@@ -23,6 +23,7 @@ public partial class App : Application
     private AppPerformanceTelemetry? _performanceTelemetry;
     private DispatcherResponsivenessMonitor? _responsivenessMonitor;
     private AdaptiveMaintenanceCoordinator? _maintenanceCoordinator;
+    private MainViewModel? _mainViewModel;
     private PreProcessInputEventHandler? _inputHandler;
     private int _uiErrorDialogOpen;
 
@@ -281,7 +282,10 @@ public partial class App : Application
                 if (args.StagingItem.Input is MouseButtonEventArgs or MouseWheelEventArgs or
                     KeyEventArgs or TouchEventArgs)
                 {
-                    maintenanceCoordinator.NotifyVisibleActivity();
+                    if (maintenanceCoordinator.NotifyVisibleActivity())
+                    {
+                        _mainViewModel?.NotifyMaintenancePausedForVisibleActivity();
+                    }
                 }
             };
             InputManager.Current.PreProcessInput += _inputHandler;
@@ -330,6 +334,7 @@ public partial class App : Application
                 _diagnosticLog,
                 _performanceTelemetry,
                 maintenanceCoordinator);
+            _mainViewModel = viewModel;
             var mainWindow = new MainWindow(viewModel, columnLayouts);
             MainWindow = mainWindow;
             mainWindow.Show();
@@ -420,6 +425,7 @@ public partial class App : Application
 
         _maintenanceCoordinator?.CancelActiveSlice();
         _maintenanceCoordinator = null;
+        _mainViewModel = null;
         _responsivenessMonitor?.Dispose();
         _responsivenessMonitor = null;
         _diagnosticLog?.Info("shutdown", $"Aplicativo encerrado com código {e.ApplicationExitCode}.");

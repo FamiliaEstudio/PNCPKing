@@ -210,13 +210,31 @@ public sealed partial class MainViewModel
             return false;
         }
 
-        var policy = await _priceCacheRepository.GetPolicyAsync().ConfigureAwait(true);
+        var policy = await Task.Run(
+                () => _priceCacheRepository.GetPolicyAsync(cancellationToken),
+                cancellationToken)
+            .ConfigureAwait(true);
         if (!policy.Authorized || !policy.Enabled || policy.Paused)
         {
             return false;
         }
 
-        await StartPriceCacheCycleAsync(sliceDuration, cancellationToken).ConfigureAwait(true);
+        using var phaseSpan = _performanceTelemetry.Begin("maintenance", "price-cache");
+        try
+        {
+            await StartPriceCacheCycleAsync(sliceDuration, cancellationToken).ConfigureAwait(true);
+            phaseSpan.Complete();
+        }
+        catch (OperationCanceledException)
+        {
+            phaseSpan.Complete();
+            throw;
+        }
+        catch (Exception exception)
+        {
+            phaseSpan.Fail(exception);
+            throw;
+        }
         return true;
     }
 
@@ -244,7 +262,10 @@ public sealed partial class MainViewModel
 
     private async Task RunPriceCacheCycleCoreAsync(CancellationToken cancellationToken)
     {
-        var policy = await _priceCacheRepository.GetPolicyAsync(cancellationToken).ConfigureAwait(true);
+        var policy = await Task.Run(
+                () => _priceCacheRepository.GetPolicyAsync(cancellationToken),
+                cancellationToken)
+            .ConfigureAwait(true);
         if (!policy.Authorized || !policy.Enabled || policy.Paused)
         {
             await RefreshPriceCacheProgressAsync().ConfigureAwait(true);
@@ -257,7 +278,10 @@ public sealed partial class MainViewModel
         var progress = new Progress<PriceCacheProgress>(UpdatePriceCacheProgress);
         try
         {
-            await _priceCacheService.SynchronizeAsync(progress, cancellationToken).ConfigureAwait(true);
+            await Task.Run(
+                    () => _priceCacheService.SynchronizeAsync(progress, cancellationToken),
+                    cancellationToken)
+                .ConfigureAwait(true);
         }
         catch (OperationCanceledException)
         {
@@ -265,10 +289,10 @@ public sealed partial class MainViewModel
         }
         catch (Exception exception)
         {
-            await _priceCacheRepository.SetStatusAsync(
+            await Task.Run(() => _priceCacheRepository.SetStatusAsync(
                     PriceCacheStatus.Failed,
                     exception.Message,
-                    CancellationToken.None)
+                    CancellationToken.None))
                 .ConfigureAwait(true);
             PriceCacheActivityText = $"Falha no cache: {exception.Message}";
         }
@@ -285,10 +309,15 @@ public sealed partial class MainViewModel
 
     private async Task RefreshPriceCacheProgressAsync()
     {
-        var policy = await _priceCacheRepository.GetPolicyAsync().ConfigureAwait(true);
+        var snapshot = await Task.Run(async () =>
+        {
+            var policy = await _priceCacheRepository.GetPolicyAsync().ConfigureAwait(false);
+            var progress = await _priceCacheRepository.GetProgressAsync().ConfigureAwait(false);
+            return (Policy: policy, Progress: progress);
+        }).ConfigureAwait(true);
+        var policy = snapshot.Policy;
         IsPriceCachePaused = policy.Paused;
-        var progress = await _priceCacheRepository.GetProgressAsync().ConfigureAwait(true);
-        UpdatePriceCacheProgress(progress);
+        UpdatePriceCacheProgress(snapshot.Progress);
     }
 
     private void UpdatePriceCacheProgress(PriceCacheProgress progress)

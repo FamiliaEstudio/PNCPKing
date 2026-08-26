@@ -274,7 +274,104 @@ public sealed class PncpRequestSchedulingTests
         Assert.Equal(2, results.Calls);
         Assert.Equal(1, results.Succeeded);
         Assert.Equal(1, results.Failed);
+        Assert.Equal(0, results.Canceled);
         Assert.Equal(2, results.BytesReceived);
+    }
+
+    [Fact]
+    public async Task CallerCancellation_IsCanceledInsteadOfFailed()
+    {
+        var inner = new BlockingHandler(expectedInitialCalls: 1);
+        var telemetry = new PncpRequestTelemetry();
+        using var client = new HttpClient(new PncpSchedulingHandler(
+            new PncpRequestScheduler(),
+            telemetry)
+        {
+            InnerHandler = inner
+        });
+        using var cancellation = new CancellationTokenSource();
+
+        var request = client.GetByteArrayAsync(
+            "https://example.test/api/pncp/v1/orgaos/1/compras/2026/1/itens",
+            cancellation.Token);
+        await inner.WaitForInitialCallsAsync();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
+        var category = telemetry.GetSnapshot()[PncpRequestCategory.ItemLists];
+        var recent = telemetry.GetRecentSnapshot(TimeSpan.FromSeconds(60));
+        Assert.Equal(1, category.Calls);
+        Assert.Equal(0, category.Succeeded);
+        Assert.Equal(0, category.Failed);
+        Assert.Equal(1, category.Canceled);
+        Assert.Equal(1, recent.Canceled);
+        Assert.Equal(0, recent.Failed);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    public async Task HttpPressureResponses_RemainRealFailures(HttpStatusCode statusCode)
+    {
+        var telemetry = new PncpRequestTelemetry();
+        using var client = new HttpClient(new PncpSchedulingHandler(
+            new PncpRequestScheduler(),
+            telemetry)
+        {
+            InnerHandler = new StatusHandler(statusCode)
+        });
+
+        using var response = await client.GetAsync(
+            "https://example.test/api/pncp/v1/orgaos/1/compras/2026/1/itens");
+
+        var category = telemetry.GetSnapshot()[PncpRequestCategory.ItemLists];
+        Assert.Equal(1, category.Failed);
+        Assert.Equal(0, category.Canceled);
+    }
+
+    [Fact]
+    public async Task TransportFailure_RemainsARealFailure()
+    {
+        var telemetry = new PncpRequestTelemetry();
+        using var client = new HttpClient(new PncpSchedulingHandler(
+            new PncpRequestScheduler(),
+            telemetry)
+        {
+            InnerHandler = new TransportFailureHandler()
+        });
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.GetAsync(
+            "https://example.test/api/pncp/v1/orgaos/1/compras/2026/1/itens"));
+
+        var category = telemetry.GetSnapshot()[PncpRequestCategory.ItemLists];
+        Assert.Equal(1, category.Failed);
+        Assert.Equal(0, category.Canceled);
+    }
+
+    [Fact]
+    public void RecentTelemetry_ExpiresEventsOutsideTheRequestedWindow()
+    {
+        var clock = new ManualTimeProvider();
+        var telemetry = new PncpRequestTelemetry(clock);
+        Complete(telemetry, PncpRequestOutcome.Succeeded);
+        clock.Advance(TimeSpan.FromSeconds(30));
+        Complete(telemetry, PncpRequestOutcome.Failed);
+        Complete(telemetry, PncpRequestOutcome.Canceled);
+
+        var current = telemetry.GetRecentSnapshot(TimeSpan.FromSeconds(60));
+        clock.Advance(TimeSpan.FromSeconds(31));
+        var expired = telemetry.GetRecentSnapshot(TimeSpan.FromSeconds(60));
+
+        Assert.Equal(3, current.Calls);
+        Assert.Equal(1, current.Succeeded);
+        Assert.Equal(1, current.Failed);
+        Assert.Equal(1, current.Canceled);
+        Assert.NotNull(current.P50);
+        Assert.NotNull(current.P95);
+        Assert.Equal(2, expired.Calls);
+        Assert.Equal(0, expired.Succeeded);
+        Assert.Equal(1, expired.Failed);
+        Assert.Equal(1, expired.Canceled);
     }
 
     [Fact]
@@ -453,9 +550,10 @@ public sealed class PncpRequestSchedulingTests
     {
         var inner = new BlockingHandler(expectedInitialCalls: 1);
         var scheduler = new PncpRequestScheduler(maximumConcurrency: 48);
+        var telemetry = new PncpRequestTelemetry();
         using var client = new HttpClient(new PncpSchedulingHandler(
             scheduler,
-            new PncpRequestTelemetry(),
+            telemetry,
             itemRequestTimeout: TimeSpan.FromMilliseconds(50))
         {
             InnerHandler = inner
@@ -468,6 +566,9 @@ public sealed class PncpRequestSchedulingTests
         var snapshot = scheduler.GetSnapshot();
         Assert.Equal(32, snapshot.EffectiveConcurrency);
         Assert.Equal("timeout", snapshot.LastReductionReason);
+        var category = telemetry.GetSnapshot()[PncpRequestCategory.ItemLists];
+        Assert.Equal(1, category.Failed);
+        Assert.Equal(0, category.Canceled);
     }
 
     [Fact]
@@ -527,9 +628,19 @@ public sealed class PncpRequestSchedulingTests
         Assert.Equal(1, value.Calls);
         Assert.Equal(1, value.Succeeded);
         Assert.Equal(0, value.Failed);
+        Assert.Equal(0, value.Canceled);
         Assert.Equal(expectedBytes, value.BytesReceived);
         Assert.True(value.TotalDuration >= TimeSpan.Zero);
         Assert.True(value.TotalQueueDuration >= TimeSpan.Zero);
+    }
+
+    private static void Complete(
+        PncpRequestTelemetry telemetry,
+        PncpRequestOutcome outcome)
+    {
+        var measurement = telemetry.Begin(PncpRequestCategory.Contracts);
+        measurement.MarkDispatched();
+        measurement.Complete(outcome);
     }
 
     private sealed class BlockingHandler(int expectedInitialCalls) : HttpMessageHandler
@@ -608,6 +719,24 @@ public sealed class PncpRequestSchedulingTests
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken) => Task.FromResult(responses.Dequeue());
+    }
+
+    private sealed class StatusHandler(HttpStatusCode statusCode) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) => Task.FromResult(new HttpResponseMessage(statusCode)
+            {
+                Content = new ByteArrayContent([1])
+            });
+    }
+
+    private sealed class TransportFailureHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) =>
+            throw new HttpRequestException("transport failure");
     }
 
     private sealed class ManualTimeProvider : TimeProvider

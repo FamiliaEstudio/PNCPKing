@@ -43,6 +43,20 @@
                                    MaxWidth="210" TextTrimming="CharacterEllipsis" />
                     </StackPanel>
                 </Button>
+                <Border Background="{Binding InterfaceIndicatorBrush}" CornerRadius="4"
+                        Padding="7,4" Margin="8,0,0,0" VerticalAlignment="Center"
+                        ToolTip="{Binding InterfaceIndicatorDetails}"
+                        AutomationProperties.Name="{Binding InterfaceIndicatorText}">
+                    <TextBlock Text="{Binding InterfaceIndicatorText}" Foreground="White"
+                               FontSize="11" FontWeight="SemiBold" />
+                </Border>
+                <Border Background="{Binding PncpIndicatorBrush}" CornerRadius="4"
+                        Padding="7,4" Margin="5,0,0,0" VerticalAlignment="Center"
+                        ToolTip="{Binding PncpIndicatorDetails}"
+                        AutomationProperties.Name="{Binding PncpIndicatorText}">
+                    <TextBlock Text="{Binding PncpIndicatorText}" Foreground="White"
+                               FontSize="11" FontWeight="SemiBold" />
+                </Border>
             </StackPanel>
             <Button Grid.Column="2" Content="Opções ▾" VerticalAlignment="Center"
                     Click="DropdownMenu_Click">
@@ -325,6 +339,10 @@
                             IsEnabled="{Binding IsCustomDateRange}" ToolTip="Data inicial" />
                 <DatePicker Width="125" SelectedDate="{Binding CustomEndDate}"
                             IsEnabled="{Binding IsCustomDateRange}" ToolTip="Data final" />
+                <CheckBox Content="Buscar preços até esgotar"
+                          IsChecked="{Binding SearchUntilCandidateSetExhausted}"
+                          VerticalAlignment="Center" Margin="7,0,4,0"
+                          ToolTip="Percorre todas as contratações candidatas; acima de 500, pede confirmação antes das chamadas de preços." />
                 <Button Content="Pesquisar" Command="{Binding SearchCommand}" MinWidth="105" />
             </WrapPanel>
         </Grid>
@@ -392,6 +410,9 @@
                               SelectedItem="{Binding SelectedItemSearchRow}"
                               AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Extended"
                               SelectionUnit="FullRow"
+                              PreviewMouseRightButtonUp="ItemResultsGrid_PreviewMouseRightButtonUp"
+                              MouseDoubleClick="ItemResultsGrid_MouseDoubleClick"
+                              ToolTip="Clique direito fixa a linha; duplo clique seleciona ou remove o preço da cesta."
                               EnableRowVirtualization="True" EnableColumnVirtualization="True"
                               VirtualizingPanel.IsVirtualizing="True"
                               VirtualizingPanel.VirtualizationMode="Recycling"
@@ -401,6 +422,12 @@
                         <DataGrid.RowStyle>
                             <Style TargetType="DataGridRow">
                                 <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsPinned}" Value="True">
+                                        <Setter Property="Background" Value="#E6F0FA" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding IsSelectedForBasket}" Value="True">
+                                        <Setter Property="Background" Value="#E3F4E5" />
+                                    </DataTrigger>
                                     <DataTrigger Binding="{Binding IsCancelled}" Value="True">
                                         <Setter Property="Background" Value="#FFFFE4E4" />
                                     </DataTrigger>
@@ -408,6 +435,9 @@
                             </Style>
                         </DataGrid.RowStyle>
                         <DataGrid.Columns>
+                            <DataGridTextColumn Header="Marca" Binding="{Binding RetentionMarker}"
+                                                Width="105" IsReadOnly="True"
+                                                services:DataGridColumnLayoutService.Key="retention-marker" />
                             <DataGridTextColumn Header="Publicação" Binding="{Binding Contract.PublicationDate, StringFormat=dd/MM/yyyy}" Width="95" />
                             <DataGridTextColumn Header="UF" Binding="{Binding Contract.Uf}" Width="42" />
                             <DataGridTextColumn Header="Descrição" Binding="{Binding Item.Description}" Width="380" />
@@ -459,9 +489,10 @@
                                     Command="{Binding OpenSelectedContractCacheCommand}" />
                             <Button Content="Usar esta amostra em uma cotação"
                                     Command="{Binding UseQuotationSampleCommand}" />
-                            <Button Content="Criar/adicionar à cesta manual"
+                            <Button Content="{Binding ManualBasketButtonText}"
+                                    IsEnabled="{Binding HasSelectedBasketPrices}"
                                     Click="CreateManualBasket_Click"
-                                    ToolTip="Use Ctrl ou Shift para selecionar vários preços homologados." />
+                                    ToolTip="Use duplo clique em um preço homologado para incluí-lo ou removê-lo desta seleção." />
                             <Button Content="Abrir contratação no PNCP" Command="{Binding OpenPncpCommand}"
                                     CommandParameter="{Binding SelectedItemSearchRow.Contract}" />
                         </WrapPanel>

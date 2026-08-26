@@ -233,9 +233,7 @@ public partial class MainWindow : Window
 
         try
         {
-            var selected = ItemResultsGrid.SelectedItems
-                .OfType<ItemSearchDisplayRow>()
-                .ToArray();
+            var selected = _viewModel.GetSelectedBasketPrices();
             await _viewModel.CreateOrAppendManualBasketAsync(selected).ConfigureAwait(true);
         }
         catch (Exception exception) when (!AsyncCommandRuntime.IsCritical(exception))
@@ -246,6 +244,56 @@ public partial class MainWindow : Window
         {
             Interlocked.Exchange(ref _manualBasketInteraction, 0);
         }
+    }
+
+    private void ItemResultsGrid_PreviewMouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (FindItemResultRow(e.OriginalSource as DependencyObject, out var row, out _))
+        {
+            ItemResultsGrid.SelectedItem = row;
+            _viewModel.ToggleItemPricePin(row);
+            e.Handled = true;
+        }
+    }
+
+    private void ItemResultsGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Left ||
+            !FindItemResultRow(e.OriginalSource as DependencyObject, out var row, out var interactive) ||
+            interactive)
+        {
+            return;
+        }
+
+        ItemResultsGrid.SelectedItem = row;
+        _viewModel.ToggleItemPriceBasketSelection(row);
+        e.Handled = true;
+    }
+
+    private static bool FindItemResultRow(
+        DependencyObject? source,
+        out ItemSearchDisplayRow row,
+        out bool interactive)
+    {
+        interactive = false;
+        while (source is not null && source is not DataGridRow)
+        {
+            if (source is System.Windows.Controls.Primitives.ButtonBase)
+            {
+                interactive = true;
+            }
+
+            source = System.Windows.Media.VisualTreeHelper.GetParent(source);
+        }
+
+        if (source is DataGridRow { Item: ItemSearchDisplayRow item })
+        {
+            row = item;
+            return true;
+        }
+
+        row = null!;
+        return false;
     }
 
     private void QuotationLinesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)

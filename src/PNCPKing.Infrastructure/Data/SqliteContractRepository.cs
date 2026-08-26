@@ -2648,7 +2648,8 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                                 'sqlite_autoindex_item_results_1', 'idx_items_contract_status',
                                 'items_fts', 'items_fts_data', 'items_fts_idx',
                                 'items_fts_docsize', 'items_fts_config',
-                                'contract_item_snapshots');
+                                'contract_item_snapshots')
+                   AND [aggregate] = TRUE;
                 """;
             return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
         }

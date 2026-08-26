@@ -29,6 +29,57 @@ public sealed class ItemSearchSessionTests
     }
 
     [Fact]
+    public async Task ExhaustiveRequest_TraversesTheCandidateSetInOneOperation()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contracts = CandidateContracts(520, "exhaustive");
+        await database.Repository.UpsertContractsAsync(contracts);
+        var client = new SessionPncpClient(
+            new Dictionary<string, IReadOnlyList<ProcurementItem>>(),
+            itemFactory: contract => [Item(contract.PncpId, 1, "Café em grãos", false)]);
+        await using var service = new ItemSearchSessionService(
+            client,
+            database.Repository,
+            Path.Combine(database.Directory, "exhaustive.db"));
+        await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
+
+        var result = await service.RunContinuousAsync(new PriceBatchRequest(
+            1,
+            LargeRequestConfirmed: true,
+            BudgetMode: PriceBatchBudgetMode.CandidateContracts,
+            ExactContractCount: 50)
+        {
+            ExhaustCandidateSet = true
+        });
+
+        Assert.True(result.CandidateSetExhausted);
+        Assert.Equal(520, result.ContractsScanned);
+        Assert.Equal(520, result.ProcessedContracts);
+        Assert.Equal(520, client.ItemListCalls);
+    }
+
+    [Fact]
+    public async Task ExhaustiveRequest_RequiresExplicitConfirmation()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contract = RepositorySearchTests.Contract("exhaustive-confirm", "Café", "SP", 1);
+        await database.Repository.UpsertContractsAsync([contract]);
+        await using var service = new ItemSearchSessionService(
+            new SessionPncpClient(new Dictionary<string, IReadOnlyList<ProcurementItem>>()),
+            database.Repository,
+            Path.Combine(database.Directory, "exhaustive-confirm.db"));
+        await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.RunContinuousAsync(new PriceBatchRequest(1)
+            {
+                ExhaustCandidateSet = true
+            }));
+
+        Assert.Contains("confirmação", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Session_ReturnsOnlyMatchingItemsAndHydratesFiftyAtATime()
     {
         await using var database = await TestDatabase.CreateAsync();

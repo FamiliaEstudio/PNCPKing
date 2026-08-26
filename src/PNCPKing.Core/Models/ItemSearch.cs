@@ -95,6 +95,8 @@ public sealed record PriceBatchRequest(
     PriceBatchBudgetMode BudgetMode = PriceBatchBudgetMode.CandidateContracts,
     int? ExactContractCount = null)
 {
+    public bool ExhaustCandidateSet { get; init; }
+
     public int RequestedContracts => ExactContractCount is > 0
         ? ExactContractCount.Value
         : checked(BatchCount * ItemSearchDefaults.ContractsPerBatch);

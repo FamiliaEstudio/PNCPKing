@@ -1212,7 +1212,7 @@ public sealed partial class MainViewModel
                     BatchCount = line.RequestedBatchCount;
                     MinimumPriceText = line.MinimumUnitPrice?.ToString("N4") ?? string.Empty;
                     MaximumPriceText = line.MaximumUnitPrice?.ToString("N4") ?? string.Empty;
-                    ItemSearchRows.Clear();
+                    ResetCurrentItemRows();
                     PriceSearchProgress = 0;
                     _transientItemSearchService.Stop();
                     var automationQuery = new SearchQuery(

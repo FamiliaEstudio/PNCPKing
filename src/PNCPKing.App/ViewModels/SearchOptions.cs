@@ -13,8 +13,11 @@ public sealed record SearchSortOption(string Label, SearchSort Value)
     public override string ToString() => Label;
 }
 
-public sealed class ItemSearchDisplayRow
+public sealed class ItemSearchDisplayRow : ObservableObject
 {
+    private bool _isPinned;
+    private bool _isSelectedForBasket;
+
     public ItemSearchDisplayRow(ItemSearchRow source)
     {
         Source = source;
@@ -48,6 +51,46 @@ public sealed class ItemSearchDisplayRow
     public DateOnly? ResultDate => Source.Result?.ResultDate;
     public string DisplayStatus => Source.DisplayStatus;
     public bool IsCancelled => Source.PriceState == ItemSearchPriceState.Cancelled;
+    public bool IsBasketEligible =>
+        Source.PriceState == ItemSearchPriceState.Homologated &&
+        Source.Result is { IsActive: true, HomologatedUnitValue: > 0 };
+
+    public bool IsPinned
+    {
+        get => _isPinned;
+        set
+        {
+            if (SetProperty(ref _isPinned, value))
+            {
+                OnPropertyChanged(nameof(IsRetained));
+                OnPropertyChanged(nameof(RetentionMarker));
+            }
+        }
+    }
+
+    public bool IsSelectedForBasket
+    {
+        get => _isSelectedForBasket;
+        set
+        {
+            if (SetProperty(ref _isSelectedForBasket, value))
+            {
+                OnPropertyChanged(nameof(IsRetained));
+                OnPropertyChanged(nameof(RetentionMarker));
+            }
+        }
+    }
+
+    public bool IsRetained => IsPinned || IsSelectedForBasket;
+
+    public string RetentionMarker => (IsPinned, IsSelectedForBasket) switch
+    {
+        (true, true) => "Fixado · Cesta",
+        (true, false) => "Fixado",
+        (false, true) => "Cesta",
+        _ => string.Empty
+    };
+
     public string PortalUrl => Source.Contract.PortalUri.AbsoluteUri;
     public double? DistanceFromRibeiraoKilometers { get; }
 }

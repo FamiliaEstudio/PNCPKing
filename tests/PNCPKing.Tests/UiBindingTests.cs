@@ -7,6 +7,52 @@ namespace PNCPKing.Tests;
 public sealed class UiBindingTests
 {
     [Fact]
+    public void MainSearch_ExposesHealthExhaustionAndPersistentPriceGestures()
+    {
+        var document = LoadView("MainWindow.xaml");
+        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+
+        var healthBindings = document.Descendants(presentation + "TextBlock")
+            .Select(element => element.Attribute("Text")?.Value ?? string.Empty)
+            .Where(value => value.Contains("IndicatorText", StringComparison.Ordinal))
+            .ToArray();
+        Assert.Contains(healthBindings, value => value.Contains("InterfaceIndicatorText", StringComparison.Ordinal));
+        Assert.Contains(healthBindings, value => value.Contains("PncpIndicatorText", StringComparison.Ordinal));
+        var healthTooltips = document.Descendants(presentation + "Border")
+            .Select(element => element.Attribute("ToolTip")?.Value ?? string.Empty)
+            .Where(value => value.Contains("IndicatorDetails", StringComparison.Ordinal))
+            .ToArray();
+        Assert.Contains(healthTooltips, value => value.Contains("InterfaceIndicatorDetails", StringComparison.Ordinal));
+        Assert.Contains(healthTooltips, value => value.Contains("PncpIndicatorDetails", StringComparison.Ordinal));
+
+        var exhaustive = Assert.Single(
+            document.Descendants(presentation + "CheckBox"),
+            element => element.Attribute("Content")?.Value == "Buscar preços até esgotar");
+        Assert.Contains(
+            "SearchUntilCandidateSetExhausted",
+            Assert.IsType<XAttribute>(exhaustive.Attribute("IsChecked")).Value);
+
+        var grid = Assert.Single(
+            document.Descendants(presentation + "DataGrid"),
+            element => element.Attribute("Name")?.Value == "ItemResultsGrid" ||
+                       element.Attribute(XName.Get("Name", "http://schemas.microsoft.com/winfx/2006/xaml"))?.Value ==
+                       "ItemResultsGrid");
+        Assert.Equal(
+            "ItemResultsGrid_PreviewMouseRightButtonUp",
+            grid.Attribute("PreviewMouseRightButtonUp")?.Value);
+        Assert.Equal("ItemResultsGrid_MouseDoubleClick", grid.Attribute("MouseDoubleClick")?.Value);
+        Assert.Contains(
+            grid.Descendants(presentation + "DataGridTextColumn"),
+            column => column.Attribute("Binding")?.Value.Contains("RetentionMarker", StringComparison.Ordinal) == true);
+
+        var basketButton = Assert.Single(
+            document.Descendants(presentation + "Button"),
+            element => element.Attribute("Click")?.Value == "CreateManualBasket_Click");
+        Assert.Contains("ManualBasketButtonText", basketButton.Attribute("Content")?.Value ?? string.Empty);
+        Assert.Contains("HasSelectedBasketPrices", basketButton.Attribute("IsEnabled")?.Value ?? string.Empty);
+    }
+
+    [Fact]
     public void StartupOverlay_BlocksTheWholeWindowWithoutDisablingTheContentTree()
     {
         var document = LoadView("MainWindow.xaml");

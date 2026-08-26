@@ -85,7 +85,7 @@ public sealed class SystemResourceTests
             time);
         await using var slice = coordinator.BeginSlice();
 
-        coordinator.NotifyVisibleActivity();
+        Assert.True(coordinator.NotifyVisibleActivity());
 
         Assert.True(SpinWait.SpinUntil(
             () => slice.Token.IsCancellationRequested,

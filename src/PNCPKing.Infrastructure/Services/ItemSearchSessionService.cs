@@ -943,6 +943,12 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 "Mais de 500 contratações exigem confirmação explícita do usuário.");
         }
 
+        if (request.ExhaustCandidateSet && !request.LargeRequestConfirmed)
+        {
+            throw new InvalidOperationException(
+                "Esgotar todas as contratações exige confirmação explícita do usuário.");
+        }
+
         var session = GetRequiredSession();
         if (session.Text.Length == 0)
         {
@@ -979,13 +985,13 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             int BudgetUsed() => request.BudgetMode == PriceBatchBudgetMode.UnresolvedContracts
                 ? _contractsExpanded - expandedAtStart
                 : _contractsScanned - contractsAtStart;
-            while (BudgetUsed() < request.RequestedContracts)
+            while (request.ExhaustCandidateSet || BudgetUsed() < request.RequestedContracts)
             {
                 var networkConcurrency = CurrentNetworkConcurrency;
                 var window = new List<ItemContractCandidate>(networkConcurrency);
-                var windowSize = Math.Min(
-                    networkConcurrency,
-                    request.RequestedContracts - BudgetUsed());
+                var windowSize = request.ExhaustCandidateSet
+                    ? networkConcurrency
+                    : Math.Min(networkConcurrency, request.RequestedContracts - BudgetUsed());
                 while (window.Count < windowSize &&
                        await EnsureNextCandidateAvailableAsync(linked.Token).ConfigureAwait(false))
                 {
@@ -1114,7 +1120,8 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                                 $"{_hits.Count:N0} item(ns) compatível(is) descoberto(s).",
                                 requestedContracts: request.RequestedContracts,
                                 processedContracts: processedContracts));
-                            budgetReached = BudgetUsed() >= request.RequestedContracts;
+                            budgetReached = !request.ExhaustCandidateSet &&
+                                            BudgetUsed() >= request.RequestedContracts;
                         }
                     }
                 }
