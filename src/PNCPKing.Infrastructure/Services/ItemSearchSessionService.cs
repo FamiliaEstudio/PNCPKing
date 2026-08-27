@@ -1003,7 +1003,6 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                     break;
                 }
 
-                var preparedWindow = new PreparedCandidate?[window.Count];
                 var pendingPreparations = window
                     .Select((candidate, index) => (
                         Task: PrepareCandidateAsync(
@@ -1012,7 +1011,9 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                             linked.Token),
                         Index: index))
                     .ToDictionary(value => value.Task, value => value.Index);
-                var preparedIndex = 0;
+                var candidateWork = new Task<CompletedCandidateWork>?[window.Count];
+                using var hydrationGate = new SemaphoreSlim(networkConcurrency, networkConcurrency);
+                var committedCandidates = 0;
                 var completedPreparations = 0;
                 var budgetReached = false;
                 try
@@ -1022,114 +1023,89 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                         var completedTask = await Task.WhenAny(pendingPreparations.Keys).ConfigureAwait(false);
                         var completedIndex = pendingPreparations[completedTask];
                         pendingPreparations.Remove(completedTask);
-                        preparedWindow[completedIndex] = await completedTask.ConfigureAwait(false);
+                        var prepared = await completedTask.ConfigureAwait(false);
+                        candidateWork[completedIndex] = CompleteCandidateWorkAsync(
+                            prepared,
+                            hydrationGate,
+                            callsAtStart,
+                            failuresAtStart,
+                            throttledRows,
+                            minimumUnitPrice,
+                            maximumUnitPrice,
+                            linked.Token);
                         completedPreparations++;
+                        var completedCandidateWork = candidateWork.Count(
+                            task => task?.IsCompletedSuccessfully == true);
                         throttledProgress.Report(CreateProgress(
                             Volatile.Read(ref _completedResultCalls) - callsAtStart,
                             Volatile.Read(ref _completedResultCalls) - callsAtStart,
                             Volatile.Read(ref _failedResultCalls) - failuresAtStart,
                             false,
-                            $"Janela de rede: {completedPreparations:N0}/{window.Count:N0} resposta(s) concluída(s); " +
+                            $"Janela: {completedPreparations:N0}/{window.Count:N0} contratação(ões) preparada(s); " +
+                            $"{completedCandidateWork:N0}/{window.Count:N0} com preços concluídos; " +
                             $"{BudgetUsed():N0}/{request.RequestedContracts:N0} contratação(ões) confirmada(s).",
                             requestedContracts: request.RequestedContracts,
                             processedContracts: BudgetUsed()));
+                    }
 
-                        while (!budgetReached &&
-                               preparedIndex < preparedWindow.Length &&
-                               preparedWindow[preparedIndex] is { } prepared)
+                    while (!budgetReached && committedCandidates < candidateWork.Length)
+                    {
+                        var completedWork = await candidateWork[committedCandidates]!
+                            .ConfigureAwait(false);
+                        var discovery = await CompletePreparedCandidateAsync(
+                                completedWork.Prepared,
+                                completedWork.MatchingHits,
+                                linked.Token)
+                            .ConfigureAwait(false);
+
+                        if (discovery.FreshItemListUsed || completedWork.HydratedItemCount > 0)
                         {
-                            var discovery = await CompletePreparedCandidateAsync(prepared, linked.Token)
-                                .ConfigureAwait(false);
-                            var matchingHits = discovery.MatchingHits;
-                            IReadOnlyList<ItemSearchHit> toHydrate = [];
-                            if (matchingHits.Count > 0)
-                            {
-                                var availableRows = (await BuildRowsAsync(
-                                    matchingHits,
-                                    minimumUnitPrice,
-                                    maximumUnitPrice,
-                                    linked.Token)
-                                    .ConfigureAwait(false))
-                                    .Where(row => row.PriceState != ItemSearchPriceState.Pending)
-                                    .ToArray();
-                                if (availableRows.Length > 0)
-                                {
-                                    throttledRows.Report(availableRows);
-                                }
-
-                                toHydrate = await FilterItemsNeedingApiAsync(
-                                        matchingHits.Where(hit => hit.Item.HasResult),
-                                        retryFailures: true,
-                                        excludedKeys: null,
-                                        cancellationToken: linked.Token)
-                                    .ConfigureAwait(false);
-                                await HydrateSelectedAsync(
-                                        toHydrate,
-                                        PncpRequestPriority.AdditionalBatches,
-                                        progress: null,
-                                        requestedCalls: toHydrate.Count,
-                                        completedBaseline: callsAtStart,
-                                        failedBaseline: failuresAtStart,
-                                        retryFailures: true,
-                                        cancellationToken: linked.Token,
-                                        completedRowProgress: throttledRows,
-                                        minimumUnitPrice: minimumUnitPrice,
-                                        maximumUnitPrice: maximumUnitPrice)
-                                    .ConfigureAwait(false);
-
-                                var finalRows = (await BuildRowsAsync(
-                                        matchingHits,
-                                        minimumUnitPrice,
-                                        maximumUnitPrice,
-                                        linked.Token)
-                                    .ConfigureAwait(false))
-                                    .ToArray();
-                                throttledRows.Report(finalRows);
-                            }
-
-                            if (discovery.FreshItemListUsed || toHydrate.Count > 0)
-                            {
-                                _contractsExpanded = checked(_contractsExpanded + 1);
-                            }
-                            else
-                            {
-                                _fullyResolvedContracts = checked(_fullyResolvedContracts + 1);
-                            }
-
-                            _processedCandidateCursor = discovery.Cursor;
-                            var nextPreparedIndex = preparedIndex + 1;
-                            var windowHasPending = nextPreparedIndex < preparedWindow.Length;
-                            await SaveCheckpointAsync(
-                                    !windowHasPending && !HasMoreContractCandidates,
-                                    linked.Token)
-                                .ConfigureAwait(false);
-                            preparedIndex = nextPreparedIndex;
-                            var examinedContracts = _contractsScanned - contractsAtStart;
-                            var expandedContracts = _contractsExpanded - expandedAtStart;
-                            var resolvedContracts = _fullyResolvedContracts - resolvedAtStart;
-                            var processedContracts = BudgetUsed();
-                            throttledProgress.Report(CreateProgress(
-                                Volatile.Read(ref _completedResultCalls) - callsAtStart,
-                                Volatile.Read(ref _completedResultCalls) - callsAtStart,
-                                Volatile.Read(ref _failedResultCalls) - failuresAtStart,
-                                false,
-                                $"Cobertura nova: {expandedContracts:N0} de {request.RequestedContracts:N0}; " +
-                                $"janela {completedPreparations:N0}/{window.Count:N0}; " +
-                                $"{examinedContracts:N0} candidata(s) examinada(s), " +
-                                $"{resolvedContracts:N0} já resolvida(s) localmente; " +
-                                $"{_hits.Count:N0} item(ns) compatível(is) descoberto(s).",
-                                requestedContracts: request.RequestedContracts,
-                                processedContracts: processedContracts));
-                            budgetReached = !request.ExhaustCandidateSet &&
-                                            BudgetUsed() >= request.RequestedContracts;
+                            _contractsExpanded = checked(_contractsExpanded + 1);
                         }
+                        else
+                        {
+                            _fullyResolvedContracts = checked(_fullyResolvedContracts + 1);
+                        }
+
+                        _processedCandidateCursor = discovery.Cursor;
+                        committedCandidates++;
+                        var windowHasPending = committedCandidates < candidateWork.Length;
+                        await SaveCheckpointAsync(
+                                !windowHasPending && !HasMoreContractCandidates,
+                                linked.Token)
+                            .ConfigureAwait(false);
+                        var examinedContracts = _contractsScanned - contractsAtStart;
+                        var expandedContracts = _contractsExpanded - expandedAtStart;
+                        var resolvedContracts = _fullyResolvedContracts - resolvedAtStart;
+                        var processedContracts = BudgetUsed();
+                        var completedCandidateWork = candidateWork.Count(
+                            task => task?.IsCompletedSuccessfully == true);
+                        throttledProgress.Report(CreateProgress(
+                            Volatile.Read(ref _completedResultCalls) - callsAtStart,
+                            Volatile.Read(ref _completedResultCalls) - callsAtStart,
+                            Volatile.Read(ref _failedResultCalls) - failuresAtStart,
+                            false,
+                            $"Cobertura nova: {expandedContracts:N0} de {request.RequestedContracts:N0}; " +
+                            $"janela preparada {completedPreparations:N0}/{window.Count:N0}, " +
+                            $"preços concluídos {completedCandidateWork:N0}/{window.Count:N0}, " +
+                            $"confirmadas em ordem {committedCandidates:N0}/{window.Count:N0}; " +
+                            $"{examinedContracts:N0} candidata(s) examinada(s), " +
+                            $"{resolvedContracts:N0} já resolvida(s) localmente; " +
+                            $"{_hits.Count:N0} item(ns) compatível(is) descoberto(s).",
+                            requestedContracts: request.RequestedContracts,
+                            processedContracts: processedContracts));
+                        budgetReached = !request.ExhaustCandidateSet &&
+                                        BudgetUsed() >= request.RequestedContracts;
                     }
                 }
                 catch
                 {
                     try
                     {
-                        await Task.WhenAll(pendingPreparations.Keys).ConfigureAwait(false);
+                        var unfinishedWork = pendingPreparations.Keys
+                            .Cast<Task>()
+                            .Concat(candidateWork.Where(task => task is not null).Cast<Task>());
+                        await Task.WhenAll(unfinishedWork).ConfigureAwait(false);
                     }
                     catch
                     {
@@ -1140,9 +1116,9 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 }
                 finally
                 {
-                    if (preparedIndex < window.Count)
+                    if (committedCandidates < window.Count)
                     {
-                        _nextCandidateIndex -= window.Count - preparedIndex;
+                        _nextCandidateIndex -= window.Count - committedCandidates;
                     }
                 }
             }
@@ -1408,9 +1384,9 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
 
     private async Task<DiscoveryAttempt> CompletePreparedCandidateAsync(
         PreparedCandidate prepared,
+        IReadOnlyList<ItemSearchHit> matchingHits,
         CancellationToken cancellationToken)
     {
-        var session = GetRequiredSession();
         var contract = prepared.Candidate.Contract;
         _contractsScanned++;
         _currentGeographicStage = DescribeGeographicStage(contract);
@@ -1434,8 +1410,7 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 .ConfigureAwait(false);
         }
 
-        var matchingHits = await AddMatchingHitsAsync(contract, session.Text, cancellationToken)
-            .ConfigureAwait(false);
+        await CommitMatchingHitsAsync(matchingHits, cancellationToken).ConfigureAwait(false);
         if (_processedContractKeys.Add(contract.PncpId))
         {
             _processedContracts.Add(contract);
@@ -1452,6 +1427,70 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             false,
             prepared.Candidate.Cursor,
             matchingHits);
+    }
+
+    private async Task<CompletedCandidateWork> CompleteCandidateWorkAsync(
+        PreparedCandidate prepared,
+        SemaphoreSlim hydrationGate,
+        int completedBaseline,
+        int failedBaseline,
+        IProgress<IReadOnlyList<ItemSearchRow>> rowProgress,
+        decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice,
+        CancellationToken cancellationToken)
+    {
+        var session = GetRequiredSession();
+        var matchingHits = await FindMatchingHitsAsync(
+                prepared.Candidate.Contract,
+                session.Text,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (matchingHits.Count == 0)
+        {
+            return new CompletedCandidateWork(prepared, matchingHits, 0);
+        }
+
+        var availableRows = (await BuildRowsAsync(
+                matchingHits,
+                minimumUnitPrice,
+                maximumUnitPrice,
+                cancellationToken)
+            .ConfigureAwait(false))
+            .Where(row => row.PriceState != ItemSearchPriceState.Pending)
+            .ToArray();
+        if (availableRows.Length > 0)
+        {
+            rowProgress.Report(availableRows);
+        }
+
+        var toHydrate = await FilterItemsNeedingApiAsync(
+                matchingHits.Where(hit => hit.Item.HasResult),
+                retryFailures: true,
+                excludedKeys: null,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        await HydrateSelectedAsync(
+                toHydrate,
+                PncpRequestPriority.AdditionalBatches,
+                progress: null,
+                requestedCalls: toHydrate.Count,
+                completedBaseline: completedBaseline,
+                failedBaseline: failedBaseline,
+                retryFailures: true,
+                cancellationToken: cancellationToken,
+                completedRowProgress: rowProgress,
+                minimumUnitPrice: minimumUnitPrice,
+                maximumUnitPrice: maximumUnitPrice,
+                sharedSemaphore: hydrationGate)
+            .ConfigureAwait(false);
+
+        rowProgress.Report((await BuildRowsAsync(
+                matchingHits,
+                minimumUnitPrice,
+                maximumUnitPrice,
+                cancellationToken)
+            .ConfigureAwait(false)).ToArray());
+        return new CompletedCandidateWork(prepared, matchingHits, toHydrate.Count);
     }
 
     private async Task RetryPreviousContractFailuresAsync(
@@ -1570,18 +1609,33 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         string searchText,
         CancellationToken cancellationToken)
     {
+        var matchingHits = await FindMatchingHitsAsync(contract, searchText, cancellationToken)
+            .ConfigureAwait(false);
+        await CommitMatchingHitsAsync(matchingHits, cancellationToken).ConfigureAwait(false);
+        return matchingHits;
+    }
+
+    private async Task<IReadOnlyList<ItemSearchHit>> FindMatchingHitsAsync(
+        ContractRecord contract,
+        string searchText,
+        CancellationToken cancellationToken)
+    {
         var matches = await _repository.SearchItemsAsync(
                 contract.PncpId,
                 searchText,
                 cancellationToken)
             .ConfigureAwait(false);
-        var matchingHits = new List<ItemSearchHit>(matches.Count);
+        return matches.Select(item => new ItemSearchHit(contract, item)).ToArray();
+    }
+
+    private async Task CommitMatchingHitsAsync(
+        IReadOnlyList<ItemSearchHit> matchingHits,
+        CancellationToken cancellationToken)
+    {
         var storedHits = new List<(ItemSearchHit Hit, long DiscoveredOrder)>();
-        foreach (var item in matches)
+        foreach (var hit in matchingHits)
         {
-            var hit = new ItemSearchHit(contract, item);
-            matchingHits.Add(hit);
-            var key = (ContractId: contract.PncpId, ItemNumber: item.ItemNumber);
+            var key = (ContractId: hit.Contract.PncpId, ItemNumber: hit.Item.ItemNumber);
             if (!_hitKeys.Add(key))
             {
                 var existingIndex = _hits.FindIndex(value =>
@@ -1601,7 +1655,6 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         }
 
         await _temporaryResults.SaveHitsAsync(storedHits, cancellationToken).ConfigureAwait(false);
-        return matchingHits;
     }
 
     private bool HasMoreContractCandidates =>
@@ -1816,10 +1869,14 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         CancellationToken cancellationToken,
         IProgress<IReadOnlyList<ItemSearchRow>>? completedRowProgress = null,
         decimal? minimumUnitPrice = null,
-        decimal? maximumUnitPrice = null)
+        decimal? maximumUnitPrice = null,
+        SemaphoreSlim? sharedSemaphore = null)
     {
         var networkConcurrency = CurrentNetworkConcurrency;
-        using var semaphore = new SemaphoreSlim(networkConcurrency, networkConcurrency);
+        using var ownedSemaphore = sharedSemaphore is null
+            ? new SemaphoreSlim(networkConcurrency, networkConcurrency)
+            : null;
+        var semaphore = sharedSemaphore ?? ownedSemaphore!;
         var progressGate = new object();
         var lastReportedCompleted = -1;
         var tasks = hits.Select(async hit =>
@@ -2242,6 +2299,11 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         ItemContractCandidate Candidate,
         bool FreshItemListUsed,
         Exception? Failure);
+
+    private sealed record CompletedCandidateWork(
+        PreparedCandidate Prepared,
+        IReadOnlyList<ItemSearchHit> MatchingHits,
+        int HydratedItemCount);
 
     private sealed class ThrottledProgress<T>(IProgress<T>? inner, TimeSpan interval)
     {
