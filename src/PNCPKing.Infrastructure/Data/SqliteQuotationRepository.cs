@@ -98,6 +98,69 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task UpdateLineRequestedDetailsAsync(
+        Guid lineId,
+        decimal requestedQuantity,
+        string requestedUnit,
+        CancellationToken cancellationToken = default)
+    {
+        if (requestedQuantity < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(requestedQuantity),
+                "A quantidade não pode ser negativa.");
+        }
+
+        var normalizedUnit = (requestedUnit ?? string.Empty).Trim();
+        var requestedQuantityScaled = DecimalScale.ToScaled(requestedQuantity)!.Value;
+        var now = DateTimeOffset.UtcNow;
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        long currentQuantityScaled;
+        string currentUnit;
+        await using (var current = connection.CreateCommand())
+        {
+            current.Transaction = (SqliteTransaction)transaction;
+            current.CommandText = "SELECT requested_quantity_scaled, requested_unit FROM quotation_lines WHERE id = $id;";
+            current.Parameters.AddWithValue("$id", lineId.ToString("N"));
+            await using var reader = await current.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                throw new InvalidOperationException("O item da cotação não existe mais.");
+            }
+
+            currentQuantityScaled = reader.GetInt64(0);
+            currentUnit = reader.GetString(1);
+        }
+
+        if (currentQuantityScaled == requestedQuantityScaled &&
+            string.Equals(currentUnit, normalizedUnit, StringComparison.Ordinal))
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await using (var line = connection.CreateCommand())
+        {
+            line.Transaction = (SqliteTransaction)transaction;
+            line.CommandText = """
+                UPDATE quotation_lines
+                   SET requested_quantity_scaled = $quantity,
+                       requested_unit = $unit,
+                       selection_confirmed = 0
+                 WHERE id = $id;
+                """;
+            line.Parameters.AddWithValue("$quantity", requestedQuantityScaled);
+            line.Parameters.AddWithValue("$unit", normalizedUnit);
+            line.Parameters.AddWithValue("$id", lineId.ToString("N"));
+            await line.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await TouchLineProjectAsync(connection, (SqliteTransaction)transaction, lineId, now, cancellationToken)
+            .ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task SetLineCatalogSelectionAsync(
         Guid lineId,
         QuotationCatalogSelection? selection,
@@ -2842,10 +2905,9 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
     private static void ValidateInput(QuotationLineInput input)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(input.Description);
-        ArgumentException.ThrowIfNullOrWhiteSpace(input.RequestedUnit);
-        if (input.RequestedQuantity <= 0)
+        if (input.RequestedQuantity < 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(input), "A quantidade deve ser maior que zero.");
+            throw new ArgumentOutOfRangeException(nameof(input), "A quantidade não pode ser negativa.");
         }
 
         if (input.MinimumUnitPrice < 0 || input.MaximumUnitPrice < 0 ||

@@ -38,9 +38,18 @@ public sealed class UiBindingTests
                        element.Attribute(XName.Get("Name", "http://schemas.microsoft.com/winfx/2006/xaml"))?.Value ==
                        "ItemResultsGrid");
         Assert.Equal(
-            "ItemResultsGrid_PreviewMouseRightButtonUp",
-            grid.Attribute("PreviewMouseRightButtonUp")?.Value);
+            "ItemResultsGrid_PreviewMouseRightButtonDown",
+            grid.Attribute("PreviewMouseRightButtonDown")?.Value);
+        Assert.Equal(
+            "ItemResultsGrid_PreviewMouseLeftButtonDown",
+            grid.Attribute("PreviewMouseLeftButtonDown")?.Value);
+        Assert.Equal("ItemResultsGrid_PreviewMouseMove", grid.Attribute("PreviewMouseMove")?.Value);
+        Assert.Equal(
+            "ItemResultsGrid_PreviewMouseLeftButtonUp",
+            grid.Attribute("PreviewMouseLeftButtonUp")?.Value);
         Assert.Equal("ItemResultsGrid_MouseDoubleClick", grid.Attribute("MouseDoubleClick")?.Value);
+        Assert.Contains("1 segundo", grid.Attribute("ToolTip")?.Value ?? string.Empty);
+        Assert.Contains("clique direito", grid.Attribute("ToolTip")?.Value ?? string.Empty);
         Assert.Contains(
             grid.Descendants(presentation + "DataGridTextColumn"),
             column => column.Attribute("Binding")?.Value.Contains("RetentionMarker", StringComparison.Ordinal) == true);
@@ -197,6 +206,48 @@ public sealed class UiBindingTests
                        element.Attribute("Command")?.Value.Contains(
                            "UpdateCatalogCommand",
                            StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public void MainWindow_ExposesSessionOnlyAggressiveItemIndexToggle()
+    {
+        var document = LoadView("MainWindow.xaml");
+        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        var toggle = Assert.Single(
+            document.Descendants(presentation + "ToggleButton"),
+            element => element.Attribute("Command")?.Value.Contains(
+                "ToggleAggressivePriceCacheCommand",
+                StringComparison.Ordinal) == true);
+
+        Assert.Contains(
+            "ToggleAggressivePriceCacheCommand",
+            Assert.IsType<XAttribute>(toggle.Attribute("Command")).Value);
+        Assert.Contains(
+            "IsAggressivePriceCacheMode",
+            Assert.IsType<XAttribute>(toggle.Attribute("IsChecked")).Value);
+        Assert.Contains(
+            "Mode=OneWay",
+            Assert.IsType<XAttribute>(toggle.Attribute("IsChecked")).Value.Replace(" ", string.Empty));
+    }
+
+    [Fact]
+    public void MainWindow_ExposesIndependentSessionOnlyAggressiveNationalPriceToggle()
+    {
+        var document = LoadView("MainWindow.xaml");
+        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        var toggle = Assert.Single(
+            document.Descendants(presentation + "ToggleButton"),
+            element => element.Attribute("Command")?.Value.Contains(
+                "ToggleAggressiveNationalPriceIndexCommand",
+                StringComparison.Ordinal) == true);
+
+        Assert.Equal("Download agressivo", toggle.Attribute("Content")?.Value);
+        Assert.Contains(
+            "IsAggressiveNationalPriceMode",
+            Assert.IsType<XAttribute>(toggle.Attribute("IsChecked")).Value);
+        Assert.Contains(
+            "Mode=OneWay",
+            Assert.IsType<XAttribute>(toggle.Attribute("IsChecked")).Value.Replace(" ", string.Empty));
     }
 
     [Fact]
@@ -421,7 +472,7 @@ public sealed class UiBindingTests
     }
 
     [Fact]
-    public void NewQuotationItemWindow_CollectsOnlyTheThreeRequiredFields()
+    public void NewQuotationItemWindow_KeepsDescriptionAndMakesQuantityAndUnitOptional()
     {
         var document = LoadView("NewQuotationItemWindow.xaml");
         XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
@@ -432,9 +483,31 @@ public sealed class UiBindingTests
             ["DescriptionTextBox", "QuantityTextBox", "UnitTextBox"],
             textBoxes.Select(element => Assert.IsType<XAttribute>(element.Attribute(x + "Name")).Value).ToArray());
         Assert.All(textBoxes, element => Assert.Null(element.Attribute("Text")));
+        var labels = document.Descendants(presentation + "TextBlock")
+            .Select(element => element.Attribute("Text")?.Value ?? string.Empty)
+            .ToArray();
+        Assert.Contains("Quantidade (opcional)", labels);
+        Assert.Contains("Unidade (opcional)", labels);
         Assert.Contains(document.Descendants(presentation + "Button"), element =>
             element.Attribute("Content")?.Value == "Criar item" &&
             element.Attribute("IsDefault")?.Value == "True");
+    }
+
+    [Fact]
+    public void QuotationItemWindow_ExposesManualRequestedDetailsEditorAndPromptSlots()
+    {
+        var document = LoadView("QuotationItemWindow.xaml");
+        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        var buttons = document.Descendants(presentation + "Button").ToArray();
+
+        var editor = Assert.Single(buttons, element =>
+            element.Attribute("Click")?.Value == "EditItemDetails_Click");
+        Assert.Contains(
+            "CanEditRequestedDetails",
+            editor.Attribute("IsEnabled")?.Value ?? string.Empty);
+        Assert.Contains(buttons, element => element.Attribute("Click")?.Value == "RestrictivePrompt_Click");
+        Assert.Contains(buttons, element => element.Attribute("Click")?.Value == "IntermediatePrompt_Click");
+        Assert.Contains(buttons, element => element.Attribute("Click")?.Value == "BroadPrompt_Click");
     }
 
     [Fact]

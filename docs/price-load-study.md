@@ -1,4 +1,4 @@
-# Dimensionamento da carga nacional de preços homologados
+# Dimensionamento da carga nacional de listas e preços homologados
 
 Medição realizada em 20/07/2026 na API oficial do PNCP, sem consultar documentos.
 
@@ -27,16 +27,38 @@ O PNCP exige uma chamada para obter a lista de itens de cada contratação e out
 
 Mesmo no ritmo ideal observado na amostra e com duas chamadas simultâneas, o piso teórico fica próximo de 13–35 dias contínuos. Limites da API, `429`, indisponibilidades, novas tentativas e respostas maiores podem transformar isso em vários meses.
 
-## Recomendação
+## Índice nacional de itens implementado
 
-Não incluir a carga nacional de preços automaticamente na sincronização principal. Implementar uma segunda fila, opcional e confirmada separadamente, priorizando uma destas abrangências:
+A carga indiscriminada de resultados não integra mais a fila nacional. Depois da cobertura completa das contratações e de uma autorização separada, o PNCP King mantém somente as listas de itens da janela móvel de 365 dias.
 
-1. contratações encontradas pela pesquisa do usuário;
-2. uma UF ou a região Sudeste;
-3. um período menor;
-4. contratações já homologadas ou atualizadas recentemente.
+Para as 1.491.875 contratações da projeção, a carga inicial passa a ter:
 
-A fila deve manter checkpoint por contratação e item, limitar-se a duas chamadas simultâneas e exibir sua própria estimativa de tráfego, tempo e espaço antes de começar.
+| Componente | Projeção |
+|---|---:|
+| Chamadas para listas de itens | 1.491.875 |
+| Chamadas de resultados em segundo plano | 0 |
+| Tráfego das listas, pelas duas amostras | aproximadamente 22,9–43,3 GiB |
+
+O aplicativo calcula novamente contratos restantes, espaço, duração e reserva de disco antes da autorização. No modo normal, a fila mantém checkpoint por contratação, faz apenas uma chamada de lista por vez e cede imediatamente a API às pesquisas visíveis. O modo agressivo de itens usa a concorrência adaptativa disponível, mas continua sem consultar resultados.
+
+Na pesquisa, o FTS local identifica itens compatíveis mesmo quando o objeto da contratação é genérico. Somente esses itens, quando `temResultado=true`, acionam o endpoint de resultados. Respostas bem-sucedidas, inclusive vazias ou canceladas, ficam concluídas no banco principal até uma mudança em `dataAtualizacaoGlobal` invalidá-las.
+
+## Índice nacional de preços implementado
+
+Depois da conclusão das listas, uma segunda autorização estima separadamente o índice de preços. Na base medida durante a implementação havia 8.054.429 itens elegíveis, 26.711 já consultados e aproximadamente 8.027.718 chamadas restantes.
+
+| Componente | Estimativa inicial |
+|---|---:|
+| Chamadas restantes de resultados | aproximadamente 8,03 milhões |
+| Crescimento físico esperado | próximo de 1,8 GiB |
+| Planejamento conservador de disco | 3–5 GiB |
+| Duração inicial | aproximadamente 1–10 dias, recalibrada pelo rendimento real |
+
+A autorização persiste, mas não inicia nenhuma chamada. O download em massa ocorre exclusivamente enquanto o botão **Download agressivo** da barra de preços estiver ativo. Antes dos resultados, o mesmo ciclo conclui cobertura e listas eventualmente pendentes; os modos agressivos de itens e preços são mutuamente exclusivos.
+
+O endpoint oficial retorna uma lista. O índice conserva somente registros com situação `1 — Informado` e `valorUnitarioHomologado > 0`. Na maioria dos itens há apenas uma vencedora útil. Há exceções oficiais de divisão do fornecimento com mais de uma vencedora positiva; nesses casos todas são preservadas, sem escolher arbitrariamente uma empresa. Respostas vazias, somente canceladas, com preço zero/ausente ou `404` concluem o item sem preço útil e não geram nova chamada até uma atualização global.
+
+O controle adaptativo aumenta a concorrência após sucessos e a reduz diante de `429`, `Retry-After`, timeout, `5xx` ou latência alta. Resultados obtidos em massa são reconstruíveis e acompanham a janela móvel; preços consultados sob demanda ou usados em cotações permanecem fixados.
 
 Referências oficiais:
 

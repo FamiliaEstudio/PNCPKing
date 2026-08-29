@@ -29,12 +29,32 @@ internal sealed record StoredItemSearchSession(
     int FailedCalls,
     bool CandidateSetExhausted,
     IReadOnlyList<ItemSearchHit> Hits,
-    IReadOnlyList<ContractRecord> ProcessedContracts);
+    IReadOnlyList<ContractRecord> ProcessedContracts,
+    int HitCount,
+    int ProcessedContractCount);
 
 internal sealed record StoredContractFailure(
     string ContractId,
     int Attempts,
     string Error);
+
+internal sealed record StoredCandidateCommit(
+    ContractRecord Contract,
+    long ProcessedOrder,
+    IReadOnlyList<(ItemSearchHit Hit, long DiscoveredOrder)> Hits,
+    string? Failure);
+
+internal sealed record StoredSessionCheckpoint(
+    ItemCandidateCursor? Cursor,
+    int ContractsScanned,
+    int ExpandedContracts,
+    int FullyResolvedContracts,
+    int CachedItemLists,
+    int ItemListCalls,
+    int ItemResultCalls,
+    int CompletedResultCalls,
+    int FailedCalls,
+    bool CandidateSetExhausted);
 
 /// <summary>
 /// Search-session prices deliberately live outside the user's permanent index.
@@ -192,7 +212,8 @@ internal sealed class TemporaryItemResultStore(
 
     public async Task<StoredItemSearchSession?> TryRestoreAsync(
         string anchorKey,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool loadHistory = true)
     {
         if (!_persistent || !File.Exists(_databasePath))
         {
@@ -295,39 +316,56 @@ internal sealed class TemporaryItemResultStore(
                 }
             }
 
-            var hits = new List<ItemSearchHit>();
-            await using (var command = connection.CreateCommand())
+            int hitCount;
+            int processedContractCount;
+            await using (var counts = connection.CreateCommand())
             {
-                command.CommandText = """
-                    SELECT contract_json, item_json
-                      FROM search_hits
-                     ORDER BY discovered_order, contract_id, item_number;
+                counts.CommandText = """
+                    SELECT (SELECT COUNT(*) FROM search_hits),
+                           (SELECT COUNT(*) FROM processed_contracts);
                     """;
-                await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                {
-                    var contract = JsonSerializer.Deserialize<ContractRecord>(reader.GetString(0), JsonOptions)
-                        ?? throw new InvalidDataException("Contratação inválida na pesquisa persistida.");
-                    var item = JsonSerializer.Deserialize<ProcurementItem>(reader.GetString(1), JsonOptions)
-                        ?? throw new InvalidDataException("Item inválido na pesquisa persistida.");
-                    hits.Add(new ItemSearchHit(contract, item));
-                }
+                await using var reader = await counts.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+                hitCount = checked((int)reader.GetInt64(0));
+                processedContractCount = checked((int)reader.GetInt64(1));
             }
 
+            var hits = new List<ItemSearchHit>();
             var processedContracts = new List<ContractRecord>();
-            await using (var command = connection.CreateCommand())
+            if (loadHistory)
             {
-                command.CommandText = """
-                    SELECT contract_json
-                      FROM processed_contracts
-                     ORDER BY processed_order, contract_id;
-                    """;
-                await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                await using (var command = connection.CreateCommand())
                 {
-                    processedContracts.Add(
-                        JsonSerializer.Deserialize<ContractRecord>(reader.GetString(0), JsonOptions)
-                        ?? throw new InvalidDataException("Contratação processada inválida."));
+                    command.CommandText = """
+                        SELECT contract_json, item_json
+                          FROM search_hits
+                         ORDER BY discovered_order, contract_id, item_number;
+                        """;
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                    while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        var contract = JsonSerializer.Deserialize<ContractRecord>(reader.GetString(0), JsonOptions)
+                            ?? throw new InvalidDataException("Contratação inválida na pesquisa persistida.");
+                        var item = JsonSerializer.Deserialize<ProcurementItem>(reader.GetString(1), JsonOptions)
+                            ?? throw new InvalidDataException("Item inválido na pesquisa persistida.");
+                        hits.Add(new ItemSearchHit(contract, item));
+                    }
+                }
+
+                await using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = """
+                        SELECT contract_json
+                          FROM processed_contracts
+                         ORDER BY processed_order, contract_id;
+                        """;
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                    while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        processedContracts.Add(
+                            JsonSerializer.Deserialize<ContractRecord>(reader.GetString(0), JsonOptions)
+                            ?? throw new InvalidDataException("Contratação processada inválida."));
+                    }
                 }
             }
 
@@ -349,7 +387,9 @@ internal sealed class TemporaryItemResultStore(
                 failedCalls,
                 exhausted,
                 hits,
-                processedContracts);
+                processedContracts,
+                hitCount,
+                processedContractCount);
         }
         catch (Exception exception) when (
             exception is SqliteException or JsonException or FormatException or InvalidDataException)
@@ -407,6 +447,105 @@ internal sealed class TemporaryItemResultStore(
         command.Parameters.AddWithValue("$updatedAt", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<ItemSearchHit>> LoadHitsAsync(
+        CancellationToken cancellationToken)
+    {
+        if (!File.Exists(_databasePath))
+        {
+            return [];
+        }
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT contract_json, item_json
+              FROM search_hits
+             ORDER BY discovered_order, contract_id, item_number;
+            """;
+        var hits = new List<ItemSearchHit>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var contract = JsonSerializer.Deserialize<ContractRecord>(reader.GetString(0), JsonOptions)
+                ?? throw new InvalidDataException("Contratação inválida na pesquisa persistida.");
+            var item = JsonSerializer.Deserialize<ProcurementItem>(reader.GetString(1), JsonOptions)
+                ?? throw new InvalidDataException("Item inválido na pesquisa persistida.");
+            hits.Add(new ItemSearchHit(contract, item));
+        }
+
+        return hits;
+    }
+
+    public async Task<IReadOnlyList<(ContractRecord Contract, long ProcessedOrder)>>
+        LoadProcessedContractsPageAsync(
+            long afterProcessedOrder,
+            int maximum,
+            CancellationToken cancellationToken)
+    {
+        if (!File.Exists(_databasePath) || maximum <= 0)
+        {
+            return [];
+        }
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT contract_json, processed_order
+              FROM processed_contracts
+             WHERE processed_order > $after
+             ORDER BY processed_order, contract_id
+             LIMIT $maximum;
+            """;
+        command.Parameters.AddWithValue("$after", Math.Max(0, afterProcessedOrder));
+        command.Parameters.AddWithValue("$maximum", maximum);
+        var contracts = new List<(ContractRecord Contract, long ProcessedOrder)>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            contracts.Add((
+                JsonSerializer.Deserialize<ContractRecord>(reader.GetString(0), JsonOptions)
+                    ?? throw new InvalidDataException("Contratação processada inválida."),
+                reader.GetInt64(1)));
+        }
+
+        return contracts;
+    }
+
+    public async Task<IReadOnlyList<ItemSearchHit>> GetFailedHitsAsync(
+        int maximum,
+        CancellationToken cancellationToken)
+    {
+        if (!File.Exists(_databasePath) || maximum <= 0)
+        {
+            return [];
+        }
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT h.contract_json, h.item_json
+              FROM queried_items q
+              JOIN search_hits h ON h.contract_id = q.contract_id
+                                AND h.item_number = q.item_number
+             WHERE q.succeeded = 0
+             ORDER BY q.queried_at, h.discovered_order, h.contract_id, h.item_number
+             LIMIT $maximum;
+            """;
+        command.Parameters.AddWithValue("$maximum", maximum);
+        var hits = new List<ItemSearchHit>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var contract = JsonSerializer.Deserialize<ContractRecord>(reader.GetString(0), JsonOptions)
+                ?? throw new InvalidDataException("Contratação inválida na falha persistida.");
+            var item = JsonSerializer.Deserialize<ProcurementItem>(reader.GetString(1), JsonOptions)
+                ?? throw new InvalidDataException("Item inválido na falha persistida.");
+            hits.Add(new ItemSearchHit(contract, item));
+        }
+
+        return hits;
     }
 
     public async Task UpdateCriteriaAsync(
@@ -473,6 +612,19 @@ internal sealed class TemporaryItemResultStore(
         }
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task ClearHitsAsync(CancellationToken cancellationToken)
+    {
+        if (!_persistent || !File.Exists(_databasePath))
+        {
+            return;
+        }
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM search_hits;";
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task SaveProcessedContractAsync(
@@ -595,6 +747,156 @@ internal sealed class TemporaryItemResultStore(
         command.Parameters.AddWithValue(
             "$updatedAt",
             DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task CommitCandidatesAsync(
+        IReadOnlyList<StoredCandidateCommit> candidates,
+        StoredSessionCheckpoint checkpoint,
+        CancellationToken cancellationToken)
+    {
+        if (!_persistent || !File.Exists(_databasePath))
+        {
+            return;
+        }
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        await using var processed = connection.CreateCommand();
+        processed.Transaction = (SqliteTransaction)transaction;
+        processed.CommandText = """
+            INSERT INTO processed_contracts(contract_id, processed_order, contract_json)
+            VALUES($contractId, $order, $contract)
+            ON CONFLICT(contract_id) DO UPDATE SET
+                processed_order = MIN(processed_contracts.processed_order, excluded.processed_order),
+                contract_json = excluded.contract_json;
+            """;
+        processed.Parameters.Add("$contractId", SqliteType.Text);
+        processed.Parameters.Add("$order", SqliteType.Integer);
+        processed.Parameters.Add("$contract", SqliteType.Text);
+
+        await using var hit = connection.CreateCommand();
+        hit.Transaction = (SqliteTransaction)transaction;
+        hit.CommandText = """
+            INSERT INTO search_hits(
+                contract_id, item_number, discovered_order, contract_json, item_json)
+            VALUES($contractId, $itemNumber, $order, $contract, $item)
+            ON CONFLICT(contract_id, item_number) DO UPDATE SET
+                discovered_order = MIN(search_hits.discovered_order, excluded.discovered_order),
+                contract_json = excluded.contract_json,
+                item_json = excluded.item_json;
+            """;
+        hit.Parameters.Add("$contractId", SqliteType.Text);
+        hit.Parameters.Add("$itemNumber", SqliteType.Integer);
+        hit.Parameters.Add("$order", SqliteType.Integer);
+        hit.Parameters.Add("$contract", SqliteType.Text);
+        hit.Parameters.Add("$item", SqliteType.Text);
+
+        await using var saveFailure = connection.CreateCommand();
+        saveFailure.Transaction = (SqliteTransaction)transaction;
+        saveFailure.CommandText = """
+            INSERT INTO contract_failures(contract_id, attempts, error, updated_at)
+            VALUES($contractId, 1, $error, $updatedAt)
+            ON CONFLICT(contract_id) DO UPDATE SET
+                attempts = contract_failures.attempts + 1,
+                error = excluded.error,
+                updated_at = excluded.updated_at;
+            """;
+        saveFailure.Parameters.Add("$contractId", SqliteType.Text);
+        saveFailure.Parameters.Add("$error", SqliteType.Text);
+        saveFailure.Parameters.Add("$updatedAt", SqliteType.Text);
+
+        await using var removeFailure = connection.CreateCommand();
+        removeFailure.Transaction = (SqliteTransaction)transaction;
+        removeFailure.CommandText =
+            "DELETE FROM contract_failures WHERE contract_id = $contractId;";
+        removeFailure.Parameters.Add("$contractId", SqliteType.Text);
+
+        foreach (var candidate in candidates)
+        {
+            processed.Parameters["$contractId"].Value = candidate.Contract.PncpId;
+            processed.Parameters["$order"].Value = Math.Max(1, candidate.ProcessedOrder);
+            processed.Parameters["$contract"].Value = JsonSerializer.Serialize(candidate.Contract, JsonOptions);
+            await processed.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            foreach (var value in candidate.Hits)
+            {
+                hit.Parameters["$contractId"].Value = value.Hit.Contract.PncpId;
+                hit.Parameters["$itemNumber"].Value = value.Hit.Item.ItemNumber;
+                hit.Parameters["$order"].Value = value.DiscoveredOrder;
+                hit.Parameters["$contract"].Value = JsonSerializer.Serialize(value.Hit.Contract, JsonOptions);
+                hit.Parameters["$item"].Value = JsonSerializer.Serialize(value.Hit.Item, JsonOptions);
+                await hit.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            if (candidate.Failure is null)
+            {
+                removeFailure.Parameters["$contractId"].Value = candidate.Contract.PncpId;
+                await removeFailure.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                saveFailure.Parameters["$contractId"].Value = candidate.Contract.PncpId;
+                saveFailure.Parameters["$error"].Value = candidate.Failure;
+                saveFailure.Parameters["$updatedAt"].Value =
+                    DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+                await saveFailure.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        await using var saveCheckpoint = connection.CreateCommand();
+        saveCheckpoint.Transaction = (SqliteTransaction)transaction;
+        saveCheckpoint.CommandText = """
+            UPDATE session_info
+               SET cursor_geo_layer = $layer,
+                   cursor_group_rank = $group,
+                   cursor_rotation_band = $band,
+                   cursor_random_key = $random,
+                   cursor_pncp_id = $pncpId,
+                   contracts_scanned = $scanned,
+                   expanded_contracts = $expanded,
+                   fully_resolved_contracts = $resolved,
+                   cached_item_lists = $cachedLists,
+                   item_list_calls = $listCalls,
+                   item_result_calls = $resultCalls,
+                   completed_result_calls = $completedCalls,
+                   failed_calls = $failedCalls,
+                   candidate_set_exhausted = $exhausted,
+                   updated_at = $updatedAt;
+            """;
+        saveCheckpoint.Parameters.AddWithValue("$layer", DbValue(checkpoint.Cursor?.GeographicLayer));
+        saveCheckpoint.Parameters.AddWithValue("$group", DbValue(checkpoint.Cursor?.GroupRank));
+        saveCheckpoint.Parameters.AddWithValue("$band", DbValue(checkpoint.Cursor?.RotationBand));
+        saveCheckpoint.Parameters.AddWithValue("$random", DbValue(checkpoint.Cursor?.RandomOrderKey));
+        saveCheckpoint.Parameters.AddWithValue("$pncpId", DbValue(checkpoint.Cursor?.PncpId));
+        saveCheckpoint.Parameters.AddWithValue("$scanned", Math.Max(0, checkpoint.ContractsScanned));
+        saveCheckpoint.Parameters.AddWithValue("$expanded", Math.Max(0, checkpoint.ExpandedContracts));
+        saveCheckpoint.Parameters.AddWithValue("$resolved", Math.Max(0, checkpoint.FullyResolvedContracts));
+        saveCheckpoint.Parameters.AddWithValue("$cachedLists", Math.Max(0, checkpoint.CachedItemLists));
+        saveCheckpoint.Parameters.AddWithValue("$listCalls", Math.Max(0, checkpoint.ItemListCalls));
+        saveCheckpoint.Parameters.AddWithValue("$resultCalls", Math.Max(0, checkpoint.ItemResultCalls));
+        saveCheckpoint.Parameters.AddWithValue("$completedCalls", Math.Max(0, checkpoint.CompletedResultCalls));
+        saveCheckpoint.Parameters.AddWithValue("$failedCalls", Math.Max(0, checkpoint.FailedCalls));
+        saveCheckpoint.Parameters.AddWithValue("$exhausted", checkpoint.CandidateSetExhausted ? 1 : 0);
+        saveCheckpoint.Parameters.AddWithValue(
+            "$updatedAt",
+            DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        await saveCheckpoint.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task CheckpointPassiveAsync(CancellationToken cancellationToken)
+    {
+        if (!_persistent || !File.Exists(_databasePath))
+        {
+            return;
+        }
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA wal_checkpoint(PASSIVE);";
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -805,6 +1107,229 @@ internal sealed class TemporaryItemResultStore(
         return new TemporaryItemResultEntry(succeeded, error, results);
     }
 
+    public async Task<IReadOnlyDictionary<(string ContractId, long ItemNumber), TemporaryItemResultEntry?>>
+        GetManyAsync(
+            IReadOnlyList<ItemSearchHit> hits,
+            CancellationToken cancellationToken)
+    {
+        var keys = hits
+            .Select(hit => (ContractId: hit.Contract.PncpId, ItemNumber: hit.Item.ItemNumber))
+            .Distinct()
+            .ToArray();
+        var entries = keys.ToDictionary(
+            key => key,
+            _ => (TemporaryItemResultEntry?)null);
+        if (!File.Exists(_databasePath) || keys.Length == 0)
+        {
+            return entries;
+        }
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using (var selection = connection.CreateCommand())
+        {
+            selection.CommandText = """
+                CREATE TEMP TABLE IF NOT EXISTS selected_temporary_items(
+                    contract_id TEXT NOT NULL,
+                    item_number INTEGER NOT NULL,
+                    PRIMARY KEY(contract_id, item_number)
+                ) WITHOUT ROWID;
+                DELETE FROM selected_temporary_items;
+                """;
+            await selection.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = """
+                INSERT OR IGNORE INTO selected_temporary_items(contract_id, item_number)
+                VALUES($contractId, $itemNumber);
+                """;
+            insert.Parameters.Add("$contractId", SqliteType.Text);
+            insert.Parameters.Add("$itemNumber", SqliteType.Integer);
+            foreach (var key in keys)
+            {
+                insert.Parameters["$contractId"].Value = key.ContractId;
+                insert.Parameters["$itemNumber"].Value = key.ItemNumber;
+                await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        var states = new Dictionary<(string ContractId, long ItemNumber), (bool Succeeded, string? Error)>();
+        await using (var state = connection.CreateCommand())
+        {
+            state.CommandText = """
+                SELECT q.contract_id, q.item_number, q.succeeded, q.error
+                  FROM selected_temporary_items selected
+                  JOIN queried_items q ON q.contract_id = selected.contract_id
+                                      AND q.item_number = selected.item_number;
+                """;
+            await using var reader = await state.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                states[(reader.GetString(0), reader.GetInt64(1))] = (
+                    reader.GetInt64(2) == 1,
+                    reader.IsDBNull(3) ? null : reader.GetString(3));
+            }
+        }
+
+        var results = states.Keys.ToDictionary(
+            key => key,
+            _ => new List<HomologationResult>());
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT r.contract_id, r.item_number, r.result_sequence, r.supplier_tax_id,
+                       r.supplier_name, r.supplier_type, r.supplier_municipality, r.supplier_uf,
+                       r.quantity_scaled, r.unit_value_scaled, r.total_value_scaled, r.result_date,
+                       r.result_status_id, r.result_status_name
+                  FROM selected_temporary_items selected
+                  JOIN item_results r ON r.contract_id = selected.contract_id
+                                     AND r.item_number = selected.item_number
+                 ORDER BY r.contract_id, r.item_number, r.result_sequence;
+                """;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var result = ReadResult(reader);
+                results[(result.ContractId, result.ItemNumber)].Add(result);
+            }
+        }
+
+        foreach (var (key, state) in states)
+        {
+            entries[key] = new TemporaryItemResultEntry(
+                state.Succeeded,
+                state.Error,
+                results[key]);
+        }
+
+        return entries;
+    }
+
+    public async Task<int> GetAvailableResultRowCountAsync(CancellationToken cancellationToken)
+    {
+        if (!File.Exists(_databasePath))
+        {
+            return 0;
+        }
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT COUNT(*)
+                  FROM search_hits h
+                  JOIN queried_items q ON q.contract_id = h.contract_id
+                                      AND q.item_number = h.item_number
+                                      AND q.succeeded = 1
+                  JOIN item_results r ON r.contract_id = h.contract_id
+                                     AND r.item_number = h.item_number
+                 WHERE r.unit_value_scaled IS NOT NULL AND r.unit_value_scaled > 0;
+                """;
+            return checked(Convert.ToInt32(
+                await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                CultureInfo.InvariantCulture));
+        }
+        catch (SqliteException)
+        {
+            return 0;
+        }
+    }
+
+    public async Task<ItemSearchResultPage> LoadResultPageAsync(
+        ItemSearchResultCursor? cursor,
+        int pageSize,
+        decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice,
+        CancellationToken cancellationToken)
+    {
+        if (!File.Exists(_databasePath))
+        {
+            return new ItemSearchResultPage([], cursor, false);
+        }
+
+        pageSize = Math.Clamp(pageSize, 1, ItemSearchDefaults.ContractsPerBatch);
+        var hasRange = minimumUnitPrice is not null || maximumUnitPrice is not null;
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT h.contract_json, h.item_json, h.discovered_order,
+                   r.contract_id, r.item_number, r.result_sequence, r.supplier_tax_id,
+                   r.supplier_name, r.supplier_type, r.supplier_municipality, r.supplier_uf,
+                   r.quantity_scaled, r.unit_value_scaled, r.total_value_scaled, r.result_date,
+                   r.result_status_id, r.result_status_name
+              FROM search_hits h
+              JOIN queried_items q ON q.contract_id = h.contract_id
+                                  AND q.item_number = h.item_number
+                                  AND q.succeeded = 1
+              JOIN item_results r ON r.contract_id = h.contract_id
+                                 AND r.item_number = h.item_number
+             WHERE r.unit_value_scaled IS NOT NULL
+               AND r.unit_value_scaled > 0
+               AND ($hasRange = 0 OR r.result_status_id = 1)
+               AND ($minimum IS NULL OR r.unit_value_scaled >= $minimum)
+               AND ($maximum IS NULL OR r.unit_value_scaled <= $maximum)
+               AND ($hasCursor = 0
+                    OR h.discovered_order > $order
+                    OR (h.discovered_order = $order AND h.contract_id > $contractId)
+                    OR (h.discovered_order = $order AND h.contract_id = $contractId
+                        AND h.item_number > $itemNumber)
+                    OR (h.discovered_order = $order AND h.contract_id = $contractId
+                        AND h.item_number = $itemNumber AND r.result_sequence > $sequence))
+             ORDER BY h.discovered_order, h.contract_id, h.item_number, r.result_sequence
+             LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$hasRange", hasRange ? 1 : 0);
+        command.Parameters.AddWithValue(
+            "$minimum",
+            DbValue(minimumUnitPrice is null ? null : DecimalScale.ToScaled(minimumUnitPrice.Value)));
+        command.Parameters.AddWithValue(
+            "$maximum",
+            DbValue(maximumUnitPrice is null ? null : DecimalScale.ToScaled(maximumUnitPrice.Value)));
+        command.Parameters.AddWithValue("$hasCursor", cursor is null ? 0 : 1);
+        command.Parameters.AddWithValue("$order", cursor?.DiscoveredOrder ?? 0);
+        command.Parameters.AddWithValue("$contractId", cursor?.ContractId ?? string.Empty);
+        command.Parameters.AddWithValue("$itemNumber", cursor?.ItemNumber ?? 0);
+        command.Parameters.AddWithValue("$sequence", cursor?.ResultSequence ?? 0);
+        command.Parameters.AddWithValue("$limit", pageSize + 1);
+
+        var values = new List<(ItemSearchRow Row, ItemSearchResultCursor Cursor)>(pageSize + 1);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var contract = JsonSerializer.Deserialize<ContractRecord>(reader.GetString(0), JsonOptions)
+                ?? throw new InvalidDataException("Contratação inválida na página de resultados.");
+            var item = JsonSerializer.Deserialize<ProcurementItem>(reader.GetString(1), JsonOptions)
+                ?? throw new InvalidDataException("Item inválido na página de resultados.");
+            var result = ReadResult(reader, 3);
+            values.Add((
+                new ItemSearchRow(
+                    contract,
+                    item,
+                    result,
+                    result.IsActive ? ItemSearchPriceState.Homologated : ItemSearchPriceState.Cancelled,
+                    result.IsActive ? "Preço homologado encontrado" : "Resultado cancelado",
+                    true),
+                new ItemSearchResultCursor(
+                    reader.GetInt64(2),
+                    reader.GetString(3),
+                    reader.GetInt64(4),
+                    reader.GetInt64(5))));
+        }
+
+        var hasMore = values.Count > pageSize;
+        if (hasMore)
+        {
+            values.RemoveAt(values.Count - 1);
+        }
+
+        return new ItemSearchResultPage(
+            values.Select(value => value.Row).ToArray(),
+            values.Count == 0 ? cursor : values[^1].Cursor,
+            hasMore);
+    }
+
     public ValueTask DisposeAsync()
     {
         if (!_persistent)
@@ -923,24 +1448,24 @@ internal sealed class TemporaryItemResultStore(
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private static HomologationResult ReadResult(SqliteDataReader reader) => new()
+    private static HomologationResult ReadResult(SqliteDataReader reader, int offset = 0) => new()
     {
-        ContractId = reader.GetString(0),
-        ItemNumber = reader.GetInt64(1),
-        ResultSequence = reader.GetInt64(2),
-        SupplierTaxId = reader.GetString(3),
-        SupplierName = reader.GetString(4),
-        SupplierType = reader.GetString(5),
-        SupplierMunicipality = reader.GetString(6),
-        SupplierUf = reader.GetString(7),
-        HomologatedQuantityScaled = reader.IsDBNull(8) ? null : reader.GetInt64(8),
-        HomologatedUnitValueScaled = reader.IsDBNull(9) ? null : reader.GetInt64(9),
-        HomologatedTotalValueScaled = reader.IsDBNull(10) ? null : reader.GetInt64(10),
-        ResultDate = reader.IsDBNull(11) || !DateOnly.TryParse(reader.GetString(11), CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)
+        ContractId = reader.GetString(offset),
+        ItemNumber = reader.GetInt64(offset + 1),
+        ResultSequence = reader.GetInt64(offset + 2),
+        SupplierTaxId = reader.GetString(offset + 3),
+        SupplierName = reader.GetString(offset + 4),
+        SupplierType = reader.GetString(offset + 5),
+        SupplierMunicipality = reader.GetString(offset + 6),
+        SupplierUf = reader.GetString(offset + 7),
+        HomologatedQuantityScaled = reader.IsDBNull(offset + 8) ? null : reader.GetInt64(offset + 8),
+        HomologatedUnitValueScaled = reader.IsDBNull(offset + 9) ? null : reader.GetInt64(offset + 9),
+        HomologatedTotalValueScaled = reader.IsDBNull(offset + 10) ? null : reader.GetInt64(offset + 10),
+        ResultDate = reader.IsDBNull(offset + 11) || !DateOnly.TryParse(reader.GetString(offset + 11), CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)
             ? null
             : date,
-        ResultStatusId = reader.GetInt32(12),
-        ResultStatusName = reader.GetString(13)
+        ResultStatusId = reader.GetInt32(offset + 12),
+        ResultStatusName = reader.GetString(offset + 13)
     };
 
     private void DeleteFiles()

@@ -103,6 +103,26 @@ public partial class QuotationItemWindow : Window
     private async void RenameItem_Click(object sender, RoutedEventArgs e) =>
         await PromptRenameItemAsync().ConfigureAwait(true);
 
+    private async void EditItemDetails_Click(object sender, RoutedEventArgs e)
+    {
+        var line = ViewModel.Line?.Line;
+        if (line is null || !ViewModel.CanEditRequestedDetails)
+        {
+            return;
+        }
+
+        var window = new NewQuotationItemWindow(line)
+        {
+            Owner = this
+        };
+        if (window.ShowDialog() == true && window.Input is { } input)
+        {
+            await RunAsync(() => ViewModel.UpdateRequestedDetailsAsync(
+                input.RequestedQuantity,
+                input.RequestedUnit)).ConfigureAwait(true);
+        }
+    }
+
     private async Task PromptRenameItemAsync()
     {
         var current = ViewModel.Line?.Line.EffectiveDisplayName;

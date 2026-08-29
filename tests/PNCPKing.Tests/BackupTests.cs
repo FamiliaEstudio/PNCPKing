@@ -160,8 +160,9 @@ public sealed class BackupTests
         var contract = PriceCacheTests.RecentContract("bulk", today, 1);
         await database.Repository.UpsertContractsAsync([contract]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-89), today);
-        await cache.PrepareWindowAsync(today.AddDays(-89), today);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.SetNationalPriceIndexAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.PrepareWindowAsync(today.AddDays(-364), today);
         await cache.MarkContractDownloadingAsync(contract.PncpId, true);
         var items = Enumerable.Range(1, 250).Select(number =>
             PriceCacheTests.Item(contract, number) with
@@ -199,9 +200,12 @@ public sealed class BackupTests
         await service.ImportAsync(compact);
         var importedCache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
         var policy = await importedCache.GetPolicyAsync();
+        var pricePolicy = await importedCache.GetNationalPriceIndexPolicyAsync();
         var counts = await database.Repository.GetCountsAsync();
         Assert.False(policy.Authorized);
         Assert.False(policy.Enabled);
+        Assert.False(pricePolicy.Authorized);
+        Assert.False(pricePolicy.Enabled);
         Assert.Equal(0, counts.Items);
         Assert.Equal(0, counts.Results);
     }

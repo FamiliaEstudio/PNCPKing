@@ -38,6 +38,19 @@ public interface IContractRepository
     Task<ContractRecord?> GetContractAsync(string pncpId, CancellationToken cancellationToken = default);
     Task UpsertItemsAsync(string contractId, IReadOnlyList<ProcurementItem> items, bool forceRefresh, CancellationToken cancellationToken = default);
     Task<ContractItemSnapshot?> GetItemSnapshotAsync(string contractId, CancellationToken cancellationToken = default);
+    async Task<IReadOnlyDictionary<string, ContractItemSnapshot?>> GetItemSnapshotsAsync(
+        IReadOnlyList<ContractRecord> contracts,
+        CancellationToken cancellationToken = default)
+    {
+        var snapshots = new Dictionary<string, ContractItemSnapshot?>(StringComparer.Ordinal);
+        foreach (var contract in contracts)
+        {
+            snapshots[contract.PncpId] = await GetItemSnapshotAsync(contract.PncpId, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return snapshots;
+    }
     Task<ProcurementItem?> GetItemAsync(
         string contractId,
         long itemNumber,
@@ -48,7 +61,32 @@ public interface IContractRepository
         string text,
         CancellationToken cancellationToken = default);
     Task<CachedItemResults?> GetCachedItemResultsAsync(string contractId, long itemNumber, CancellationToken cancellationToken = default);
+    async Task<IReadOnlyDictionary<(string ContractId, long ItemNumber), CachedItemResults?>> GetCachedItemResultsAsync(
+        IReadOnlyList<ItemSearchHit> hits,
+        CancellationToken cancellationToken = default)
+    {
+        var results = new Dictionary<(string ContractId, long ItemNumber), CachedItemResults?>();
+        foreach (var hit in hits)
+        {
+            var key = (ContractId: hit.Contract.PncpId, ItemNumber: hit.Item.ItemNumber);
+            if (!results.ContainsKey(key))
+            {
+                results[key] = await GetCachedItemResultsAsync(
+                        key.ContractId,
+                        key.ItemNumber,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+
+        return results;
+    }
     Task ReplaceItemResultsAsync(string contractId, long itemNumber, IReadOnlyList<HomologationResult> results, CancellationToken cancellationToken = default);
+    Task ReplaceBackgroundItemResultsAsync(
+        string contractId,
+        long itemNumber,
+        IReadOnlyList<HomologationResult> results,
+        CancellationToken cancellationToken = default);
     Task SetItemHydrationStatusAsync(string contractId, long itemNumber, ItemHydrationStatus status, string? error = null, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ProcurementItem>> GetPendingItemsAsync(string contractId, bool forceRefresh, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ItemDisplayRow>> GetItemDisplayRowsAsync(string contractId, CancellationToken cancellationToken = default);

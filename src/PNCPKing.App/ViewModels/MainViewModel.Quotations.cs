@@ -223,7 +223,7 @@ public sealed partial class MainViewModel
             () => !IsFileBusy && SelectedQuotationLine is not null && SelectedQuotationBasket is not null);
         ExportQuotationCommand = new AsyncRelayCommand(
             ExportQuotationAsync,
-            () => !IsFileBusy && !IsDocumentBusy &&
+            () => !IsAnyAggressivePncpMode && !IsFileBusy && !IsDocumentBusy &&
                   SelectedQuotationProject is not null && QuotationLines.Count > 0);
         ExportQuotationPackageCommand = new AsyncRelayCommand(
             ExportQuotationPackageAsync,
@@ -244,7 +244,7 @@ public sealed partial class MainViewModel
             reference => reference is not null && Uri.TryCreate(reference.Source.PortalUrl, UriKind.Absolute, out _));
         AccessQuotationDocumentsCommand = new AsyncRelayCommand<QuotationReferenceDisplay>(
             AccessQuotationDocumentsAsync,
-            reference => reference is not null && !IsDocumentBusy && !IsFileBusy &&
+            reference => !IsAnyAggressivePncpMode && reference is not null && !IsDocumentBusy && !IsFileBusy &&
                          PncpContractKey.TryParse(
                              reference.Source.ContractId,
                              reference.Source.PortalUrl,
@@ -271,10 +271,10 @@ public sealed partial class MainViewModel
             () => !IsFileBusy && !IsPriceBusy && !IsDocumentBusy);
         AiQuotationCommand = new AsyncRelayCommand(
             StartAiQuotationAsync,
-            () => !IsFileBusy && !IsPriceBusy && !IsDocumentBusy);
+            () => !IsAnyAggressivePncpMode && !IsFileBusy && !IsPriceBusy && !IsDocumentBusy);
         ResumeQuotationAutomationCommand = new AsyncRelayCommand(
             ResumeQuotationAutomationAsync,
-            () => !IsFileBusy && !IsPriceBusy && !IsDocumentBusy &&
+            () => !IsAnyAggressivePncpMode && !IsFileBusy && !IsPriceBusy && !IsDocumentBusy &&
                   SelectedQuotationProject is not null);
         CancelQuotationAutomationCommand = new RelayCommand(
             () => _quotationAutomationCancellation?.Cancel(),
@@ -285,13 +285,15 @@ public sealed partial class MainViewModel
                   SelectedQuotationProject is not null);
         OpenRestrictiveQuotationSearchCommand = new RelayCommand(
             () => OpenQuotationSearch(PromptMatchLevel.Restrictive),
-            () => SelectedQuotationLine is not null);
+            () => !IsAnyAggressivePncpMode && SelectedQuotationLine is not null);
         OpenIntermediateQuotationSearchCommand = new RelayCommand(
             () => OpenQuotationSearch(PromptMatchLevel.Intermediate),
-            () => SelectedQuotationLine?.Line.PromptSet is { IntermediateText.Length: > 0 });
+            () => !IsAnyAggressivePncpMode &&
+                  SelectedQuotationLine?.Line.PromptSet is { IntermediateText.Length: > 0 });
         OpenBroadQuotationSearchCommand = new RelayCommand(
             () => OpenQuotationSearch(PromptMatchLevel.Broad),
-            () => SelectedQuotationLine?.Line.PromptSet is { BroadText.Length: > 0 });
+            () => !IsAnyAggressivePncpMode &&
+                  SelectedQuotationLine?.Line.PromptSet is { BroadText.Length: > 0 });
         RenameManualBasketCommand = new AsyncRelayCommand(
             RenameSelectedManualBasketAsync,
             () => !IsFileBusy && SelectedQuotationBasket?.Source.IsManual == true);
@@ -304,7 +306,8 @@ public sealed partial class MainViewModel
                   SelectedBasketReference is not null);
         OpenQuotationItemCommand = new RelayCommand(
             OpenSelectedQuotationItem,
-            () => SelectedQuotationProject is not null && SelectedQuotationLine is not null);
+            () => !IsAnyAggressivePncpMode &&
+                  SelectedQuotationProject is not null && SelectedQuotationLine is not null);
     }
 
     public void OpenSelectedQuotationItem() =>
@@ -315,6 +318,12 @@ public sealed partial class MainViewModel
 
     private void OpenSelectedQuotationItemCore(string? referenceId)
     {
+        if (IsAnyAggressivePncpMode)
+        {
+            StatusText = "Desative o download agressivo antes de abrir a pesquisa do item da cotação.";
+            return;
+        }
+
         var project = SelectedQuotationProject;
         var line = SelectedQuotationLine;
         if (project is null || line is null)
@@ -1175,6 +1184,12 @@ public sealed partial class MainViewModel
 
     private async Task RunQuotationAutomationAsync(QuotationAutomationRun run)
     {
+        if (IsAnyAggressivePncpMode)
+        {
+            StatusText = "Desative o download agressivo antes de iniciar a automação de preços.";
+            return;
+        }
+
         _quotationAutomationCancellation?.Dispose();
         _quotationAutomationCancellation = new CancellationTokenSource();
         _quotationAutomationCompletion = new TaskCompletionSource<bool>(

@@ -36,6 +36,7 @@ public sealed record PncpSchedulerSnapshot(
     DateTimeOffset? LastConcurrencyChangeAt = null)
 {
     public int InitialConcurrency { get; init; }
+    public bool AggressiveBackgroundEnabled { get; init; }
 
     public int CurrentTier => EffectiveConcurrency;
 
@@ -85,6 +86,7 @@ public sealed class PncpRequestScheduler
     private int _activeRequests;
     private int _schedulePosition;
     private int _backgroundSuppressions;
+    private int _aggressiveBackgroundModes;
     private int _consecutiveSuccesses;
     private int _concurrencyReductions;
     private int _successesSinceLatencyEvaluation;
@@ -170,6 +172,22 @@ public sealed class PncpRequestScheduler
         return new SuppressionLease(this);
     }
 
+    /// <summary>
+    /// Allows the rebuildable item index to occupy every otherwise idle
+    /// scheduler slot. Foreground suppression and higher-priority queues still
+    /// take precedence, and adaptive concurrency remains authoritative.
+    /// </summary>
+    public IDisposable EnableAggressiveBackgroundRequests()
+    {
+        lock (_gate)
+        {
+            _aggressiveBackgroundModes++;
+            DispatchLocked();
+        }
+
+        return new AggressiveBackgroundLease(this);
+    }
+
     public PncpSchedulerSnapshot GetSnapshot()
     {
         lock (_gate)
@@ -195,7 +213,8 @@ public sealed class PncpRequestScheduler
                 _lastReductionReason,
                 _lastConcurrencyChangeAt)
             {
-                InitialConcurrency = _initialConcurrency
+                InitialConcurrency = _initialConcurrency,
+                AggressiveBackgroundEnabled = _aggressiveBackgroundModes > 0
             };
         }
     }
@@ -462,8 +481,8 @@ public sealed class PncpRequestScheduler
 
             if (priority == PncpRequestPriority.BackgroundPriceCache &&
                 (_backgroundSuppressions > 0 ||
-                 _activeByPriority[(int)priority] > 0 ||
-                 HasForegroundWorkLocked()))
+                 HasForegroundWorkLocked() ||
+                 (_aggressiveBackgroundModes == 0 && _activeByPriority[(int)priority] > 0)))
             {
                 continue;
             }
@@ -526,6 +545,20 @@ public sealed class PncpRequestScheduler
         }
     }
 
+    private void ReleaseAggressiveBackgroundMode()
+    {
+        lock (_gate)
+        {
+            if (_aggressiveBackgroundModes == 0)
+            {
+                throw new InvalidOperationException("O modo agressivo de fundo já foi liberado.");
+            }
+
+            _aggressiveBackgroundModes--;
+            DispatchLocked();
+        }
+    }
+
     private static void ValidatePriority(PncpRequestPriority priority)
     {
         if ((int)priority is < 0 or > 4)
@@ -564,6 +597,14 @@ public sealed class PncpRequestScheduler
 
         public void Dispose() =>
             Interlocked.Exchange(ref _owner, null)?.ReleaseBackgroundSuppression();
+    }
+
+    private sealed class AggressiveBackgroundLease(PncpRequestScheduler owner) : IDisposable
+    {
+        private PncpRequestScheduler? _owner = owner;
+
+        public void Dispose() =>
+            Interlocked.Exchange(ref _owner, null)?.ReleaseAggressiveBackgroundMode();
     }
 
     private sealed record SuccessfulOutcome(TimeSpan Duration, DateTimeOffset CompletedAt);

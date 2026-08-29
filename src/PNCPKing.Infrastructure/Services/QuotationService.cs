@@ -26,6 +26,17 @@ public sealed class QuotationService(
         CancellationToken cancellationToken = default) =>
         repository.RenameLineDisplayNameAsync(lineId, displayName, cancellationToken);
 
+    public Task UpdateLineRequestedDetailsAsync(
+        Guid lineId,
+        decimal requestedQuantity,
+        string requestedUnit,
+        CancellationToken cancellationToken = default) =>
+        repository.UpdateLineRequestedDetailsAsync(
+            lineId,
+            requestedQuantity,
+            requestedUnit,
+            cancellationToken);
+
     public Task SetLineCatalogSelectionAsync(
         Guid lineId,
         QuotationCatalogSelection? selection,

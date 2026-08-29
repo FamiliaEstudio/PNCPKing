@@ -6,7 +6,7 @@ using PNCPKing.Core.Search;
 
 namespace PNCPKing.Infrastructure.Data;
 
-public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
+public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
 {
     private const long MinimumBytesPerContract = 14_000;
     private const long MaximumBytesPerContract = 28_000;
@@ -74,17 +74,45 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         long contracts;
         long complete;
-        await using (var command = connection.CreateCommand())
+        var prepared = false;
+        await using (var state = connection.CreateCommand())
         {
+            state.CommandText = """
+                SELECT prepared_window_start, prepared_window_end,
+                       indexed_contract_count, indexed_complete_count
+                  FROM price_cache_control
+                 WHERE id = 1;
+                """;
+            await using var reader = await state.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false) &&
+                ParseDate(reader, 0) == startDate &&
+                ParseDate(reader, 1) == endDate)
+            {
+                contracts = reader.GetInt64(2);
+                complete = reader.GetInt64(3);
+                prepared = true;
+            }
+            else
+            {
+                contracts = 0;
+                complete = 0;
+            }
+        }
+
+        if (!prepared)
+        {
+            await using var command = connection.CreateCommand();
             command.CommandText = """
                 SELECT COUNT(*),
-                       SUM(CASE WHEN pc.status = $complete THEN 1 ELSE 0 END)
+                       SUM(CASE WHEN s.contract_id IS NOT NULL
+                                      AND COALESCE(s.source_global_updated_at, '') =
+                                          COALESCE(c.global_updated_at, '')
+                                THEN 1 ELSE 0 END)
                   FROM contracts c
-                  LEFT JOIN price_cache_contracts pc ON pc.contract_id = c.pncp_id
+                  LEFT JOIN contract_item_snapshots s ON s.contract_id = c.pncp_id
                  WHERE c.publication_date >= $start
                    AND c.publication_date < $endExclusive;
                 """;
-            command.Parameters.AddWithValue("$complete", (int)PriceCacheContractStatus.Complete);
             command.Parameters.AddWithValue("$start", FormatDate(startDate));
             command.Parameters.AddWithValue("$endExclusive", FormatDate(endDate.AddDays(1)));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -142,7 +170,16 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
                    status = $status,
                    window_start = $start,
                    window_end = $end,
-                   authorized_at = CASE WHEN $authorized = 1 THEN COALESCE(authorized_at, $now) ELSE authorized_at END,
+                   authorized_at = CASE WHEN $authorized = 1 THEN $now ELSE authorized_at END,
+                   prepared_window_start = CASE WHEN $authorized = 1 THEN NULL ELSE prepared_window_start END,
+                   prepared_window_end = CASE WHEN $authorized = 1 THEN NULL ELSE prepared_window_end END,
+                   indexed_contract_count = CASE WHEN $authorized = 1 THEN 0 ELSE indexed_contract_count END,
+                   indexed_complete_count = CASE WHEN $authorized = 1 THEN 0 ELSE indexed_complete_count END,
+                   indexed_pending_count = CASE WHEN $authorized = 1 THEN 0 ELSE indexed_pending_count END,
+                   indexed_failed_count = CASE WHEN $authorized = 1 THEN 0 ELSE indexed_failed_count END,
+                   indexed_item_count = CASE WHEN $authorized = 1 THEN 0 ELSE indexed_item_count END,
+                   indexed_active_result_count = CASE WHEN $authorized = 1 THEN 0 ELSE indexed_active_result_count END,
+                   indexed_cancelled_result_count = CASE WHEN $authorized = 1 THEN 0 ELSE indexed_cancelled_result_count END,
                    last_error = '',
                    updated_at = $now
              WHERE id = 1;
@@ -224,24 +261,43 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         var now = FormatDateTime(DateTimeOffset.UtcNow);
+        var prepared = false;
+        await using (var state = connection.CreateCommand())
+        {
+            state.Transaction = (SqliteTransaction)transaction;
+            state.CommandText = """
+                SELECT prepared_window_start, prepared_window_end
+                  FROM price_cache_control
+                 WHERE id = 1;
+                """;
+            await using var reader = await state.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            prepared = await reader.ReadAsync(cancellationToken).ConfigureAwait(false) &&
+                       ParseDate(reader, 0) == startDate &&
+                       ParseDate(reader, 1) == endDate;
+        }
+
         await using (var control = connection.CreateCommand())
         {
             control.Transaction = (SqliteTransaction)transaction;
             control.CommandText = """
                 UPDATE price_cache_control
-                   SET window_start = $start, window_end = $end, updated_at = $now
+                   SET window_start = $start,
+                       window_end = $end,
+                       statistics_suspended = $suspended,
+                       updated_at = $now
                  WHERE id = 1;
                 """;
             control.Parameters.AddWithValue("$start", FormatDate(startDate));
             control.Parameters.AddWithValue("$end", FormatDate(endDate));
+            control.Parameters.AddWithValue("$suspended", prepared ? 0 : 1);
             control.Parameters.AddWithValue("$now", now);
             await control.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        await using (var upsert = connection.CreateCommand())
+        await using (var recovery = connection.CreateCommand())
         {
-            upsert.Transaction = (SqliteTransaction)transaction;
-            upsert.CommandText = """
+            recovery.Transaction = (SqliteTransaction)transaction;
+            recovery.CommandText = """
                 UPDATE price_cache_contracts
                    SET status = $pending,
                        last_error = '',
@@ -253,7 +309,36 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
                    SET next_retry_at = NULL,
                        updated_at = $now
                  WHERE status = $failed
+                   AND next_retry_at IS NOT NULL
                    AND last_error LIKE 'PNCP respondeu 404 (%';
+                """;
+            recovery.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
+            recovery.Parameters.AddWithValue("$downloading", (int)PriceCacheContractStatus.Downloading);
+            recovery.Parameters.AddWithValue("$failed", (int)PriceCacheContractStatus.Failed);
+            recovery.Parameters.AddWithValue("$now", now);
+            await recovery.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        if (prepared)
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await using (var upsert = connection.CreateCommand())
+        {
+            upsert.Transaction = (SqliteTransaction)transaction;
+            upsert.CommandText = """
+                UPDATE price_cache_contracts
+                   SET publication_date = COALESCE((
+                           SELECT c.publication_date
+                             FROM contracts c
+                            WHERE c.pncp_id = price_cache_contracts.contract_id), ''),
+                       updated_at = $now
+                 WHERE publication_date IS NOT COALESCE((
+                           SELECT c.publication_date
+                             FROM contracts c
+                            WHERE c.pncp_id = price_cache_contracts.contract_id), '');
 
                 UPDATE price_cache_contracts
                    SET status = $pending,
@@ -270,19 +355,48 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
                           AND COALESCE(price_cache_contracts.source_global_updated_at, '') <>
                               COALESCE(c.global_updated_at, ''));
 
+                UPDATE price_cache_contracts
+                   SET source_global_updated_at = (
+                           SELECT s.source_global_updated_at
+                             FROM contract_item_snapshots s
+                            WHERE s.contract_id = price_cache_contracts.contract_id),
+                       status = $complete,
+                       item_count = COALESCE((
+                           SELECT s.item_count
+                             FROM contract_item_snapshots s
+                            WHERE s.contract_id = price_cache_contracts.contract_id), 0),
+                       last_error = '',
+                       next_retry_at = NULL,
+                       completed_at = COALESCE(completed_at, $now),
+                       updated_at = $now
+                 WHERE EXISTS(
+                       SELECT 1
+                         FROM contracts c
+                         JOIN contract_item_snapshots s ON s.contract_id = c.pncp_id
+                        WHERE c.pncp_id = price_cache_contracts.contract_id
+                          AND c.publication_date >= $start
+                          AND c.publication_date < $endExclusive
+                          AND COALESCE(s.source_global_updated_at, '') =
+                              COALESCE(c.global_updated_at, ''))
+                   AND (status <> $complete
+                        OR COALESCE(source_global_updated_at, '') <> COALESCE((
+                               SELECT s.source_global_updated_at
+                                 FROM contract_item_snapshots s
+                                WHERE s.contract_id = price_cache_contracts.contract_id), '')
+                        OR item_count <> COALESCE((
+                               SELECT s.item_count
+                                 FROM contract_item_snapshots s
+                                WHERE s.contract_id = price_cache_contracts.contract_id), 0));
+
                 INSERT INTO price_cache_contracts(
-                    contract_id, source_global_updated_at, status, item_count,
+                    contract_id, publication_date, source_global_updated_at, status, item_count,
                     active_result_count, cancelled_result_count, background_owned,
                     user_pinned, completed_at, updated_at)
                 SELECT c.pncp_id,
+                       COALESCE(c.publication_date, ''),
                        s.source_global_updated_at,
                        CASE WHEN s.contract_id IS NOT NULL
                                       AND COALESCE(s.source_global_updated_at, '') = COALESCE(c.global_updated_at, '')
-                                      AND NOT EXISTS(
-                                          SELECT 1 FROM items pending
-                                           WHERE pending.contract_id = c.pncp_id
-                                             AND pending.has_result = 1
-                                             AND pending.hydration_status <> $itemComplete)
                             THEN $complete ELSE $pending END,
                        COALESCE(s.item_count, 0),
                        (SELECT COUNT(*) FROM item_results r
@@ -301,11 +415,8 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
                        SELECT 1 FROM price_cache_contracts pc
                         WHERE pc.contract_id = c.pncp_id);
                 """;
-            upsert.Parameters.AddWithValue("$itemComplete", (int)ItemHydrationStatus.Complete);
             upsert.Parameters.AddWithValue("$complete", (int)PriceCacheContractStatus.Complete);
             upsert.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
-            upsert.Parameters.AddWithValue("$downloading", (int)PriceCacheContractStatus.Downloading);
-            upsert.Parameters.AddWithValue("$failed", (int)PriceCacheContractStatus.Failed);
             upsert.Parameters.AddWithValue("$start", FormatDate(startDate));
             upsert.Parameters.AddWithValue("$endExclusive", FormatDate(endDate.AddDays(1)));
             upsert.Parameters.AddWithValue("$now", now);
@@ -323,8 +434,7 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
                 INSERT INTO price_cache_prune_ids(contract_id)
                 SELECT pc.contract_id
                   FROM price_cache_contracts pc
-                  JOIN contracts c ON c.pncp_id = pc.contract_id
-                 WHERE (c.publication_date < $start OR c.publication_date >= $endExclusive)
+                 WHERE (pc.publication_date < $start OR pc.publication_date >= $endExclusive)
                    AND pc.background_owned = 1
                    AND pc.user_pinned = 0
                    AND NOT EXISTS(
@@ -334,13 +444,52 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
                 DELETE FROM items
                  WHERE contract_id IN (SELECT contract_id FROM price_cache_prune_ids);
                 DELETE FROM price_cache_contracts
-                 WHERE contract_id IN (
-                     SELECT c.pncp_id FROM contracts c
-                      WHERE c.publication_date < $start OR c.publication_date >= $endExclusive);
+                 WHERE publication_date < $start OR publication_date >= $endExclusive;
                 """;
             prune.Parameters.AddWithValue("$start", FormatDate(startDate));
             prune.Parameters.AddWithValue("$endExclusive", FormatDate(endDate.AddDays(1)));
             await prune.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var statistics = connection.CreateCommand())
+        {
+            statistics.Transaction = (SqliteTransaction)transaction;
+            statistics.CommandText = """
+                WITH totals AS (
+                    SELECT COUNT(*) AS contracts,
+                           SUM(CASE WHEN status = $complete THEN 1 ELSE 0 END) AS complete,
+                           SUM(CASE WHEN status IN ($pending, $downloading) THEN 1 ELSE 0 END) AS pending,
+                           SUM(CASE WHEN status = $failed THEN 1 ELSE 0 END) AS failed,
+                           COALESCE(SUM(item_count), 0) AS items,
+                           COALESCE(SUM(active_result_count), 0) AS active,
+                           COALESCE(SUM(cancelled_result_count), 0) AS cancelled
+                      FROM price_cache_contracts
+                     WHERE publication_date >= $start
+                       AND publication_date < $endExclusive
+                )
+                UPDATE price_cache_control
+                   SET prepared_window_start = $start,
+                       prepared_window_end = $end,
+                       indexed_contract_count = (SELECT contracts FROM totals),
+                       indexed_complete_count = COALESCE((SELECT complete FROM totals), 0),
+                       indexed_pending_count = COALESCE((SELECT pending FROM totals), 0),
+                       indexed_failed_count = COALESCE((SELECT failed FROM totals), 0),
+                       indexed_item_count = (SELECT items FROM totals),
+                       indexed_active_result_count = (SELECT active FROM totals),
+                       indexed_cancelled_result_count = (SELECT cancelled FROM totals),
+                       statistics_suspended = 0,
+                       updated_at = $now
+                 WHERE id = 1;
+                """;
+            statistics.Parameters.AddWithValue("$complete", (int)PriceCacheContractStatus.Complete);
+            statistics.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
+            statistics.Parameters.AddWithValue("$downloading", (int)PriceCacheContractStatus.Downloading);
+            statistics.Parameters.AddWithValue("$failed", (int)PriceCacheContractStatus.Failed);
+            statistics.Parameters.AddWithValue("$start", FormatDate(startDate));
+            statistics.Parameters.AddWithValue("$end", FormatDate(endDate));
+            statistics.Parameters.AddWithValue("$endExclusive", FormatDate(endDate.AddDays(1)));
+            statistics.Parameters.AddWithValue("$now", now);
+            await statistics.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
@@ -353,6 +502,40 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
+            WITH policy AS (
+                SELECT authorized, enabled, paused, window_start,
+                       date(window_end, '+1 day') AS window_end_exclusive
+                  FROM price_cache_control
+                 WHERE id = 1
+            ),
+            pending_candidate AS (
+                SELECT pc.contract_id, pc.publication_date
+                  FROM price_cache_contracts pc
+                  CROSS JOIN policy
+                 WHERE pc.status = $pending
+                   AND pc.publication_date >= policy.window_start
+                   AND pc.publication_date < policy.window_end_exclusive
+                 ORDER BY pc.publication_date DESC, pc.contract_id
+                 LIMIT 1
+            ),
+            failed_candidate AS (
+                SELECT pc.contract_id, pc.publication_date
+                  FROM price_cache_contracts pc
+                  CROSS JOIN policy
+                 WHERE pc.status = $failed
+                   AND (pc.next_retry_at IS NULL OR pc.next_retry_at <= $now)
+                   AND pc.publication_date >= policy.window_start
+                   AND pc.publication_date < policy.window_end_exclusive
+                 ORDER BY pc.publication_date DESC, pc.contract_id
+                 LIMIT 1
+            ),
+            next_candidate AS (
+                SELECT contract_id, publication_date FROM pending_candidate
+                UNION ALL
+                SELECT contract_id, publication_date FROM failed_candidate
+                ORDER BY publication_date DESC, contract_id
+                LIMIT 1
+            )
             SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
                    c.additional_information, c.process, c.organization, c.unit, c.municipality,
                    c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
@@ -361,16 +544,10 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
                    pc.status, pc.source_global_updated_at, pc.item_count,
                    pc.active_result_count, pc.cancelled_result_count, pc.attempts,
                    pc.next_retry_at, pc.last_error, pc.background_owned, pc.user_pinned
-              FROM price_cache_contracts pc
+              FROM next_candidate next
+              JOIN price_cache_contracts pc ON pc.contract_id = next.contract_id
               JOIN contracts c ON c.pncp_id = pc.contract_id
-              JOIN price_cache_control ctl ON ctl.id = 1
-             WHERE ctl.authorized = 1 AND ctl.enabled = 1 AND ctl.paused = 0
-               AND c.publication_date >= ctl.window_start
-               AND c.publication_date < date(ctl.window_end, '+1 day')
-               AND (pc.status = $pending OR
-                    (pc.status = $failed AND (pc.next_retry_at IS NULL OR pc.next_retry_at <= $now)))
-             ORDER BY c.publication_date DESC, c.pncp_id
-             LIMIT 1;
+              JOIN policy ON policy.authorized = 1 AND policy.enabled = 1 AND policy.paused = 0;
             """;
         command.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
         command.Parameters.AddWithValue("$failed", (int)PriceCacheContractStatus.Failed);
@@ -439,12 +616,46 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
                                            WHERE contract_id = $contractId AND result_status_id = 1),
                    cancelled_result_count = (SELECT COUNT(*) FROM item_results
                                               WHERE contract_id = $contractId AND result_status_id <> 1),
+                   price_index_eligible_item_count =
+                       (SELECT COUNT(*) FROM items
+                         WHERE contract_id = $contractId AND has_result = 1),
+                   price_index_completed_item_count =
+                       (SELECT COUNT(*) FROM items
+                         WHERE contract_id = $contractId AND has_result = 1
+                           AND hydration_status = $itemComplete),
+                   price_index_priced_item_count =
+                       (SELECT COUNT(*) FROM items i
+                         WHERE i.contract_id = $contractId AND i.has_result = 1
+                           AND i.hydration_status = $itemComplete
+                           AND EXISTS(
+                               SELECT 1 FROM item_results r
+                                WHERE r.contract_id = i.contract_id
+                                  AND r.item_number = i.item_number
+                                  AND r.result_status_id = 1 AND r.unit_value_scaled > 0)),
+                   price_index_result_count =
+                       (SELECT COUNT(*) FROM item_results
+                         WHERE contract_id = $contractId
+                           AND result_status_id = 1 AND unit_value_scaled > 0),
+                   price_index_status = CASE WHEN EXISTS(
+                       SELECT 1 FROM items
+                        WHERE contract_id = $contractId AND has_result = 1
+                          AND hydration_status <> $itemComplete)
+                       THEN $pricePending ELSE $complete END,
+                   price_index_attempts = CASE WHEN EXISTS(
+                       SELECT 1 FROM items
+                        WHERE contract_id = $contractId AND has_result = 1
+                          AND hydration_status <> $itemComplete)
+                       THEN 0 ELSE price_index_attempts END,
+                   price_index_last_error = '',
+                   price_index_next_retry_at = NULL,
                    last_error = '', next_retry_at = NULL,
                    completed_at = $now, updated_at = $now
              WHERE contract_id = $contractId;
             """;
         command.Parameters.AddWithValue("$source", DbValue(sourceGlobalUpdatedAt));
         command.Parameters.AddWithValue("$complete", (int)PriceCacheContractStatus.Complete);
+        command.Parameters.AddWithValue("$pricePending", (int)PriceCacheContractStatus.Pending);
+        command.Parameters.AddWithValue("$itemComplete", (int)ItemHydrationStatus.Complete);
         command.Parameters.AddWithValue("$contractId", contractId);
         command.Parameters.AddWithValue("$now", FormatDateTime(DateTimeOffset.UtcNow));
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -470,6 +681,14 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
                                            WHERE contract_id = $contractId AND result_status_id = 1),
                    cancelled_result_count = (SELECT COUNT(*) FROM item_results
                                               WHERE contract_id = $contractId AND result_status_id <> 1),
+                   price_index_status = $complete,
+                   price_index_eligible_item_count = 0,
+                   price_index_completed_item_count = 0,
+                   price_index_priced_item_count = 0,
+                   price_index_result_count = 0,
+                   price_index_last_error = $reason,
+                   price_index_next_retry_at = NULL,
+                   price_index_completed_at = $now,
                    last_error = $reason,
                    next_retry_at = NULL,
                    completed_at = $now,
@@ -527,8 +746,11 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
         CancellationToken cancellationToken = default) =>
         ExecuteContractUpdateAsync(
             """
-            INSERT INTO price_cache_contracts(contract_id, status, user_pinned, updated_at)
-            VALUES($contractId, $status, 1, $now)
+            INSERT INTO price_cache_contracts(
+                contract_id, publication_date, status, user_pinned, updated_at)
+            VALUES($contractId,
+                   COALESCE((SELECT publication_date FROM contracts WHERE pncp_id = $contractId), ''),
+                   $status, 1, $now)
             ON CONFLICT(contract_id) DO UPDATE SET user_pinned = 1, background_owned = 0, updated_at = $now;
             """,
             contractId,
@@ -537,49 +759,43 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
 
     public async Task<PriceCacheProgress> GetProgressAsync(CancellationToken cancellationToken = default)
     {
-        var policy = await GetPolicyAsync(cancellationToken).ConfigureAwait(false);
-        var start = policy.WindowStart ?? DateOnly.FromDateTime(DateTime.Today).AddDays(-89);
-        var end = policy.WindowEnd ?? DateOnly.FromDateTime(DateTime.Today);
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var start = today.AddDays(-364);
+        var end = today;
+        var status = PriceCacheStatus.Disabled;
+        var message = string.Empty;
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         long total = 0, complete = 0, pending = 0, failed = 0, items = 0, active = 0, cancelled = 0;
-        await using (var command = connection.CreateCommand())
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT status, window_start, window_end, last_error,
+                   indexed_contract_count, indexed_complete_count,
+                   indexed_pending_count, indexed_failed_count,
+                   indexed_item_count, indexed_active_result_count,
+                   indexed_cancelled_result_count
+              FROM price_cache_control
+             WHERE id = 1;
+            """;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            command.CommandText = """
-                SELECT COUNT(*),
-                       SUM(CASE WHEN pc.status = $complete THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN pc.status IN ($pending, $downloading) THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN pc.status = $failed THEN 1 ELSE 0 END),
-                       COALESCE(SUM(pc.item_count), 0),
-                       COALESCE(SUM(pc.active_result_count), 0),
-                       COALESCE(SUM(pc.cancelled_result_count), 0)
-                  FROM price_cache_contracts pc
-                  JOIN contracts c ON c.pncp_id = pc.contract_id
-                 WHERE c.publication_date >= $start
-                   AND c.publication_date < $endExclusive;
-                """;
-            command.Parameters.AddWithValue("$complete", (int)PriceCacheContractStatus.Complete);
-            command.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
-            command.Parameters.AddWithValue("$downloading", (int)PriceCacheContractStatus.Downloading);
-            command.Parameters.AddWithValue("$failed", (int)PriceCacheContractStatus.Failed);
-            command.Parameters.AddWithValue("$start", FormatDate(start));
-            command.Parameters.AddWithValue("$endExclusive", FormatDate(end.AddDays(1)));
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                total = reader.GetInt64(0);
-                complete = reader.IsDBNull(1) ? 0 : reader.GetInt64(1);
-                pending = reader.IsDBNull(2) ? 0 : reader.GetInt64(2);
-                failed = reader.IsDBNull(3) ? 0 : reader.GetInt64(3);
-                items = reader.GetInt64(4);
-                active = reader.GetInt64(5);
-                cancelled = reader.GetInt64(6);
-            }
+            status = (PriceCacheStatus)reader.GetInt32(0);
+            start = ParseDate(reader, 1) ?? start;
+            end = ParseDate(reader, 2) ?? end;
+            message = reader.GetString(3);
+            total = reader.GetInt64(4);
+            complete = reader.GetInt64(5);
+            pending = reader.GetInt64(6);
+            failed = reader.GetInt64(7);
+            items = reader.GetInt64(8);
+            active = reader.GetInt64(9);
+            cancelled = reader.GetInt64(10);
         }
 
         var occupied = checked(items * 900 + (active + cancelled) * 750);
         return new PriceCacheProgress
         {
-            Status = policy.Status,
+            Status = status,
             StartDate = start,
             EndDate = end,
             TotalContracts = total,
@@ -590,7 +806,7 @@ public sealed class SqlitePriceCacheRepository : IPriceCacheRepository
             ActiveResultCount = active,
             CancelledResultCount = cancelled,
             OccupiedBytes = occupied,
-            Message = policy.LastError
+            Message = message
         };
     }
 

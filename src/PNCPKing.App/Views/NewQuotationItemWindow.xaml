@@ -17,7 +17,7 @@
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
-        <TextBlock Grid.ColumnSpan="2"
+        <TextBlock x:Name="IntroTextBlock" Grid.ColumnSpan="2"
                    Text="O item será criado sem preços e ficará pronto para pesquisa."
                    TextWrapping="Wrap" Margin="0,0,0,16" />
 
@@ -26,21 +26,21 @@
                  Height="70" AcceptsReturn="True" TextWrapping="Wrap"
                  VerticalScrollBarVisibility="Auto" />
 
-        <TextBlock Grid.Row="2" Text="Quantidade" VerticalAlignment="Center" Margin="0,10,0,0" />
+        <TextBlock Grid.Row="2" Text="Quantidade (opcional)" VerticalAlignment="Center" Margin="0,10,0,0" />
         <TextBox x:Name="QuantityTextBox" Grid.Row="2" Grid.Column="1" Margin="0,10,0,0" />
 
-        <TextBlock Grid.Row="3" Text="Unidade" VerticalAlignment="Center" Margin="0,10,0,0" />
+        <TextBlock Grid.Row="3" Text="Unidade (opcional)" VerticalAlignment="Center" Margin="0,10,0,0" />
         <TextBox x:Name="UnitTextBox" Grid.Row="3" Grid.Column="1" Margin="0,10,0,0"
                  ToolTip="Ex.: pacote, caixa, unidade" />
 
-        <TextBlock Grid.Row="4" Grid.ColumnSpan="2" Margin="0,14,0,0" Foreground="#5F6871"
-                   Text="A faixa de preço ficará aberta; a cesta terá alvo de 3 preços e usará os pesos padrão."
+        <TextBlock x:Name="FooterTextBlock" Grid.Row="4" Grid.ColumnSpan="2" Margin="0,14,0,0" Foreground="#5F6871"
+                   Text="Quantidade e unidade poderão ser configuradas depois. A cesta terá alvo de 3 preços e usará os pesos padrão."
                    TextWrapping="Wrap" />
 
         <StackPanel Grid.Row="5" Grid.ColumnSpan="2" Orientation="Horizontal"
                     HorizontalAlignment="Right" Margin="0,16,0,0">
             <Button Content="Cancelar" IsCancel="True" MinWidth="95" />
-            <Button Content="Criar item" IsDefault="True" MinWidth="110" Click="Accept_Click" />
+            <Button x:Name="AcceptButton" Content="Criar item" IsDefault="True" MinWidth="110" Click="Accept_Click" />
         </StackPanel>
     </Grid>
 </Window>

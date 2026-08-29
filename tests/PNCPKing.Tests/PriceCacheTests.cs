@@ -23,8 +23,8 @@ public sealed class PriceCacheTests
             1,
             [Result(contract, 1, 1, true)]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-89), today);
-        await cache.PrepareWindowAsync(today.AddDays(-89), today);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.PrepareWindowAsync(today.AddDays(-364), today);
 
         var itemCacheBytes = await database.Repository.GetCacheSizeBytesAsync();
         var priceCacheBytes = (await cache.GetProgressAsync()).OccupiedBytes;
@@ -59,30 +59,30 @@ public sealed class PriceCacheTests
         await database.Repository.InitializeAsync();
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
         var policy = await cache.GetPolicyAsync();
-        await cache.SetAuthorizationAsync(true, today.AddDays(-89), today);
-        await cache.PrepareWindowAsync(today.AddDays(-89), today);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.PrepareWindowAsync(today.AddDays(-364), today);
         var progress = await cache.GetProgressAsync();
 
         Assert.False(policy.Authorized);
         Assert.Equal(1, progress.TotalContracts);
         Assert.Equal(1, progress.CompletedContracts);
-        Assert.Equal(21, SqliteContractRepository.CurrentSchemaVersion);
+        Assert.Equal(25, SqliteContractRepository.CurrentSchemaVersion);
         Assert.Equal((1L, 1L, 1L), await database.Repository.GetCountsAsync());
     }
 
     [Fact]
-    public async Task Window_IsInclusiveNewestFirstAndExcludesTheNinetiethPreviousDay()
+    public async Task Window_IsInclusiveNewestFirstAndExcludesTheThreeHundredSixtyFifthPreviousDay()
     {
         await using var database = await TestDatabase.CreateAsync();
         var today = DateOnly.FromDateTime(DateTime.Today);
         await database.Repository.UpsertContractsAsync([
             RecentContract("newest", today, 1),
-            RecentContract("edge", today.AddDays(-89), 2),
-            RecentContract("outside", today.AddDays(-90), 3)
+            RecentContract("edge", today.AddDays(-364), 2),
+            RecentContract("outside", today.AddDays(-365), 3)
         ]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-89), today);
-        await cache.PrepareWindowAsync(today.AddDays(-89), today);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.PrepareWindowAsync(today.AddDays(-364), today);
 
         var progress = await cache.GetProgressAsync();
         var next = await cache.GetNextWorkAsync(DateTimeOffset.UtcNow);
@@ -100,8 +100,8 @@ public sealed class PriceCacheTests
         var contract = RecentContract("coffee", today, 1);
         await database.Repository.UpsertContractsAsync([contract]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-89), today);
-        await cache.PrepareWindowAsync(today.AddDays(-89), today);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.PrepareWindowAsync(today.AddDays(-364), today);
         await cache.MarkContractDownloadingAsync(contract.PncpId, true);
         await database.Repository.UpsertItemsAsync(contract.PncpId, [Item(contract, 1)], false);
         await database.Repository.ReplaceItemResultsAsync(contract.PncpId, 1, [
@@ -145,16 +145,18 @@ public sealed class PriceCacheTests
         var pinned = RecentContract("pinned", today, 2);
         await database.Repository.UpsertContractsAsync([removable, pinned]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-89), today);
-        await cache.PrepareWindowAsync(today.AddDays(-89), today);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.PrepareWindowAsync(today.AddDays(-364), today);
         foreach (var contract in new[] { removable, pinned })
         {
             await cache.MarkContractDownloadingAsync(contract.PncpId, true);
             await database.Repository.UpsertItemsAsync(contract.PncpId, [Item(contract, 1)], false);
-            await database.Repository.ReplaceItemResultsAsync(contract.PncpId, 1, [Result(contract, 1, 1, true)]);
             await cache.MarkContractCompleteAsync(contract.PncpId, contract.GlobalUpdatedAt);
         }
-        await cache.MarkContractPinnedAsync(pinned.PncpId);
+        await database.Repository.ReplaceItemResultsAsync(
+            pinned.PncpId,
+            1,
+            [Result(pinned, 1, 1, true)]);
 
         await cache.RemoveBackgroundCacheAsync();
 
@@ -172,7 +174,7 @@ public sealed class PriceCacheTests
         var healthy = RecentContract("healthy", today.AddDays(-1), 2);
         await database.Repository.UpsertContractsAsync([failing, healthy]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-89), today);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
         var client = new CacheClient(failing.PncpId);
         var service = new PriceCacheService(
             client,
@@ -196,7 +198,7 @@ public sealed class PriceCacheTests
         Assert.Equal(0, completed.FailedContracts);
         Assert.NotNull(await database.Repository.GetItemAsync(failing.PncpId, 1));
         Assert.Equal(3, client.ItemListCalls);
-        Assert.Equal(2, client.ResultCalls);
+        Assert.Equal(0, client.ResultCalls);
     }
 
     [Fact]
@@ -207,16 +209,113 @@ public sealed class PriceCacheTests
         var contract = RecentContract("interrupted", today, 1);
         await database.Repository.UpsertContractsAsync([contract]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-89), today);
-        await cache.PrepareWindowAsync(today.AddDays(-89), today);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.PrepareWindowAsync(today.AddDays(-364), today);
         await cache.MarkContractDownloadingAsync(contract.PncpId, true);
 
-        await cache.PrepareWindowAsync(today.AddDays(-89), today);
+        await cache.PrepareWindowAsync(today.AddDays(-364), today);
         var recovered = await cache.GetNextWorkAsync(DateTimeOffset.UtcNow);
 
         Assert.NotNull(recovered);
         Assert.Equal(contract.PncpId, recovered.Contract.PncpId);
         Assert.Equal(PriceCacheContractStatus.Pending, recovered.Checkpoint.Status);
+    }
+
+    [Fact]
+    public async Task PrepareWindow_ReusesPreparedWindowAndTracksNewContractsIncrementally()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var first = RecentContract("prepared-first", today.AddDays(-1), 1);
+        await database.Repository.UpsertContractsAsync([first]);
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+
+        await using (var connection = new SqliteConnection($"Data Source={database.Repository.DatabasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var sentinel = connection.CreateCommand();
+            sentinel.CommandText = """
+                UPDATE price_cache_contracts SET updated_at = 'sentinel'
+                 WHERE contract_id = $contract;
+                """;
+            sentinel.Parameters.AddWithValue("$contract", first.PncpId);
+            await sentinel.ExecuteNonQueryAsync();
+        }
+
+        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        var second = RecentContract("prepared-second", today, 2);
+        await database.Repository.UpsertContractsAsync([second]);
+
+        await using var verify = new SqliteConnection($"Data Source={database.Repository.DatabasePath}");
+        await verify.OpenAsync();
+        await using var command = verify.CreateCommand();
+        command.CommandText = """
+            SELECT updated_at FROM price_cache_contracts WHERE contract_id = $first;
+            """;
+        command.Parameters.AddWithValue("$first", first.PncpId);
+        Assert.Equal("sentinel", Convert.ToString(await command.ExecuteScalarAsync()));
+
+        var progress = await cache.GetProgressAsync();
+        var next = await cache.GetNextWorkAsync(DateTimeOffset.UtcNow);
+        Assert.Equal(2, progress.TotalContracts);
+        Assert.Equal(2, progress.PendingContracts);
+        Assert.NotNull(next);
+        Assert.Equal(second.PncpId, next.Contract.PncpId);
+    }
+
+    [Fact]
+    public async Task ProgressCountersFollowCheckpointAndSnapshotChanges()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var completed = RecentContract("statistics-complete", today, 1);
+        var failed = RecentContract("statistics-failed", today.AddDays(-1), 2);
+        await database.Repository.UpsertContractsAsync([completed, failed]);
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+
+        await cache.MarkContractDownloadingAsync(completed.PncpId, true);
+        await database.Repository.UpsertItemsAsync(completed.PncpId, [Item(completed, 1)], false);
+        await cache.MarkContractCompleteAsync(completed.PncpId, completed.GlobalUpdatedAt);
+        await cache.MarkContractFailedAsync(
+            failed.PncpId,
+            "falha esperada",
+            DateTimeOffset.UtcNow.AddMinutes(1));
+
+        var progress = await cache.GetProgressAsync();
+        Assert.Equal(2, progress.TotalContracts);
+        Assert.Equal(1, progress.CompletedContracts);
+        Assert.Equal(0, progress.PendingContracts);
+        Assert.Equal(1, progress.FailedContracts);
+        Assert.Equal(1, progress.ItemCount);
+    }
+
+    [Fact]
+    public async Task AuthorizationRecordsTheCurrentConfirmationTime()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        await using (var connection = new SqliteConnection($"Data Source={database.Repository.DatabasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var oldAuthorization = connection.CreateCommand();
+            oldAuthorization.CommandText = """
+                UPDATE price_cache_control SET authorized_at = '2025-01-01T00:00:00Z'
+                 WHERE id = 1;
+                """;
+            await oldAuthorization.ExecuteNonQueryAsync();
+        }
+
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
+        var before = DateTimeOffset.UtcNow.AddSeconds(-1);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        var policy = await cache.GetPolicyAsync();
+
+        Assert.NotNull(policy.AuthorizedAt);
+        Assert.True(policy.AuthorizedAt.GetValueOrDefault() >= before);
     }
 
     [Fact]
@@ -228,7 +327,7 @@ public sealed class PriceCacheTests
         var healthy = RecentContract("healthy-after-timeout", today.AddDays(-1), 2);
         await database.Repository.UpsertContractsAsync([hanging, healthy]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-89), today);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
         var service = new PriceCacheService(
             new TimeoutCacheClient(hanging.PncpId),
             database.Repository,
@@ -253,7 +352,7 @@ public sealed class PriceCacheTests
         var contract = RecentContract("missing-list", today, 1);
         await database.Repository.UpsertContractsAsync([contract]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-89), today);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
         var client = new NotFoundCacheClient(failItemList: true);
         var service = new PriceCacheService(
             client,
@@ -271,14 +370,14 @@ public sealed class PriceCacheTests
     }
 
     [Fact]
-    public async Task Synchronization_TreatsMissingResultEndpointAsEmptyResult()
+    public async Task Synchronization_DoesNotConsultResultEndpoints()
     {
         await using var database = await TestDatabase.CreateAsync();
         var today = DateOnly.FromDateTime(DateTime.Today);
         var contract = RecentContract("missing-results", today, 1);
         await database.Repository.UpsertContractsAsync([contract]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-89), today);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
         var service = new PriceCacheService(
             new NotFoundCacheClient(failItemList: false),
             database.Repository,
@@ -292,7 +391,99 @@ public sealed class PriceCacheTests
         Assert.Equal(1, progress.CompletedContracts);
         Assert.Equal(0, progress.FailedContracts);
         Assert.NotNull(item);
-        Assert.Equal(ItemHydrationStatus.Complete, item.HydrationStatus);
+        Assert.Equal(ItemHydrationStatus.NotLoaded, item.HydrationStatus);
+    }
+
+    [Fact]
+    public async Task AggressiveSynchronization_ProcessesDistinctContractsInParallelWithoutResults()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var contracts = Enumerable.Range(1, 8)
+            .Select(sequence => RecentContract($"aggressive-{sequence}", today, sequence))
+            .ToArray();
+        await database.Repository.UpsertContractsAsync(contracts);
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        var client = new ConcurrentCacheClient();
+        var service = new PriceCacheService(
+            client,
+            database.Repository,
+            new CompleteCoverageRepository(),
+            cache);
+
+        await service.SynchronizeAggressivelyAsync(maximumParallelContracts: 4);
+
+        var progress = await cache.GetProgressAsync();
+        Assert.Equal(8, progress.CompletedContracts);
+        Assert.Equal(8, client.ItemListCalls);
+        Assert.Equal(0, client.ResultCalls);
+        Assert.True(client.MaximumConcurrentCalls >= 2);
+        Assert.All(client.CallsByContract.Values, calls => Assert.Equal(1, calls));
+    }
+
+    [Fact]
+    public async Task AggressiveSynchronization_CancellationRestoresEveryClaimedCheckpoint()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var contracts = Enumerable.Range(1, 6)
+            .Select(sequence => RecentContract($"aggressive-cancel-{sequence}", today, sequence))
+            .ToArray();
+        await database.Repository.UpsertContractsAsync(contracts);
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        var client = new BlockingConcurrentCacheClient(expectedConcurrentCalls: 3);
+        var service = new PriceCacheService(
+            client,
+            database.Repository,
+            new CompleteCoverageRepository(),
+            cache);
+        using var cancellation = new CancellationTokenSource();
+        var run = service.SynchronizeAggressivelyAsync(3, cancellationToken: cancellation.Token);
+
+        await client.WaitUntilConcurrentAsync();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+
+        var progress = await cache.GetProgressAsync();
+        Assert.Equal(0, progress.CompletedContracts);
+        Assert.Equal(6, progress.PendingContracts);
+        Assert.Equal(0, progress.FailedContracts);
+    }
+
+    [Fact]
+    public async Task WindowPruning_RemovesReconstructibleContractsButPreservesPinnedResults()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var removable = RecentContract("old-removable", today, 1);
+        var pinned = RecentContract("old-pinned", today, 2);
+        await database.Repository.UpsertContractsAsync([removable, pinned]);
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        foreach (var contract in new[] { removable, pinned })
+        {
+            await cache.MarkContractDownloadingAsync(contract.PncpId, true);
+            await database.Repository.UpsertItemsAsync(contract.PncpId, [Item(contract, 1)], false);
+            await cache.MarkContractCompleteAsync(contract.PncpId, contract.GlobalUpdatedAt);
+        }
+        await database.Repository.ReplaceItemResultsAsync(
+            pinned.PncpId,
+            1,
+            [Result(pinned, 1, 1, true)]);
+        var oldDate = today.AddDays(-400).ToDateTime(new TimeOnly(12, 0), DateTimeKind.Utc);
+        await database.Repository.UpsertContractsAsync([
+            removable with { PublicationDate = oldDate },
+            pinned with { PublicationDate = oldDate }
+        ]);
+
+        await database.Repository.PruneContractsBeforeAsync(today.AddDays(-364));
+
+        Assert.Null(await database.Repository.GetContractAsync(removable.PncpId));
+        Assert.NotNull(await database.Repository.GetContractAsync(pinned.PncpId));
+        Assert.Single((await database.Repository.GetCachedItemResultsAsync(pinned.PncpId, 1))!.Results);
     }
 
     internal static ContractRecord RecentContract(string id, DateOnly date, int sequence) =>
@@ -376,6 +567,119 @@ public sealed class PriceCacheTests
                 Result(contract, itemNumber, 1, true)
             ]);
         }
+    }
+
+    private sealed class ConcurrentCacheClient : IPncpClient
+    {
+        private int _activeCalls;
+        private int _itemListCalls;
+        private int _maximumConcurrentCalls;
+        private int _resultCalls;
+
+        public int ItemListCalls => Volatile.Read(ref _itemListCalls);
+        public int MaximumConcurrentCalls => Volatile.Read(ref _maximumConcurrentCalls);
+        public int ResultCalls => Volatile.Read(ref _resultCalls);
+        public System.Collections.Concurrent.ConcurrentDictionary<string, int> CallsByContract { get; } = new();
+
+        public Task<IReadOnlyList<Modality>> GetModalitiesAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<Modality>>([]);
+
+        public Task<ContractPage> GetContractsPageAsync(
+            DateOnly startDate,
+            DateOnly endDate,
+            long modalityId,
+            string? uf,
+            int page,
+            int pageSize,
+            SyncMode mode,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<int> GetItemCountAsync(
+            ContractRecord contract,
+            CancellationToken cancellationToken = default) => Task.FromResult(1);
+
+        public async Task<IReadOnlyList<ProcurementItem>> GetItemsAsync(
+            ContractRecord contract,
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _itemListCalls);
+            CallsByContract.AddOrUpdate(contract.PncpId, 1, (_, current) => current + 1);
+            var active = Interlocked.Increment(ref _activeCalls);
+            while (true)
+            {
+                var maximum = Volatile.Read(ref _maximumConcurrentCalls);
+                if (active <= maximum ||
+                    Interlocked.CompareExchange(ref _maximumConcurrentCalls, active, maximum) == maximum)
+                {
+                    break;
+                }
+            }
+
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
+                return [Item(contract, 1)];
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _activeCalls);
+            }
+        }
+
+        public Task<IReadOnlyList<HomologationResult>> GetItemResultsAsync(
+            ContractRecord contract,
+            long itemNumber,
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _resultCalls);
+            return Task.FromResult<IReadOnlyList<HomologationResult>>([]);
+        }
+    }
+
+    private sealed class BlockingConcurrentCacheClient(int expectedConcurrentCalls) : IPncpClient
+    {
+        private readonly TaskCompletionSource _concurrent = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _calls;
+
+        public Task WaitUntilConcurrentAsync() => _concurrent.Task;
+
+        public Task<IReadOnlyList<Modality>> GetModalitiesAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<Modality>>([]);
+
+        public Task<ContractPage> GetContractsPageAsync(
+            DateOnly startDate,
+            DateOnly endDate,
+            long modalityId,
+            string? uf,
+            int page,
+            int pageSize,
+            SyncMode mode,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<int> GetItemCountAsync(
+            ContractRecord contract,
+            CancellationToken cancellationToken = default) => Task.FromResult(1);
+
+        public async Task<IReadOnlyList<ProcurementItem>> GetItemsAsync(
+            ContractRecord contract,
+            CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref _calls) >= expectedConcurrentCalls)
+            {
+                _concurrent.TrySetResult();
+            }
+
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return [];
+        }
+
+        public Task<IReadOnlyList<HomologationResult>> GetItemResultsAsync(
+            ContractRecord contract,
+            long itemNumber,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("O modo agressivo não deve consultar resultados.");
     }
 
     private sealed class TimeoutCacheClient(string hangingContractId) : IPncpClient

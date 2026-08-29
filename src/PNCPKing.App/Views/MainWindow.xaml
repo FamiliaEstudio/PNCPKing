@@ -75,6 +75,8 @@
                             <MenuItem Header="Limpar cache permanente" Command="{Binding ClearCacheCommand}" />
                             <MenuItem Header="Limpar cache de documentos" Command="{Binding ClearDocumentCacheCommand}" />
                         </MenuItem>
+                        <MenuItem Header="PNCP _Guard…" Click="PncpGuard_Click"
+                                  ToolTip="Cria campanhas distribuídas e importa pacotes de listas de itens." />
                         <Separator />
                         <MenuItem Header="Atalho na área de trabalho"
                                   IsCheckable="True"
@@ -115,6 +117,8 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="18" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
@@ -202,7 +206,7 @@
                                     </Style>
                                 </Border.Style>
                             </Border>
-                            <TextBlock Text="Itens e preços homologados — últimos 90 dias"
+                            <TextBlock Text="Índice nacional de itens — últimos 365 dias"
                                        FontWeight="SemiBold" VerticalAlignment="Center" />
                             <TextBlock Text="{Binding PriceCacheActivityText, Mode=OneWay}"
                                        Margin="12,0,0,0" VerticalAlignment="Center"
@@ -210,6 +214,10 @@
                         </StackPanel>
                         <WrapPanel DockPanel.Dock="Right">
                             <Button Content="Estimar e ativar" Command="{Binding EstimateAndActivatePriceCacheCommand}" />
+                            <ToggleButton Content="Download agressivo"
+                                          Command="{Binding ToggleAggressivePriceCacheCommand}"
+                                          IsChecked="{Binding IsAggressivePriceCacheMode, Mode=OneWay}"
+                                          ToolTip="Enquanto ativado, usa continuamente a concorrência adaptativa disponível e bloqueia novas consultas visíveis ao PNCP." />
                             <Button Content="{Binding PausePriceCacheButtonText, Mode=OneWay}" Command="{Binding PausePriceCacheCommand}" />
                             <Button Content="Cancelar ciclo" Command="{Binding CancelPriceCacheCommand}" />
                             <Button Content="Desativar" Command="{Binding DisablePriceCacheCommand}" />
@@ -223,12 +231,70 @@
                         <ColumnDefinition Width="260" />
                     </Grid.ColumnDefinitions>
                     <TextBlock Text="{Binding PriceCacheSummary, Mode=OneWay}" TextWrapping="Wrap"
-                               ToolTip="Pesquisas e cotações têm prioridade; o cache usa somente oportunidades livres da API PNCP." />
+                               ToolTip="No modo normal, pesquisas e cotações têm prioridade. No modo agressivo, o índice usa toda a concorrência adaptativa disponível." />
                     <ProgressBar Grid.Column="1" Height="9" Minimum="0" Maximum="100"
                                  Value="{Binding PriceCacheProgress, Mode=OneWay}" Margin="12,2,0,0" />
                 </Grid>
 
                 <Border Grid.Row="5" BorderBrush="#D6DDE4" BorderThickness="0,1,0,0"
+                        Margin="0,8,0,6" Padding="0,8,0,0">
+                    <DockPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <Border Width="10" Height="10" CornerRadius="5" Margin="0,0,6,0">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Setter Property="Background" Value="#9AA1A8" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding NationalPriceIndexStatus}" Value="{x:Static models:PriceCacheStatus.Downloading}">
+                                                <Setter Property="Background" Value="#7A5BC7" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding NationalPriceIndexStatus}" Value="{x:Static models:PriceCacheStatus.Paused}">
+                                                <Setter Property="Background" Value="#E6A23C" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding NationalPriceIndexStatus}" Value="{x:Static models:PriceCacheStatus.Complete}">
+                                                <Setter Property="Background" Value="#36A269" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding NationalPriceIndexStatus}" Value="{x:Static models:PriceCacheStatus.Failed}">
+                                                <Setter Property="Background" Value="#D9534F" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding NationalPriceIndexStatus}" Value="{x:Static models:PriceCacheStatus.InsufficientSpace}">
+                                                <Setter Property="Background" Value="#D9534F" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                            </Border>
+                            <TextBlock Text="Índice nacional de preços — últimos 365 dias"
+                                       FontWeight="SemiBold" VerticalAlignment="Center" />
+                            <TextBlock Text="{Binding NationalPriceIndexActivityText, Mode=OneWay}"
+                                       Margin="12,0,0,0" VerticalAlignment="Center"
+                                       Foreground="#5F6871" />
+                        </StackPanel>
+                        <WrapPanel DockPanel.Dock="Right">
+                            <Button Content="Estimar e ativar" Command="{Binding EstimateAndActivateNationalPriceIndexCommand}" />
+                            <ToggleButton Content="Download agressivo"
+                                          Command="{Binding ToggleAggressiveNationalPriceIndexCommand}"
+                                          IsChecked="{Binding IsAggressiveNationalPriceMode, Mode=OneWay}"
+                                          ToolTip="Único modo que consulta resultados em massa; bloqueia novas consultas visíveis ao PNCP até ser desligado." />
+                            <Button Content="{Binding PauseNationalPriceIndexButtonText, Mode=OneWay}" Command="{Binding PauseNationalPriceIndexCommand}" />
+                            <Button Content="Cancelar ciclo" Command="{Binding CancelNationalPriceIndexCommand}" />
+                            <Button Content="Desativar" Command="{Binding DisableNationalPriceIndexCommand}" />
+                            <Button Content="Remover preços" Command="{Binding RemoveNationalPriceIndexCommand}" />
+                        </WrapPanel>
+                    </DockPanel>
+                </Border>
+                <Grid Grid.Row="6">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="260" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="{Binding NationalPriceIndexSummary, Mode=OneWay}" TextWrapping="Wrap"
+                               ToolTip="Consulta somente itens com temResultado=true e conserva resultados Informado com valor homologado positivo." />
+                    <ProgressBar Grid.Column="1" Height="9" Minimum="0" Maximum="100"
+                                 Value="{Binding NationalPriceIndexProgress, Mode=OneWay}" Margin="12,2,0,0" />
+                </Grid>
+
+                <Border Grid.Row="7" BorderBrush="#D6DDE4" BorderThickness="0,1,0,0"
                         Margin="0,8,0,6" Padding="0,8,0,0">
                     <DockPanel>
                         <StackPanel Orientation="Horizontal">
@@ -251,7 +317,7 @@
                         </WrapPanel>
                     </DockPanel>
                 </Border>
-                <Grid Grid.Row="6">
+                <Grid Grid.Row="8">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="2*" />
                         <ColumnDefinition Width="*" />
@@ -361,11 +427,11 @@
                 <Button Content="Aplicar faixa" Command="{Binding ApplyPriceFilterCommand}" />
                 <TextBox Width="65" Text="{Binding BatchCount, UpdateSourceTrigger=LostFocus}"
                          HorizontalContentAlignment="Center"
-                         ToolTip="1 a 100 lotes de até 50 contratações ainda não resolvidas" />
+                         ToolTip="1 a 200 lotes de até 50 contratações ainda não resolvidas" />
                 <Button Content="Ampliar cobertura" Command="{Binding FireBatchesCommand}"
                         ToolTip="Avança pelo cursor e usa a cota somente com contratações que ainda exigem rede." />
-                <Button Content="Carregar mais do cache" Command="{Binding LoadNextItemPageCommand}"
-                        ToolTip="Exibe outra página local sem fazer chamadas ao PNCP." />
+                <Button Content="Carregar mais resultados" Command="{Binding LoadNextItemPageCommand}"
+                        ToolTip="Exibe outra página de até 50 resultados salvos, sem fazer chamadas ao PNCP." />
                 <Button Content="Reiniciar pesquisa" Command="{Binding RestartItemSearchCommand}"
                         ToolTip="Cria uma nova rotação sem apagar o cache permanente." />
                 <Button Content="Parar preços" Command="{Binding StopItemSearchCommand}" />
@@ -410,9 +476,12 @@
                               SelectedItem="{Binding SelectedItemSearchRow}"
                               AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Extended"
                               SelectionUnit="FullRow"
-                              PreviewMouseRightButtonUp="ItemResultsGrid_PreviewMouseRightButtonUp"
+                              PreviewMouseLeftButtonDown="ItemResultsGrid_PreviewMouseLeftButtonDown"
+                              PreviewMouseMove="ItemResultsGrid_PreviewMouseMove"
+                              PreviewMouseLeftButtonUp="ItemResultsGrid_PreviewMouseLeftButtonUp"
+                              PreviewMouseRightButtonDown="ItemResultsGrid_PreviewMouseRightButtonDown"
                               MouseDoubleClick="ItemResultsGrid_MouseDoubleClick"
-                              ToolTip="Clique direito fixa a linha; duplo clique seleciona ou remove o preço da cesta."
+                              ToolTip="Segure o botão esquerdo por 1 segundo para incluir ou remover o preço da seleção; duplo clique esquerdo fixa ou desafixa; clique direito desmarca e remove a fixação."
                               EnableRowVirtualization="True" EnableColumnVirtualization="True"
                               VirtualizingPanel.IsVirtualizing="True"
                               VirtualizingPanel.VirtualizationMode="Recycling"
@@ -492,7 +561,7 @@
                             <Button Content="{Binding ManualBasketButtonText}"
                                     IsEnabled="{Binding HasSelectedBasketPrices}"
                                     Click="CreateManualBasket_Click"
-                                    ToolTip="Use duplo clique em um preço homologado para incluí-lo ou removê-lo desta seleção." />
+                                    ToolTip="Segure o botão esquerdo por 1 segundo sobre um preço homologado para incluí-lo ou removê-lo desta seleção." />
                             <Button Content="Abrir contratação no PNCP" Command="{Binding OpenPncpCommand}"
                                     CommandParameter="{Binding SelectedItemSearchRow.Contract}" />
                         </WrapPanel>

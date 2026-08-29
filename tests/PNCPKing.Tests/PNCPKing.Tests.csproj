@@ -35,6 +35,10 @@
              Link="AppLogic/SearchOptions.cs" />
     <Compile Include="../../src/PNCPKing.App/ViewModels/QuotationDisplay.cs"
              Link="AppLogic/QuotationDisplay.cs" />
+    <Compile Include="../../src/PNCPKing.Guard/GuardPncpClient.cs"
+             Link="GuardLogic/GuardPncpClient.cs" />
+    <Compile Include="../../src/PNCPKing.Guard/GuardRepository.cs"
+             Link="GuardLogic/GuardRepository.cs" />
     <None Include="../../src/PNCPKing.App/Views/QuotationItemWindow.xaml"
           Link="Views/QuotationItemWindow.xaml"
           CopyToOutputDirectory="PreserveNewest" />

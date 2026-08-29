@@ -146,6 +146,59 @@ public sealed class PncpRequestSchedulingTests
     }
 
     [Fact]
+    public async Task AggressiveBackground_UsesEveryIdleSlotAndRestoresNormalLimitAfterLease()
+    {
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 3);
+        var background = Enumerable.Range(0, 3)
+            .Select(_ => scheduler.AcquireAsync(PncpRequestPriority.BackgroundPriceCache))
+            .ToArray();
+
+        await Task.Delay(20);
+        Assert.Equal(1, background.Count(task => task.IsCompleted));
+        (await background[0]).Dispose();
+
+        using (scheduler.EnableAggressiveBackgroundRequests())
+        {
+            var leases = await Task.WhenAll(background[1], background[2]);
+            var aggressive = scheduler.GetSnapshot();
+            Assert.True(aggressive.AggressiveBackgroundEnabled);
+            Assert.Equal(2, aggressive.ActiveBackgroundPriceCache);
+            foreach (var lease in leases)
+            {
+                lease.Dispose();
+            }
+        }
+
+        var first = scheduler.AcquireAsync(PncpRequestPriority.BackgroundPriceCache);
+        var second = scheduler.AcquireAsync(PncpRequestPriority.BackgroundPriceCache);
+        using var firstLease = await first;
+        await Task.Delay(20);
+        Assert.False(second.IsCompleted);
+        Assert.False(scheduler.GetSnapshot().AggressiveBackgroundEnabled);
+        firstLease.Dispose();
+        (await second).Dispose();
+    }
+
+    [Fact]
+    public async Task AggressiveBackground_StillWaitsForForegroundAndExplicitSuppression()
+    {
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 3);
+        using var aggressive = scheduler.EnableAggressiveBackgroundRequests();
+        using var foreground = await scheduler.AcquireAsync(PncpRequestPriority.IndexMaintenance);
+        var background = scheduler.AcquireAsync(PncpRequestPriority.BackgroundPriceCache);
+
+        await Task.Delay(20);
+        Assert.False(background.IsCompleted);
+        using var suppression = scheduler.SuppressBackgroundRequests();
+        foreground.Dispose();
+        await Task.Delay(20);
+        Assert.False(background.IsCompleted);
+
+        suppression.Dispose();
+        (await background).Dispose();
+    }
+
+    [Fact]
     public async Task ForegroundOperation_SuppressesBackgroundBetweenHttpCalls()
     {
         var scheduler = new PncpRequestScheduler(maximumConcurrency: 2);

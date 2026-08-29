@@ -22,12 +22,14 @@ A distribuição autocontida mais recente para Windows x64 está em `artifacts\w
 - catálogo nacional embutido das localidades oficiais de 2022 do IBGE, usado somente para distância e ordem geográfica, sem consultas remotas por município;
 - percurso fixo de candidatos: Ribeirão Preto e os outros 49 municípios mais próximos por distância, restante de SP em amostra aleatória estável e depois cada UF pela proximidade de sua sede municipal mais próxima;
 - sorteio estável durante cada pesquisa, paginação por cursor sem repetição e nova rotação aleatória ao iniciar outra pesquisa;
-- padrão inicial de três lotes, com seleção de 1 a 100; cada lote cobre até 50 contratações ainda não resolvidas e avança gratuitamente pelas já completas no cache;
+- padrão inicial de três lotes, com seleção de 1 a 200 na pesquisa geral; cada lote cobre até 50 contratações ainda não resolvidas e avança gratuitamente pelas já completas no cache, processadas automaticamente em parcelas locais de até 20 lotes (1.000 contratações);
 - resultados acrescentados progressivamente em uma única grade virtualizada, com percentual, contratações solicitadas/processadas, itens compatíveis, preços revelados e chamadas reais de listas/resultados;
 - grade de preços inicialmente enxuta com as nove colunas principais e layouts de visibilidade, ordem e largura persistidos por grade; o seletor permite restaurar o padrão;
 - biblioteca opcional Sweet Code, persistida no backup, com um crivo por linha e autocomplete por prefixo usando setas e `TAB`;
 - sessão retomável separada para a última pesquisa geral, com cursor, resultados e falhas preservados ao fechar; a automação continua usando armazenamento temporário isolado;
-- cache permanente opcional e móvel das listas de itens e resultados homologados dos 90 dias mais recentes, autorizado somente após estimativa de espaço/tempo, com checkpoint por contratação, pausa, retomada, poda seletiva e reserva mínima de disco;
+- índice nacional opcional e móvel das listas de itens dos últimos 365 dias, autorizado somente após estimativa de espaço/tempo, com checkpoint por contratação, pausa, retomada, poda seletiva e reserva mínima de disco; a carga de fundo não consulta resultados homologados;
+- resultados homologados consultados somente para itens compatíveis com a pesquisa e preservados no banco principal para reutilização até a contratação receber uma atualização global;
+- segundo índice nacional opcional de preços dos últimos 365 dias, com autorização própria e download exclusivamente pelo botão agressivo; ele consulta somente itens com `temResultado=true`, conserva todos os resultados `Informado` com valor unitário homologado positivo e conclui sem repetir respostas vazias, canceladas, sem valor útil ou `404`;
 - faixa inclusiva de preço unitário homologado, aplicada somente a resultados ativos e sem conversão entre unidades;
 - projetos persistentes de cotação que copiam a amostra já coletada, respeitando a faixa informada e sem novas chamadas ao PNCP;
 - qualificação auditável por cobertura do descritivo solicitado, unidade/embalagem, quantidade em faixas graduais, proximidade e atualidade;
@@ -45,7 +47,7 @@ A distribuição autocontida mais recente para Windows x64 está em `artifacts\w
 - pacote portátil `.pncpcotacao` para transferir uma cotação sem substituir o banco inteiro, preservando itens, preços PNCP/web, cestas, escolhas confirmadas, pesquisas e retomadas, rascunhos e prints com validação SHA-256;
 - extração de texto e coordenadas diretamente do PDF sempre que a camada nativa for utilizável; OCR português local é acionado somente nas páginas escaneadas, sem enviar imagens para serviços externos;
 - medição por sessão de chamadas, bytes, duração e médias de listas de itens e resultados;
-- agendador único com no máximo duas chamadas ao PNCP, prioridade para ações visíveis e índice, e apenas uma chamada de cache nacional quando não houver trabalho prioritário ativo ou enfileirado;
+- agendador único com concorrência adaptativa; no modo normal o índice usa baixa prioridade e uma lista por vez, enquanto os modos agressivos mutuamente exclusivos podem ocupar os limites recomendados da máquina, reduzir automaticamente diante de `429`, timeout ou latência alta e retomar sem intervenção;
 - distinção entre preço encontrado, resultado cancelado, item sem resultado, pendência e falha;
 - invalidação de listas e preços permanentes quando a contratação muda;
 - link para a página oficial da contratação e comandos explícitos para obter seus documentos quando solicitado;
@@ -74,7 +76,7 @@ Para gerar uma distribuição Windows autocontida:
 .\scripts\publish-windows.ps1
 ```
 
-O executável será criado em `artifacts\win-x64`.
+Somente `artifacts\win-x64\PNCPKing.exe` será publicado. O projeto PNCP Guard também é compilado em Release pela solução, mas não integra essa distribuição.
 
 A suíte automatizada cobre pesquisa por objeto e item, geografia, faixa de preço, valores homologados, rejeição de valores estimados, múltiplos resultados, falha parcial, `429`, timeout, cobertura diária, retomada por checkpoint e validação de backups.
 
@@ -84,26 +86,35 @@ A suíte automatizada cobre pesquisa por objeto e item, geografia, faixa de pre�
 2. Clique em **Calcular tamanho** e aguarde a contagem das modalidades.
 3. Revise o volume, o espaço e a duração estimados.
 4. Clique em **Baixar/atualizar dados** e confirme os números exibidos.
-5. Opcionalmente, no painel **Itens e preços homologados — últimos 90 dias**, use **Estimar e ativar**. Revise a projeção — atualmente da ordem de vários GiB — e autorize somente se quiser manter essa janela local; pesquisas e índice sempre interrompem novas chamadas dessa carga de fundo.
-6. Digite o objeto, escolha geografia, período e ordenação e clique em **Pesquisar**.
-7. Você pode combinar termos: `café filtro` ou `café + filtro` exigem ambos; `café OU chá` aceita qualquer um; `"café torrado"` busca a frase; `café -cafeteira -"filtro de papel"` exclui descrições; `"pacote "unidade` aceita qualquer uma dessas unidades estruturadas do item. Acrescente `C:(alimentação escolar, gêneros alimentícios)` para examinar primeiro contratações cujos títulos correspondam a esses crivos; o bloco `C:` seleciona contratos, mas não substitui os termos que identificam o item.
-8. Ao clicar em **Pesquisar**, confira o resumo local exibido na própria tela. O aplicativo usará a quantidade de lotes informada pelo usuário — inicialmente 3 — e cada lote ampliará até 50 contratações que ainda exijam rede; candidatas já resolvidas no cache não consomem essa cota.
-9. Para ampliar a sessão atual sem repetir contratações, informe de 1 a 100 lotes e use **Ampliar cobertura**. Todos os itens compatíveis encontrados nesses lotes terão seus resultados consultados com a concorrência adaptativa do PNCP. Use **Carregar mais do cache** para paginar somente resultados locais, **Reiniciar pesquisa** para criar nova rotação e **Parar preços** para interromper preservando o checkpoint.
-10. Use os campos de preço mínimo/máximo para filtrar o valor unitário homologado ativo.
-11. Para iniciar uma cotação, clique em **Usar esta amostra em uma cotação**, selecione ou crie um projeto e informe quantidade, unidade, alvo automático de 3 a 10 preços e faixa opcional.
-12. Para montar sua própria composição, selecione uma ou mais linhas homologadas com `Ctrl`/`Shift` e use **Criar/adicionar à cesta manual**. Na aba **Cotações**, você pode ampliar, renomear, revisar, confirmar ou excluir essas cestas.
-13. Faça novas pesquisas e adicione outros itens ao mesmo projeto. Se ampliar a coleta de um item, use **Atualizar amostra com a pesquisa atual**; a escolha anterior ficará marcada para reconfirmação.
-14. Use **Importar XLSX** para carregar vários itens pelas colunas A:G e, opcionalmente, o alvo da cesta em H. H vazia usa 3. A automação interpreta a coluna G como lotes de 50 contratações; falhas podem ser retomadas. **Exportar Excel** preenche o modelo de avaliação com a cesta atual, links PNCP/site e fórmulas ajustadas ao número real de preços; o PDF de evidências é salvo na mesma pasta.
-15. Na aba **Cotações**, use **Exportar pacote** para criar um `.pncpcotacao` portátil com a cotação selecionada e seus prints. **Importar pacote** mostra uma prévia e, se o mesmo identificador já existir, permite importar como cópia, substituir com recuperação automática ou cancelar.
-16. Para manter uma contratação no cache permanente, selecione-a na segunda aba e use **Buscar/atualizar todos os preços**.
-17. Use **Abrir contratação no PNCP** para acessar a página oficial. Use **Acessar documentos** para baixar, extrair e consolidar os PDFs; o arquivo será salvo em `Downloads` e somente será aberto se você escolher **Abrir PDF** ao final.
-18. Use **Escolher colunas** para ajustar cada grade uma vez. Visibilidade, ordem e largura são restauradas nos usos seguintes; **Restaurar padrão** volta ao layout original.
-19. Se ocorrer uma falha de abertura ou importação, use **Logs de diagnóstico**, copie o arquivo `.log` mais recente e envie-o para análise. Mesmo quando a janela principal não abre, a mensagem de erro informa o caminho exato do log.
+5. Opcionalmente, depois de concluir a cobertura das contratações, use **Índice nacional de itens — últimos 365 dias → Estimar e ativar**. Revise chamadas de listas, espaço e duração antes de autorizar. A carga armazena somente listas de itens; no modo normal ela cede o PNCP às ações visíveis, e o botão **Download agressivo** dedica a sessão às listas.
+6. Depois que as listas estiverem completas, você também pode usar **Índice nacional de preços — últimos 365 dias → Estimar e ativar**. A autorização não chama o PNCP: as consultas em massa só começam ao ativar o **Download agressivo** dessa segunda barra. Normalmente cada item produz uma vencedora positiva; quando o PNCP registrar várias vencedoras válidas para o mesmo item, todas são preservadas.
+7. Digite o objeto, escolha geografia, período e ordenação e clique em **Pesquisar**.
+8. Você pode combinar termos: `café filtro` ou `café + filtro` exigem ambos; `café OU chá` aceita qualquer um; `"café torrado"` busca a frase; `café -cafeteira -"filtro de papel"` exclui descrições; `"pacote "unidade` aceita qualquer uma dessas unidades estruturadas do item. Acrescente `C:(alimentação escolar, gêneros alimentícios)` para examinar primeiro contratações cujos títulos correspondam a esses crivos; o bloco `C:` seleciona contratos, mas não substitui os termos que identificam o item.
+9. Ao clicar em **Pesquisar**, confira o resumo local exibido na própria tela. O aplicativo usará a quantidade de lotes informada pelo usuário — inicialmente 3 — e cada lote ampliará até 50 contratações que ainda exijam rede; candidatas já resolvidas no cache não consomem essa cota.
+10. Para ampliar a sessão atual sem repetir contratações, informe de 1 a 200 lotes e use **Ampliar cobertura**. A escolha é aditiva e corresponde a até 50 novas contratações por lote; as já resolvidas no cache não consomem essa cota e são percorridas automaticamente em parcelas de até 1.000 para reduzir a pressão sobre discos mecânicos. Todos os itens que ainda exigirem rede usam a concorrência adaptativa do PNCP. Use **Carregar mais resultados** para exibir páginas de até 50 preços salvos, **Reiniciar pesquisa** para criar nova rotação e **Parar preços** para interromper preservando o checkpoint. O limite de 200 pertence à ação, não à capacidade em bytes ou registros do cache persistente; **Buscar preços até esgotar** continua percorrendo todo o conjunto confirmado.
+11. Use os campos de preço mínimo/máximo para filtrar o valor unitário homologado ativo.
+12. Para iniciar uma cotação, clique em **Usar esta amostra em uma cotação**, selecione ou crie um projeto e informe quantidade, unidade, alvo automático de 3 a 10 preços e faixa opcional.
+13. Para montar sua própria composição, selecione uma ou mais linhas homologadas com `Ctrl`/`Shift` e use **Criar/adicionar à cesta manual**. Na aba **Cotações**, você pode ampliar, renomear, revisar, confirmar ou excluir essas cestas.
+14. Faça novas pesquisas e adicione outros itens ao mesmo projeto. Se ampliar a coleta de um item, use **Atualizar amostra com a pesquisa atual**; a escolha anterior ficará marcada para reconfirmação.
+15. Use **Importar XLSX** para carregar vários itens pelas colunas A:G e, opcionalmente, o alvo da cesta em H. H vazia usa 3. A automação interpreta a coluna G como lotes de 50 contratações; falhas podem ser retomadas. **Exportar Excel** preenche o modelo de avaliação com a cesta atual, links PNCP/site e fórmulas ajustadas ao número real de preços; o PDF de evidências é salvo na mesma pasta.
+16. Na aba **Cotações**, use **Exportar pacote** para criar um `.pncpcotacao` portátil com a cotação selecionada e seus prints. **Importar pacote** mostra uma prévia e, se o mesmo identificador já existir, permite importar como cópia, substituir com recuperação automática ou cancelar.
+17. Para manter uma contratação no cache permanente, selecione-a na segunda aba e use **Buscar/atualizar todos os preços**.
+18. Use **Abrir contratação no PNCP** para acessar a página oficial. Use **Acessar documentos** para baixar, extrair e consolidar os PDFs; o arquivo será salvo em `Downloads` e somente será aberto se você escolher **Abrir PDF** ao final.
+19. Use **Escolher colunas** para ajustar cada grade uma vez. Visibilidade, ordem e largura são restauradas nos usos seguintes; **Restaurar padrão** volta ao layout original.
+20. Se ocorrer uma falha de abertura ou importação, use **Logs de diagnóstico**, copie o arquivo `.log` mais recente e envie-o para análise. Mesmo quando a janela principal não abre, a mensagem de erro informa o caminho exato do log.
+
+## PNCP Guard
+
+Em **Opções → PNCP Guard**, escolha uma pasta local sincronizada pelo Google Drive, informe um computador por linha no formato `Nome|Peso` e gere a campanha. O PNCP King usa somente seu índice atual, exclui snapshots já completos e cria um arquivo `.pncpguardplan` imutável por trabalhador em `plans`.
+
+Em cada computador, abra `PNCPGuard.exe` uma vez, selecione o plano correspondente e a mesma raiz local do Google Drive. Ao salvar, a tarefa opcional do usuário inicia o Guard dez minutos após o logon e repete a cada trinta minutos, sem segunda instância. O Guard usa `%LOCALAPPDATA%\PNCP Guard`, faz uma chamada por vez, preserva 2 GiB livres e encerra a coleta se o PNCP King estiver aberto.
+
+Os pacotes prontos aparecem em `packages` e contêm somente listas de itens, nunca uma varredura de resultados homologados. No PNCP King mestre, volte a **Opções → PNCP Guard** e use **Importar pasta do PNCP Guard**. A importação valida versão e SHA-256, é idempotente e gera confirmações em `acks`; nenhum banco SQLite é colocado na pasta sincronizada.
 
 O total homologado geral mostrado na grade de contratações é apenas um resumo. Os preços dos itens vêm exclusivamente dos campos de resultado homologado do PNCP; valores estimados nunca são usados como substitutos.
 
 Após a primeira carga autorizada, o programa verifica periodicamente se o calendário avançou ou se há lacunas. Ele baixa primeiro as publicações ausentes, faz a atualização global com sobreposição de 48 horas e só então ajusta a borda antiga da janela de 365 dias. Uma falha nunca antecipa a exclusão de registros.
 
-O estudo de custo da carga nacional de itens e resultados está em `docs/price-load-study.md`. Por exigir milhões de chamadas adicionais, ela permanece opcional, limitada à janela móvel de 90 dias e nunca começa antes da estimativa e autorização explícita.
+O estudo de custo está em `docs/price-load-study.md`. Os índices de listas e preços são opcionais, limitados à janela móvel de 365 dias e exigem estimativas e autorizações independentes. Autorizar preços não inicia tráfego; somente seu modo agressivo consulta um endpoint de resultado por item elegível ainda incompleto.
 
 O Sweet Code pode ser aberto ao lado da pesquisa. Cole um crivo por linha, ative as sugestões e use ↑/↓ e `TAB` para preencher sem impedir a digitação livre.

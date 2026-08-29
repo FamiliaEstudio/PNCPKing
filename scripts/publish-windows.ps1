@@ -9,6 +9,10 @@ if ($env:PNCPKING_DOTNET) {
 if ($env:ProgramFiles) {
     $candidates += (Join-Path $env:ProgramFiles 'dotnet\dotnet.exe')
 }
+if ($env:LOCALAPPDATA) {
+    $candidates += (Join-Path $env:LOCALAPPDATA 'Microsoft\dotnet-sdk-8\dotnet.exe')
+    $candidates += (Join-Path $env:LOCALAPPDATA 'PNCPKing\dotnet\dotnet.exe')
+}
 $pathDotnet = Get-Command dotnet -ErrorAction SilentlyContinue
 if ($pathDotnet) {
     $candidates += $pathDotnet.Source
@@ -25,12 +29,20 @@ if (-not $dotnet) {
     throw 'Não foi encontrado um SDK .NET 8. Instale o SDK (o runtime isolado não é suficiente) ou defina PNCPKING_DOTNET.'
 }
 
+if (Get-Process -Name 'PNCPKing' -ErrorAction SilentlyContinue) {
+    throw 'O PNCP King está aberto. Feche o aplicativo antes de publicar o executável canônico.'
+}
+
 & $dotnet build (Join-Path $root 'PNCPKing.sln') --configuration Release
 if ($LASTEXITCODE -ne 0) { throw 'A compilação Release falhou; a publicação foi interrompida.' }
 
 & $dotnet test (Join-Path $root 'tests\PNCPKing.Tests\PNCPKing.Tests.csproj') `
     --configuration Release --no-build
 if ($LASTEXITCODE -ne 0) { throw 'Os testes falharam; a publicação foi interrompida.' }
+
+if (Test-Path $output) {
+    Get-ChildItem $output -Force | Remove-Item -Recurse -Force
+}
 
 & $dotnet publish (Join-Path $root 'src\PNCPKing.App\PNCPKing.App.csproj') `
     --configuration Release `
@@ -44,9 +56,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Os testes falharam; a publicação foi interro
 if ($LASTEXITCODE -ne 0) { throw 'A publicação Windows falhou.' }
 
 Get-ChildItem $output -Filter '*.pdb' -File -ErrorAction SilentlyContinue | Remove-Item -Force
-$executables = @(Get-ChildItem (Join-Path $root 'artifacts') -Filter 'PNCPKing.exe' -File -Recurse)
-if ($executables.Count -ne 1 -or $executables[0].FullName -ne (Join-Path $output 'PNCPKing.exe')) {
-    throw 'A validação exige exatamente um PNCPKing.exe no caminho canônico artifacts\win-x64.'
+$executables = @(Get-ChildItem (Join-Path $root 'artifacts') -Filter '*.exe' -File -Recurse)
+if ($executables.Count -ne 1 -or
+    $executables[0].FullName -ne (Join-Path $output 'PNCPKing.exe')) {
+    throw 'A distribuição canônica exige exatamente um executável: artifacts\win-x64\PNCPKing.exe.'
 }
 
-Write-Host "PNCP King publicado em $output"
+Write-Host "PNCP King publicado em $output\PNCPKing.exe"

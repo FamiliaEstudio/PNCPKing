@@ -47,10 +47,10 @@
         <TextBox x:Name="DescriptionTextBox" Grid.Row="6" Grid.Column="1" Grid.ColumnSpan="2"
                  Height="58" TextWrapping="Wrap" AcceptsReturn="True" />
 
-        <TextBlock Grid.Row="7" Text="Quantidade, unidade e alvo auto." VerticalAlignment="Center" />
-        <TextBox x:Name="QuantityTextBox" Grid.Row="7" Grid.Column="1" />
+        <TextBlock Grid.Row="7" Text="Quantidade/unidade opcionais; alvo auto." VerticalAlignment="Center" />
+        <TextBox x:Name="QuantityTextBox" Grid.Row="7" Grid.Column="1" ToolTip="Quantidade opcional" />
         <StackPanel Grid.Row="7" Grid.Column="2" Orientation="Horizontal">
-            <TextBox x:Name="UnitTextBox" Width="85" ToolTip="Unidade" />
+            <TextBox x:Name="UnitTextBox" Width="85" ToolTip="Unidade opcional" />
             <TextBox x:Name="BasketSizeTextBox" Width="45" Text="3" ToolTip="Alvo automático de 3 a 10" />
         </StackPanel>
 

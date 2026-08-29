@@ -30,7 +30,9 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis)
         _ => "Restritivo"
     };
     public int ContractsAtActiveLevel => Line.PromptSet?.ContractsAtActiveLevel ?? 0;
-    public decimal RequestedQuantity => Line.RequestedQuantity;
+    public decimal? RequestedQuantity => Line.RequestedQuantity > 0
+        ? Line.RequestedQuantity
+        : null;
     public string RequestedUnit => Line.RequestedUnit;
     public int CollectedCount => Analysis.CollectedCount;
     public int EligibleCount => Analysis.EligibleCount;

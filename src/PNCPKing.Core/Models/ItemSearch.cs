@@ -125,7 +125,22 @@ public sealed record PriceBatchProgress(
     int FullyResolvedContracts = 0,
     long RemainingCandidateContracts = -1,
     int ItemResultCalls = 0,
-    int TotalFailedCalls = 0);
+    int TotalFailedCalls = 0,
+    int CachedContractsProcessedInSlice = 0,
+    int CachedContractsPerSlice = 0,
+    int CompletedCacheSlices = 0,
+    int AvailableSessionRows = 0);
+
+public sealed record ItemSearchResultCursor(
+    long DiscoveredOrder,
+    string ContractId,
+    long ItemNumber,
+    long ResultSequence);
+
+public sealed record ItemSearchResultPage(
+    IReadOnlyList<ItemSearchRow> Rows,
+    ItemSearchResultCursor? NextCursor,
+    bool HasMore);
 
 public sealed record TimedPriceBatchResult(
     IReadOnlyList<ItemSearchRow> Rows,

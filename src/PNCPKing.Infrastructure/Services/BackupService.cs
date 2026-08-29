@@ -561,6 +561,16 @@ public sealed class BackupService(
                        last_completed_at = NULL,
                        updated_at = $now
                  WHERE id = 1;
+                UPDATE national_price_index_control
+                   SET authorized = 0, enabled = 0, paused = 0, status = $disabled,
+                       window_start = NULL, window_end = NULL,
+                       authorized_at = NULL, last_started_at = NULL, last_completed_at = NULL,
+                       prepared_window_start = NULL, prepared_window_end = NULL,
+                       eligible_item_count = 0, completed_item_count = 0,
+                       priced_item_count = 0, result_row_count = 0,
+                       pending_contract_count = 0, failed_contract_count = 0,
+                       last_error = '', updated_at = $now
+                 WHERE id = 1;
                 """;
             command.Parameters.AddWithValue("$disabled", (int)PriceCacheStatus.Disabled);
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
@@ -600,6 +610,16 @@ public sealed class BackupService(
                SET authorized = 0, enabled = 0, paused = 0, status = $disabled,
                    last_error = '', authorized_at = NULL, last_started_at = NULL,
                    last_completed_at = NULL, updated_at = $now
+             WHERE id = 1;
+            UPDATE national_price_index_control
+               SET authorized = 0, enabled = 0, paused = 0, status = $disabled,
+                   window_start = NULL, window_end = NULL,
+                   authorized_at = NULL, last_started_at = NULL, last_completed_at = NULL,
+                   prepared_window_start = NULL, prepared_window_end = NULL,
+                   eligible_item_count = 0, completed_item_count = 0,
+                   priced_item_count = 0, result_row_count = 0,
+                   pending_contract_count = 0, failed_contract_count = 0,
+                   last_error = '', updated_at = $now
              WHERE id = 1;
             """;
         command.Parameters.AddWithValue("$disabled", (int)PriceCacheStatus.Disabled);

@@ -44,14 +44,20 @@ public partial class QuotationSampleWindow : Window
         {
             var description = DescriptionTextBox.Text.Trim();
             var unit = UnitTextBox.Text.Trim();
-            if (description.Length == 0 || unit.Length == 0)
+            if (description.Length == 0)
             {
-                throw new ArgumentException("Informe a descrição e a unidade do item.");
+                throw new ArgumentException("Informe a descrição do item.");
             }
 
-            if (!decimal.TryParse(QuantityTextBox.Text, NumberStyles.Number, CultureInfo.CurrentCulture, out var quantity) || quantity <= 0)
+            var quantity = 0m;
+            if (!string.IsNullOrWhiteSpace(QuantityTextBox.Text) &&
+                (!decimal.TryParse(
+                    QuantityTextBox.Text,
+                    NumberStyles.Number,
+                    CultureInfo.CurrentCulture,
+                    out quantity) || quantity <= 0))
             {
-                throw new ArgumentException("Informe uma quantidade maior que zero.");
+                throw new ArgumentException("Informe uma quantidade maior que zero ou deixe o campo vazio.");
             }
 
             var minimum = ParseOptionalPrice(MinimumPriceTextBox.Text, "preço mínimo");

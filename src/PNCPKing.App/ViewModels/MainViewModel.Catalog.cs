@@ -117,7 +117,7 @@ public sealed partial class MainViewModel
             option.IntervalDays == normalizedInterval);
         UpdateCatalogCommand = new AsyncRelayCommand(
             () => RunCatalogSyncAsync(showErrorDialog: true),
-            () => !IsCatalogBusy && !IsIndexBusy && !IsFileBusy);
+            () => !IsAnyAggressivePncpMode && !IsCatalogBusy && !IsIndexBusy && !IsFileBusy);
         PauseCatalogCommand = new RelayCommand(
             ToggleCatalogPause,
             () => IsCatalogBusy);
@@ -169,6 +169,15 @@ public sealed partial class MainViewModel
             return;
         }
 
+        if (IsAnyAggressivePncpMode)
+        {
+            MaintenanceActivityText = IsAggressiveNationalPriceMode
+                ? "Manutenção: modo agressivo dedicado ao índice de preços"
+                : "Manutenção: modo agressivo dedicado ao índice de itens";
+            ScheduleNextMaintenance(TimeSpan.FromSeconds(15));
+            return;
+        }
+
         var remainingDelay = _nextMaintenanceAllowedAt - DateTimeOffset.UtcNow;
         if (remainingDelay > TimeSpan.Zero)
         {
@@ -215,7 +224,7 @@ public sealed partial class MainViewModel
             {
                 slice.Token.ThrowIfCancellationRequested();
                 _preferPriceCacheMaintenance = false;
-                MaintenanceActivityText = "Manutenção: fatia do cache de preços concluída";
+                MaintenanceActivityText = "Manutenção: fatia do índice de itens concluída";
             }
             else if (await TryRunCatalogMaintenanceAsync(decision.SliceDuration, slice.Token).ConfigureAwait(true))
             {
@@ -227,7 +236,7 @@ public sealed partial class MainViewModel
             {
                 slice.Token.ThrowIfCancellationRequested();
                 _preferPriceCacheMaintenance = false;
-                MaintenanceActivityText = "Manutenção: fatia do cache de preços concluída";
+                MaintenanceActivityText = "Manutenção: fatia do índice de itens concluída";
             }
             else if (_lastOptimizeDate != DateOnly.FromDateTime(DateTime.Today))
             {

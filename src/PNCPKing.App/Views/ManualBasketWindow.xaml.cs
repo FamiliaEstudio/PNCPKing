@@ -55,7 +55,9 @@ public partial class ManualBasketWindow : Window
         {
             var line = analysis.Line;
             DescriptionTextBox.Text = line.Description;
-            QuantityTextBox.Text = line.RequestedQuantity.ToString("N4", CultureInfo.CurrentCulture);
+            QuantityTextBox.Text = line.RequestedQuantity > 0
+                ? line.RequestedQuantity.ToString("N4", CultureInfo.CurrentCulture)
+                : string.Empty;
             UnitTextBox.Text = line.RequestedUnit;
             MinimumPriceTextBox.Text = line.MinimumUnitPrice?.ToString("N4", CultureInfo.CurrentCulture) ?? string.Empty;
             MaximumPriceTextBox.Text = line.MaximumUnitPrice?.ToString("N4", CultureInfo.CurrentCulture) ?? string.Empty;
@@ -154,15 +156,20 @@ public partial class ManualBasketWindow : Window
             {
                 var description = DescriptionTextBox.Text.Trim();
                 var unit = UnitTextBox.Text.Trim();
-                if (description.Length == 0 || unit.Length == 0)
+                if (description.Length == 0)
                 {
-                    throw new ArgumentException("Informe a descrição e a unidade do novo item.");
+                    throw new ArgumentException("Informe a descrição do novo item.");
                 }
 
-                if (!decimal.TryParse(QuantityTextBox.Text, NumberStyles.Number, CultureInfo.CurrentCulture, out var quantity) ||
-                    quantity <= 0)
+                var quantity = 0m;
+                if (!string.IsNullOrWhiteSpace(QuantityTextBox.Text) &&
+                    (!decimal.TryParse(
+                        QuantityTextBox.Text,
+                        NumberStyles.Number,
+                        CultureInfo.CurrentCulture,
+                        out quantity) || quantity <= 0))
                 {
-                    throw new ArgumentException("Informe uma quantidade maior que zero.");
+                    throw new ArgumentException("Informe uma quantidade maior que zero ou deixe o campo vazio.");
                 }
 
                 if (!int.TryParse(BasketSizeTextBox.Text, NumberStyles.Integer, CultureInfo.CurrentCulture, out var basketSize) ||

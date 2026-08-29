@@ -113,6 +113,26 @@ public sealed class TimedQuotationAutomationService(
                                  RestrictiveText = value.Line.SearchText,
                                  Origin = SearchPromptOrigin.Migrated
                              });
+                var initiallyActivated = await ActivateFirstAvailablePromptsAsync(
+                    promptSets,
+                    cancellationToken).ConfigureAwait(false);
+                if (initiallyActivated.Count > 0 && processed.Count > 0)
+                {
+                    await ReevaluateCachedContractsAsync(
+                        run,
+                        initiallyActivated,
+                        processed.Values,
+                        totals,
+                        progress,
+                        activeAtStart + stopwatch.Elapsed,
+                        cancellationToken).ConfigureAwait(false);
+                }
+
+                if (BuildItemPrompts(promptSets.Values).Count == 0)
+                {
+                    break;
+                }
+
                 var globalPrompts = (await quotations.GetContractSearchPromptsAsync(run.Id, cancellationToken)
                         .ConfigureAwait(false))
                     .ToList();
@@ -169,6 +189,11 @@ public sealed class TimedQuotationAutomationService(
                         value => value.Line.PromptSet!);
                     var candidate = batch[contractIndex];
                     var itemPrompts = BuildItemPrompts(promptSets.Values);
+                    if (itemPrompts.Count == 0)
+                    {
+                        break;
+                    }
+
                     if (DateTimeOffset.UtcNow - lastProgressAt >= TimeSpan.FromMilliseconds(250))
                     {
                         Report(
@@ -225,16 +250,22 @@ public sealed class TimedQuotationAutomationService(
                     foreach (var analysis in analyses)
                     {
                         var set = promptSets[analysis.Line.Id];
+                        if (set.GetActivePrompts().Count == 0)
+                        {
+                            continue;
+                        }
+
                         var lineMatches = evaluated.RowsByLine.TryGetValue(analysis.Line.Id, out var lineRows)
                             ? lineRows.Count
                             : 0;
                         var level = set.ActiveLevel;
                         var contractsAtLevel = set.ContractsAtActiveLevel + 1;
-                        if (contractsAtLevel >= ItemSearchDefaults.ContractsPerBatch &&
-                            level < PromptMatchLevel.Broad &&
-                            !string.IsNullOrWhiteSpace(set.GetText((PromptMatchLevel)((int)level + 1))))
+                        var nextLevel = contractsAtLevel >= ItemSearchDefaults.ContractsPerBatch
+                            ? GetNextPopulatedLevel(set, level)
+                            : null;
+                        if (nextLevel is { } populatedLevel)
                         {
-                            level = (PromptMatchLevel)((int)level + 1);
+                            level = populatedLevel;
                             contractsAtLevel = 0;
                             activated.Add(set with
                             {
@@ -435,6 +466,62 @@ public sealed class TimedQuotationAutomationService(
         }
 
         return result;
+    }
+
+    private async Task<List<ItemSearchPromptSet>> ActivateFirstAvailablePromptsAsync(
+        IDictionary<Guid, ItemSearchPromptSet> promptSets,
+        CancellationToken cancellationToken)
+    {
+        var activated = new List<ItemSearchPromptSet>();
+        foreach (var pair in promptSets.ToArray())
+        {
+            var set = pair.Value;
+            if (!string.IsNullOrWhiteSpace(set.GetText(set.ActiveLevel)))
+            {
+                continue;
+            }
+
+            var level = GetNextPopulatedLevel(set, set.ActiveLevel, includeCurrent: true);
+            if (level is null)
+            {
+                continue;
+            }
+
+            var updated = set with
+            {
+                ActiveLevel = level.Value,
+                ContractsAtActiveLevel = 0
+            };
+            promptSets[pair.Key] = updated;
+            activated.Add(updated);
+            await quotations.UpdateItemSearchPromptProgressAsync(
+                updated.LineId,
+                updated.ActiveLevel,
+                updated.ContractsAtActiveLevel,
+                updated.MatchedItems,
+                updated.RevealedPrices,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        return activated;
+    }
+
+    private static PromptMatchLevel? GetNextPopulatedLevel(
+        ItemSearchPromptSet set,
+        PromptMatchLevel current,
+        bool includeCurrent = false)
+    {
+        var start = (int)current + (includeCurrent ? 0 : 1);
+        for (var value = start; value <= (int)PromptMatchLevel.Broad; value++)
+        {
+            var level = (PromptMatchLevel)value;
+            if (!string.IsNullOrWhiteSpace(set.GetText(level)))
+            {
+                return level;
+            }
+        }
+
+        return null;
     }
 
     private async Task<List<ContractSearchPrompt>> EnsureFallbackPromptsAsync(

@@ -28,6 +28,9 @@
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
                 <Button Content="✎ Editar nome" Click="RenameItem_Click"
                         ToolTip="F2 — altera somente o nome visível, sem recalcular pesquisas ou preços." />
+                <Button Content="Editar dados" Click="EditItemDetails_Click"
+                        IsEnabled="{Binding CanEditRequestedDetails}"
+                        ToolTip="Configura ou limpa a quantidade e a unidade do item manual." />
                 <Button Content="Atualizar" Click="Refresh_Click" />
                 <Button Content="Pausar automação" Click="Pause_Click" />
                 <Button Content="Retomar automação" Click="Resume_Click" />

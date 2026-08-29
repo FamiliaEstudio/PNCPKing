@@ -92,6 +92,77 @@ public sealed record PriceCacheProgress
         : Math.Clamp(CompletedContracts * 100d / TotalContracts, 0d, 100d);
 }
 
+public sealed record NationalPriceIndexPolicy
+{
+    public bool Authorized { get; init; }
+    public bool Enabled { get; init; }
+    public bool Paused { get; init; }
+    public PriceCacheStatus Status { get; init; } = PriceCacheStatus.NotAuthorized;
+    public DateOnly? WindowStart { get; init; }
+    public DateOnly? WindowEnd { get; init; }
+    public DateTimeOffset? AuthorizedAt { get; init; }
+    public DateTimeOffset? LastStartedAt { get; init; }
+    public DateTimeOffset? LastCompletedAt { get; init; }
+    public string LastError { get; init; } = string.Empty;
+}
+
+public sealed record NationalPriceIndexEstimate
+{
+    public required DateOnly StartDate { get; init; }
+    public required DateOnly EndDate { get; init; }
+    public required long EligibleItems { get; init; }
+    public required long CompletedItems { get; init; }
+    public required long EstimatedMinimumBytes { get; init; }
+    public required long EstimatedMaximumBytes { get; init; }
+    public required long EstimatedNetworkBytes { get; init; }
+    public required long AvailableFreeBytes { get; init; }
+    public required long SafetyReserveBytes { get; init; }
+    public required TimeSpan EstimatedMinimumDuration { get; init; }
+    public required TimeSpan EstimatedMaximumDuration { get; init; }
+
+    public long RemainingItems => Math.Max(0, EligibleItems - CompletedItems);
+    public long RequiredFreeBytes => checked(EstimatedMaximumBytes + SafetyReserveBytes);
+    public bool HasEnoughSpace => AvailableFreeBytes >= RequiredFreeBytes;
+}
+
+public sealed record NationalPriceIndexCheckpoint
+{
+    public required string ContractId { get; init; }
+    public required PriceCacheContractStatus Status { get; init; }
+    public int Attempts { get; init; }
+    public DateTimeOffset? NextRetryAt { get; init; }
+    public string LastError { get; init; } = string.Empty;
+    public int EligibleItems { get; init; }
+    public int CompletedItems { get; init; }
+    public int PricedItems { get; init; }
+    public int ResultRows { get; init; }
+}
+
+public sealed record NationalPriceIndexWorkItem(
+    ContractRecord Contract,
+    NationalPriceIndexCheckpoint Checkpoint);
+
+public sealed record NationalPriceIndexProgress
+{
+    public required PriceCacheStatus Status { get; init; }
+    public required DateOnly StartDate { get; init; }
+    public required DateOnly EndDate { get; init; }
+    public required long EligibleItems { get; init; }
+    public required long CompletedItems { get; init; }
+    public required long PricedItems { get; init; }
+    public required long ResultRows { get; init; }
+    public required long NoPriceItems { get; init; }
+    public required long PendingContracts { get; init; }
+    public required long FailedContracts { get; init; }
+    public required long OccupiedBytes { get; init; }
+    public TimeSpan? EstimatedRemaining { get; init; }
+    public string Message { get; init; } = string.Empty;
+
+    public double Percentage => EligibleItems <= 0
+        ? Status == PriceCacheStatus.Complete ? 100d : 0d
+        : Math.Clamp(CompletedItems * 100d / EligibleItems, 0d, 100d);
+}
+
 public sealed record PriceCacheLocalPage(
     IReadOnlyList<ItemSearchHit> Hits,
     int Page,

@@ -103,6 +103,8 @@ public sealed class QuotationPackageTests
                 CreatedAt = now,
                 UpdatedAt = now
             });
+        await sourceRepository.UpdateLineRequestedDetailsAsync(lineId, 0m, "");
+        await sourceRepository.ConfirmBasketAsync(lineId, completed.Basket.Key);
 
         var workspace = new QuotationItemSearchWorkspace
         {
@@ -181,6 +183,8 @@ public sealed class QuotationPackageTests
                 Assert.Equal("SP", reference.SupplierUf);
             });
         Assert.True(restored.Line.SelectionConfirmed);
+        Assert.Equal(0m, restored.Line.RequestedQuantity);
+        Assert.Equal(string.Empty, restored.Line.RequestedUnit);
         Assert.Equal("Café premium", restored.Line.DisplayName);
         Assert.Equal("Café torrado", restored.Line.Description);
         Assert.Equal("CATMAT 123456", restored.Line.CatalogSelection?.Label);

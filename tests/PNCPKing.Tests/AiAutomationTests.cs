@@ -459,7 +459,7 @@ public sealed class AiAutomationTests
     }
 
     [Fact]
-    public async Task TimedAutomation_ProcessesFiftyUniqueSharedContractsBeforeEscalatingAllItems()
+    public async Task TimedAutomation_ProcessesFiftyUniqueSharedContractsAndSkipsEmptyPromptLevel()
     {
         var root = CreateTemporaryFolder();
         try
@@ -484,7 +484,7 @@ public sealed class AiAutomationTests
                 [
                     new QuotationImportItem(
                         1, "\"pincel artistico\"", "Pincel", 1, "unidade",
-                        null, null, 1, 3, IntermediateSearchText: "pincel", BroadSearchText: "pincel"),
+                        null, null, 1, 3, IntermediateSearchText: "", BroadSearchText: "pincel"),
                     new QuotationImportItem(
                         2, "\"linha bordado\"", "Linha", 1, "unidade",
                         null, null, 1, 3, IntermediateSearchText: "linha", BroadSearchText: "linha")
@@ -509,11 +509,112 @@ public sealed class AiAutomationTests
             Assert.Equal(60, processed.Count);
             Assert.Equal(60, processed.Select(value => value.ContractId).Distinct().Count());
             Assert.Equal(60, client.ItemListCalls);
-            Assert.All(lines, line =>
-            {
-                Assert.Equal(PromptMatchLevel.Intermediate, line.PromptSet!.ActiveLevel);
-                Assert.Equal(10, line.PromptSet.ContractsAtActiveLevel);
-            });
+            var pincel = lines.Single(line => line.Description == "Pincel");
+            Assert.Equal(PromptMatchLevel.Broad, pincel.PromptSet!.ActiveLevel);
+            Assert.Equal(10, pincel.PromptSet.ContractsAtActiveLevel);
+            var linha = lines.Single(line => line.Description == "Linha");
+            Assert.Equal(PromptMatchLevel.Intermediate, linha.PromptSet!.ActiveLevel);
+            Assert.Equal(10, linha.PromptSet.ContractsAtActiveLevel);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public async Task TimedAutomation_StartsAtFirstPopulatedPromptWhenRestrictiveIsEmpty()
+    {
+        var root = CreateTemporaryFolder();
+        try
+        {
+            var database = Path.Combine(root, "first-populated.db");
+            var contractRepository = new SqliteContractRepository(database);
+            await contractRepository.InitializeAsync();
+            await contractRepository.UpsertContractsAsync([
+                Contract("first-populated-1", "Materiais para terapia ocupacional")
+            ]);
+            var quotationRepository = new SqliteQuotationRepository(database);
+            var quotationService = new QuotationService(
+                quotationRepository,
+                new QuotationAnalyzer());
+            var project = await quotationService.CreateProjectAsync("Primeiro preenchido");
+            var run = await quotationService.CreateTimedAutomationRunAsync(
+                project.Id,
+                SearchGeoFilter.All,
+                new DateOnly(2026, 1, 1),
+                new DateOnly(2026, 12, 31),
+                [
+                    new QuotationImportItem(
+                        1, "", "Pincel", 1, "unidade",
+                        null, null, 1, 3, IntermediateSearchText: "pincel")
+                ],
+                AdequacyWeights.Default,
+                TimeSpan.FromMinutes(5),
+                ["terapia"]);
+            var client = new EmptyItemListPncpClient();
+            await using var itemSearch = new ItemSearchSessionService(
+                client,
+                contractRepository,
+                Path.Combine(root, "temporary.db"));
+            var automation = new TimedQuotationAutomationService(
+                contractRepository,
+                itemSearch,
+                quotationService);
+
+            await automation.RunAsync(run);
+
+            var line = Assert.Single(await quotationRepository.GetLinesAsync(project.Id));
+            Assert.Equal(PromptMatchLevel.Intermediate, line.PromptSet!.ActiveLevel);
+            Assert.Equal(1, line.PromptSet.ContractsAtActiveLevel);
+            Assert.Equal(1, client.ItemListCalls);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public async Task TimedAutomation_WithNoItemPromptsMakesNoItemListCalls()
+    {
+        var root = CreateTemporaryFolder();
+        try
+        {
+            var database = Path.Combine(root, "no-item-prompts.db");
+            var contractRepository = new SqliteContractRepository(database);
+            await contractRepository.InitializeAsync();
+            await contractRepository.UpsertContractsAsync([
+                Contract("no-prompts-1", "Materiais para terapia ocupacional")
+            ]);
+            var quotationRepository = new SqliteQuotationRepository(database);
+            var quotationService = new QuotationService(
+                quotationRepository,
+                new QuotationAnalyzer());
+            var project = await quotationService.CreateProjectAsync("Sem prompts");
+            var run = await quotationService.CreateTimedAutomationRunAsync(
+                project.Id,
+                SearchGeoFilter.All,
+                new DateOnly(2026, 1, 1),
+                new DateOnly(2026, 12, 31),
+                [new QuotationImportItem(1, "", "Pincel", 1, "unidade", null, null, 1)],
+                AdequacyWeights.Default,
+                TimeSpan.FromMinutes(5),
+                ["terapia"]);
+            var client = new EmptyItemListPncpClient();
+            await using var itemSearch = new ItemSearchSessionService(
+                client,
+                contractRepository,
+                Path.Combine(root, "temporary.db"));
+            var automation = new TimedQuotationAutomationService(
+                contractRepository,
+                itemSearch,
+                quotationService);
+
+            await automation.RunAsync(run);
+
+            Assert.Equal(0, client.ItemListCalls);
+            Assert.Empty(await quotationRepository.GetProcessedContractsAsync(run.Id));
         }
         finally
         {

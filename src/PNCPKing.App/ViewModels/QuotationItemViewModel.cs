@@ -150,18 +150,36 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                 OnPropertyChanged(nameof(Header));
                 OnPropertyChanged(nameof(ItemSummary));
                 OnPropertyChanged(nameof(CatalogSelectionSummary));
+                OnPropertyChanged(nameof(CanEditRequestedDetails));
             }
         }
     }
 
     public string Header => Line?.Description ?? "Item da cotação";
 
-    public string ItemSummary => Line is null
-        ? string.Empty
-        : $"Quantidade {Line.RequestedQuantity:N4} {Line.RequestedUnit} · " +
-          $"alvo {Line.RequestedBasketSize:N0} preços · " +
-          $"coletados {Line.CollectedCount:N0} · elegíveis {Line.EligibleCount:N0} · " +
-          $"nível {Line.ActivePromptLevel} · situação {Line.Status}";
+    public string ItemSummary
+    {
+        get
+        {
+            if (Line is null)
+            {
+                return string.Empty;
+            }
+
+            var quantity = Line.Line.RequestedQuantity > 0
+                ? $"Quantidade {Line.Line.RequestedQuantity:N4}"
+                : "Quantidade não informada";
+            var unit = string.IsNullOrWhiteSpace(Line.Line.RequestedUnit)
+                ? "unidade não informada"
+                : $"unidade {Line.Line.RequestedUnit}";
+            return $"{quantity} · {unit} · alvo {Line.RequestedBasketSize:N0} preços · " +
+                   $"coletados {Line.CollectedCount:N0} · elegíveis {Line.EligibleCount:N0} · " +
+                   $"nível {Line.ActivePromptLevel} · situação {Line.Status}";
+        }
+    }
+
+    public bool CanEditRequestedDetails =>
+        Line?.Line.AutomationState == QuotationAutomationItemState.Manual;
 
     public string CatalogQuery
     {
@@ -567,6 +585,19 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         await _main.RefreshQuotationItemAsync(_projectId, _lineId).ConfigureAwait(true);
     }
 
+    public async Task UpdateRequestedDetailsAsync(decimal quantity, string unit)
+    {
+        if (!CanEditRequestedDetails)
+        {
+            throw new InvalidOperationException("Somente itens manuais podem ter quantidade e unidade editadas aqui.");
+        }
+
+        await _quotations.UpdateLineRequestedDetailsAsync(_lineId, quantity, unit)
+            .ConfigureAwait(true);
+        await LoadAsync(SelectedBasket?.Key).ConfigureAwait(true);
+        await _main.RefreshQuotationItemAsync(_projectId, _lineId).ConfigureAwait(true);
+    }
+
     public async Task SearchCatalogAsync(int page = 1)
     {
         if (!IsCatalogAvailable)
@@ -726,7 +757,9 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        if (_workspace is not null && !SearchDefinitionChanged)
+        if (_workspace is not null &&
+            !string.IsNullOrWhiteSpace(SearchText) &&
+            !SearchDefinitionChanged)
         {
             await _itemSearch.SavePreferencesAsync(BuildWorkspace()).ConfigureAwait(true);
         }
@@ -1218,7 +1251,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         _disposed = true;
         _main.TimedQuotationProgressChanged -= OnTimedProgress;
         _searchCancellation?.Cancel();
-        if (_workspace is not null)
+        if (_workspace is not null && !string.IsNullOrWhiteSpace(SearchText))
         {
             try
             {

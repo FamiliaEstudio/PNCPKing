@@ -11,11 +11,10 @@ public sealed class QuotationTests
 {
     private static readonly DateOnly Today = new(2026, 7, 21);
 
-    public static TheoryData<string, decimal, string> InvalidEmptyLineInputs => new()
+    public static TheoryData<string, decimal, string> InvalidManualLineInputs => new()
     {
         { "", 1m, "unidade" },
-        { "Café", 0m, "unidade" },
-        { "Café", 1m, "" }
+        { "Café", -1m, "" }
     };
 
     [Fact]
@@ -62,8 +61,8 @@ public sealed class QuotationTests
     }
 
     [Theory]
-    [MemberData(nameof(InvalidEmptyLineInputs))]
-    public async Task ManualLine_RequiresDescriptionPositiveQuantityAndUnit(
+    [MemberData(nameof(InvalidManualLineInputs))]
+    public async Task ManualLine_RequiresDescriptionAndNonNegativeQuantity(
         string description,
         decimal quantity,
         string unit)
@@ -78,6 +77,40 @@ public sealed class QuotationTests
             new QuotationLineInput(description, quantity, unit, null, null)));
 
         Assert.Empty(await repository.GetLinesAsync(project.Id));
+    }
+
+    [Fact]
+    public async Task ManualLine_AllowsMissingQuantityAndUnit()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer(Today));
+        var project = await service.CreateProjectAsync("Cadastro incompleto");
+
+        var created = await service.CreateLineAsync(
+            project.Id,
+            new QuotationLineInput("Café", 0m, "", null, null));
+
+        Assert.Equal(0m, created.Line.RequestedQuantity);
+        Assert.Equal(string.Empty, created.Line.RequestedUnit);
+        Assert.Null(new QuotationLineDisplay(created).RequestedQuantity);
+        Assert.Empty(created.References);
+        Assert.Empty(created.Baskets);
+    }
+
+    [Fact]
+    public void MissingRequestedQuantityAndUnit_UseNeutralAdequacyScores()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+
+        var scored = analyzer.ScoreReference(
+            Line("Café torrado", 0m, ""),
+            Reference("optional", "c1", "11222333000181", 100m));
+
+        Assert.Equal(QuotationReferenceState.Eligible, scored.State);
+        Assert.Equal(10m, scored.Adequacy.UnitScore);
+        Assert.Equal(5m, scored.Adequacy.QuantityScore);
+        Assert.Contains("não identificada", scored.Adequacy.Explanation, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -837,6 +870,65 @@ public sealed class QuotationTests
     }
 
     [Fact]
+    public async Task RequestedDetails_UpdatePreservesItemDataAndInvalidatesConfirmationOnlyWhenChanged()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var project = await repository.CreateProjectAsync("Dados opcionais");
+        var lineId = Guid.NewGuid();
+        await repository.SaveSampleAsync(
+            project.Id,
+            lineId,
+            new QuotationLineInput("Café torrado", 10m, "pacote", null, null),
+            [
+                Reference("details-a", "c1", "11222333000181", 90m) with { LineId = lineId },
+                Reference("details-b", "c2", "60701190000104", 100m) with { LineId = lineId },
+                Reference("details-c", "c3", "33000167000101", 110m) with { LineId = lineId }
+            ]);
+        var service = new QuotationService(repository, new QuotationAnalyzer(Today));
+        var before = Assert.Single(await service.GetAnalysesAsync(project.Id));
+        await repository.ConfirmBasketAsync(lineId, before.Baskets.Single().Key);
+        await repository.RenameLineDisplayNameAsync(lineId, "Café premium");
+        await repository.SetLineCatalogSelectionAsync(lineId, new QuotationCatalogSelection
+        {
+            Kind = CatalogKind.Catmat,
+            Code = "123456",
+            Description = "CAFÉ TORRADO",
+            SelectedAt = DateTimeOffset.UtcNow
+        });
+        var confirmed = Assert.Single(await repository.GetLinesAsync(project.Id));
+
+        await service.UpdateLineRequestedDetailsAsync(lineId, 0m, "");
+
+        var cleared = Assert.Single(await repository.GetLinesAsync(project.Id));
+        Assert.Equal(0m, cleared.RequestedQuantity);
+        Assert.Equal(string.Empty, cleared.RequestedUnit);
+        Assert.False(cleared.SelectionConfirmed);
+        Assert.Equal(confirmed.SelectedBasketKey, cleared.SelectedBasketKey);
+        Assert.Equal(confirmed.SampleVersion, cleared.SampleVersion);
+        Assert.Equal(confirmed.SearchText, cleared.SearchText);
+        Assert.Equal(confirmed.PromptSet, cleared.PromptSet);
+        Assert.Equal("Café premium", cleared.DisplayName);
+        Assert.Equal("CATMAT 123456", cleared.CatalogSelection?.Label);
+        Assert.Equal(3, (await repository.GetReferencesAsync(lineId)).Count);
+
+        var clearedAnalysis = Assert.Single(await service.GetAnalysesAsync(project.Id));
+        await repository.ConfirmBasketAsync(lineId, clearedAnalysis.Baskets.Single().Key);
+        await service.UpdateLineRequestedDetailsAsync(lineId, 0m, "");
+        Assert.True(Assert.Single(await repository.GetLinesAsync(project.Id)).SelectionConfirmed);
+
+        await service.UpdateLineRequestedDetailsAsync(lineId, 25m, " caixa ");
+        var completed = Assert.Single(await repository.GetLinesAsync(project.Id));
+        Assert.Equal(25m, completed.RequestedQuantity);
+        Assert.Equal("caixa", completed.RequestedUnit);
+        Assert.False(completed.SelectionConfirmed);
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+            service.UpdateLineRequestedDetailsAsync(lineId, -1m, "caixa"));
+        Assert.Equal(25m, Assert.Single(await repository.GetLinesAsync(project.Id)).RequestedQuantity);
+    }
+
+    [Fact]
     public async Task Workbook_UsesDisplayNameAndCatalogCodeInItemTitle()
     {
         var analyzer = new QuotationAnalyzer(Today);
@@ -1328,6 +1420,45 @@ public sealed class QuotationTests
                     .Select(cell => cell.GetValue<decimal>()).ToArray());
             Assert.DoesNotContain(referencesSheet.CellsUsed(), cell =>
                 cell.GetString().Contains("1.5", StringComparison.Ordinal));
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            var directory = Path.GetDirectoryName(path)!;
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public async Task Workbook_LeavesMissingRequestedQuantityAndUnitBlank()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var project = new QuotationProject(
+            Guid.NewGuid(),
+            "Campos opcionais",
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow);
+        var analysis = analyzer.Analyze(
+            Line("Café torrado", 0m, ""),
+            [
+                Reference("blank-a", "c1", "11222333000181", 90m),
+                Reference("blank-b", "c2", "60701190000104", 100m),
+                Reference("blank-c", "c3", "33000167000101", 110m)
+            ]);
+        analysis = Confirm(analysis, analysis.Baskets.Single());
+        var path = Path.Combine(
+            Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"), "blank-fields.xlsx");
+        try
+        {
+            await new QuotationWorkbookService().ExportAsync(
+                path,
+                new QuotationProjectReport(project, [analysis]),
+                "Maria de Souza");
+
+            using var workbook = new XLWorkbook(path);
+            var references = workbook.Worksheet("Referências");
+            Assert.All(references.Range("C2:C4").Cells(), cell => Assert.True(cell.IsEmpty()));
+            Assert.All(references.Range("D2:D4").Cells(), cell => Assert.True(cell.IsEmpty()));
         }
         finally
         {

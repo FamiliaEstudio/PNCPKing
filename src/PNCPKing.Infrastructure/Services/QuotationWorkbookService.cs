@@ -534,8 +534,14 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             var basket = analysis.Line.SelectionConfirmed ? analysis.SelectedBasket : null;
             sheet.Cell(row, 1).Value = itemNumber++;
             sheet.Cell(row, 2).Value = FormatLineName(analysis.Line);
-            sheet.Cell(row, 3).Value = analysis.Line.RequestedQuantity;
-            sheet.Cell(row, 4).Value = analysis.Line.RequestedUnit;
+            if (analysis.Line.RequestedQuantity > 0)
+            {
+                sheet.Cell(row, 3).Value = analysis.Line.RequestedQuantity;
+            }
+            if (!string.IsNullOrWhiteSpace(analysis.Line.RequestedUnit))
+            {
+                sheet.Cell(row, 4).Value = analysis.Line.RequestedUnit;
+            }
             sheet.Cell(row, 5).Value = basket is not null
                 ? "Resolvido"
                 : analysis.Baskets.Count == 0 ? "Sem cesta válida" : "Aguardando confirmação";
@@ -598,8 +604,14 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 var reference = entry.Reference;
                 sheet.Cell(row, 1).Value = itemNumber;
                 sheet.Cell(row, 2).Value = FormatLineName(analysis.Line);
-                sheet.Cell(row, 3).Value = analysis.Line.RequestedQuantity;
-                sheet.Cell(row, 4).Value = analysis.Line.RequestedUnit;
+                if (analysis.Line.RequestedQuantity > 0)
+                {
+                    sheet.Cell(row, 3).Value = analysis.Line.RequestedQuantity;
+                }
+                if (!string.IsNullOrWhiteSpace(analysis.Line.RequestedUnit))
+                {
+                    sheet.Cell(row, 4).Value = analysis.Line.RequestedUnit;
+                }
                 sheet.Cell(row, 5).Value = reference.SupplierName;
                 sheet.Cell(row, 6).Value = FormatBrazilianTaxId(reference.SupplierTaxId);
                 sheet.Cell(row, 6).Style.NumberFormat.Format = "@";

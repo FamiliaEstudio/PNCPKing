@@ -5,9 +5,11 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Threading;
 using PNCPKing.App.Services;
 using PNCPKing.App.ViewModels;
 using PNCPKing.Core.Models;
+using PNCPKing.Infrastructure.Services;
 
 namespace PNCPKing.App.Views;
 
@@ -17,18 +19,31 @@ public partial class MainWindow : Window
     private const uint MonitorDefaultToNearest = 0x00000002;
     private readonly MainViewModel _viewModel;
     private readonly DataGridColumnLayoutService _columnLayouts;
+    private readonly GuardMasterService _guardMasterService;
+    private readonly DispatcherTimer _itemResultHoldTimer = new()
+    {
+        Interval = TimeSpan.FromSeconds(1)
+    };
+    private ItemSearchDisplayRow? _itemResultHoldRow;
+    private Point _itemResultHoldOrigin;
     private bool _shutdownInProgress;
     private bool _shutdownComplete;
     private int _manualBasketInteraction;
 
-    public MainWindow(MainViewModel viewModel, DataGridColumnLayoutService columnLayouts)
+    public MainWindow(
+        MainViewModel viewModel,
+        DataGridColumnLayoutService columnLayouts,
+        GuardMasterService guardMasterService)
     {
         _viewModel = viewModel;
         _columnLayouts = columnLayouts;
+        _guardMasterService = guardMasterService;
         InitializeComponent();
         DataContext = viewModel;
         ClampInitialSizeToWorkArea();
         SourceInitialized += MainWindow_SourceInitialized;
+        Deactivated += (_, _) => CancelItemResultHold();
+        _itemResultHoldTimer.Tick += ItemResultHoldTimer_Tick;
         _columnLayouts.Register("item-results", ItemResultsGrid);
         _columnLayouts.Register("quotation-lines", QuotationLinesGrid);
         _columnLayouts.Register("quotation-baskets", QuotationBasketsGrid);
@@ -181,6 +196,9 @@ public partial class MainWindow : Window
     private void CatalogDictionary_Click(object sender, RoutedEventArgs e) =>
         _viewModel.OpenCatalogDictionary(this);
 
+    private void PncpGuard_Click(object sender, RoutedEventArgs e) =>
+        new GuardWindow(_guardMasterService) { Owner = this }.ShowDialog();
+
     private void QuotationLinesGrid_PreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.F2) return;
@@ -246,18 +264,82 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ItemResultsGrid_PreviewMouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    private void ItemResultsGrid_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (FindItemResultRow(e.OriginalSource as DependencyObject, out var row, out _))
+        CancelItemResultHold();
+        if (e.ChangedButton != MouseButton.Left ||
+            e.ClickCount != 1 ||
+            !FindItemResultRow(e.OriginalSource as DependencyObject, out var row, out var interactive) ||
+            interactive)
         {
-            ItemResultsGrid.SelectedItem = row;
-            _viewModel.ToggleItemPricePin(row);
-            e.Handled = true;
+            return;
         }
+
+        _itemResultHoldRow = row;
+        _itemResultHoldOrigin = e.GetPosition(ItemResultsGrid);
+        _itemResultHoldTimer.Start();
+    }
+
+    private void ItemResultsGrid_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (_itemResultHoldRow is null)
+        {
+            return;
+        }
+
+        var current = e.GetPosition(ItemResultsGrid);
+        if (e.LeftButton != MouseButtonState.Pressed ||
+            Math.Abs(current.X - _itemResultHoldOrigin.X) > SystemParameters.MinimumHorizontalDragDistance ||
+            Math.Abs(current.Y - _itemResultHoldOrigin.Y) > SystemParameters.MinimumVerticalDragDistance)
+        {
+            CancelItemResultHold();
+        }
+    }
+
+    private void ItemResultsGrid_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton == MouseButton.Left)
+        {
+            CancelItemResultHold();
+        }
+    }
+
+    private void ItemResultsGrid_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        CancelItemResultHold();
+        if (e.ChangedButton != MouseButton.Right ||
+            !FindItemResultRow(e.OriginalSource as DependencyObject, out var row, out var interactive) ||
+            interactive)
+        {
+            return;
+        }
+
+        _viewModel.ClearItemPriceRetention(row);
+        e.Handled = true;
+    }
+
+    private void ItemResultHoldTimer_Tick(object? sender, EventArgs e)
+    {
+        var row = _itemResultHoldRow;
+        CancelItemResultHold();
+        if (row is null || Mouse.LeftButton != MouseButtonState.Pressed)
+        {
+            return;
+        }
+
+        ItemResultsGrid.SelectedItem = row;
+        _viewModel.ToggleItemPriceBasketSelection(row);
+    }
+
+    private void CancelItemResultHold()
+    {
+        _itemResultHoldTimer.Stop();
+        _itemResultHoldRow = null;
     }
 
     private void ItemResultsGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
+        CancelItemResultHold();
         if (e.ChangedButton != MouseButton.Left ||
             !FindItemResultRow(e.OriginalSource as DependencyObject, out var row, out var interactive) ||
             interactive)
@@ -266,7 +348,7 @@ public partial class MainWindow : Window
         }
 
         ItemResultsGrid.SelectedItem = row;
-        _viewModel.ToggleItemPriceBasketSelection(row);
+        _viewModel.ToggleItemPricePin(row);
         e.Handled = true;
     }
 

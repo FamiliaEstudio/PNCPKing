@@ -57,6 +57,50 @@ public interface IPriceCacheRepository
         CancellationToken cancellationToken = default);
     Task<PriceCacheProgress> GetProgressAsync(CancellationToken cancellationToken = default);
     Task RemoveBackgroundCacheAsync(CancellationToken cancellationToken = default);
+    Task<NationalPriceIndexPolicy> GetNationalPriceIndexPolicyAsync(
+        CancellationToken cancellationToken = default);
+    Task<NationalPriceIndexEstimate> EstimateNationalPriceIndexAsync(
+        DateOnly startDate,
+        DateOnly endDate,
+        CancellationToken cancellationToken = default);
+    Task SetNationalPriceIndexAuthorizationAsync(
+        bool authorized,
+        DateOnly startDate,
+        DateOnly endDate,
+        CancellationToken cancellationToken = default);
+    Task SetNationalPriceIndexPausedAsync(
+        bool paused,
+        string? reason = null,
+        CancellationToken cancellationToken = default);
+    Task SetNationalPriceIndexStatusAsync(
+        PriceCacheStatus status,
+        string? message = null,
+        CancellationToken cancellationToken = default);
+    Task PrepareNationalPriceIndexAsync(
+        DateOnly startDate,
+        DateOnly endDate,
+        CancellationToken cancellationToken = default);
+    Task<NationalPriceIndexWorkItem?> GetNextNationalPriceWorkAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default);
+    Task MarkNationalPriceContractDownloadingAsync(
+        string contractId,
+        CancellationToken cancellationToken = default);
+    Task MarkNationalPriceContractCompleteAsync(
+        string contractId,
+        CancellationToken cancellationToken = default);
+    Task MarkNationalPriceContractFailedAsync(
+        string contractId,
+        string error,
+        DateTimeOffset nextRetryAt,
+        CancellationToken cancellationToken = default);
+    Task MarkNationalPriceContractPendingAsync(
+        string contractId,
+        string? message = null,
+        CancellationToken cancellationToken = default);
+    Task<NationalPriceIndexProgress> GetNationalPriceIndexProgressAsync(
+        CancellationToken cancellationToken = default);
+    Task RemoveBackgroundPricesAsync(CancellationToken cancellationToken = default);
     Task<PriceCacheLocalPage> SearchLocalAsync(
         SearchQuery filters,
         SearchExpression expression,

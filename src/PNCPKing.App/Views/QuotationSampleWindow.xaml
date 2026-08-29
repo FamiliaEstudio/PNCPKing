@@ -36,9 +36,9 @@
         <TextBox x:Name="DescriptionTextBox" Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2"
                  TextWrapping="Wrap" AcceptsReturn="True" Height="65" VerticalScrollBarVisibility="Auto" />
 
-        <TextBlock Grid.Row="4" Text="Quantidade e unidade" VerticalAlignment="Center" />
-        <TextBox x:Name="QuantityTextBox" Grid.Row="4" Grid.Column="1" />
-        <TextBox x:Name="UnitTextBox" Grid.Row="4" Grid.Column="2" ToolTip="Ex.: pacote, caixa, unidade" />
+        <TextBlock Grid.Row="4" Text="Quantidade e unidade (opcionais)" VerticalAlignment="Center" />
+        <TextBox x:Name="QuantityTextBox" Grid.Row="4" Grid.Column="1" ToolTip="Quantidade opcional" />
+        <TextBox x:Name="UnitTextBox" Grid.Row="4" Grid.Column="2" ToolTip="Unidade opcional; ex.: pacote, caixa, unidade" />
 
         <TextBlock Grid.Row="5" Text="Faixa unitária opcional" VerticalAlignment="Center" />
         <Grid Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2">

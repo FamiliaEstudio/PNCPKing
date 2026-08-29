@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 21;
+    public const int CurrentSchemaVersion = 25;
 
     private const string GeographicGroupExpression = "CASE WHEN c.geo_layer = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -512,6 +512,151 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             span.Complete();
             version = 21;
+        }
+
+        if (version < 22)
+        {
+            using var span = _performance.Begin("startup", "schema-v22");
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = (SqliteTransaction)transaction;
+            migration.CommandText = SchemaV22Sql;
+            await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 22 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            span.Complete();
+            version = 22;
+        }
+
+        if (version < 23)
+        {
+            using var span = _performance.Begin("startup", "schema-v23");
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = (SqliteTransaction)transaction;
+            migration.CommandText = SchemaV23Sql;
+            await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 23 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            span.Complete();
+            version = 23;
+        }
+
+        if (version < 24)
+        {
+            using var span = _performance.Begin("startup", "schema-v24");
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            if (!await HasColumnAsync(
+                    connection,
+                    (SqliteTransaction)transaction,
+                    "price_cache_control",
+                    "prepared_window_start",
+                    cancellationToken).ConfigureAwait(false))
+            {
+                await using var columns = connection.CreateCommand();
+                columns.Transaction = (SqliteTransaction)transaction;
+                columns.CommandText = """
+                    ALTER TABLE price_cache_control ADD COLUMN prepared_window_start TEXT;
+                    ALTER TABLE price_cache_control ADD COLUMN prepared_window_end TEXT;
+                    ALTER TABLE price_cache_control ADD COLUMN indexed_contract_count INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE price_cache_control ADD COLUMN indexed_complete_count INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE price_cache_control ADD COLUMN indexed_pending_count INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE price_cache_control ADD COLUMN indexed_failed_count INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE price_cache_control ADD COLUMN indexed_item_count INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE price_cache_control ADD COLUMN indexed_active_result_count INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE price_cache_control ADD COLUMN indexed_cancelled_result_count INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE price_cache_control ADD COLUMN statistics_suspended INTEGER NOT NULL DEFAULT 0;
+                    """;
+                await columns.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            if (!await HasColumnAsync(
+                    connection,
+                    (SqliteTransaction)transaction,
+                    "price_cache_contracts",
+                    "publication_date",
+                    cancellationToken).ConfigureAwait(false))
+            {
+                await using var column = connection.CreateCommand();
+                column.Transaction = (SqliteTransaction)transaction;
+                column.CommandText =
+                    "ALTER TABLE price_cache_contracts ADD COLUMN publication_date TEXT NOT NULL DEFAULT '';";
+                await column.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using (var migration = connection.CreateCommand())
+            {
+                migration.Transaction = (SqliteTransaction)transaction;
+                migration.CommandText = SchemaV24Sql;
+                await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 24 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            span.Complete();
+            version = 24;
+        }
+
+        if (version < 25)
+        {
+            EnsureMigrationSpace();
+            using var span = _performance.Begin("startup", "schema-v25");
+            ReportInitialization(
+                progress,
+                previousVersion,
+                35,
+                "Preparando índice nacional de preços",
+                "Criando checkpoints de preços sem alterar itens ou resultados existentes…");
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            if (!await HasColumnAsync(
+                    connection,
+                    (SqliteTransaction)transaction,
+                    "price_cache_contracts",
+                    "price_index_status",
+                    cancellationToken).ConfigureAwait(false))
+            {
+                await using var columns = connection.CreateCommand();
+                columns.Transaction = (SqliteTransaction)transaction;
+                columns.CommandText = """
+                    ALTER TABLE price_cache_contracts ADD COLUMN price_index_status INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE price_cache_contracts ADD COLUMN price_index_attempts INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE price_cache_contracts ADD COLUMN price_index_last_error TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE price_cache_contracts ADD COLUMN price_index_next_retry_at TEXT;
+                    ALTER TABLE price_cache_contracts ADD COLUMN price_index_started_at TEXT;
+                    ALTER TABLE price_cache_contracts ADD COLUMN price_index_completed_at TEXT;
+                    ALTER TABLE price_cache_contracts ADD COLUMN price_index_eligible_item_count INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE price_cache_contracts ADD COLUMN price_index_completed_item_count INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE price_cache_contracts ADD COLUMN price_index_priced_item_count INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE price_cache_contracts ADD COLUMN price_index_result_count INTEGER NOT NULL DEFAULT 0;
+                    """;
+                await columns.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using (var migration = connection.CreateCommand())
+            {
+                migration.Transaction = (SqliteTransaction)transaction;
+                migration.CommandText = SchemaV25Sql;
+                await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 25 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            span.Complete();
+            version = 25;
         }
 
         stopwatch.Stop();
@@ -1261,14 +1406,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         pageSize = Math.Clamp(pageSize, 1, 500);
         randomPivot = Math.Clamp(randomPivot, 0, long.MaxValue - 1);
         var candidateMatch = expression.CandidateMatchQuery;
+        var itemMatch = expression.ItemMatchQuery;
         var explicitMatch = expression.ExplicitContractMatchQuery;
-        var combinedCandidateMatch = CombineFtsQueries(candidateMatch, explicitMatch);
-        var joinsFts = candidateMatch.Length > 0;
         var conditions = new List<string>();
-        if (joinsFts)
-        {
-            conditions.Add("contracts_fts MATCH $combinedCandidateMatch");
-        }
         var geoFilter = filters.EffectiveGeoFilter;
         switch (geoFilter.Kind)
         {
@@ -1294,8 +1434,47 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         }
 
         var where = conditions.Count == 0 ? string.Empty : " WHERE " + string.Join(" AND ", conditions);
-        var ftsJoin = joinsFts
-            ? "JOIN contracts_fts ON contracts_fts.rowid = c.rowid"
+        var indexedItemCondition = itemMatch.Length > 0
+            ? """
+              EXISTS(
+                  SELECT 1
+                    FROM items i
+                    JOIN items_fts ON items_fts.rowid = i.rowid
+                   WHERE i.contract_id = indexed_contract.pncp_id
+                     AND items_fts MATCH $itemMatch)
+              """
+            : "EXISTS(SELECT 1 FROM items i WHERE i.contract_id = indexed_contract.pncp_id)";
+        var unindexedContractSource = candidateMatch.Length > 0
+            ? """
+              SELECT fallback.rowid
+                FROM contracts fallback
+                JOIN contracts_fts ON contracts_fts.rowid = fallback.rowid
+               WHERE contracts_fts MATCH $candidateMatch
+                 AND NOT EXISTS(
+                     SELECT 1
+                       FROM contract_item_snapshots s
+                      WHERE s.contract_id = fallback.pncp_id
+                        AND COALESCE(s.source_global_updated_at, '') =
+                            COALESCE(fallback.global_updated_at, ''))
+              """
+            : """
+              SELECT fallback.rowid
+                FROM contracts fallback
+              WHERE NOT EXISTS(
+                     SELECT 1
+                       FROM contract_item_snapshots s
+                      WHERE s.contract_id = fallback.pncp_id
+                        AND COALESCE(s.source_global_updated_at, '') =
+                            COALESCE(fallback.global_updated_at, ''))
+              """;
+        var explicitContractUnion = explicitMatch.Length > 0
+            ? """
+              UNION
+              SELECT explicit_contract.rowid
+                FROM contracts explicit_contract
+                JOIN contracts_fts ON contracts_fts.rowid = explicit_contract.rowid
+               WHERE contracts_fts MATCH $explicitMatch
+              """
             : string.Empty;
         var geographicLayerExpression = explicitMatch.Length > 0
             ? """
@@ -1320,7 +1499,19 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = $"""
-            WITH ranked AS (
+            WITH candidate_rows AS (
+                SELECT indexed_contract.rowid
+                  FROM contracts indexed_contract
+                  JOIN contract_item_snapshots snapshot
+                    ON snapshot.contract_id = indexed_contract.pncp_id
+                   AND COALESCE(snapshot.source_global_updated_at, '') =
+                       COALESCE(indexed_contract.global_updated_at, '')
+                 WHERE {indexedItemCondition}
+                UNION
+                {unindexedContractSource}
+                {explicitContractUnion}
+            ),
+            ranked AS (
                 SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
                        c.additional_information, c.process, c.organization, c.unit, c.municipality,
                        c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
@@ -1330,8 +1521,8 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                        {GeographicGroupExpression} AS group_rank,
                        CASE WHEN COALESCE(c.random_order_key, 0) >= $randomPivot THEN 0 ELSE 1 END AS rotation_band,
                        COALESCE(c.random_order_key, 0) AS random_order_key
-                  FROM contracts c
-                  {ftsJoin}
+                  FROM candidate_rows candidate
+                  JOIN contracts c ON c.rowid = candidate.rowid
                   {where}
             )
             SELECT * FROM ranked
@@ -1339,9 +1530,13 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
              ORDER BY geographic_layer, group_rank, rotation_band, random_order_key, pncp_id
              LIMIT $limit;
             """;
-        if (joinsFts)
+        if (candidateMatch.Length > 0)
         {
-            command.Parameters.AddWithValue("$combinedCandidateMatch", combinedCandidateMatch);
+            command.Parameters.AddWithValue("$candidateMatch", candidateMatch);
+        }
+        if (itemMatch.Length > 0)
+        {
+            command.Parameters.AddWithValue("$itemMatch", itemMatch);
         }
         if (explicitMatch.Length > 0)
         {
@@ -1515,13 +1710,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             .ConfigureAwait(false);
 
         var candidateMatch = expression.CandidateMatchQuery;
+        var itemMatch = expression.ItemMatchQuery;
         var explicitMatch = expression.ExplicitContractMatchQuery;
-        var combinedCandidateMatch = CombineFtsQueries(candidateMatch, explicitMatch);
         var candidateConditions = new List<string>();
-        if (candidateMatch.Length > 0)
-        {
-            candidateConditions.Add("contracts_fts MATCH $combinedCandidateMatch");
-        }
 
         switch (filters.EffectiveGeoFilter.Kind)
         {
@@ -1549,10 +1740,62 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         var candidateWhere = candidateConditions.Count == 0
             ? string.Empty
             : " WHERE " + string.Join(" AND ", candidateConditions);
-        var candidateFtsJoin = candidateMatch.Length > 0
-            ? "JOIN contracts_fts ON contracts_fts.rowid = c.rowid"
+        var indexedItemCondition = itemMatch.Length > 0
+            ? """
+              EXISTS(
+                  SELECT 1
+                    FROM items indexed_item
+                    JOIN items_fts ON items_fts.rowid = indexed_item.rowid
+                   WHERE indexed_item.contract_id = indexed_contract.pncp_id
+                     AND items_fts MATCH $itemMatch)
+              """
+            : "EXISTS(SELECT 1 FROM items indexed_item WHERE indexed_item.contract_id = indexed_contract.pncp_id)";
+        var unindexedContractSource = candidateMatch.Length > 0
+            ? """
+              SELECT fallback.rowid
+                FROM contracts fallback
+                JOIN contracts_fts ON contracts_fts.rowid = fallback.rowid
+               WHERE contracts_fts MATCH $candidateMatch
+                 AND NOT EXISTS(
+                     SELECT 1
+                       FROM contract_item_snapshots s
+                      WHERE s.contract_id = fallback.pncp_id
+                        AND COALESCE(s.source_global_updated_at, '') =
+                            COALESCE(fallback.global_updated_at, ''))
+              """
+            : """
+              SELECT fallback.rowid
+                FROM contracts fallback
+              WHERE NOT EXISTS(
+                     SELECT 1
+                       FROM contract_item_snapshots s
+                      WHERE s.contract_id = fallback.pncp_id
+                        AND COALESCE(s.source_global_updated_at, '') =
+                            COALESCE(fallback.global_updated_at, ''))
+              """;
+        var explicitContractUnion = explicitMatch.Length > 0
+            ? """
+              UNION
+              SELECT explicit_contract.rowid
+                FROM contracts explicit_contract
+                JOIN contracts_fts ON contracts_fts.rowid = explicit_contract.rowid
+               WHERE contracts_fts MATCH $explicitMatch
+              """
             : string.Empty;
-        var itemMatch = expression.ItemMatchQuery;
+        var candidateRowsCte = $"""
+            candidate_rows AS (
+                SELECT indexed_contract.rowid
+                  FROM contracts indexed_contract
+                  JOIN contract_item_snapshots snapshot
+                    ON snapshot.contract_id = indexed_contract.pncp_id
+                   AND COALESCE(snapshot.source_global_updated_at, '') =
+                       COALESCE(indexed_contract.global_updated_at, '')
+                 WHERE {indexedItemCondition}
+                UNION
+                {unindexedContractSource}
+                {explicitContractUnion}
+            )
+            """;
         var itemFtsJoin = itemMatch.Length > 0
             ? "JOIN items_fts ON items_fts.rowid = i.rowid"
             : string.Empty;
@@ -1565,14 +1808,23 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         await using (var count = connection.CreateCommand())
         {
             count.CommandText = $"""
+                WITH {candidateRowsCte}
                 SELECT COUNT(*)
-                  FROM contracts c
-                  {candidateFtsJoin}
+                  FROM candidate_rows candidate
+                  JOIN contracts c ON c.rowid = candidate.rowid
                   {candidateWhere};
                 """;
             if (candidateMatch.Length > 0)
             {
-                count.Parameters.AddWithValue("$combinedCandidateMatch", combinedCandidateMatch);
+                count.Parameters.AddWithValue("$candidateMatch", candidateMatch);
+            }
+            if (itemMatch.Length > 0)
+            {
+                count.Parameters.AddWithValue("$itemMatch", itemMatch);
+            }
+            if (explicitMatch.Length > 0)
+            {
+                count.Parameters.AddWithValue("$explicitMatch", explicitMatch);
             }
 
             AddFilterParameters(count, filters);
@@ -1586,10 +1838,11 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         await using (var cached = connection.CreateCommand())
         {
             cached.CommandText = $"""
-                WITH candidate_contracts AS (
+                WITH {candidateRowsCte},
+                candidate_contracts AS (
                     SELECT c.pncp_id
-                      FROM contracts c
-                      {candidateFtsJoin}
+                      FROM candidate_rows candidate
+                      JOIN contracts c ON c.rowid = candidate.rowid
                       {candidateWhere}
                 )
                 SELECT i.description, i.unit,
@@ -1609,12 +1862,16 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                 """;
             if (candidateMatch.Length > 0)
             {
-                cached.Parameters.AddWithValue("$combinedCandidateMatch", combinedCandidateMatch);
+                cached.Parameters.AddWithValue("$candidateMatch", candidateMatch);
             }
 
             if (itemMatch.Length > 0)
             {
                 cached.Parameters.AddWithValue("$itemMatch", itemMatch);
+            }
+            if (explicitMatch.Length > 0)
+            {
+                cached.Parameters.AddWithValue("$explicitMatch", explicitMatch);
             }
 
             cached.Parameters.AddWithValue("$complete", (int)ItemHydrationStatus.Complete);
@@ -1848,6 +2105,72 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             ParseDateTime(reader, 3));
     }
 
+    public async Task<IReadOnlyDictionary<string, ContractItemSnapshot?>> GetItemSnapshotsAsync(
+        IReadOnlyList<ContractRecord> contracts,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(contracts);
+        var contractIds = contracts
+            .Select(contract => contract.PncpId)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var snapshots = contractIds.ToDictionary(
+            contractId => contractId,
+            _ => (ContractItemSnapshot?)null,
+            StringComparer.Ordinal);
+        if (contractIds.Length == 0)
+        {
+            return snapshots;
+        }
+
+        await using var readerLease = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using (var selection = connection.CreateCommand())
+        {
+            selection.CommandText = """
+                CREATE TEMP TABLE IF NOT EXISTS selected_snapshot_contracts(
+                    contract_id TEXT PRIMARY KEY
+                ) WITHOUT ROWID;
+                DELETE FROM selected_snapshot_contracts;
+                """;
+            await selection.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText =
+                "INSERT OR IGNORE INTO selected_snapshot_contracts(contract_id) VALUES($contractId);";
+            insert.Parameters.Add("$contractId", SqliteType.Text);
+            foreach (var contractId in contractIds)
+            {
+                insert.Parameters["$contractId"].Value = contractId;
+                await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT s.contract_id, s.fetched_at, s.item_count, s.source_global_updated_at
+              FROM selected_snapshot_contracts selected
+              JOIN contract_item_snapshots s ON s.contract_id = selected.contract_id;
+            """;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var fetchedAt = ParseDateTime(reader, 1)
+                ?? throw new InvalidDataException($"Snapshot de itens inválido para {reader.GetString(0)}.");
+            snapshots[reader.GetString(0)] = new ContractItemSnapshot(
+                reader.GetString(0),
+                fetchedAt,
+                reader.GetInt32(2),
+                ParseDateTime(reader, 3));
+        }
+
+        return snapshots;
+    }
+
     public async Task<ProcurementItem?> GetItemAsync(
         string contractId,
         long itemNumber,
@@ -2054,11 +2377,132 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         return new CachedItemResults(item, results);
     }
 
-    public async Task ReplaceItemResultsAsync(
+    public async Task<IReadOnlyDictionary<(string ContractId, long ItemNumber), CachedItemResults?>>
+        GetCachedItemResultsAsync(
+            IReadOnlyList<ItemSearchHit> hits,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(hits);
+        var keys = hits
+            .Select(hit => (ContractId: hit.Contract.PncpId, ItemNumber: hit.Item.ItemNumber))
+            .Distinct()
+            .ToArray();
+        var cached = keys.ToDictionary(
+            key => key,
+            _ => (CachedItemResults?)null);
+        if (keys.Length == 0)
+        {
+            return cached;
+        }
+
+        await using var readerLease = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using (var selection = connection.CreateCommand())
+        {
+            selection.CommandText = """
+                CREATE TEMP TABLE IF NOT EXISTS selected_cached_items(
+                    contract_id TEXT NOT NULL,
+                    item_number INTEGER NOT NULL,
+                    PRIMARY KEY(contract_id, item_number)
+                ) WITHOUT ROWID;
+                DELETE FROM selected_cached_items;
+                """;
+            await selection.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = """
+                INSERT OR IGNORE INTO selected_cached_items(contract_id, item_number)
+                VALUES($contractId, $itemNumber);
+                """;
+            insert.Parameters.Add("$contractId", SqliteType.Text);
+            insert.Parameters.Add("$itemNumber", SqliteType.Integer);
+            foreach (var key in keys)
+            {
+                insert.Parameters["$contractId"].Value = key.ContractId;
+                insert.Parameters["$itemNumber"].Value = key.ItemNumber;
+                await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        var items = new Dictionary<(string ContractId, long ItemNumber), ProcurementItem>();
+        await using (var itemCommand = connection.CreateCommand())
+        {
+            itemCommand.CommandText = """
+                SELECT i.contract_id, i.item_number, i.description, i.unit, i.requested_quantity_scaled,
+                       i.additional_information, i.item_category, i.ncm_nbs_code, i.ncm_nbs_description,
+                       i.catalog_code, i.catalog_name, i.catalog_category, i.status, i.has_result,
+                       i.source_updated_at, i.hydration_status, i.last_error
+                  FROM selected_cached_items selected
+                  JOIN items i ON i.contract_id = selected.contract_id
+                              AND i.item_number = selected.item_number;
+                """;
+            await using var reader = await itemCommand.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var item = ReadItem(reader);
+                items[(item.ContractId, item.ItemNumber)] = item;
+            }
+        }
+
+        var results = keys.ToDictionary(
+            key => key,
+            _ => new List<HomologationResult>());
+        await using (var resultCommand = connection.CreateCommand())
+        {
+            resultCommand.CommandText = """
+                SELECT r.contract_id, r.item_number, r.result_sequence,
+                       r.supplier_tax_id, r.supplier_name, r.supplier_type,
+                       r.supplier_municipality, r.supplier_uf,
+                       r.quantity_scaled, r.unit_value_scaled, r.total_value_scaled,
+                       r.result_date, r.result_status_id, r.result_status_name
+                  FROM selected_cached_items selected
+                  JOIN item_results r ON r.contract_id = selected.contract_id
+                                     AND r.item_number = selected.item_number
+                 ORDER BY r.contract_id, r.item_number, r.result_sequence;
+                """;
+            await using var reader = await resultCommand.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var result = ReadResult(reader);
+                results[(result.ContractId, result.ItemNumber)].Add(result);
+            }
+        }
+
+        foreach (var key in keys)
+        {
+            if (items.TryGetValue(key, out var item))
+            {
+                cached[key] = new CachedItemResults(item, results[key]);
+            }
+        }
+
+        return cached;
+    }
+
+    public Task ReplaceItemResultsAsync(
         string contractId,
         long itemNumber,
         IReadOnlyList<HomologationResult> results,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        ReplaceItemResultsCoreAsync(contractId, itemNumber, results, pinContract: true, cancellationToken);
+
+    public Task ReplaceBackgroundItemResultsAsync(
+        string contractId,
+        long itemNumber,
+        IReadOnlyList<HomologationResult> results,
+        CancellationToken cancellationToken = default) =>
+        ReplaceItemResultsCoreAsync(contractId, itemNumber, results, pinContract: false, cancellationToken);
+
+    private async Task ReplaceItemResultsCoreAsync(
+        string contractId,
+        long itemNumber,
+        IReadOnlyList<HomologationResult> results,
+        bool pinContract,
+        CancellationToken cancellationToken)
     {
         await using var writer = await _connections.WorkCoordinator
             .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
@@ -2135,6 +2579,108 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             update.Parameters.AddWithValue("$contractId", contractId);
             update.Parameters.AddWithValue("$itemNumber", itemNumber);
             await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        if (pinContract)
+        {
+            await using var pin = connection.CreateCommand();
+            pin.Transaction = (SqliteTransaction)transaction;
+            pin.CommandText = """
+                INSERT INTO price_cache_contracts(
+                    contract_id, publication_date, source_global_updated_at, status, item_count,
+                    active_result_count, cancelled_result_count, background_owned,
+                    user_pinned, completed_at, updated_at)
+                SELECT c.pncp_id, COALESCE(c.publication_date, ''), c.global_updated_at, 2,
+                       COALESCE(s.item_count, 0),
+                       (SELECT COUNT(*) FROM item_results r
+                         WHERE r.contract_id = c.pncp_id AND r.result_status_id = 1),
+                       (SELECT COUNT(*) FROM item_results r
+                         WHERE r.contract_id = c.pncp_id AND r.result_status_id <> 1),
+                       0, 1, $updatedAt, $updatedAt
+                  FROM contracts c
+                  LEFT JOIN contract_item_snapshots s ON s.contract_id = c.pncp_id
+                 WHERE c.pncp_id = $contractId
+                ON CONFLICT(contract_id) DO UPDATE SET
+                    publication_date = excluded.publication_date,
+                    source_global_updated_at = excluded.source_global_updated_at,
+                    status = excluded.status,
+                    item_count = excluded.item_count,
+                    active_result_count = excluded.active_result_count,
+                    cancelled_result_count = excluded.cancelled_result_count,
+                    background_owned = 0,
+                    user_pinned = 1,
+                    completed_at = excluded.completed_at,
+                    updated_at = excluded.updated_at;
+                """;
+            pin.Parameters.AddWithValue("$contractId", contractId);
+            pin.Parameters.AddWithValue("$updatedAt", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await pin.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var refreshPriceIndex = connection.CreateCommand())
+        {
+            refreshPriceIndex.Transaction = (SqliteTransaction)transaction;
+            refreshPriceIndex.CommandText = """
+                UPDATE price_cache_contracts
+                   SET price_index_eligible_item_count =
+                           (SELECT COUNT(*) FROM items
+                             WHERE contract_id = $contractId AND has_result = 1),
+                       price_index_completed_item_count =
+                           (SELECT COUNT(*) FROM items
+                             WHERE contract_id = $contractId AND has_result = 1
+                               AND hydration_status = $complete),
+                       price_index_priced_item_count =
+                           (SELECT COUNT(*) FROM items i
+                             WHERE i.contract_id = $contractId AND i.has_result = 1
+                               AND i.hydration_status = $complete
+                               AND EXISTS(
+                                   SELECT 1 FROM item_results r
+                                    WHERE r.contract_id = i.contract_id
+                                      AND r.item_number = i.item_number
+                                      AND r.result_status_id = 1
+                                      AND r.unit_value_scaled > 0)),
+                       price_index_result_count =
+                           (SELECT COUNT(*) FROM item_results
+                             WHERE contract_id = $contractId
+                               AND result_status_id = 1 AND unit_value_scaled > 0),
+                       price_index_status = CASE
+                           WHEN NOT EXISTS(
+                               SELECT 1 FROM items
+                                WHERE contract_id = $contractId AND has_result = 1
+                                  AND hydration_status <> $complete)
+                           THEN $checkpointComplete
+                           WHEN price_index_status = $downloading THEN $downloading
+                           ELSE $pending END,
+                       price_index_last_error = CASE
+                           WHEN NOT EXISTS(
+                               SELECT 1 FROM items
+                                WHERE contract_id = $contractId AND has_result = 1
+                                  AND hydration_status <> $complete)
+                           THEN '' ELSE price_index_last_error END,
+                       price_index_next_retry_at = CASE
+                           WHEN NOT EXISTS(
+                               SELECT 1 FROM items
+                                WHERE contract_id = $contractId AND has_result = 1
+                                  AND hydration_status <> $complete)
+                           THEN NULL ELSE price_index_next_retry_at END,
+                       price_index_completed_at = CASE
+                           WHEN NOT EXISTS(
+                               SELECT 1 FROM items
+                                WHERE contract_id = $contractId AND has_result = 1
+                                  AND hydration_status <> $complete)
+                           THEN $updatedAt ELSE price_index_completed_at END,
+                       updated_at = $updatedAt
+                 WHERE contract_id = $contractId;
+                """;
+            refreshPriceIndex.Parameters.AddWithValue("$contractId", contractId);
+            refreshPriceIndex.Parameters.AddWithValue("$complete", (int)ItemHydrationStatus.Complete);
+            refreshPriceIndex.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
+            refreshPriceIndex.Parameters.AddWithValue("$downloading", (int)PriceCacheContractStatus.Downloading);
+            refreshPriceIndex.Parameters.AddWithValue("$checkpointComplete", (int)PriceCacheContractStatus.Complete);
+            refreshPriceIndex.Parameters.AddWithValue(
+                "$updatedAt",
+                DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await refreshPriceIndex.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
@@ -2631,7 +3177,16 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = "DELETE FROM contracts WHERE publication_date < $cutoff;";
+        command.CommandText = """
+            DELETE FROM contracts
+             WHERE publication_date < $cutoff
+               AND NOT EXISTS(
+                   SELECT 1 FROM price_cache_contracts pc
+                    WHERE pc.contract_id = contracts.pncp_id AND pc.user_pinned = 1)
+               AND NOT EXISTS(
+                   SELECT 1 FROM quotation_references qr
+                    WHERE qr.contract_id = contracts.pncp_id);
+            """;
         command.Parameters.AddWithValue("$cutoff", cutoff.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -4436,6 +4991,551 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             VALUES('delete', old.rowid, old.catalog_kind, old.code, old.search_text);
             INSERT INTO catalog_entries_fts(rowid, catalog_kind, code, search_text)
             VALUES(new.rowid, new.catalog_kind, new.code, new.search_text);
+        END;
+        """;
+
+    private const string SchemaV22Sql = """
+        CREATE TABLE IF NOT EXISTS guard_master(
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            master_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS guard_workers(
+            worker_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            weight INTEGER NOT NULL CHECK(weight > 0),
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS guard_campaigns(
+            campaign_id TEXT PRIMARY KEY,
+            master_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            root_path TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_guard_campaign_active
+            ON guard_campaigns(active) WHERE active = 1;
+
+        CREATE TABLE IF NOT EXISTS guard_imported_packages(
+            package_id TEXT PRIMARY KEY,
+            package_sha256 TEXT NOT NULL,
+            campaign_id TEXT NOT NULL,
+            worker_id TEXT NOT NULL,
+            imported_at TEXT NOT NULL,
+            imported_contracts INTEGER NOT NULL,
+            skipped_contracts INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_guard_packages_campaign
+            ON guard_imported_packages(campaign_id, imported_at);
+        """;
+
+    private const string SchemaV23Sql = """
+        UPDATE price_cache_control
+           SET authorized = 0,
+               enabled = 0,
+               paused = 0,
+               status = 0,
+               window_start = NULL,
+               window_end = NULL,
+               last_error = '',
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = 1;
+
+        UPDATE price_cache_contracts
+           SET user_pinned = 1,
+               background_owned = 0,
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE EXISTS(
+               SELECT 1
+                 FROM items i
+                WHERE i.contract_id = price_cache_contracts.contract_id
+                  AND i.has_result = 1
+                  AND i.hydration_status = 2);
+
+        UPDATE price_cache_contracts
+           SET source_global_updated_at = (
+                   SELECT s.source_global_updated_at
+                     FROM contract_item_snapshots s
+                    WHERE s.contract_id = price_cache_contracts.contract_id),
+               status = CASE WHEN EXISTS(
+                       SELECT 1
+                         FROM contracts c
+                         JOIN contract_item_snapshots s ON s.contract_id = c.pncp_id
+                        WHERE c.pncp_id = price_cache_contracts.contract_id
+                          AND COALESCE(s.source_global_updated_at, '') =
+                              COALESCE(c.global_updated_at, ''))
+                   THEN 2 ELSE 0 END,
+               last_error = '',
+               next_retry_at = NULL,
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
+        """;
+
+    private const string SchemaV24Sql = """
+        UPDATE price_cache_control
+           SET statistics_suspended = 1
+         WHERE id = 1;
+
+        UPDATE price_cache_contracts
+           SET publication_date = COALESCE((
+                   SELECT c.publication_date
+                     FROM contracts c
+                    WHERE c.pncp_id = price_cache_contracts.contract_id), '')
+         WHERE publication_date IS NOT COALESCE((
+                   SELECT c.publication_date
+                     FROM contracts c
+                    WHERE c.pncp_id = price_cache_contracts.contract_id), '');
+
+        CREATE INDEX IF NOT EXISTS idx_price_cache_contracts_status_publication
+            ON price_cache_contracts(status, publication_date DESC, contract_id);
+
+        DROP TRIGGER IF EXISTS price_cache_statistics_insert;
+        DROP TRIGGER IF EXISTS price_cache_statistics_delete;
+        DROP TRIGGER IF EXISTS price_cache_statistics_update;
+        DROP TRIGGER IF EXISTS contracts_insert_price_cache_checkpoint;
+        DROP TRIGGER IF EXISTS contracts_update_price_cache_publication;
+        DROP TRIGGER IF EXISTS snapshots_insert_complete_price_cache;
+        DROP TRIGGER IF EXISTS snapshots_update_complete_price_cache;
+
+        CREATE TRIGGER price_cache_statistics_insert
+        AFTER INSERT ON price_cache_contracts
+        WHEN (SELECT statistics_suspended FROM price_cache_control WHERE id = 1) = 0
+        BEGIN
+            UPDATE price_cache_control
+               SET indexed_contract_count = indexed_contract_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day') THEN 1 ELSE 0 END,
+                   indexed_complete_count = indexed_complete_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                                  AND new.status = 2 THEN 1 ELSE 0 END,
+                   indexed_pending_count = indexed_pending_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                                  AND new.status IN (0, 1) THEN 1 ELSE 0 END,
+                   indexed_failed_count = indexed_failed_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                                  AND new.status = 3 THEN 1 ELSE 0 END,
+                   indexed_item_count = indexed_item_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                            THEN new.item_count ELSE 0 END,
+                   indexed_active_result_count = indexed_active_result_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                            THEN new.active_result_count ELSE 0 END,
+                   indexed_cancelled_result_count = indexed_cancelled_result_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                            THEN new.cancelled_result_count ELSE 0 END
+             WHERE id = 1;
+        END;
+
+        CREATE TRIGGER price_cache_statistics_delete
+        AFTER DELETE ON price_cache_contracts
+        WHEN (SELECT statistics_suspended FROM price_cache_control WHERE id = 1) = 0
+        BEGIN
+            UPDATE price_cache_control
+               SET indexed_contract_count = MAX(0, indexed_contract_count -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day') THEN 1 ELSE 0 END),
+                   indexed_complete_count = MAX(0, indexed_complete_count -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                                  AND old.status = 2 THEN 1 ELSE 0 END),
+                   indexed_pending_count = MAX(0, indexed_pending_count -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                                  AND old.status IN (0, 1) THEN 1 ELSE 0 END),
+                   indexed_failed_count = MAX(0, indexed_failed_count -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                                  AND old.status = 3 THEN 1 ELSE 0 END),
+                   indexed_item_count = MAX(0, indexed_item_count -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                            THEN old.item_count ELSE 0 END),
+                   indexed_active_result_count = MAX(0, indexed_active_result_count -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                            THEN old.active_result_count ELSE 0 END),
+                   indexed_cancelled_result_count = MAX(0, indexed_cancelled_result_count -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                            THEN old.cancelled_result_count ELSE 0 END)
+             WHERE id = 1;
+        END;
+
+        CREATE TRIGGER price_cache_statistics_update
+        AFTER UPDATE OF publication_date, status, item_count,
+                        active_result_count, cancelled_result_count ON price_cache_contracts
+        WHEN (SELECT statistics_suspended FROM price_cache_control WHERE id = 1) = 0
+        BEGIN
+            UPDATE price_cache_control
+               SET indexed_contract_count = MAX(0, indexed_contract_count
+                       - CASE WHEN old.publication_date >= window_start
+                                    AND old.publication_date < date(window_end, '+1 day') THEN 1 ELSE 0 END
+                       + CASE WHEN new.publication_date >= window_start
+                                    AND new.publication_date < date(window_end, '+1 day') THEN 1 ELSE 0 END),
+                   indexed_complete_count = MAX(0, indexed_complete_count
+                       - CASE WHEN old.publication_date >= window_start
+                                    AND old.publication_date < date(window_end, '+1 day')
+                                    AND old.status = 2 THEN 1 ELSE 0 END
+                       + CASE WHEN new.publication_date >= window_start
+                                    AND new.publication_date < date(window_end, '+1 day')
+                                    AND new.status = 2 THEN 1 ELSE 0 END),
+                   indexed_pending_count = MAX(0, indexed_pending_count
+                       - CASE WHEN old.publication_date >= window_start
+                                    AND old.publication_date < date(window_end, '+1 day')
+                                    AND old.status IN (0, 1) THEN 1 ELSE 0 END
+                       + CASE WHEN new.publication_date >= window_start
+                                    AND new.publication_date < date(window_end, '+1 day')
+                                    AND new.status IN (0, 1) THEN 1 ELSE 0 END),
+                   indexed_failed_count = MAX(0, indexed_failed_count
+                       - CASE WHEN old.publication_date >= window_start
+                                    AND old.publication_date < date(window_end, '+1 day')
+                                    AND old.status = 3 THEN 1 ELSE 0 END
+                       + CASE WHEN new.publication_date >= window_start
+                                    AND new.publication_date < date(window_end, '+1 day')
+                                    AND new.status = 3 THEN 1 ELSE 0 END),
+                   indexed_item_count = MAX(0, indexed_item_count
+                       - CASE WHEN old.publication_date >= window_start
+                                    AND old.publication_date < date(window_end, '+1 day')
+                              THEN old.item_count ELSE 0 END
+                       + CASE WHEN new.publication_date >= window_start
+                                    AND new.publication_date < date(window_end, '+1 day')
+                              THEN new.item_count ELSE 0 END),
+                   indexed_active_result_count = MAX(0, indexed_active_result_count
+                       - CASE WHEN old.publication_date >= window_start
+                                    AND old.publication_date < date(window_end, '+1 day')
+                              THEN old.active_result_count ELSE 0 END
+                       + CASE WHEN new.publication_date >= window_start
+                                    AND new.publication_date < date(window_end, '+1 day')
+                              THEN new.active_result_count ELSE 0 END),
+                   indexed_cancelled_result_count = MAX(0, indexed_cancelled_result_count
+                       - CASE WHEN old.publication_date >= window_start
+                                    AND old.publication_date < date(window_end, '+1 day')
+                              THEN old.cancelled_result_count ELSE 0 END
+                       + CASE WHEN new.publication_date >= window_start
+                                    AND new.publication_date < date(window_end, '+1 day')
+                              THEN new.cancelled_result_count ELSE 0 END)
+             WHERE id = 1;
+        END;
+
+        CREATE TRIGGER contracts_insert_price_cache_checkpoint
+        AFTER INSERT ON contracts
+        WHEN EXISTS(
+            SELECT 1 FROM price_cache_control
+             WHERE id = 1 AND authorized = 1 AND enabled = 1
+               AND new.publication_date >= window_start
+               AND new.publication_date < date(window_end, '+1 day'))
+        BEGIN
+            INSERT OR IGNORE INTO price_cache_contracts(
+                contract_id, publication_date, status, updated_at)
+            VALUES(new.pncp_id, COALESCE(new.publication_date, ''), 0,
+                   strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+        END;
+
+        CREATE TRIGGER contracts_update_price_cache_publication
+        AFTER UPDATE OF publication_date ON contracts
+        WHEN old.publication_date IS NOT new.publication_date
+        BEGIN
+            UPDATE price_cache_contracts
+               SET publication_date = COALESCE(new.publication_date, ''),
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE contract_id = new.pncp_id;
+            INSERT OR IGNORE INTO price_cache_contracts(
+                contract_id, publication_date, status, updated_at)
+            SELECT new.pncp_id, COALESCE(new.publication_date, ''), 0,
+                   strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE EXISTS(
+                 SELECT 1 FROM price_cache_control
+                  WHERE id = 1 AND authorized = 1 AND enabled = 1
+                    AND new.publication_date >= window_start
+                    AND new.publication_date < date(window_end, '+1 day'));
+        END;
+
+        CREATE TRIGGER snapshots_insert_complete_price_cache
+        AFTER INSERT ON contract_item_snapshots
+        BEGIN
+            UPDATE price_cache_contracts
+               SET source_global_updated_at = new.source_global_updated_at,
+                   status = 2,
+                   item_count = new.item_count,
+                   active_result_count = (SELECT COUNT(*) FROM item_results
+                                            WHERE contract_id = new.contract_id AND result_status_id = 1),
+                   cancelled_result_count = (SELECT COUNT(*) FROM item_results
+                                               WHERE contract_id = new.contract_id AND result_status_id <> 1),
+                   last_error = '',
+                   next_retry_at = NULL,
+                   completed_at = new.fetched_at,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE contract_id = new.contract_id
+               AND publication_date >= (SELECT window_start FROM price_cache_control WHERE id = 1)
+               AND publication_date < date((SELECT window_end FROM price_cache_control WHERE id = 1), '+1 day')
+               AND COALESCE(new.source_global_updated_at, '') = COALESCE((
+                       SELECT global_updated_at FROM contracts WHERE pncp_id = new.contract_id), '');
+        END;
+
+        CREATE TRIGGER snapshots_update_complete_price_cache
+        AFTER UPDATE OF fetched_at, item_count, source_global_updated_at ON contract_item_snapshots
+        BEGIN
+            UPDATE price_cache_contracts
+               SET source_global_updated_at = new.source_global_updated_at,
+                   status = 2,
+                   item_count = new.item_count,
+                   active_result_count = (SELECT COUNT(*) FROM item_results
+                                            WHERE contract_id = new.contract_id AND result_status_id = 1),
+                   cancelled_result_count = (SELECT COUNT(*) FROM item_results
+                                               WHERE contract_id = new.contract_id AND result_status_id <> 1),
+                   last_error = '',
+                   next_retry_at = NULL,
+                   completed_at = new.fetched_at,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE contract_id = new.contract_id
+               AND publication_date >= (SELECT window_start FROM price_cache_control WHERE id = 1)
+               AND publication_date < date((SELECT window_end FROM price_cache_control WHERE id = 1), '+1 day')
+               AND COALESCE(new.source_global_updated_at, '') = COALESCE((
+                       SELECT global_updated_at FROM contracts WHERE pncp_id = new.contract_id), '');
+        END;
+
+        WITH bounds AS (
+            SELECT window_start AS start,
+                   date(window_end, '+1 day') AS end_exclusive
+              FROM price_cache_control
+             WHERE id = 1
+        ),
+        cache_totals AS (
+            SELECT COUNT(*) AS contracts,
+                   SUM(CASE WHEN pc.status = 2 THEN 1 ELSE 0 END) AS complete,
+                   SUM(CASE WHEN pc.status IN (0, 1) THEN 1 ELSE 0 END) AS pending,
+                   SUM(CASE WHEN pc.status = 3 THEN 1 ELSE 0 END) AS failed,
+                   COALESCE(SUM(pc.item_count), 0) AS items,
+                   COALESCE(SUM(pc.active_result_count), 0) AS active,
+                   COALESCE(SUM(pc.cancelled_result_count), 0) AS cancelled
+              FROM price_cache_contracts pc
+              CROSS JOIN bounds
+             WHERE pc.publication_date >= bounds.start
+               AND pc.publication_date < bounds.end_exclusive
+        ),
+        contract_total AS (
+            SELECT COUNT(*) AS contracts
+              FROM contracts c
+              CROSS JOIN bounds
+             WHERE c.publication_date >= bounds.start
+               AND c.publication_date < bounds.end_exclusive
+        )
+        UPDATE price_cache_control
+           SET indexed_contract_count = (SELECT contracts FROM cache_totals),
+               indexed_complete_count = COALESCE((SELECT complete FROM cache_totals), 0),
+               indexed_pending_count = COALESCE((SELECT pending FROM cache_totals), 0),
+               indexed_failed_count = COALESCE((SELECT failed FROM cache_totals), 0),
+               indexed_item_count = (SELECT items FROM cache_totals),
+               indexed_active_result_count = (SELECT active FROM cache_totals),
+               indexed_cancelled_result_count = (SELECT cancelled FROM cache_totals),
+               prepared_window_start = CASE
+                   WHEN window_start IS NOT NULL AND window_end IS NOT NULL
+                    AND (SELECT contracts FROM cache_totals) = (SELECT contracts FROM contract_total)
+                   THEN window_start ELSE NULL END,
+               prepared_window_end = CASE
+                   WHEN window_start IS NOT NULL AND window_end IS NOT NULL
+                    AND (SELECT contracts FROM cache_totals) = (SELECT contracts FROM contract_total)
+                   THEN window_end ELSE NULL END,
+               statistics_suspended = 0
+         WHERE id = 1;
+        """;
+
+    private const string SchemaV25Sql = """
+        CREATE TABLE IF NOT EXISTS national_price_index_control(
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            authorized INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            paused INTEGER NOT NULL DEFAULT 0,
+            status INTEGER NOT NULL DEFAULT 0,
+            window_start TEXT,
+            window_end TEXT,
+            authorized_at TEXT,
+            last_started_at TEXT,
+            last_completed_at TEXT,
+            last_error TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            prepared_window_start TEXT,
+            prepared_window_end TEXT,
+            eligible_item_count INTEGER NOT NULL DEFAULT 0,
+            completed_item_count INTEGER NOT NULL DEFAULT 0,
+            priced_item_count INTEGER NOT NULL DEFAULT 0,
+            result_row_count INTEGER NOT NULL DEFAULT 0,
+            pending_contract_count INTEGER NOT NULL DEFAULT 0,
+            failed_contract_count INTEGER NOT NULL DEFAULT 0,
+            statistics_suspended INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT OR IGNORE INTO national_price_index_control(id, updated_at)
+        VALUES(1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+
+        CREATE INDEX IF NOT EXISTS idx_price_cache_contracts_price_work
+            ON price_cache_contracts(
+                price_index_status, price_index_next_retry_at,
+                publication_date DESC, contract_id);
+
+        DROP TRIGGER IF EXISTS national_price_statistics_insert;
+        DROP TRIGGER IF EXISTS national_price_statistics_delete;
+        DROP TRIGGER IF EXISTS national_price_statistics_update;
+
+        CREATE TRIGGER national_price_statistics_insert
+        AFTER INSERT ON price_cache_contracts
+        WHEN (SELECT statistics_suspended FROM national_price_index_control WHERE id = 1) = 0
+        BEGIN
+            UPDATE national_price_index_control
+               SET eligible_item_count = eligible_item_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                            THEN new.price_index_eligible_item_count ELSE 0 END,
+                   completed_item_count = completed_item_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                            THEN new.price_index_completed_item_count ELSE 0 END,
+                   priced_item_count = priced_item_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                            THEN new.price_index_priced_item_count ELSE 0 END,
+                   result_row_count = result_row_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                            THEN new.price_index_result_count ELSE 0 END,
+                   pending_contract_count = pending_contract_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                                  AND new.price_index_status IN (0, 1) THEN 1 ELSE 0 END,
+                   failed_contract_count = failed_contract_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                                  AND new.price_index_status = 3 THEN 1 ELSE 0 END,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = 1;
+        END;
+
+        CREATE TRIGGER national_price_statistics_delete
+        AFTER DELETE ON price_cache_contracts
+        WHEN (SELECT statistics_suspended FROM national_price_index_control WHERE id = 1) = 0
+        BEGIN
+            UPDATE national_price_index_control
+               SET eligible_item_count = eligible_item_count -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                            THEN old.price_index_eligible_item_count ELSE 0 END,
+                   completed_item_count = completed_item_count -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                            THEN old.price_index_completed_item_count ELSE 0 END,
+                   priced_item_count = priced_item_count -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                            THEN old.price_index_priced_item_count ELSE 0 END,
+                   result_row_count = result_row_count -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                            THEN old.price_index_result_count ELSE 0 END,
+                   pending_contract_count = pending_contract_count -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                                  AND old.price_index_status IN (0, 1) THEN 1 ELSE 0 END,
+                   failed_contract_count = failed_contract_count -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                                  AND old.price_index_status = 3 THEN 1 ELSE 0 END,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = 1;
+        END;
+
+        CREATE TRIGGER national_price_statistics_update
+        AFTER UPDATE OF publication_date, price_index_status,
+                        price_index_eligible_item_count, price_index_completed_item_count,
+                        price_index_priced_item_count, price_index_result_count
+        ON price_cache_contracts
+        WHEN (SELECT statistics_suspended FROM national_price_index_control WHERE id = 1) = 0
+        BEGIN
+            UPDATE national_price_index_control
+               SET eligible_item_count = eligible_item_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                            THEN new.price_index_eligible_item_count ELSE 0 END -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                            THEN old.price_index_eligible_item_count ELSE 0 END,
+                   completed_item_count = completed_item_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                            THEN new.price_index_completed_item_count ELSE 0 END -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                            THEN old.price_index_completed_item_count ELSE 0 END,
+                   priced_item_count = priced_item_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                            THEN new.price_index_priced_item_count ELSE 0 END -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                            THEN old.price_index_priced_item_count ELSE 0 END,
+                   result_row_count = result_row_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                            THEN new.price_index_result_count ELSE 0 END -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                            THEN old.price_index_result_count ELSE 0 END,
+                   pending_contract_count = pending_contract_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                                  AND new.price_index_status IN (0, 1) THEN 1 ELSE 0 END -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                                  AND old.price_index_status IN (0, 1) THEN 1 ELSE 0 END,
+                   failed_contract_count = failed_contract_count +
+                       CASE WHEN new.publication_date >= window_start
+                                  AND new.publication_date < date(window_end, '+1 day')
+                                  AND new.price_index_status = 3 THEN 1 ELSE 0 END -
+                       CASE WHEN old.publication_date >= window_start
+                                  AND old.publication_date < date(window_end, '+1 day')
+                                  AND old.price_index_status = 3 THEN 1 ELSE 0 END,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = 1;
+        END;
+
+        DROP TRIGGER IF EXISTS contracts_mark_items_stale;
+        CREATE TRIGGER contracts_mark_items_stale
+        AFTER UPDATE OF global_updated_at ON contracts
+        WHEN COALESCE(old.global_updated_at, '') <> COALESCE(new.global_updated_at, '')
+        BEGIN
+            UPDATE items SET hydration_status = 4
+             WHERE contract_id = new.pncp_id AND has_result = 1;
+            DELETE FROM contract_item_snapshots WHERE contract_id = new.pncp_id;
+            UPDATE price_cache_contracts
+               SET status = 0,
+                   source_global_updated_at = NULL,
+                   item_count = 0,
+                   active_result_count = 0,
+                   cancelled_result_count = 0,
+                   attempts = 0,
+                   last_error = '',
+                   next_retry_at = NULL,
+                   started_at = NULL,
+                   completed_at = NULL,
+                   price_index_status = 0,
+                   price_index_attempts = 0,
+                   price_index_last_error = '',
+                   price_index_next_retry_at = NULL,
+                   price_index_started_at = NULL,
+                   price_index_completed_at = NULL,
+                   price_index_eligible_item_count = 0,
+                   price_index_completed_item_count = 0,
+                   price_index_priced_item_count = 0,
+                   price_index_result_count = 0,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE contract_id = new.pncp_id;
         END;
         """;
 

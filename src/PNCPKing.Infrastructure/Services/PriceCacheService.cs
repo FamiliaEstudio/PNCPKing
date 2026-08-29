@@ -14,7 +14,7 @@ public sealed class PriceCacheService(
     TimeSpan? requestTimeout = null,
     IPerformanceTelemetry? performance = null)
 {
-    public const int WindowDays = 90;
+    public const int WindowDays = 365;
     public static TimeSpan DefaultRequestTimeout { get; } = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan MaximumRetryDelay = TimeSpan.FromHours(6);
     private readonly TimeSpan _requestTimeout = ValidateRequestTimeout(requestTimeout);
@@ -25,9 +25,39 @@ public sealed class PriceCacheService(
     public void PauseForVisibleActivity() => _visibleActivityPause.Pause();
     public void ResumeAfterVisibleActivity() => _visibleActivityPause.Resume();
 
-    public async Task SynchronizeAsync(
+    public Task SynchronizeAsync(
+        IProgress<PriceCacheProgress>? progress = null,
+        CancellationToken cancellationToken = default) =>
+        SynchronizeCoreAsync(
+            maximumParallelContracts: 1,
+            ignoreVisibleActivity: false,
+            progress,
+            cancellationToken);
+
+    public Task SynchronizeAggressivelyAsync(
+        int maximumParallelContracts,
         IProgress<PriceCacheProgress>? progress = null,
         CancellationToken cancellationToken = default)
+    {
+        if (maximumParallelContracts < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maximumParallelContracts),
+                "O paralelismo agressivo deve ser pelo menos 1.");
+        }
+
+        return SynchronizeCoreAsync(
+            maximumParallelContracts,
+            ignoreVisibleActivity: true,
+            progress,
+            cancellationToken);
+    }
+
+    private async Task SynchronizeCoreAsync(
+        int maximumParallelContracts,
+        bool ignoreVisibleActivity,
+        IProgress<PriceCacheProgress>? progress,
+        CancellationToken cancellationToken)
     {
         using var span = _performance.Begin("price-cache", "synchronize");
         var today = DateOnly.FromDateTime(DateTime.Today);
@@ -42,7 +72,7 @@ public sealed class PriceCacheService(
         {
             await cache.SetStatusAsync(
                     PriceCacheStatus.Idle,
-                    "Aguardando a cobertura completa do índice PNCP para os últimos 90 dias.",
+                    "Aguardando a cobertura completa do índice PNCP para os últimos 365 dias.",
                     cancellationToken)
                 .ConfigureAwait(false);
             progress?.Report(await cache.GetProgressAsync(cancellationToken).ConfigureAwait(false));
@@ -55,7 +85,8 @@ public sealed class PriceCacheService(
         var stopwatch = Stopwatch.StartNew();
         var lastProgressReport = Stopwatch.GetTimestamp();
         long completedThisRun = 0;
-        string? currentContractId = null;
+        long nextSpaceCheckAt = 0;
+        var active = new Dictionary<string, Task<bool>>(StringComparer.Ordinal);
         var activitySnapshot = await cache.GetProgressAsync(cancellationToken).ConfigureAwait(false);
         progress?.Report(activitySnapshot);
 
@@ -81,14 +112,24 @@ public sealed class PriceCacheService(
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                await _visibleActivityPause.WaitAsync(cancellationToken).ConfigureAwait(false);
+                if (!ignoreVisibleActivity)
+                {
+                    await _visibleActivityPause.WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
+
                 policy = await cache.GetPolicyAsync(cancellationToken).ConfigureAwait(false);
                 if (!policy.Authorized || !policy.Enabled || policy.Paused)
                 {
-                    break;
+                    if (active.Count == 0)
+                    {
+                        break;
+                    }
+
+                    await CompleteOneAsync(active, cancellationToken).ConfigureAwait(false);
+                    continue;
                 }
 
-                if (completedThisRun % 25 == 0)
+                if (completedThisRun >= nextSpaceCheckAt)
                 {
                     var estimate = await cache.EstimateAsync(start, today, cancellationToken).ConfigureAwait(false);
                     if (!estimate.HasEnoughSpace)
@@ -97,21 +138,53 @@ public sealed class PriceCacheService(
                             $"Espaço insuficiente: preserve {FormatBytes(estimate.SafetyReserveBytes)} de reserva " +
                             $"e libere aproximadamente {FormatBytes(estimate.RequiredFreeBytes - estimate.AvailableFreeBytes)}.";
                         await cache.SetPausedAsync(true, message, cancellationToken).ConfigureAwait(false);
+                        await Task.WhenAll(active.Values).ConfigureAwait(false);
                         progress?.Report(await cache.GetProgressAsync(cancellationToken).ConfigureAwait(false));
                         return;
                     }
+
+                    nextSpaceCheckAt = completedThisRun + 25;
                 }
 
-                var work = await cache.GetNextWorkAsync(DateTimeOffset.UtcNow, cancellationToken)
-                    .ConfigureAwait(false);
-                if (work is null)
+                var noAvailableWork = false;
+                while (active.Count < maximumParallelContracts)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var work = await cache.GetNextWorkAsync(DateTimeOffset.UtcNow, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (work is null)
+                    {
+                        noAvailableWork = true;
+                        break;
+                    }
+
+                    var itemSnapshot = await contracts.GetItemSnapshotAsync(
+                            work.Contract.PncpId,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    var ownsNewData = work.Checkpoint.BackgroundOwned ||
+                                      itemSnapshot is null && !work.Checkpoint.UserPinned;
+                    await cache.MarkContractDownloadingAsync(
+                            work.Contract.PncpId,
+                            ownsNewData,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    active.Add(
+                        work.Contract.PncpId,
+                        ProcessContractAsync(
+                            work,
+                            itemSnapshot?.IsCurrentFor(work.Contract) == true,
+                            cancellationToken));
+                }
+
+                if (active.Count == 0 && noAvailableWork)
                 {
                     var snapshot = await cache.GetProgressAsync(cancellationToken).ConfigureAwait(false);
                     if (snapshot.PendingContracts == 0 && snapshot.FailedContracts == 0)
                     {
                         await cache.SetStatusAsync(
                                 PriceCacheStatus.Complete,
-                                "Janela móvel de 90 dias completamente armazenada.",
+                                "Índice móvel de itens dos últimos 365 dias completamente armazenado.",
                                 cancellationToken)
                             .ConfigureAwait(false);
                     }
@@ -138,163 +211,20 @@ public sealed class PriceCacheService(
                     return;
                 }
 
-                currentContractId = work.Contract.PncpId;
-                var itemSnapshot = await contracts.GetItemSnapshotAsync(
-                        work.Contract.PncpId,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                var ownsNewData = work.Checkpoint.BackgroundOwned ||
-                                  itemSnapshot is null && !work.Checkpoint.UserPinned;
-                await cache.MarkContractDownloadingAsync(
-                        work.Contract.PncpId,
-                        ownsNewData,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                try
+                if (active.Count > 0)
                 {
-                    if (itemSnapshot?.IsCurrentFor(work.Contract) != true)
+                    if (maximumParallelContracts > 1 && ShouldReportProgress())
                     {
-                        if (ShouldReportProgress())
+                        progress?.Report(activitySnapshot with
                         {
-                            progress?.Report(activitySnapshot with
-                            {
-                                Message = $"consultando itens da contratação " +
-                                          $"(limite de {_requestTimeout.TotalSeconds:N0} s)"
-                            });
-                        }
-                        using var listScope = PncpRequestOptions.BeginScope(
-                            PncpRequestPriority.BackgroundPriceCache,
-                            PncpRequestCategory.ItemLists);
-                        var items = await ExecuteWithRequestTimeoutAsync(
-                                token => client.GetItemsAsync(work.Contract, token),
-                                cancellationToken)
-                            .ConfigureAwait(false);
-                        await contracts.UpsertItemsAsync(
-                                work.Contract.PncpId,
-                                items,
-                                forceRefresh: false,
-                                cancellationToken)
-                            .ConfigureAwait(false);
+                            Message = $"modo agressivo: {active.Count:N0} contratação(ões) em processamento"
+                        });
                     }
 
-                    var pendingItems = await contracts.GetPendingItemsAsync(
-                            work.Contract.PncpId,
-                            forceRefresh: false,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                    for (var pendingIndex = 0; pendingIndex < pendingItems.Count; pendingIndex++)
+                    if (await CompleteOneAsync(active, cancellationToken).ConfigureAwait(false))
                     {
-                        var item = pendingItems[pendingIndex];
-                        cancellationToken.ThrowIfCancellationRequested();
-                        await _visibleActivityPause.WaitAsync(cancellationToken).ConfigureAwait(false);
-                        if (ShouldReportProgress())
-                        {
-                            progress?.Report(activitySnapshot with
-                            {
-                                Message = $"consultando preço {pendingIndex + 1:N0}/{pendingItems.Count:N0}"
-                            });
-                        }
-                        await contracts.SetItemHydrationStatusAsync(
-                                work.Contract.PncpId,
-                                item.ItemNumber,
-                                ItemHydrationStatus.Loading,
-                                cancellationToken: cancellationToken)
-                            .ConfigureAwait(false);
-                        try
-                        {
-                            using var resultScope = PncpRequestOptions.BeginScope(
-                                PncpRequestPriority.BackgroundPriceCache,
-                                PncpRequestCategory.ItemResults);
-                            var results = await ExecuteWithRequestTimeoutAsync(
-                                    token => client.GetItemResultsAsync(
-                                        work.Contract,
-                                        item.ItemNumber,
-                                        token),
-                                    cancellationToken)
-                                .ConfigureAwait(false);
-                            await contracts.ReplaceItemResultsAsync(
-                                    work.Contract.PncpId,
-                                    item.ItemNumber,
-                                    results,
-                                    cancellationToken)
-                                .ConfigureAwait(false);
-                        }
-                        catch (HttpRequestException exception) when (
-                            exception.StatusCode == HttpStatusCode.NotFound)
-                        {
-                            // O índice pode manter um item cujo endpoint de resultados já foi removido.
-                            // Uma resposta vazia fecha o item sem bloquear toda a contratação.
-                            await contracts.ReplaceItemResultsAsync(
-                                    work.Contract.PncpId,
-                                    item.ItemNumber,
-                                    [],
-                                    CancellationToken.None)
-                                .ConfigureAwait(false);
-                        }
-                        catch (OperationCanceledException)
-                        {
-                            await contracts.SetItemHydrationStatusAsync(
-                                    work.Contract.PncpId,
-                                    item.ItemNumber,
-                                    ItemHydrationStatus.NotLoaded,
-                                    "Carga interrompida; item preservado para retomada.",
-                                    CancellationToken.None)
-                                .ConfigureAwait(false);
-                            throw;
-                        }
-                        catch (Exception exception)
-                        {
-                            await contracts.SetItemHydrationStatusAsync(
-                                    work.Contract.PncpId,
-                                    item.ItemNumber,
-                                    ItemHydrationStatus.Failed,
-                                    exception.Message,
-                                    CancellationToken.None)
-                                .ConfigureAwait(false);
-                            throw;
-                        }
+                        completedThisRun++;
                     }
-
-                    await cache.MarkContractCompleteAsync(
-                            work.Contract.PncpId,
-                            work.Contract.GlobalUpdatedAt,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                    completedThisRun++;
-                    currentContractId = null;
-                }
-                catch (OperationCanceledException)
-                {
-                    await cache.MarkContractPendingAsync(
-                            work.Contract.PncpId,
-                            "Ciclo interrompido; a contratação será retomada.",
-                            CancellationToken.None)
-                        .ConfigureAwait(false);
-                    throw;
-                }
-                catch (HttpRequestException exception) when (
-                    exception.StatusCode == HttpStatusCode.NotFound)
-                {
-                    await cache.MarkContractUnavailableAsync(
-                            work.Contract.PncpId,
-                            work.Contract.GlobalUpdatedAt,
-                            "O índice referencia a contratação, mas o endpoint de itens respondeu 404. " +
-                            "Ela será reconsiderada somente se o PNCP publicar uma atualização global.",
-                            CancellationToken.None)
-                        .ConfigureAwait(false);
-                    completedThisRun++;
-                    currentContractId = null;
-                }
-                catch (Exception exception)
-                {
-                    var retry = DateTimeOffset.UtcNow + RetryDelay(work.Checkpoint.Attempts + 1);
-                    await cache.MarkContractFailedAsync(
-                            work.Contract.PncpId,
-                            exception.Message,
-                            retry,
-                            CancellationToken.None)
-                        .ConfigureAwait(false);
-                    currentContractId = null;
                 }
 
                 if (ShouldReportProgress())
@@ -310,14 +240,7 @@ public sealed class PriceCacheService(
         }
         catch (OperationCanceledException)
         {
-            if (currentContractId is not null)
-            {
-                await cache.MarkContractPendingAsync(
-                        currentContractId,
-                        "Ciclo interrompido; a contratação será retomada.",
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
+            await AwaitInterruptedWorkersAsync(active.Values).ConfigureAwait(false);
 
             var currentPolicy = await cache.GetPolicyAsync(CancellationToken.None).ConfigureAwait(false);
             if (currentPolicy.Enabled && !currentPolicy.Paused)
@@ -334,6 +257,93 @@ public sealed class PriceCacheService(
         finally
         {
             stopwatch.Stop();
+        }
+    }
+
+    private static async Task<bool> CompleteOneAsync(
+        Dictionary<string, Task<bool>> active,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var completed = await Task.WhenAny(active.Values).ConfigureAwait(false);
+        var contractId = active.First(pair => ReferenceEquals(pair.Value, completed)).Key;
+        active.Remove(contractId);
+        return await completed.ConfigureAwait(false);
+    }
+
+    private static async Task AwaitInterruptedWorkersAsync(IEnumerable<Task<bool>> workers)
+    {
+        try
+        {
+            await Task.WhenAll(workers).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Each worker restored its checkpoint before propagating cancellation.
+        }
+    }
+
+    private async Task<bool> ProcessContractAsync(
+        PriceCacheWorkItem work,
+        bool hasCurrentSnapshot,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!hasCurrentSnapshot)
+            {
+                using var listScope = PncpRequestOptions.BeginScope(
+                    PncpRequestPriority.BackgroundPriceCache,
+                    PncpRequestCategory.ItemLists);
+                var items = await ExecuteWithRequestTimeoutAsync(
+                        token => client.GetItemsAsync(work.Contract, token),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                await contracts.UpsertItemsAsync(
+                        work.Contract.PncpId,
+                        items,
+                        forceRefresh: false,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            await cache.MarkContractCompleteAsync(
+                    work.Contract.PncpId,
+                    work.Contract.GlobalUpdatedAt,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            await cache.MarkContractPendingAsync(
+                    work.Contract.PncpId,
+                    "Ciclo interrompido; a contratação será retomada.",
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            throw;
+        }
+        catch (HttpRequestException exception) when (exception.StatusCode == HttpStatusCode.NotFound)
+        {
+            await cache.MarkContractUnavailableAsync(
+                    work.Contract.PncpId,
+                    work.Contract.GlobalUpdatedAt,
+                    "O índice referencia a contratação, mas o endpoint de itens respondeu 404. " +
+                    "Ela será reconsiderada somente se o PNCP publicar uma atualização global.",
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception exception)
+        {
+            var retry = DateTimeOffset.UtcNow + RetryDelay(work.Checkpoint.Attempts + 1);
+            await cache.MarkContractFailedAsync(
+                    work.Contract.PncpId,
+                    exception.Message,
+                    retry,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            return false;
         }
     }
 

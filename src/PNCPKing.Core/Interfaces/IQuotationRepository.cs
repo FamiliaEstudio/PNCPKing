@@ -11,6 +11,11 @@ public interface IQuotationRepository
         Guid lineId,
         string displayName,
         CancellationToken cancellationToken = default);
+    Task UpdateLineRequestedDetailsAsync(
+        Guid lineId,
+        decimal requestedQuantity,
+        string requestedUnit,
+        CancellationToken cancellationToken = default);
     Task SetLineCatalogSelectionAsync(
         Guid lineId,
         QuotationCatalogSelection? selection,

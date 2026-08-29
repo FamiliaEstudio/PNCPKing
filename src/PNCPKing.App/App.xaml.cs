@@ -204,6 +204,11 @@ public partial class App : Application
                 repository,
                 priceCacheRepository,
                 performance: _performanceTelemetry);
+            var nationalPriceIndexService = new NationalPriceIndexService(
+                client,
+                repository,
+                priceCacheRepository,
+                performance: _performanceTelemetry);
             var itemSearchService = new ItemSearchSessionService(
                 client,
                 repository,
@@ -297,6 +302,7 @@ public partial class App : Application
                 requestScheduler,
                 priceCacheRepository,
                 priceCacheService,
+                nationalPriceIndexService,
                 new ItemHydrationService(client, repository),
                 itemSearchService,
                 transientItemSearchService,
@@ -335,7 +341,10 @@ public partial class App : Application
                 _performanceTelemetry,
                 maintenanceCoordinator);
             _mainViewModel = viewModel;
-            var mainWindow = new MainWindow(viewModel, columnLayouts);
+            var mainWindow = new MainWindow(
+                viewModel,
+                columnLayouts,
+                new GuardMasterService(sqliteConnections));
             MainWindow = mainWindow;
             mainWindow.Show();
             if (desktopShortcutStartupException is not null)
