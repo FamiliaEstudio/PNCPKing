@@ -354,6 +354,15 @@ public sealed class PncpRequestScheduler
         {
             next = Math.Min(8, _maximumConcurrency);
         }
+        else if (_effectiveConcurrency > 1)
+        {
+            _pressureEventsAtNormalFloor++;
+            if (_pressureEventsAtNormalFloor >= 2)
+            {
+                next = 1;
+                _pressureEventsAtNormalFloor = 0;
+            }
+        }
 
         SetConcurrencyLocked(next, reason, now, countAsReduction: true);
         BlockGrowthUntilLocked(blockedUntil);

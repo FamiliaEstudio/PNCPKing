@@ -1020,12 +1020,8 @@ public partial class AiQuotationWindow : Window
 
     private void SynchronizeContractPrompts(IReadOnlyList<string> contractPrompts)
     {
-        foreach (var item in DraftItems)
-        {
-            item.SynchronizeContractCandidates(contractPrompts);
-        }
-
-        DraftItemsGrid?.Items.Refresh();
+        // Os crivos continuam armazenados para a ampliação explícita e para
+        // compatibilidade, mas novas expressões de item não recebem bloco C:.
     }
 
     private void ApplyDuplicateSelection()

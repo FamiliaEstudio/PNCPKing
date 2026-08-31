@@ -246,6 +246,46 @@ public sealed class ItemSearchRepositoryTests
     }
 
     [Fact]
+    public async Task StaleCandidateSource_ReturnsOnlyPreviouslyLoadedInvalidatedMatches()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var current = RepositorySearchTests.Contract("current", "Café", "SP", 1);
+        var stale = RepositorySearchTests.Contract("stale", "Café", "SP", 2);
+        var neverLoaded = RepositorySearchTests.Contract("never-loaded", "Café", "SP", 3);
+        await database.Repository.UpsertContractsAsync([current, stale, neverLoaded]);
+        await database.Repository.UpsertItemsAsync(current.PncpId, [
+            Item(current.PncpId, 1, "Café atual", true) with
+            {
+                HydrationStatus = ItemHydrationStatus.Complete
+            }
+        ], false);
+        await database.Repository.UpsertItemsAsync(stale.PncpId, [
+            Item(stale.PncpId, 1, "Coffee Break", true) with
+            {
+                HydrationStatus = ItemHydrationStatus.Complete
+            }
+        ], false);
+        await database.Repository.UpsertItemsAsync(neverLoaded.PncpId, [
+            Item(neverLoaded.PncpId, 1, "Coffee Break", true)
+        ], false);
+        await database.Repository.UpsertContractsAsync([
+            stale with { GlobalUpdatedAt = stale.GlobalUpdatedAt!.Value.AddHours(1) }
+        ]);
+
+        var query = new SearchQuery("Coffee Break", GeoScope.All);
+        var first = await database.Repository.SearchStaleItemCandidatesAsync(
+            query,
+            PNCPKing.Core.Search.SearchText.Parse(query.Text),
+            null,
+            1);
+
+        Assert.Equal(1, first.TotalContracts);
+        Assert.Single(first.Results);
+        Assert.Equal(stale.PncpId, first.Results[0].PncpId);
+        Assert.False(first.HasMore);
+    }
+
+    [Fact]
     public async Task ContractCandidate_GeographyPrioritizesButDoesNotExcludeTheRestOfBrazil()
     {
         await using var database = await TestDatabase.CreateAsync();

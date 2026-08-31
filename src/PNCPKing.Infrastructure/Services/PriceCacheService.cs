@@ -17,7 +17,7 @@ public sealed class PriceCacheService(
     public const int WindowDays = 365;
     public static TimeSpan DefaultRequestTimeout { get; } = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan MaximumRetryDelay = TimeSpan.FromHours(6);
-    private readonly TimeSpan _requestTimeout = ValidateRequestTimeout(requestTimeout);
+    private readonly TimeSpan? _requestTimeout = ValidateRequestTimeout(requestTimeout);
     private readonly IPerformanceTelemetry _performance = performance ?? NullPerformanceTelemetry.Instance;
     private readonly AsyncPauseGate _visibleActivityPause = new();
 
@@ -376,8 +376,13 @@ public sealed class PriceCacheService(
         Func<CancellationToken, Task<T>> operation,
         CancellationToken cancellationToken)
     {
+        if (_requestTimeout is null)
+        {
+            return await operation(cancellationToken).ConfigureAwait(false);
+        }
+
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(_requestTimeout);
+        timeout.CancelAfter(_requestTimeout.Value);
         try
         {
             return await operation(timeout.Token).ConfigureAwait(false);
@@ -385,23 +390,22 @@ public sealed class PriceCacheService(
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
             throw new TimeoutException(
-                $"A API do PNCP não respondeu em {_requestTimeout.TotalSeconds:N0} segundos; " +
+                $"A API do PNCP não respondeu em {_requestTimeout.Value.TotalSeconds:N0} segundos; " +
                 "a contratação foi adiada para nova tentativa.",
                 exception);
         }
     }
 
-    private static TimeSpan ValidateRequestTimeout(TimeSpan? requestTimeout)
+    private static TimeSpan? ValidateRequestTimeout(TimeSpan? requestTimeout)
     {
-        var value = requestTimeout ?? DefaultRequestTimeout;
-        if (value <= TimeSpan.Zero)
+        if (requestTimeout is { } value && value <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(requestTimeout),
                 "O limite de espera deve ser maior que zero.");
         }
 
-        return value;
+        return requestTimeout;
     }
 
     private static string FormatBytes(long bytes)

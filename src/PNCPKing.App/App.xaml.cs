@@ -170,7 +170,11 @@ public partial class App : Application
                 $"inicial={requestConcurrency.InitialConcurrency}; " +
                 $"máxima={requestConcurrency.MaximumConcurrency}.");
             var requestTelemetry = new PncpRequestTelemetry();
-            var handler = new PncpSchedulingHandler(requestScheduler, requestTelemetry, _performanceTelemetry)
+            var handler = new PncpSchedulingHandler(
+                requestScheduler,
+                requestTelemetry,
+                _performanceTelemetry,
+                PriceCacheService.DefaultRequestTimeout)
             {
                 InnerHandler = socketsHandler
             };

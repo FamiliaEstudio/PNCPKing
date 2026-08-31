@@ -204,7 +204,7 @@
                         </Grid.ColumnDefinitions>
                         <TextBox Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
                                  AcceptsReturn="True" TextWrapping="Wrap" MinHeight="58"
-                                 ToolTip="Use E, OU, exclusões com -, frases, aproximações com % e C:(título 1, título 2) para priorizar contratações." />
+                                 ToolTip="Use E, OU, exclusões com -, frases e aproximações com %. Expressões antigas com C: continuam aceitas." />
                         <StackPanel Grid.Column="1" Margin="8,0,0,0">
                             <CheckBox Content="Sweet Codes" IsChecked="{Binding SweetCodeEnabled}" />
                             <ComboBox Width="260" ItemsSource="{Binding SweetCodeExpressions}"

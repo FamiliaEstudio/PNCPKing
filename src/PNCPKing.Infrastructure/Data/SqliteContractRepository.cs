@@ -1392,10 +1392,12 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         int pageSize = 200,
         CancellationToken cancellationToken = default)
     {
+        using var span = _performance.Begin("price-search", "explicit-candidate-chunk");
         ArgumentNullException.ThrowIfNull(filters);
         ArgumentNullException.ThrowIfNull(expression);
         if (expression.IsEmpty)
         {
+            span.Complete();
             return new ItemCandidatePage([], null, false);
         }
 
@@ -1434,16 +1436,29 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         }
 
         var where = conditions.Count == 0 ? string.Empty : " WHERE " + string.Join(" AND ", conditions);
-        var indexedItemCondition = itemMatch.Length > 0
+        var indexedContractSource = itemMatch.Length > 0
             ? """
-              EXISTS(
-                  SELECT 1
-                    FROM items i
-                    JOIN items_fts ON items_fts.rowid = i.rowid
-                   WHERE i.contract_id = indexed_contract.pncp_id
-                     AND items_fts MATCH $itemMatch)
+              SELECT DISTINCT indexed_contract.rowid
+                FROM items_fts
+                CROSS JOIN items indexed_item ON indexed_item.rowid = items_fts.rowid
+                CROSS JOIN contracts indexed_contract
+                  ON indexed_contract.pncp_id = indexed_item.contract_id
+                CROSS JOIN contract_item_snapshots snapshot
+                  ON snapshot.contract_id = indexed_contract.pncp_id
+                 AND COALESCE(snapshot.source_global_updated_at, '') =
+                     COALESCE(indexed_contract.global_updated_at, '')
+               WHERE items_fts MATCH $itemMatch
               """
-            : "EXISTS(SELECT 1 FROM items i WHERE i.contract_id = indexed_contract.pncp_id)";
+            : """
+              SELECT DISTINCT indexed_contract.rowid
+                FROM items indexed_item
+                CROSS JOIN contracts indexed_contract
+                  ON indexed_contract.pncp_id = indexed_item.contract_id
+                CROSS JOIN contract_item_snapshots snapshot
+                  ON snapshot.contract_id = indexed_contract.pncp_id
+                 AND COALESCE(snapshot.source_global_updated_at, '') =
+                     COALESCE(indexed_contract.global_updated_at, '')
+              """;
         var unindexedContractSource = candidateMatch.Length > 0
             ? """
               SELECT fallback.rowid
@@ -1500,13 +1515,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         await using var command = connection.CreateCommand();
         command.CommandText = $"""
             WITH candidate_rows AS (
-                SELECT indexed_contract.rowid
-                  FROM contracts indexed_contract
-                  JOIN contract_item_snapshots snapshot
-                    ON snapshot.contract_id = indexed_contract.pncp_id
-                   AND COALESCE(snapshot.source_global_updated_at, '') =
-                       COALESCE(indexed_contract.global_updated_at, '')
-                 WHERE {indexedItemCondition}
+                {indexedContractSource}
                 UNION
                 {unindexedContractSource}
                 {explicitContractUnion}
@@ -1573,6 +1582,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             candidates.RemoveAt(candidates.Count - 1);
         }
 
+        span.Complete(candidates.Count);
         return new ItemCandidatePage(
             candidates,
             candidates.Count == 0 ? cursor : candidates[^1].Cursor,
@@ -1693,6 +1703,139 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             hasMore);
     }
 
+    public async Task<StaleItemCandidatePage> SearchStaleItemCandidatesAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        StaleItemCandidateCursor? cursor,
+        int pageSize = 200,
+        CancellationToken cancellationToken = default)
+    {
+        using var span = _performance.Begin("price-search", "stale-detection");
+        ArgumentNullException.ThrowIfNull(filters);
+        ArgumentNullException.ThrowIfNull(expression);
+        if (expression.IsEmpty)
+        {
+            return new StaleItemCandidatePage([], null, false, 0);
+        }
+
+        await using var readerLease = await _connections.WorkCoordinator
+            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+            .ConfigureAwait(false);
+
+        pageSize = Math.Clamp(pageSize, 1, 512);
+        var itemMatch = expression.ItemMatchQuery;
+        var conditions = new List<string>
+        {
+            "i.has_result = 1",
+            "i.hydration_status = $stale",
+            "pncp_item_matches(i.description, i.unit) = 1"
+        };
+        if (itemMatch.Length > 0)
+        {
+            conditions.Add("items_fts MATCH $itemMatch");
+        }
+
+        switch (filters.EffectiveGeoFilter.Kind)
+        {
+            case SearchGeoFilterKind.Southeast:
+                conditions.Add("c.uf IN ('ES','MG','RJ','SP')");
+                break;
+            case SearchGeoFilterKind.State:
+                conditions.Add("c.uf = $uf");
+                break;
+            case SearchGeoFilterKind.NearRibeirao:
+                conditions.Add("c.geo_layer = 0");
+                break;
+        }
+
+        if (filters.StartDate is not null)
+        {
+            conditions.Add("c.publication_date >= $startDate");
+        }
+        if (filters.EndDate is not null)
+        {
+            conditions.Add("c.publication_date < $endDateExclusive");
+        }
+
+        var source = itemMatch.Length > 0
+            ? """
+              items_fts
+              CROSS JOIN items i ON i.rowid = items_fts.rowid
+              CROSS JOIN contracts c ON c.pncp_id = i.contract_id
+              """
+            : """
+              items i
+              CROSS JOIN contracts c ON c.pncp_id = i.contract_id
+              """;
+        var cursorWhere = cursor is null
+            ? string.Empty
+            : "WHERE stale.pncp_id > $cursorContract";
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        connection.CreateFunction<string?, string?, bool>(
+            "pncp_item_matches",
+            (description, unit) => expression.MatchesItem(description, unit),
+            isDeterministic: true);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            WITH stale_contracts AS MATERIALIZED (
+                SELECT c.pncp_id
+                  FROM {source}
+                 WHERE {string.Join(" AND ", conditions)}
+                 GROUP BY c.pncp_id
+            ),
+            page AS (
+                SELECT stale.pncp_id
+                  FROM stale_contracts stale
+                  {cursorWhere}
+                 ORDER BY stale.pncp_id
+                 LIMIT $limit
+            )
+            SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
+                   c.additional_information, c.process, c.organization, c.unit, c.municipality,
+                   c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
+                   c.publication_date, c.global_updated_at, c.total_homologated_scaled,
+                   c.distance_from_ribeirao_km,
+                   (SELECT COUNT(*) FROM stale_contracts) AS total_contracts
+              FROM page
+              CROSS JOIN contracts c ON c.pncp_id = page.pncp_id
+             ORDER BY page.pncp_id;
+            """;
+        command.Parameters.AddWithValue("$stale", (int)ItemHydrationStatus.Stale);
+        command.Parameters.AddWithValue("$limit", pageSize + 1);
+        if (itemMatch.Length > 0)
+        {
+            command.Parameters.AddWithValue("$itemMatch", itemMatch);
+        }
+        if (cursor is not null)
+        {
+            command.Parameters.AddWithValue("$cursorContract", cursor.ContractId);
+        }
+        AddFilterParameters(command, filters);
+
+        var contracts = new List<ContractRecord>(pageSize + 1);
+        long totalContracts = 0;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            contracts.Add(ReadContract(reader));
+            totalContracts = reader.GetInt64(19);
+        }
+
+        var hasMore = contracts.Count > pageSize;
+        if (hasMore)
+        {
+            contracts.RemoveAt(contracts.Count - 1);
+        }
+
+        span.Complete(contracts.Count);
+        return new StaleItemCandidatePage(
+            contracts,
+            contracts.Count == 0 ? cursor : new StaleItemCandidateCursor(contracts[^1].PncpId),
+            hasMore,
+            totalContracts);
+    }
+
     public async Task<ItemSearchLocalSummary> GetItemSearchLocalSummaryAsync(
         SearchQuery filters,
         SearchExpression expression,
@@ -1740,16 +1883,29 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         var candidateWhere = candidateConditions.Count == 0
             ? string.Empty
             : " WHERE " + string.Join(" AND ", candidateConditions);
-        var indexedItemCondition = itemMatch.Length > 0
+        var indexedContractSource = itemMatch.Length > 0
             ? """
-              EXISTS(
-                  SELECT 1
-                    FROM items indexed_item
-                    JOIN items_fts ON items_fts.rowid = indexed_item.rowid
-                   WHERE indexed_item.contract_id = indexed_contract.pncp_id
-                     AND items_fts MATCH $itemMatch)
+              SELECT DISTINCT indexed_contract.rowid
+                FROM items_fts
+                CROSS JOIN items indexed_item ON indexed_item.rowid = items_fts.rowid
+                CROSS JOIN contracts indexed_contract
+                  ON indexed_contract.pncp_id = indexed_item.contract_id
+                CROSS JOIN contract_item_snapshots snapshot
+                  ON snapshot.contract_id = indexed_contract.pncp_id
+                 AND COALESCE(snapshot.source_global_updated_at, '') =
+                     COALESCE(indexed_contract.global_updated_at, '')
+               WHERE items_fts MATCH $itemMatch
               """
-            : "EXISTS(SELECT 1 FROM items indexed_item WHERE indexed_item.contract_id = indexed_contract.pncp_id)";
+            : """
+              SELECT DISTINCT indexed_contract.rowid
+                FROM items indexed_item
+                CROSS JOIN contracts indexed_contract
+                  ON indexed_contract.pncp_id = indexed_item.contract_id
+                CROSS JOIN contract_item_snapshots snapshot
+                  ON snapshot.contract_id = indexed_contract.pncp_id
+                 AND COALESCE(snapshot.source_global_updated_at, '') =
+                     COALESCE(indexed_contract.global_updated_at, '')
+              """;
         var unindexedContractSource = candidateMatch.Length > 0
             ? """
               SELECT fallback.rowid
@@ -1784,13 +1940,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             : string.Empty;
         var candidateRowsCte = $"""
             candidate_rows AS (
-                SELECT indexed_contract.rowid
-                  FROM contracts indexed_contract
-                  JOIN contract_item_snapshots snapshot
-                    ON snapshot.contract_id = indexed_contract.pncp_id
-                   AND COALESCE(snapshot.source_global_updated_at, '') =
-                       COALESCE(indexed_contract.global_updated_at, '')
-                 WHERE {indexedItemCondition}
+                {indexedContractSource}
                 UNION
                 {unindexedContractSource}
                 {explicitContractUnion}
@@ -1975,6 +2125,7 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                 hydration_status = CASE
                     WHEN $forceRefresh = 1 THEN excluded.hydration_status
                     WHEN items.hydration_status = 2 THEN items.hydration_status
+                    WHEN items.hydration_status = 4 AND excluded.has_result = 1 THEN 4
                     ELSE excluded.hydration_status
                 END,
                 last_error = CASE WHEN $forceRefresh = 1 THEN NULL ELSE items.last_error END,
@@ -3478,6 +3629,17 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         span.Complete(bytes: walBytes);
     }
 
+    public async Task MarkOptimizePendingAsync(CancellationToken cancellationToken = default)
+    {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+            .ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE maintenance_state SET last_optimize_date = '' WHERE id = 1;";
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task OptimizeAsync(CancellationToken cancellationToken = default)
     {
         using var span = _performance.Begin("maintenance", "sqlite-optimize");
@@ -3485,18 +3647,16 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
             .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using (var claim = connection.CreateCommand())
+        var today = DateOnly.FromDateTime(DateTime.Today).ToString("O");
+        await using (var check = connection.CreateCommand())
         {
-            claim.CommandText = """
-                UPDATE maintenance_state
-                   SET last_optimize_date = $today
-                 WHERE id = 1 AND last_optimize_date <> $today;
-                SELECT changes();
-                """;
-            claim.Parameters.AddWithValue("$today", DateOnly.FromDateTime(DateTime.Today).ToString("O"));
-            if (Convert.ToInt32(
-                    await claim.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
-                    CultureInfo.InvariantCulture) == 0)
+            check.CommandText = "SELECT last_optimize_date FROM maintenance_state WHERE id = 1;";
+            if (string.Equals(
+                    Convert.ToString(
+                        await check.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                        CultureInfo.InvariantCulture),
+                    today,
+                    StringComparison.Ordinal))
             {
                 span.Complete();
                 return;
@@ -3506,6 +3666,10 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         await using var command = connection.CreateCommand();
         command.CommandText = "PRAGMA optimize; PRAGMA wal_checkpoint(PASSIVE);";
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await using var completed = connection.CreateCommand();
+        completed.CommandText = "UPDATE maintenance_state SET last_optimize_date = $today WHERE id = 1;";
+        completed.Parameters.AddWithValue("$today", today);
+        await completed.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         span.Complete();
     }
 

@@ -14,7 +14,11 @@ public sealed class NationalPriceIndexService(
     IPerformanceTelemetry? performance = null)
 {
     private static readonly TimeSpan MaximumRetryDelay = TimeSpan.FromHours(6);
-    private readonly TimeSpan _requestTimeout = requestTimeout ?? PriceCacheService.DefaultRequestTimeout;
+    private readonly TimeSpan? _requestTimeout = requestTimeout is null || requestTimeout > TimeSpan.Zero
+        ? requestTimeout
+        : throw new ArgumentOutOfRangeException(
+            nameof(requestTimeout),
+            "O limite de espera deve ser maior que zero.");
     private readonly IPerformanceTelemetry _performance = performance ?? NullPerformanceTelemetry.Instance;
 
     public async Task SynchronizeAggressivelyAsync(
@@ -340,8 +344,13 @@ public sealed class NationalPriceIndexService(
         Func<CancellationToken, Task<T>> operation,
         CancellationToken cancellationToken)
     {
+        if (_requestTimeout is null)
+        {
+            return await operation(cancellationToken).ConfigureAwait(false);
+        }
+
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(_requestTimeout);
+        timeout.CancelAfter(_requestTimeout.Value);
         try
         {
             return await operation(timeout.Token).ConfigureAwait(false);
@@ -349,7 +358,7 @@ public sealed class NationalPriceIndexService(
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
             throw new TimeoutException(
-                $"A API do PNCP não respondeu em {_requestTimeout.TotalSeconds:N0} segundos; " +
+                $"A API do PNCP não respondeu em {_requestTimeout.Value.TotalSeconds:N0} segundos; " +
                 "o item foi adiado para nova tentativa.",
                 exception);
         }

@@ -137,6 +137,68 @@ public sealed class PriceCacheTests
     }
 
     [Fact]
+    public async Task ContractChunkSearch_UsesCursorWithoutOverlapForUnitOnlyExpression()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var contracts = new[]
+        {
+            RecentContract("chunk-newest", today, 1),
+            RecentContract("chunk-middle", today.AddDays(-1), 2),
+            RecentContract("chunk-oldest", today.AddDays(-2), 3)
+        };
+        await database.Repository.UpsertContractsAsync(contracts);
+        foreach (var contract in contracts)
+        {
+            await database.Repository.UpsertItemsAsync(contract.PncpId, [
+                Item(contract, 1) with
+                {
+                    Unit = "PACOTE",
+                    HydrationStatus = ItemHydrationStatus.Complete
+                }
+            ], false);
+            await database.Repository.ReplaceItemResultsAsync(contract.PncpId, 1, [
+                Result(contract, 1, 1, true)
+            ]);
+        }
+
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
+        var expression = SearchText.Parse("\"pacote");
+        var query = new SearchQuery(
+            "\"pacote",
+            GeoScope.All,
+            today.AddDays(-30),
+            today,
+            Sort: SearchSort.Newest);
+        var first = await cache.SearchLocalAfterAsync(query, expression, null, null, null, 1);
+        var second = await cache.SearchLocalAfterAsync(
+            query,
+            expression,
+            null,
+            null,
+            first.Cursor,
+            1);
+        var third = await cache.SearchLocalAfterAsync(
+            query,
+            expression,
+            null,
+            null,
+            second.Cursor,
+            1);
+
+        Assert.Equal("chunk-newest", Assert.Single(first.Hits).Contract.PncpId);
+        Assert.Equal("chunk-middle", Assert.Single(second.Hits).Contract.PncpId);
+        Assert.Equal("chunk-oldest", Assert.Single(third.Hits).Contract.PncpId);
+        Assert.Equal(
+            3,
+            first.Hits.Concat(second.Hits).Concat(third.Hits)
+                .Select(hit => hit.Contract.PncpId)
+                .Distinct(StringComparer.Ordinal)
+                .Count());
+        Assert.False(third.HasMore);
+    }
+
+    [Fact]
     public async Task SelectiveRemoval_DeletesBackgroundDataButPreservesPinnedContract()
     {
         await using var database = await TestDatabase.CreateAsync();

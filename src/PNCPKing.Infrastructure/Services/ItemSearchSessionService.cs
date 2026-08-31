@@ -112,7 +112,8 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         ContractRecord contract,
         IReadOnlyList<ContractItemPrompt> prompts,
         CancellationToken cancellationToken = default,
-        PncpRequestPriority priority = PncpRequestPriority.AdditionalBatches)
+        PncpRequestPriority priority = PncpRequestPriority.AdditionalBatches,
+        int? maximumNetworkConcurrency = null)
     {
         ArgumentNullException.ThrowIfNull(contract);
         ArgumentNullException.ThrowIfNull(prompts);
@@ -204,7 +205,9 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             .GroupBy(item => item.ItemNumber)
             .Select(group => group.First())
             .ToArray();
-        var networkConcurrency = CurrentNetworkConcurrency;
+        var networkConcurrency = Math.Min(
+            CurrentNetworkConcurrency,
+            Math.Max(1, maximumNetworkConcurrency ?? int.MaxValue));
         using var semaphore = new SemaphoreSlim(networkConcurrency, networkConcurrency);
         var hydrationTasks = itemsToHydrate.Select(async item =>
         {
@@ -319,6 +322,107 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             actualCalls.ItemListCalls,
             actualCalls.ItemResultCalls,
             actualCalls.FailedCalls);
+    }
+
+    public async Task<StalePriceRevalidationResult> RevalidateStaleMatchesAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        IProgress<StalePriceRevalidationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(filters);
+        ArgumentNullException.ThrowIfNull(expression);
+        if (expression.IsEmpty)
+        {
+            return new StalePriceRevalidationResult(0, 0, 0, 0, 0);
+        }
+
+        var constrained = (_requestScheduler?.GetSnapshot().MaximumConcurrency ?? 48) <= 16;
+        var maximumConcurrency = constrained ? 1 : 2;
+        var pageSize = constrained ? 128 : 256;
+        StaleItemCandidateCursor? cursor = null;
+        var totalContracts = 0;
+        var processedContracts = 0;
+        var refreshedContracts = 0;
+        var itemResultCalls = 0;
+        var failedCalls = 0;
+        var prompt = new ContractItemPrompt(
+            Guid.Empty,
+            PromptMatchLevel.Restrictive,
+            expression.OriginalText);
+
+        do
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var started = Stopwatch.GetTimestamp();
+            var page = await _repository.SearchStaleItemCandidatesAsync(
+                    filters,
+                    expression,
+                    cursor,
+                    pageSize,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (totalContracts == 0)
+            {
+                totalContracts = checked((int)Math.Min(int.MaxValue, page.TotalContracts));
+                progress?.Report(new StalePriceRevalidationProgress(
+                    totalContracts,
+                    processedContracts,
+                    refreshedContracts,
+                    itemResultCalls,
+                    failedCalls));
+            }
+
+            var queryDuration = Stopwatch.GetElapsedTime(started);
+            if (queryDuration < TimeSpan.FromMilliseconds(150))
+            {
+                pageSize = Math.Min(512, pageSize * 2);
+            }
+            else if (queryDuration > TimeSpan.FromMilliseconds(500))
+            {
+                pageSize = Math.Max(64, pageSize / 2);
+            }
+
+            foreach (var contract in page.Results)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var evaluated = await EvaluateContractAsync(
+                        contract,
+                        [prompt],
+                        cancellationToken,
+                        PncpRequestPriority.VisiblePrices,
+                        maximumConcurrency)
+                    .ConfigureAwait(false);
+                processedContracts++;
+                itemResultCalls += evaluated.ItemResultApiCalls;
+                failedCalls += evaluated.FailedCalls;
+                if (evaluated.ItemListsFromApi > 0 && evaluated.FailedCalls == 0)
+                {
+                    refreshedContracts++;
+                }
+
+                progress?.Report(new StalePriceRevalidationProgress(
+                    totalContracts,
+                    processedContracts,
+                    refreshedContracts,
+                    itemResultCalls,
+                    failedCalls));
+            }
+
+            cursor = page.NextCursor;
+            if (!page.HasMore || page.Results.Count == 0)
+            {
+                break;
+            }
+        }
+        while (true);
+
+        return new StalePriceRevalidationResult(
+            totalContracts,
+            processedContracts,
+            refreshedContracts,
+            itemResultCalls,
+            failedCalls);
     }
 
     private (int ItemListCalls, int ItemResultCalls, int FailedCalls) GetActualCallDelta(

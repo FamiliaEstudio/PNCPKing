@@ -662,6 +662,108 @@ public sealed class ItemSearchSessionTests
     }
 
     [Fact]
+    public async Task RestrictedRevalidation_CallsOnlyKnownStaleMatchingContract()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var current = RepositorySearchTests.Contract("current-price", "Café", "SP", 1);
+        var stale = RepositorySearchTests.Contract("stale-price", "Café", "SP", 2);
+        var neverLoaded = RepositorySearchTests.Contract("never-price", "Café", "SP", 3);
+        await database.Repository.UpsertContractsAsync([current, stale, neverLoaded]);
+        await database.Repository.UpsertItemsAsync(current.PncpId, [
+            Item(current.PncpId, 1, "Coffee Break", true) with
+            {
+                HydrationStatus = ItemHydrationStatus.Complete
+            }
+        ], false);
+        await database.Repository.ReplaceItemResultsAsync(current.PncpId, 1, [
+            Result(current.PncpId, 1, 1, 12m, 1)
+        ]);
+        await database.Repository.UpsertItemsAsync(stale.PncpId, [
+            Item(stale.PncpId, 1, "Coffee Break", true) with
+            {
+                HydrationStatus = ItemHydrationStatus.Complete
+            }
+        ], false);
+        await database.Repository.ReplaceItemResultsAsync(stale.PncpId, 1, [
+            Result(stale.PncpId, 1, 1, 15m, 1)
+        ]);
+        await database.Repository.UpsertItemsAsync(neverLoaded.PncpId, [
+            Item(neverLoaded.PncpId, 1, "Coffee Break", true)
+        ], false);
+        var updatedStale = stale with
+        {
+            GlobalUpdatedAt = stale.GlobalUpdatedAt!.Value.AddHours(1)
+        };
+        await database.Repository.UpsertContractsAsync([updatedStale]);
+
+        var client = new SessionPncpClient(
+            new Dictionary<string, IReadOnlyList<ProcurementItem>>
+            {
+                [stale.PncpId] = [Item(stale.PncpId, 1, "Coffee Break premium", true)]
+            },
+            (_, _) => [Result(stale.PncpId, 1, 2, 25m, 1)]);
+        await using var service = new ItemSearchSessionService(
+            client,
+            database.Repository,
+            Path.Combine(database.Directory, "restricted-revalidation.db"),
+            requestScheduler: new PncpRequestScheduler(maximumConcurrency: 16));
+        var query = new SearchQuery("Coffee Break", GeoScope.All);
+
+        var result = await service.RevalidateStaleMatchesAsync(
+            query,
+            SearchText.Parse(query.Text));
+
+        Assert.Equal(1, result.TotalContracts);
+        Assert.Equal(1, result.ProcessedContracts);
+        Assert.Equal(1, client.ItemListCalls);
+        Assert.Equal(1, client.ResultCalls);
+        Assert.Equal(12m, (await database.Repository.GetCachedItemResultsAsync(current.PncpId, 1))!
+            .Results.Single().HomologatedUnitValue);
+        Assert.Equal(25m, (await database.Repository.GetCachedItemResultsAsync(stale.PncpId, 1))!
+            .Results.Single().HomologatedUnitValue);
+        Assert.Equal(
+            ItemHydrationStatus.NotLoaded,
+            (await database.Repository.GetItemAsync(neverLoaded.PncpId, 1))!.HydrationStatus);
+    }
+
+    [Fact]
+    public async Task RestrictedRevalidation_RemovedItemMakesNoResultCall()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contract = RepositorySearchTests.Contract("removed-stale", "Café", "SP", 1);
+        await database.Repository.UpsertContractsAsync([contract]);
+        await database.Repository.UpsertItemsAsync(contract.PncpId, [
+            Item(contract.PncpId, 1, "Coffee Break", true) with
+            {
+                HydrationStatus = ItemHydrationStatus.Complete
+            }
+        ], false);
+        await database.Repository.ReplaceItemResultsAsync(contract.PncpId, 1, [
+            Result(contract.PncpId, 1, 1, 15m, 1)
+        ]);
+        await database.Repository.UpsertContractsAsync([
+            contract with { GlobalUpdatedAt = contract.GlobalUpdatedAt!.Value.AddHours(1) }
+        ]);
+        var client = new SessionPncpClient(new Dictionary<string, IReadOnlyList<ProcurementItem>>
+        {
+            [contract.PncpId] = []
+        });
+        await using var service = new ItemSearchSessionService(
+            client,
+            database.Repository,
+            Path.Combine(database.Directory, "removed-revalidation.db"));
+
+        var result = await service.RevalidateStaleMatchesAsync(
+            new SearchQuery("Coffee Break", GeoScope.All),
+            SearchText.Parse("Coffee Break"));
+
+        Assert.Equal(1, result.ProcessedContracts);
+        Assert.Equal(1, client.ItemListCalls);
+        Assert.Equal(0, client.ResultCalls);
+        Assert.Null(await database.Repository.GetItemAsync(contract.PncpId, 1));
+    }
+
+    [Fact]
     public async Task RepositoryCandidateSource_ContinuesByCursorAndCapsFreshListsPerAction()
     {
         await using var database = await TestDatabase.CreateAsync();

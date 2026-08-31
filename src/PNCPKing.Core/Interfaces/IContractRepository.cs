@@ -31,6 +31,12 @@ public interface IContractRepository
         ItemCandidateCursor? cursor,
         int pageSize = 200,
         CancellationToken cancellationToken = default);
+    Task<StaleItemCandidatePage> SearchStaleItemCandidatesAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        StaleItemCandidateCursor? cursor,
+        int pageSize = 200,
+        CancellationToken cancellationToken = default);
     Task<ItemSearchLocalSummary> GetItemSearchLocalSummaryAsync(
         SearchQuery filters,
         SearchExpression expression,
@@ -103,6 +109,7 @@ public interface IContractRepository
     Task<string> StartSyncRunAsync(SyncMode mode, DateOnly startDate, DateOnly endDate, CancellationToken cancellationToken = default);
     Task CompleteSyncRunAsync(string runId, bool succeeded, long contractsSaved, string? error, CancellationToken cancellationToken = default);
     Task<(long Contracts, long Items, long Results)> GetCountsAsync(CancellationToken cancellationToken = default);
+    Task MarkOptimizePendingAsync(CancellationToken cancellationToken = default);
     Task OptimizeAsync(CancellationToken cancellationToken = default);
     Task CheckpointWalAsync(CancellationToken cancellationToken = default);
     Task MaintainWalAsync(CancellationToken cancellationToken = default);

@@ -114,15 +114,8 @@ public sealed class AiPromptRefinementService(
                 $"A IA devolveu {contractPrompts.Count:N0} crivo(s) global(is) distinto(s); são necessários exatamente 10.");
         }
 
-        var synchronized = mapped.Select(item => item with
-        {
-            RestrictiveText = SearchText.ReplaceContractCandidates(item.RestrictiveText, contractPrompts),
-            IntermediateText = SearchText.ReplaceContractCandidates(item.IntermediateText, contractPrompts),
-            BroadText = SearchText.ReplaceContractCandidates(item.BroadText, contractPrompts)
-        }).ToArray();
-
         return new AiPromptRefinementResult(
-            synchronized,
+            mapped,
             contractPrompts,
             response.InputTokens,
             response.OutputTokens,
@@ -141,7 +134,7 @@ public sealed class AiPromptRefinementService(
             var parsed = SearchText.Parse(value);
             if (parsed.HasExplicitContractCandidates)
             {
-                throw new SearchQueryException("A IA não deve incluir C:; o bloco é sincronizado localmente.");
+                throw new SearchQueryException("A IA não deve gerar novos blocos C:.");
             }
         }
         catch (SearchQueryException exception)

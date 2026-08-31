@@ -95,3 +95,11 @@ public sealed record ItemCandidatePage(
     IReadOnlyList<ItemContractCandidate> Results,
     ItemCandidateCursor? NextCursor,
     bool HasMore);
+
+public sealed record StaleItemCandidateCursor(string ContractId);
+
+public sealed record StaleItemCandidatePage(
+    IReadOnlyList<ContractRecord> Results,
+    StaleItemCandidateCursor? NextCursor,
+    bool HasMore,
+    long TotalContracts);

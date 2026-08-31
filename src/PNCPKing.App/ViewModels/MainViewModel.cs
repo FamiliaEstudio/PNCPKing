@@ -90,6 +90,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _hasMoreTemporaryPriceRows;
     private int _temporaryPriceRowsLoaded;
     private bool _remotePriceExpansionStarted;
+    private bool _isStalePriceRevalidationActive;
+    private bool _restartPriceSessionOnNextExpansion;
     private int _activeExpansionRemaining;
     private bool _activeExpansionExhaustive;
     private int _priceRunGeneration;
@@ -311,15 +313,14 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             () => _contractSearchCountPending && _contractCountCancellation is not null);
         LoadNextItemPageCommand = new AsyncRelayCommand(
             LoadNextItemPageAsync,
-            () => !IsFileBusy && !_isResultPageLoading && HasMoreStoredPriceRows &&
-                  _itemSearchService.CurrentSession is not null);
+            () => !IsFileBusy && !_isResultPageLoading && HasMoreStoredPriceRows);
         FireBatchesCommand = new AsyncRelayCommand(
             FireBatchesAsync,
             () => !IsAnyAggressivePncpMode && !IsFileBusy && !IsPriceBusy && _isItemSearchActive);
         ApplyPriceFilterCommand = new AsyncRelayCommand(
             ApplyPriceFilterAsync,
             () => !IsFileBusy && !IsPriceBusy && !_isResultPageLoading &&
-                  _itemSearchService.CurrentSession is not null);
+                  _activeItemSearchExpression is not null);
         StopItemSearchCommand = new RelayCommand(StopItemSearch, () => _isItemSearchActive);
         CalculatePreflightCommand = new AsyncRelayCommand(
             CalculatePreflightAsync,
@@ -749,7 +750,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     }
 
     private bool HasMoreStoredPriceRows =>
-        _hasMoreLocalPriceRows || !_temporaryPricePagingStarted || _hasMoreTemporaryPriceRows;
+        _hasMoreLocalPriceRows ||
+        (_remotePriceExpansionStarted && _itemSearchService.CurrentSession is not null &&
+         (!_temporaryPricePagingStarted || _hasMoreTemporaryPriceRows));
 
     public bool SearchUntilCandidateSetExhausted
     {
@@ -1368,12 +1371,6 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        var exhaustCandidateSet = SearchUntilCandidateSetExhausted;
-        var previousSessionId = _itemSearchService.CurrentSession?.Id;
-        var interruptedBatchRemainder = resetSession && !restartPriceSession && IsPriceBusy &&
-                                        !_activeExpansionExhaustive
-            ? Math.Max(0, _activeExpansionRemaining)
-            : 0;
         CancellationTokenSource? priceCancellation = null;
         if (resetSession)
         {
@@ -1384,6 +1381,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             previousPriceCancellation?.Cancel();
             _itemSearchService.Stop();
             previousPriceCancellation?.Dispose();
+            _isStalePriceRevalidationActive = false;
+            SetPriceBusy(false, usesNetwork: false);
+            _restartPriceSessionOnNextExpansion = restartPriceSession;
         }
 
         using var visibleActivity = _requestScheduler.SuppressBackgroundRequests();
@@ -1457,6 +1457,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             var activePriceCancellation = priceCancellation ??
                 throw new InvalidOperationException("A pesquisa de itens não possui token de cancelamento.");
             SetItemSearchActive(false);
+            await RemoveInvalidRetainedPricesAsync(activePriceCancellation.Token).ConfigureAwait(true);
             ResetCurrentItemRows();
             CurrentItemPage = 0;
             HasMoreItemCandidates = true;
@@ -1476,73 +1477,23 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             _remotePriceExpansionStarted = false;
             _localItemSearchSummary = null;
             ItemSearchSummary = "Buscando a primeira página no cache local…";
-            var localSummaryTask = RefreshLocalItemSearchSummaryAsync(
-                activeSearchQuery,
-                _activeItemSearchExpression,
-                searchGeneration,
-                activePriceCancellation.Token);
-            var itemSessionTask = Task.Run(
-                () => _itemSearchService.StartAsync(
-                    activeSearchQuery with { Page = 1, PageSize = 200 },
-                    restartPriceSession,
-                    activePriceCancellation.Token),
-                activePriceCancellation.Token);
             var localRows = await LoadLocalPricePageAsync(activePriceCancellation.Token).ConfigureAwait(true);
-            await Task.Yield();
-            var itemSession = await itemSessionTask.ConfigureAwait(true);
             if (searchGeneration != Volatile.Read(ref _contractSearchGeneration))
             {
                 return;
             }
 
-            var (minimum, maximum) = ParsePriceRange();
-            var restoredRows = localRows < ItemSearchSessionService.DefaultPageSize
-                ? await LoadTemporaryPricePageAsync(
-                        ItemSearchSessionService.DefaultPageSize - localRows,
-                        activePriceCancellation.Token,
-                        minimum,
-                        maximum)
-                    .ConfigureAwait(true)
-                : 0;
-            CurrentItemPage = localRows + restoredRows > 0 ? 1 : 0;
+            CurrentItemPage = localRows > 0 ? 1 : 0;
             SetItemSearchActive(true);
             NotifyCommands();
-            if (exhaustCandidateSet)
-            {
-                ItemSearchSummary = "Calculando o total de contratações candidatas antes da busca completa…";
-                await localSummaryTask.ConfigureAwait(true);
-                if (!ConfirmExhaustiveItemSearch())
-                {
-                    HasMoreItemCandidates = true;
-                    ItemSearchSummary =
-                        $"{BuildLocalSearchSummary()} Busca completa não iniciada; " +
-                        "os resultados locais foram preservados.";
-                    StatusText = "Busca completa cancelada antes das chamadas de preços.";
-                    return;
-                }
-            }
-            else
-            {
-                _ = localSummaryTask;
-            }
-
-            HasMoreItemCandidates = true;
-            ItemSearchSummary =
-                $"{BuildLocalSearchSummary()} {restoredRows:N0} linha(s) da sessão retomável; " +
-                (exhaustCandidateSet
-                    ? "iniciando busca até esgotar as contratações candidatas."
-                    : "iniciando ampliação da cobertura.");
-            StatusText = localRows > 0
-                ? "Resultados locais entregues; ampliando com contratações ainda não resolvidas."
-                : "Ampliando com contratações ainda não resolvidas.";
-            _remotePriceExpansionStarted = true;
-            int? exactRemainder = previousSessionId == itemSession.Id && interruptedBatchRemainder > 0
-                ? interruptedBatchRemainder
-                : null;
-            await RunSelectedBatchesAsync(
-                    activePriceCancellation.Token,
-                    exactRemainder,
-                    exhaustCandidateSet)
+            HasMoreItemCandidates = _hasMoreLocalPriceRows;
+            ItemSearchSummary = $"{localRows:N0} preços locais atuais exibidos.";
+            StatusText = $"{localRows:N0} preços locais atuais exibidos.";
+            await RevalidateStalePricesAsync(
+                    activeSearchQuery,
+                    _activeItemSearchExpression,
+                    searchGeneration,
+                    activePriceCancellation.Token)
                 .ConfigureAwait(true);
         }
         catch (OperationCanceledException)
@@ -1760,6 +1711,98 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
+    private async Task RevalidateStalePricesAsync(
+        SearchQuery query,
+        SearchExpression expression,
+        int searchGeneration,
+        CancellationToken cancellationToken)
+    {
+        using var span = _performanceTelemetry.Begin("price-search", "stale-revalidation");
+        _isStalePriceRevalidationActive = true;
+        SetPriceBusy(true, usesNetwork: true);
+        try
+        {
+            var progress = new Progress<StalePriceRevalidationProgress>(value =>
+            {
+                if (searchGeneration != Volatile.Read(ref _contractSearchGeneration))
+                {
+                    return;
+                }
+
+                PriceSearchProgress = value.Percentage;
+                ItemSearchSummary = value.TotalContracts == 0
+                    ? $"{_localPriceRowsLoaded:N0} preços locais atuais exibidos; nenhum preço alterado aguarda revalidação."
+                    : $"Revalidando {value.TotalContracts:N0} contratações alteradas no PNCP… " +
+                      $"{value.ProcessedContracts:N0}/{value.TotalContracts:N0} concluída(s); " +
+                      $"chamadas de resultados: {value.ItemResultCalls:N0}; falhas: {value.FailedCalls:N0}.";
+                StatusText = value.TotalContracts == 0
+                    ? "Resultados locais atuais entregues."
+                    : $"Revalidando preços alterados no PNCP: {value.ProcessedContracts:N0}/" +
+                      $"{value.TotalContracts:N0} contratação(ões).";
+            });
+            var result = await _itemSearchService.RevalidateStaleMatchesAsync(
+                    query,
+                    expression,
+                    progress,
+                    cancellationToken)
+                .ConfigureAwait(true);
+            if (searchGeneration != Volatile.Read(ref _contractSearchGeneration))
+            {
+                return;
+            }
+
+            if (result.TotalContracts == 0)
+            {
+                PriceSearchProgress = 100;
+                ItemSearchSummary =
+                    $"{_localPriceRowsLoaded:N0} preços locais atuais exibidos; " +
+                    "nenhum preço alterado aguarda revalidação.";
+                StatusText = "Resultados locais atuais entregues.";
+                span.Complete();
+                return;
+            }
+
+            await ReloadLocalPricesAtomicallyAsync(cancellationToken).ConfigureAwait(true);
+            PriceSearchProgress = 100;
+            ItemSearchSummary =
+                $"Revalidação concluída; resultados locais atualizados. " +
+                $"{result.ProcessedContracts:N0} contratação(ões) examinada(s), " +
+                $"{result.ItemResultCalls:N0} resultado(s) consultado(s) e " +
+                $"{result.FailedCalls:N0} falha(s).";
+            StatusText = "Revalidação concluída; resultados locais atualizados.";
+            span.Complete(result.ProcessedContracts);
+        }
+        catch (OperationCanceledException)
+        {
+            if (searchGeneration == Volatile.Read(ref _contractSearchGeneration))
+            {
+                ItemSearchSummary =
+                    $"Revalidação interrompida; {_localPriceRowsLoaded:N0} preços locais atuais permanecem exibidos.";
+                StatusText = "Revalidação de preços interrompida; checkpoints preservados.";
+            }
+            span.Complete();
+        }
+        catch (Exception exception)
+        {
+            if (searchGeneration == Volatile.Read(ref _contractSearchGeneration))
+            {
+                ItemSearchSummary =
+                    $"Os preços locais atuais permanecem exibidos. Falha ao revalidar alterações: {exception.Message}";
+                StatusText = "Revalidação adiada; será tentada novamente em uma nova pesquisa.";
+            }
+            span.Fail(exception);
+        }
+        finally
+        {
+            if (searchGeneration == Volatile.Read(ref _contractSearchGeneration))
+            {
+                _isStalePriceRevalidationActive = false;
+                SetPriceBusy(false, usesNetwork: false);
+                NotifyCommands();
+            }
+        }
+    }
+
     private async Task ChangeContractPageAsync(int page)
     {
         try
@@ -1789,7 +1832,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task LoadNextItemPageAsync()
     {
-        if (_disposed || _isResultPageLoading || _itemSearchService.CurrentSession is null)
+        if (_disposed || _isResultPageLoading)
         {
             return;
         }
@@ -1825,7 +1868,50 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        await RunSelectedBatchesAsync(cancellation.Token).ConfigureAwait(true);
+        var query = _activeSearchQuery;
+        var expression = _activeItemSearchExpression;
+        if (query is null || expression is null)
+        {
+            ItemSearchSummary = "Pesquise um item antes de ampliar pela API.";
+            return;
+        }
+
+        var exhaustCandidateSet = SearchUntilCandidateSetExhausted;
+        if (exhaustCandidateSet)
+        {
+            ItemSearchSummary = "Calculando o total de contratações candidatas para esgotar pela API…";
+            await RefreshLocalItemSearchSummaryAsync(
+                    query,
+                    expression,
+                    Volatile.Read(ref _contractSearchGeneration),
+                    cancellation.Token)
+                .ConfigureAwait(true);
+            if (!ConfirmExhaustiveItemSearch())
+            {
+                ItemSearchSummary =
+                    $"{_localPriceRowsLoaded:N0} preços locais atuais preservados; " +
+                    "a ampliação pela API não foi iniciada.";
+                return;
+            }
+        }
+
+        if (!_remotePriceExpansionStarted)
+        {
+            ItemSearchSummary = "Preparando a sessão explícita de ampliação pela API…";
+            await _itemSearchService.StartAsync(
+                    query with { Page = 1, PageSize = 200 },
+                    _restartPriceSessionOnNextExpansion,
+                    cancellation.Token)
+                .ConfigureAwait(true);
+            _restartPriceSessionOnNextExpansion = false;
+            _remotePriceExpansionStarted = true;
+            HasMoreItemCandidates = true;
+        }
+
+        await RunSelectedBatchesAsync(
+                cancellation.Token,
+                exhaustCandidateSet: exhaustCandidateSet)
+            .ConfigureAwait(true);
     }
 
     private async Task RunSelectedBatchesAsync(
@@ -1839,6 +1925,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
+        using var expansionSpan = _performanceTelemetry.Begin("price-search", "explicit-api-expansion");
         var effectiveBatchCount = BatchCount;
         var estimatedCandidateContracts = _localItemSearchSummary?.CandidateContracts;
         var exhaustiveProgressCount = estimatedCandidateContracts is > 0
@@ -1917,6 +2004,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 $"chamadas de listas/resultados: {result.ItemListCalls:N0}/{result.ItemResultCalls:N0}; " +
                 $"falhas na sessão: {result.TotalFailedCalls:N0}. " +
                 BuildSearchTrafficSummary();
+            expansionSpan.Complete(result.ProcessedContracts);
         }
         catch (OperationCanceledException)
         {
@@ -1924,6 +2012,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             {
                 ItemSearchSummary = "Lotes interrompidos; o que terminou foi preservado no checkpoint retomável.";
             }
+            expansionSpan.Complete();
         }
         catch (Exception exception)
         {
@@ -1931,6 +2020,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             {
                 ItemSearchSummary = $"Falha ao disparar lotes: {exception.Message}";
             }
+            expansionSpan.Fail(exception);
         }
         finally
         {
@@ -2008,6 +2098,81 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
+    private async Task ReloadLocalPricesAtomicallyAsync(CancellationToken cancellationToken)
+    {
+        if (_activeSearchQuery is null || _activeItemSearchExpression is null)
+        {
+            return;
+        }
+
+        var (minimum, maximum) = ParsePriceRange();
+        var pagesToRestore = Math.Max(1, CurrentItemPage);
+        var rows = new List<ItemSearchRow>(pagesToRestore * ItemSearchSessionService.DefaultPageSize);
+        PriceCacheLocalCursor? cursor = null;
+        PriceCacheLocalPage? lastPage = null;
+        for (var pageNumber = 0; pageNumber < pagesToRestore; pageNumber++)
+        {
+            lastPage = await Task.Run(
+                    () => _priceCacheRepository.SearchLocalAfterAsync(
+                        _activeSearchQuery,
+                        _activeItemSearchExpression,
+                        minimum,
+                        maximum,
+                        cursor,
+                        ItemSearchSessionService.DefaultPageSize,
+                        cancellationToken),
+                    cancellationToken)
+                .ConfigureAwait(true);
+            rows.AddRange(lastPage.Rows ?? []);
+            cursor = lastPage.Cursor;
+            if (!lastPage.HasMore)
+            {
+                break;
+            }
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        ReplaceVisiblePriceRows(rows);
+        _localPricePage = lastPage?.Page ?? 0;
+        _localPriceCursor = lastPage?.Cursor;
+        _hasMoreLocalPriceRows = lastPage?.HasMore == true;
+        _localPriceRowsLoaded = rows.Count;
+        CurrentItemPage = rows.Count > 0 ? Math.Max(1, _localPricePage) : 0;
+        HasMoreItemCandidates = HasMoreStoredPriceRows;
+        NotifyCommands();
+    }
+
+    private void ReplaceVisiblePriceRows(IReadOnlyList<ItemSearchRow> rows)
+    {
+        using var span = _performanceTelemetry.Begin("ui", "item-results-atomic-apply");
+        var replacement = new List<ItemSearchDisplayRow>(_retainedItemRows.Count + rows.Count);
+        _visibleItemKeys.Clear();
+        _currentItemResultKeys.Clear();
+        foreach (var (key, retained) in _retainedItemRows)
+        {
+            if (_visibleItemKeys.Add(key))
+            {
+                replacement.Add(retained);
+            }
+        }
+
+        foreach (var source in rows.Where(row =>
+                     _activeItemSearchExpression is null ||
+                     _activeItemSearchExpression.MatchesItem(row.Item.Description, row.Item.Unit)))
+        {
+            var display = new ItemSearchDisplayRow(source);
+            var key = RowKey(display);
+            _currentItemResultKeys.Add(key);
+            if (_visibleItemKeys.Add(key))
+            {
+                replacement.Add(_retainedItemRows.TryGetValue(key, out var retained) ? retained : display);
+            }
+        }
+
+        ItemSearchRows.ReplaceAll(replacement);
+        span.Complete(replacement.Count);
+    }
+
     private async Task<int> LoadNextStoredPricePageAsync(
         CancellationToken cancellationToken,
         decimal? minimum = null,
@@ -2032,7 +2197,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             remaining = Math.Max(0, remaining - local);
         }
 
-        if (remaining > 0 && (!_temporaryPricePagingStarted || _hasMoreTemporaryPriceRows))
+        if (remaining > 0 && _remotePriceExpansionStarted &&
+            (!_temporaryPricePagingStarted || _hasMoreTemporaryPriceRows))
         {
             loaded += await LoadTemporaryPricePageAsync(
                     remaining,
@@ -2126,6 +2292,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private void StopItemSearch()
     {
         var wasActive = _isItemSearchActive;
+        var wasRevalidating = _isStalePriceRevalidationActive;
         Interlocked.Increment(ref _priceRunGeneration);
         _activeExpansionRemaining = 0;
         _activeExpansionExhaustive = false;
@@ -2137,7 +2304,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         HasMoreItemCandidates = false;
         if (wasActive)
         {
-            ItemSearchSummary = "Ampliação interrompida; execute a mesma pesquisa para retomar do checkpoint.";
+            ItemSearchSummary = wasRevalidating
+                ? "Revalidação interrompida; os preços locais atuais foram preservados."
+                : "Ampliação pela API interrompida; execute a mesma pesquisa para retomar do checkpoint.";
         }
 
         NotifyCommands();
@@ -2178,6 +2347,40 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             _visibleItemKeys.Add(key);
             ItemSearchRows.Add(row);
         }
+    }
+
+    private async Task RemoveInvalidRetainedPricesAsync(CancellationToken cancellationToken)
+    {
+        foreach (var (key, retained) in _retainedItemRows.ToArray())
+        {
+            var stored = await _repository.GetCachedItemResultsAsync(
+                    retained.Contract.PncpId,
+                    retained.Item.ItemNumber,
+                    cancellationToken)
+                .ConfigureAwait(true);
+            var retainedResult = retained.Result;
+            var currentResult = retainedResult is null
+                ? null
+                : stored?.Results.FirstOrDefault(result =>
+                    result.ResultSequence == retainedResult.ResultSequence);
+            var remainsCurrent = stored?.IsCurrent == true && currentResult is not null &&
+                                 currentResult.ResultStatusId == retainedResult?.ResultStatusId &&
+                                 currentResult.HomologatedQuantityScaled == retainedResult?.HomologatedQuantityScaled &&
+                                 currentResult.HomologatedUnitValueScaled == retainedResult?.HomologatedUnitValueScaled &&
+                                 currentResult.HomologatedTotalValueScaled == retainedResult?.HomologatedTotalValueScaled;
+            if (remainsCurrent)
+            {
+                continue;
+            }
+
+            retained.IsPinned = false;
+            retained.IsSelectedForBasket = false;
+            _retainedItemRows.Remove(key);
+        }
+
+        OnPropertyChanged(nameof(SelectedBasketPriceCount));
+        OnPropertyChanged(nameof(HasSelectedBasketPrices));
+        OnPropertyChanged(nameof(ManualBasketButtonText));
     }
 
     private void SynchronizeRetainedItemRow(ItemSearchDisplayRow row)
@@ -2468,6 +2671,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         // now proves every day/modality, fills new dates first, applies the 48 h
         // overlap and only then prunes the expired edge.
         await _autoSyncCoordinator.SynchronizeAsync(progress, cancellationToken).ConfigureAwait(true);
+        await _repository.MarkOptimizePendingAsync(cancellationToken).ConfigureAwait(true);
+        _lastOptimizeDate = null;
         OperationProgress = 100;
         StatusText = "Sincronização concluída; janela móvel de 365 dias atualizada.";
         await RefreshDatasetSummaryAsync().ConfigureAwait(true);
@@ -2540,6 +2745,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                                 sliceCancellation.Token),
                             sliceCancellation.Token)
                         .ConfigureAwait(true);
+                    await _repository.MarkOptimizePendingAsync(sliceCancellation.Token).ConfigureAwait(true);
+                    _lastOptimizeDate = null;
                     OperationProgress = 100;
                     StatusText = "Manutenção automática concluída.";
                 }

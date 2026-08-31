@@ -526,6 +526,27 @@ public sealed class PncpRequestSchedulingTests
     }
 
     [Fact]
+    public void AdaptiveConcurrency_RepeatedTimeoutsCanReachOneWithoutHttp429()
+    {
+        var clock = new ManualTimeProvider();
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 48, timeProvider: clock);
+
+        for (var index = 0; index < 7; index++)
+        {
+            scheduler.ReportOutcome(
+                PncpRequestCategory.ItemResults,
+                HttpStatusCode.RequestTimeout,
+                TimeSpan.FromSeconds(45));
+        }
+
+        var snapshot = scheduler.GetSnapshot();
+        Assert.Equal(1, snapshot.EffectiveConcurrency);
+        Assert.Equal(5, snapshot.ConcurrencyReductions);
+        Assert.Equal("timeout", snapshot.LastReductionReason);
+        Assert.True(snapshot.GrowthBlockedUntil > clock.GetUtcNow());
+    }
+
+    [Fact]
     public void AdaptiveConcurrency_CountsRecoverySuccessesOnlyAfterRetryAfterCooldown()
     {
         var clock = new ManualTimeProvider();
@@ -625,6 +646,42 @@ public sealed class PncpRequestSchedulingTests
     }
 
     [Fact]
+    public async Task BackgroundItemTimeout_ReducesConcurrencyAndReturnsToCheckpointWithoutHttpRetry()
+    {
+        var inner = new BlockingHandler(expectedInitialCalls: 1);
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 48);
+        var telemetry = new PncpRequestTelemetry();
+        using var httpClient = new HttpClient(new PncpSchedulingHandler(
+            scheduler,
+            telemetry,
+            itemRequestTimeout: TimeSpan.FromMilliseconds(50))
+        {
+            InnerHandler = inner
+        });
+        var client = new PncpClient(
+            httpClient,
+            new Uri("https://example.test/consulta/"),
+            new Uri("https://example.test/pncp/"),
+            _ => TimeSpan.Zero);
+        using var scope = PncpRequestOptions.BeginScope(
+            PncpRequestPriority.BackgroundPriceCache,
+            PncpRequestCategory.ItemResults);
+
+        await Assert.ThrowsAsync<TimeoutException>(() =>
+            client.GetItemResultsAsync(
+                RepositorySearchTests.Contract("background-timeout", "Objeto", "SP", 1),
+                1));
+
+        var snapshot = scheduler.GetSnapshot();
+        Assert.Equal(32, snapshot.EffectiveConcurrency);
+        Assert.Equal("timeout", snapshot.LastReductionReason);
+        Assert.Equal(1, inner.Calls);
+        var category = telemetry.GetSnapshot()[PncpRequestCategory.ItemResults];
+        Assert.Equal(1, category.Failed);
+        Assert.Equal(0, category.Canceled);
+    }
+
+    [Fact]
     public async Task MaintenanceRemainsLimitedToTwoWhenAdaptiveCeilingIsFortyEight()
     {
         var scheduler = new PncpRequestScheduler(maximumConcurrency: 48);
@@ -706,6 +763,7 @@ public sealed class PncpRequestSchedulingTests
         private int _calls;
         private int _maximumConcurrentCalls;
 
+        public int Calls => Volatile.Read(ref _calls);
         public int MaximumConcurrentCalls => Volatile.Read(ref _maximumConcurrentCalls);
 
         public Task WaitForInitialCallsAsync() => _initialCalls.Task.WaitAsync(TimeSpan.FromSeconds(5));

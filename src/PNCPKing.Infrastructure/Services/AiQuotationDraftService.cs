@@ -161,14 +161,6 @@ public sealed class AiQuotationDraftService : IAiQuotationDraftService
                 $"A IA devolveu {contractPrompts.Count:N0} crivo(s) global(is) distinto(s); são necessários exatamente 10.");
         }
 
-        mapped = mapped.Select(item => item with
-        {
-            SearchText = SearchText.ReplaceContractCandidates(item.SearchText, contractPrompts),
-            IntermediateSearchText = SearchText.ReplaceContractCandidates(
-                item.IntermediateSearchText,
-                contractPrompts),
-            BroadSearchText = SearchText.ReplaceContractCandidates(item.BroadSearchText, contractPrompts)
-        }).ToArray();
         var blocking = mapped.Any(item => item.HasBlockingError);
         if (raw.DeclaredItemCount > 0 && raw.DeclaredItemCount != mapped.Length)
         {

@@ -162,6 +162,25 @@ public sealed record ContractEvaluationResult(
     int ItemResultApiCalls,
     int FailedCalls);
 
+public sealed record StalePriceRevalidationProgress(
+    int TotalContracts,
+    int ProcessedContracts,
+    int RefreshedContracts,
+    int ItemResultCalls,
+    int FailedCalls)
+{
+    public double Percentage => TotalContracts == 0
+        ? 100d
+        : Math.Clamp(ProcessedContracts * 100d / TotalContracts, 0d, 100d);
+}
+
+public sealed record StalePriceRevalidationResult(
+    int TotalContracts,
+    int ProcessedContracts,
+    int RefreshedContracts,
+    int ItemResultCalls,
+    int FailedCalls);
+
 /// <summary>
 /// Network measurements isolated to one item-search session. HTTP calls include
 /// retries, whereas <see cref="PriceBatchProgress.CompletedItemCalls"/> counts

@@ -66,14 +66,13 @@ public sealed class AiAutomationTests
             Assert.Equal("cafe gourmet", SearchText.Parse(first.Items[0].IntermediateSearchText).ItemText);
             Assert.Equal("cafe", SearchText.Parse(first.Items[0].BroadSearchText).ItemText);
             Assert.Equal(10, first.ContractSearchPrompts.Count);
-            Assert.Equal(10, SearchText.Parse(first.Items[0].SearchText).ContractCandidates.Count);
             Assert.All(
                 first.Items,
                 item =>
                 {
-                    Assert.Equal(10, SearchText.Parse(item.SearchText).ContractCandidates.Count);
-                    Assert.Equal(10, SearchText.Parse(item.IntermediateSearchText).ContractCandidates.Count);
-                    Assert.Equal(10, SearchText.Parse(item.BroadSearchText).ContractCandidates.Count);
+                    Assert.Empty(SearchText.Parse(item.SearchText).ContractCandidates);
+                    Assert.Empty(SearchText.Parse(item.IntermediateSearchText).ContractCandidates);
+                    Assert.Empty(SearchText.Parse(item.BroadSearchText).ContractCandidates);
                 });
             Assert.Equal(first.Id, second.Id);
             var draftFolder = cache.GetDraftFolder(first.PdfSha256);
@@ -753,7 +752,7 @@ public sealed class AiAutomationTests
         Assert.Equal(10, result.ContractSearchPrompts.Count);
         var restrictive = SearchText.Parse(result.Items[0].RestrictiveText);
         Assert.Equal("\"pincel artistico\" %20 cm", restrictive.ItemText);
-        Assert.Equal(10, restrictive.ContractCandidates.Count);
+        Assert.Empty(restrictive.ContractCandidates);
 
         var invalid = new AiPromptRefinementService(new RefinementProvider(changeRestrictive: true));
         await Assert.ThrowsAsync<InvalidDataException>(() => invalid.RefineAsync(

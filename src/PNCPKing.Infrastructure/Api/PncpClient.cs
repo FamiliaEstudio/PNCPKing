@@ -431,6 +431,13 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
                 stopwatch.Stop();
                 await Task.Delay(_backoffDelay(attempt), cancellationToken).ConfigureAwait(false);
             }
+            catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                stopwatch.Stop();
+                throw new TimeoutException(
+                    "A API do PNCP excedeu o limite de espera da chamada; o trabalho será retomado.",
+                    exception);
+            }
         }
 
         throw new InvalidOperationException("Falha inesperada ao consultar o PNCP.");
@@ -470,8 +477,16 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
         return TimeSpan.FromMilliseconds(exponentialSeconds * 1000 + Random.Shared.Next(250, 1250));
     }
 
-    private static int MaximumAttemptsFor(Uri uri) =>
-        PncpRequestOptions.ResolveCurrentPriority(uri) <= PncpRequestPriority.AdditionalBatches ? 3 : 7;
+    private static int MaximumAttemptsFor(Uri uri)
+    {
+        var priority = PncpRequestOptions.ResolveCurrentPriority(uri);
+        if (priority == PncpRequestPriority.BackgroundPriceCache)
+        {
+            return 1;
+        }
+
+        return priority <= PncpRequestPriority.AdditionalBatches ? 3 : 7;
+    }
 
     private static int ReadFlexibleInt(JsonElement element)
     {

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Diagnostics;
 using Microsoft.Data.Sqlite;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
@@ -951,9 +952,12 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         }
         conditions.AddRange(activePriceConditions);
 
-        var itemJoin = itemMatch.Length > 0
-            ? "JOIN items_fts ON items_fts.rowid = i.rowid"
-            : string.Empty;
+        var itemSource = itemMatch.Length > 0
+            ? """
+              items_fts
+              CROSS JOIN items i ON i.rowid = items_fts.rowid
+              """
+            : "items i";
         var explicitPriority = explicitMatch.Length > 0
             ? "CASE WHEN c.rowid IN (SELECT rowid FROM contracts_fts WHERE contracts_fts MATCH $explicitMatch) THEN 0 ELSE 1 END"
             : "0";
@@ -964,6 +968,23 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
             SearchSort.Relevance when itemMatch.Length > 0 => ("bm25(items_fts)", "0.0"),
             _ => ("0.0", "0.0")
         };
+        if (filters.Sort != SearchSort.Relevance && explicitMatch.Length == 0 &&
+            await ShouldUseContractChunksAsync(itemMatch, cancellationToken).ConfigureAwait(false))
+        {
+            var chunked = await SearchLocalByContractChunksAsync(
+                    filters,
+                    expression,
+                    minimumUnitPrice,
+                    maximumUnitPrice,
+                    cursor,
+                    page,
+                    pageSize,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            sqlSpan.Complete(chunked.Rows?.Count ?? 0);
+            span.Complete(chunked.Rows?.Count ?? 0);
+            return chunked;
+        }
         var cursorWhere = cursor is null
             ? string.Empty
             : """
@@ -1006,11 +1027,10 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
                        r.supplier_municipality, r.supplier_uf, r.quantity_scaled,
                        r.unit_value_scaled, r.total_value_scaled, r.result_date,
                        r.result_status_id, r.result_status_name
-                  FROM items i
-                  JOIN contracts c ON c.pncp_id = i.contract_id
-                  JOIN contract_item_snapshots s ON s.contract_id = i.contract_id
-                  JOIN item_results r ON r.contract_id = i.contract_id AND r.item_number = i.item_number
-                  {itemJoin}
+                  FROM {itemSource}
+                  CROSS JOIN contracts c ON c.pncp_id = i.contract_id
+                  CROSS JOIN contract_item_snapshots s ON s.contract_id = i.contract_id
+                  CROSS JOIN item_results r ON r.contract_id = i.contract_id AND r.item_number = i.item_number
                  WHERE {string.Join(" AND ", conditions)}
             )
             SELECT * FROM ranked_items
@@ -1126,6 +1146,333 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
             hasMore,
             hits.Length,
             rows,
+            continuation);
+    }
+
+    private async Task<bool> ShouldUseContractChunksAsync(
+        string itemMatch,
+        CancellationToken cancellationToken)
+    {
+        if (itemMatch.Length == 0)
+        {
+            return true;
+        }
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT COUNT(*)
+              FROM (
+                  SELECT rowid
+                    FROM items_fts
+                   WHERE items_fts MATCH $itemMatch
+                   LIMIT 20001
+              );
+            """;
+        command.Parameters.AddWithValue("$itemMatch", itemMatch);
+        var occurrences = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture);
+        return occurrences > 20_000;
+    }
+
+    private async Task<PriceCacheLocalPage> SearchLocalByContractChunksAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice,
+        PriceCacheLocalCursor? initialCursor,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken)
+    {
+        using var span = _performance.Begin("price-search", "local-contract-chunks");
+        var chunkSize = string.Equals(_connections.ProfileName, "Restrito", StringComparison.Ordinal)
+            ? 128
+            : 256;
+        var matches = new List<(ItemSearchHit Hit, ItemSearchRow Row, PriceCacheLocalCursor Cursor)>(
+            pageSize + 1);
+        var scanCursor = initialCursor;
+        var hasMoreContracts = true;
+
+        while (matches.Count <= pageSize && hasMoreContracts)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var chunkStarted = Stopwatch.GetTimestamp();
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            connection.CreateFunction<string?, string?, bool>(
+                "pncp_item_matches",
+                (description, unit) => expression.MatchesItem(description, unit),
+                isDeterministic: true);
+
+            var contractConditions = new List<string>();
+            switch (filters.EffectiveGeoFilter.Kind)
+            {
+                case SearchGeoFilterKind.Southeast:
+                    contractConditions.Add("c.uf IN ('ES','MG','RJ','SP')");
+                    break;
+                case SearchGeoFilterKind.State:
+                    contractConditions.Add("c.uf = $uf");
+                    break;
+                case SearchGeoFilterKind.NearRibeirao:
+                    contractConditions.Add("c.geo_layer = 0");
+                    break;
+            }
+            if (filters.StartDate is not null)
+            {
+                contractConditions.Add("c.publication_date >= $startDate");
+            }
+            if (filters.EndDate is not null)
+            {
+                contractConditions.Add("c.publication_date < $endDateExclusive");
+            }
+
+            var primaryRank = filters.Sort == SearchSort.Nearest
+                ? "CAST(COALESCE(c.geo_layer, 1) AS REAL)"
+                : "0.0";
+            var secondaryRank = filters.Sort == SearchSort.Nearest
+                ? "CAST(COALESCE(c.municipality_distance_rank, 999999) AS REAL)"
+                : "0.0";
+            if (scanCursor is not null)
+            {
+                var inclusiveContract = scanCursor.ItemNumber != long.MaxValue;
+                var contractComparison = inclusiveContract ? ">=" : ">";
+                contractConditions.Add($"""
+                    (({primaryRank}) > $cursorPrimary
+                     OR (({primaryRank}) = $cursorPrimary AND ({secondaryRank}) > $cursorSecondary)
+                     OR (({primaryRank}) = $cursorPrimary AND ({secondaryRank}) = $cursorSecondary
+                         AND COALESCE(c.publication_date, '') < $cursorPublication)
+                     OR (({primaryRank}) = $cursorPrimary AND ({secondaryRank}) = $cursorSecondary
+                         AND COALESCE(c.publication_date, '') = $cursorPublication
+                         AND c.pncp_id {contractComparison} $cursorContract))
+                    """);
+            }
+
+            var contractWhere = contractConditions.Count == 0
+                ? string.Empty
+                : "WHERE " + string.Join(" AND ", contractConditions);
+            var contracts = new List<(string Id, double Primary, double Secondary, string Publication)>(
+                chunkSize + 1);
+            await using (var contractCommand = connection.CreateCommand())
+            {
+                contractCommand.CommandText = $"""
+                    SELECT c.pncp_id, {primaryRank}, {secondaryRank},
+                           COALESCE(c.publication_date, '')
+                      FROM contracts c
+                      {contractWhere}
+                     ORDER BY 2, 3, 4 DESC, c.pncp_id
+                     LIMIT $contractLimit;
+                    """;
+                contractCommand.Parameters.AddWithValue("$contractLimit", chunkSize + 1);
+                AddFilterParameters(contractCommand, filters);
+                if (scanCursor is not null)
+                {
+                    contractCommand.Parameters.AddWithValue("$cursorPrimary", scanCursor.PrimaryRank);
+                    contractCommand.Parameters.AddWithValue("$cursorSecondary", scanCursor.SecondaryRank);
+                    contractCommand.Parameters.AddWithValue("$cursorPublication", scanCursor.PublicationDate);
+                    contractCommand.Parameters.AddWithValue("$cursorContract", scanCursor.ContractId);
+                }
+
+                await using var reader = await contractCommand.ExecuteReaderAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    contracts.Add((
+                        reader.GetString(0),
+                        reader.GetDouble(1),
+                        reader.GetDouble(2),
+                        reader.GetString(3)));
+                }
+            }
+
+            hasMoreContracts = contracts.Count > chunkSize;
+            if (hasMoreContracts)
+            {
+                contracts.RemoveAt(contracts.Count - 1);
+            }
+            if (contracts.Count == 0)
+            {
+                break;
+            }
+
+            await using var command = connection.CreateCommand();
+            var contractParameters = new string[contracts.Count];
+            for (var index = 0; index < contracts.Count; index++)
+            {
+                contractParameters[index] = $"$contract{index}";
+                command.Parameters.AddWithValue(contractParameters[index], contracts[index].Id);
+            }
+
+            var itemConditions = new List<string>
+            {
+                $"c.pncp_id IN ({string.Join(", ", contractParameters)})",
+                "i.hydration_status = $complete",
+                "COALESCE(s.source_global_updated_at, '') = COALESCE(c.global_updated_at, '')",
+                "pncp_item_matches(i.description, i.unit) = 1",
+                "r.result_status_id = 1",
+                "r.unit_value_scaled > 0"
+            };
+            if (minimumUnitPrice is not null)
+            {
+                itemConditions.Add("r.unit_value_scaled >= $minimum");
+                command.Parameters.AddWithValue(
+                    "$minimum",
+                    DecimalScale.ToScaled(minimumUnitPrice.Value)!.Value);
+            }
+            if (maximumUnitPrice is not null)
+            {
+                itemConditions.Add("r.unit_value_scaled <= $maximum");
+                command.Parameters.AddWithValue(
+                    "$maximum",
+                    DecimalScale.ToScaled(maximumUnitPrice.Value)!.Value);
+            }
+            if (scanCursor is not null)
+            {
+                itemConditions.Add("""
+                    ((primary_rank > $itemCursorPrimary)
+                     OR (primary_rank = $itemCursorPrimary AND secondary_rank > $itemCursorSecondary)
+                     OR (primary_rank = $itemCursorPrimary AND secondary_rank = $itemCursorSecondary
+                         AND publication_date < $itemCursorPublication)
+                     OR (primary_rank = $itemCursorPrimary AND secondary_rank = $itemCursorSecondary
+                         AND publication_date = $itemCursorPublication AND pncp_id > $itemCursorContract)
+                     OR (primary_rank = $itemCursorPrimary AND secondary_rank = $itemCursorSecondary
+                         AND publication_date = $itemCursorPublication AND pncp_id = $itemCursorContract
+                         AND item_number > $itemCursorItem)
+                     OR (primary_rank = $itemCursorPrimary AND secondary_rank = $itemCursorSecondary
+                         AND publication_date = $itemCursorPublication AND pncp_id = $itemCursorContract
+                         AND item_number = $itemCursorItem AND result_sequence > $itemCursorResult))
+                    """);
+                command.Parameters.AddWithValue("$itemCursorPrimary", scanCursor.PrimaryRank);
+                command.Parameters.AddWithValue("$itemCursorSecondary", scanCursor.SecondaryRank);
+                command.Parameters.AddWithValue("$itemCursorPublication", scanCursor.PublicationDate);
+                command.Parameters.AddWithValue("$itemCursorContract", scanCursor.ContractId);
+                command.Parameters.AddWithValue("$itemCursorItem", scanCursor.ItemNumber);
+                command.Parameters.AddWithValue("$itemCursorResult", scanCursor.ResultSequence);
+            }
+
+            var remaining = pageSize + 1 - matches.Count;
+            command.CommandText = $"""
+                WITH ranked_items AS (
+                    SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
+                           c.additional_information, c.process, c.organization, c.unit, c.municipality,
+                           c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
+                           COALESCE(c.publication_date, '') AS publication_date,
+                           c.global_updated_at, c.total_homologated_scaled, c.distance_from_ribeirao_km,
+                           i.contract_id, i.item_number, i.description, i.unit, i.requested_quantity_scaled,
+                           i.additional_information, i.item_category, i.ncm_nbs_code, i.ncm_nbs_description,
+                           i.catalog_code, i.catalog_name, i.catalog_category, i.status, i.has_result,
+                           i.source_updated_at, i.hydration_status, i.last_error,
+                           0 AS sort_priority, {primaryRank} AS primary_rank,
+                           {secondaryRank} AS secondary_rank,
+                           r.result_sequence, r.supplier_tax_id, r.supplier_name, r.supplier_type,
+                           r.supplier_municipality, r.supplier_uf, r.quantity_scaled,
+                           r.unit_value_scaled, r.total_value_scaled, r.result_date,
+                           r.result_status_id, r.result_status_name
+                      FROM contracts c
+                      CROSS JOIN items i ON i.contract_id = c.pncp_id
+                      CROSS JOIN contract_item_snapshots s ON s.contract_id = c.pncp_id
+                      CROSS JOIN item_results r
+                        ON r.contract_id = i.contract_id AND r.item_number = i.item_number
+                     WHERE {string.Join(" AND ", itemConditions.Where(value => !value.Contains("primary_rank", StringComparison.Ordinal)))}
+                )
+                SELECT * FROM ranked_items
+                 WHERE {string.Join(" AND ", itemConditions.Where(value => value.Contains("primary_rank", StringComparison.Ordinal)).DefaultIfEmpty("1 = 1"))}
+                 ORDER BY sort_priority, primary_rank, secondary_rank,
+                          publication_date DESC, pncp_id, item_number, result_sequence
+                 LIMIT $resultLimit;
+                """;
+            command.Parameters.AddWithValue("$complete", (int)ItemHydrationStatus.Complete);
+            command.Parameters.AddWithValue("$resultLimit", remaining);
+
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    var contract = ReadContract(reader);
+                    var item = ReadItem(reader, 19);
+                    var result = new HomologationResult
+                    {
+                        ContractId = contract.PncpId,
+                        ItemNumber = item.ItemNumber,
+                        ResultSequence = reader.GetInt64(39),
+                        SupplierTaxId = reader.GetString(40),
+                        SupplierName = reader.GetString(41),
+                        SupplierType = reader.GetString(42),
+                        SupplierMunicipality = reader.GetString(43),
+                        SupplierUf = reader.GetString(44),
+                        HomologatedQuantityScaled = reader.IsDBNull(45) ? null : reader.GetInt64(45),
+                        HomologatedUnitValueScaled = reader.IsDBNull(46) ? null : reader.GetInt64(46),
+                        HomologatedTotalValueScaled = reader.IsDBNull(47) ? null : reader.GetInt64(47),
+                        ResultDate = ParseDate(reader, 48),
+                        ResultStatusId = reader.GetInt32(49),
+                        ResultStatusName = reader.GetString(50)
+                    };
+                    var rowCursor = new PriceCacheLocalCursor(
+                        page,
+                        0,
+                        reader.GetDouble(37),
+                        reader.GetDouble(38),
+                        reader.GetString(15),
+                        contract.PncpId,
+                        item.ItemNumber,
+                        result.ResultSequence);
+                    matches.Add((
+                        new ItemSearchHit(contract, item),
+                        new ItemSearchRow(
+                            contract,
+                            item,
+                            result,
+                            ItemSearchPriceState.Homologated,
+                            "Preço homologado do cache local",
+                            false),
+                        rowCursor));
+                    scanCursor = rowCursor;
+                }
+            }
+
+            if (matches.Count > pageSize)
+            {
+                break;
+            }
+
+            var lastContract = contracts[^1];
+            scanCursor = new PriceCacheLocalCursor(
+                page,
+                0,
+                lastContract.Primary,
+                lastContract.Secondary,
+                lastContract.Publication,
+                lastContract.Id,
+                long.MaxValue,
+                long.MaxValue);
+            var duration = Stopwatch.GetElapsedTime(chunkStarted);
+            if (duration < TimeSpan.FromMilliseconds(150))
+            {
+                chunkSize = Math.Min(512, chunkSize * 2);
+            }
+            else if (duration > TimeSpan.FromMilliseconds(500))
+            {
+                chunkSize = Math.Max(64, chunkSize / 2);
+            }
+        }
+
+        var selected = matches.Take(pageSize).ToArray();
+        var hits = selected
+            .Select(value => value.Hit)
+            .DistinctBy(hit => (hit.Contract.PncpId, hit.Item.ItemNumber))
+            .ToArray();
+        var hasMore = matches.Count > pageSize;
+        var continuation = hasMore
+            ? selected[^1].Cursor
+            : scanCursor ?? selected.LastOrDefault().Cursor ?? initialCursor;
+        span.Complete(selected.Length);
+        return new PriceCacheLocalPage(
+            hits,
+            page,
+            pageSize,
+            hasMore,
+            hits.Length,
+            selected.Select(value => value.Row).ToArray(),
             continuation);
     }
 

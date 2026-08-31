@@ -375,7 +375,7 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <TextBox x:Name="QueryTextBox" Text="{Binding QueryText, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="Sintaxe: café + filtro (E); café OU chá; -cafeteira; &quot;café torrado&quot;; &quot;pacote (unidade); C:(material escolar, expediente) prioriza títulos de contratações."
+                         ToolTip="Sintaxe: café + filtro (E); café OU chá; -cafeteira; &quot;café torrado&quot;; &quot;pacote (unidade)."
                          VerticalContentAlignment="Center" FontSize="15"
                          PreviewKeyDown="QueryTextBox_PreviewKeyDown" />
                 <CheckBox Grid.Column="1" Content="Sweet Code" IsChecked="{Binding SweetCodeEnabled}"
@@ -405,10 +405,10 @@
                             IsEnabled="{Binding IsCustomDateRange}" ToolTip="Data inicial" />
                 <DatePicker Width="125" SelectedDate="{Binding CustomEndDate}"
                             IsEnabled="{Binding IsCustomDateRange}" ToolTip="Data final" />
-                <CheckBox Content="Buscar preços até esgotar"
+                <CheckBox Content="Esgotar pela API"
                           IsChecked="{Binding SearchUntilCandidateSetExhausted}"
                           VerticalAlignment="Center" Margin="7,0,4,0"
-                          ToolTip="Percorre todas as contratações candidatas; acima de 500, pede confirmação antes das chamadas de preços." />
+                          ToolTip="Ao clicar em Ampliar pela API, percorre todas as contratações candidatas; não altera a pesquisa local nem a revalidação restrita." />
                 <Button Content="Pesquisar" Command="{Binding SearchCommand}" MinWidth="105" />
             </WrapPanel>
         </Grid>
@@ -428,8 +428,8 @@
                 <TextBox Width="65" Text="{Binding BatchCount, UpdateSourceTrigger=LostFocus}"
                          HorizontalContentAlignment="Center"
                          ToolTip="1 a 200 lotes de até 50 contratações ainda não resolvidas" />
-                <Button Content="Ampliar cobertura" Command="{Binding FireBatchesCommand}"
-                        ToolTip="Avança pelo cursor e usa a cota somente com contratações que ainda exigem rede." />
+                <Button Content="Ampliar pela API" Command="{Binding FireBatchesCommand}"
+                        ToolTip="Operação explícita que alcança itens ausentes, falhas e contratações ainda não indexadas." />
                 <Button Content="Carregar mais resultados" Command="{Binding LoadNextItemPageCommand}"
                         ToolTip="Exibe outra página de até 50 resultados salvos, sem fazer chamadas ao PNCP." />
                 <Button Content="Reiniciar pesquisa" Command="{Binding RestartItemSearchCommand}"

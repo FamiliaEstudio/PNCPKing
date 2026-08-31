@@ -189,7 +189,7 @@
                         </DataGrid.Columns>
                     </DataGrid>
                     <StackPanel Grid.Row="2" Margin="0,8,0,0">
-                        <TextBlock Text="10 crivos globais de contratações — um por linha; sincronizados com C: nos prompts:" />
+                        <TextBlock Text="10 crivos auxiliares de contratações — usados somente na ampliação explícita pela API:" />
                         <TextBox x:Name="ContractPromptsTextBox" MinHeight="80" MaxHeight="145"
                                  AcceptsReturn="True" VerticalScrollBarVisibility="Auto"
                                  TextWrapping="Wrap"

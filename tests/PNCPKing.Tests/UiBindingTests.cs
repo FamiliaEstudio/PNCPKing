@@ -27,10 +27,13 @@ public sealed class UiBindingTests
 
         var exhaustive = Assert.Single(
             document.Descendants(presentation + "CheckBox"),
-            element => element.Attribute("Content")?.Value == "Buscar preços até esgotar");
+            element => element.Attribute("Content")?.Value == "Esgotar pela API");
         Assert.Contains(
             "SearchUntilCandidateSetExhausted",
             Assert.IsType<XAttribute>(exhaustive.Attribute("IsChecked")).Value);
+        Assert.Single(
+            document.Descendants(presentation + "Button"),
+            element => element.Attribute("Content")?.Value == "Ampliar pela API");
 
         var grid = Assert.Single(
             document.Descendants(presentation + "DataGrid"),
