@@ -364,7 +364,8 @@ public sealed class UiBindingTests
             ],
             ["_Limpeza"] = [
                 "{Binding ClearCacheCommand}",
-                "{Binding ClearDocumentCacheCommand}"
+                "{Binding ClearDocumentCacheCommand}",
+                "{Binding ClearBackupRecoveriesCommand}"
             ]
         };
         foreach (var expectedGroup in expectedGroups)

@@ -33,8 +33,8 @@ public sealed class Schema25MigrationTests
         var cached = await repository.GetCachedItemResultsAsync(contract.PncpId, 1);
 
         Assert.Equal(24, result.PreviousVersion);
-        Assert.Equal(25, result.CurrentVersion);
-        Assert.Equal([25], result.AppliedMigrations);
+        Assert.Equal(26, result.CurrentVersion);
+        Assert.Equal([25, 26], result.AppliedMigrations);
         Assert.False(policy.Authorized);
         Assert.False(policy.Enabled);
         Assert.Equal(1, progress.EligibleItems);
@@ -45,8 +45,8 @@ public sealed class Schema25MigrationTests
         Assert.Single(cached.Results);
 
         var repeated = await repository.InitializeAsync();
-        Assert.Equal(25, repeated.PreviousVersion);
-        Assert.Equal(25, repeated.CurrentVersion);
+        Assert.Equal(26, repeated.PreviousVersion);
+        Assert.Equal(26, repeated.CurrentVersion);
         Assert.Empty(repeated.AppliedMigrations);
     }
 

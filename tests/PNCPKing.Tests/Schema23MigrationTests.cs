@@ -42,8 +42,8 @@ public sealed class Schema23MigrationTests
         var cached = await database.Repository.GetCachedItemResultsAsync(contract.PncpId, 1);
 
         Assert.Equal(22, result.PreviousVersion);
-        Assert.Equal(25, result.CurrentVersion);
-        Assert.Equal([23, 24, 25], result.AppliedMigrations);
+        Assert.Equal(26, result.CurrentVersion);
+        Assert.Equal([23, 24, 25, 26], result.AppliedMigrations);
         Assert.NotNull(cached);
         Assert.True(cached.IsCurrent);
         Assert.Single(cached.Results);

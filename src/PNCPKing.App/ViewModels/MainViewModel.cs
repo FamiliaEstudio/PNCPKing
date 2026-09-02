@@ -77,6 +77,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private CancellationTokenSource? _priceCancellation;
     private CancellationTokenSource? _foregroundCancellation;
     private CancellationTokenSource? _documentCancellation;
+    private CancellationTokenSource? _fileOperationCancellation;
     private IDisposable? _backgroundCacheSuppression;
     private SearchQuery? _activeSearchQuery;
     private ItemSearchLocalSummary? _localItemSearchSummary;
@@ -123,6 +124,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _isDocumentBusy;
     private double _operationProgress;
     private string _fileOperationProgressText = "Operação de arquivo inativa";
+    private bool _isFileOperationIndeterminate;
+    private bool _canCancelFileOperation;
     private double _priceSearchProgress;
     private double _documentProgress;
     private string _documentProgressText = "Documentos: inativos";
@@ -349,11 +352,22 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         CancelDocumentOperationCommand = new RelayCommand(
             () => _documentCancellation?.Cancel(),
             () => _documentCancellation is not null);
-        ExportBackupCommand = new AsyncRelayCommand(ExportBackupAsync, () => !IsFileBusy && !IsIndexBusy);
+        ExportBackupCommand = new AsyncRelayCommand(
+            ExportBackupAsync,
+            () => !IsFileBusy && !IsIndexBusy && !IsCatalogBusy && !IsPriceBusy &&
+                  !IsForegroundBusy && !IsDocumentBusy && !IsPriceCacheBusy && !IsNationalPriceIndexBusy &&
+                  !_automaticMaintenanceRunning && !IsAnyAggressivePncpMode);
         ImportBackupCommand = new AsyncRelayCommand(
             ImportBackupAsync,
             () => !IsFileBusy && !IsIndexBusy && !IsForegroundBusy && !IsPriceBusy &&
-                  !IsCatalogBusy && !IsPriceCacheBusy);
+                  !IsCatalogBusy && !IsDocumentBusy && !IsPriceCacheBusy && !IsNationalPriceIndexBusy &&
+                  !_automaticMaintenanceRunning && !IsAnyAggressivePncpMode);
+        CancelFileOperationCommand = new RelayCommand(
+            () => _fileOperationCancellation?.Cancel(),
+            () => IsFileBusy && CanCancelFileOperation && _fileOperationCancellation is not null);
+        ClearBackupRecoveriesCommand = new AsyncRelayCommand(
+            ClearBackupRecoveriesAsync,
+            () => !IsFileBusy);
         OpenDiagnosticLogsCommand = new RelayCommand(OpenDiagnosticLogs);
         ExportPerformanceReportCommand = new AsyncRelayCommand(
             ExportPerformanceReportAsync,
@@ -421,6 +435,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public ICommand CancelDocumentOperationCommand { get; }
     public ICommand ExportBackupCommand { get; }
     public ICommand ImportBackupCommand { get; }
+    public ICommand CancelFileOperationCommand { get; }
+    public ICommand ClearBackupRecoveriesCommand { get; }
     public ICommand OpenDiagnosticLogsCommand { get; }
     public ICommand ExportPerformanceReportCommand { get; }
     public ICommand ComparePerformanceReportCommand { get; }
@@ -990,6 +1006,24 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         private set => SetProperty(ref _fileOperationProgressText, value);
     }
 
+    public bool IsFileOperationIndeterminate
+    {
+        get => _isFileOperationIndeterminate;
+        private set => SetProperty(ref _isFileOperationIndeterminate, value);
+    }
+
+    public bool CanCancelFileOperation
+    {
+        get => _canCancelFileOperation;
+        private set
+        {
+            if (SetProperty(ref _canCancelFileOperation, value))
+            {
+                NotifyCommands();
+            }
+        }
+    }
+
     public double PriceSearchProgress
     {
         get => _priceSearchProgress;
@@ -1226,6 +1260,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _priceCancellation?.Cancel();
         _foregroundCancellation?.Cancel();
         _documentCancellation?.Cancel();
+        _fileOperationCancellation?.Cancel();
         _catalogCancellation?.Cancel();
         _isAggressivePriceCacheMode = false;
         _aggressivePriceCacheIterationCancellation?.Cancel();
@@ -1363,7 +1398,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task SearchAsync(
         bool resetSession,
-        bool restartPriceSession = false)
+        bool restartPriceSession = false,
+        bool revalidateStalePrices = true)
     {
         if (IsAnyAggressivePncpMode)
         {
@@ -1489,12 +1525,15 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             HasMoreItemCandidates = _hasMoreLocalPriceRows;
             ItemSearchSummary = $"{localRows:N0} preços locais atuais exibidos.";
             StatusText = $"{localRows:N0} preços locais atuais exibidos.";
-            await RevalidateStalePricesAsync(
-                    activeSearchQuery,
-                    _activeItemSearchExpression,
-                    searchGeneration,
-                    activePriceCancellation.Token)
-                .ConfigureAwait(true);
+            if (revalidateStalePrices)
+            {
+                await RevalidateStalePricesAsync(
+                        activeSearchQuery,
+                        _activeItemSearchExpression,
+                        searchGeneration,
+                        activePriceCancellation.Token)
+                    .ConfigureAwait(true);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -2723,6 +2762,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
 
         _automaticMaintenanceRunning = true;
+        NotifyCommands();
         using var phaseSpan = _performanceTelemetry.Begin("maintenance", "coverage");
         try
         {
@@ -2775,6 +2815,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         finally
         {
             _automaticMaintenanceRunning = false;
+            NotifyCommands();
         }
     }
 
@@ -3104,8 +3145,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     {
         var profileChoice = MessageBox.Show(
             "Escolha o perfil do backup:\n\n" +
-            "SIM — Compacto (recomendado): preserva índice, cotações, evidências e CATMAT/CATSER, sem o cache reconstruível de itens/preços.\n\n" +
-            "NÃO — Completo: inclui também todo o cache de itens/preços e seus checkpoints.\n\n" +
+            "SIM — Completo (recomendado): inclui contratações, itens, preços, snapshots e checkpoints.\n\n" +
+            "NÃO — Compacto: preserva os dados permanentes, mas itens e preços reconstruíveis precisarão ser carregados novamente.\n\n" +
             "CANCELAR — não exportar.",
             "Perfil do backup .pncpking",
             MessageBoxButton.YesNoCancel,
@@ -3117,8 +3158,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
 
         var profile = profileChoice == MessageBoxResult.Yes
-            ? BackupProfile.Compact
-            : BackupProfile.Full;
+            ? BackupProfile.Full
+            : BackupProfile.Compact;
         var dialog = new SaveFileDialog
         {
             Title = "Exportar backup do PNCP King",
@@ -3131,27 +3172,137 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        await RunFileOperationAsync(async cancellationToken =>
+        BackupExportInspection inspection;
+        try
         {
-            var progressMessage = profile == BackupProfile.Compact
-                ? "Criando e compactando uma cópia temporária do banco…"
-                : "Criando snapshot completo do banco permanente…";
-            StatusText = progressMessage;
-            FileOperationProgressText = progressMessage;
-            _diagnosticLog.Info(
-                "backup-export",
-                $"Exportação iniciada em segundo plano. perfil={profile}; destino={dialog.FileName}");
-            await Task.Run(
-                    () => _backupService.ExportAsync(dialog.FileName, profile, cancellationToken),
-                    cancellationToken)
+            StatusText = "Calculando o espaço necessário para o backup…";
+            inspection = await _backupService.InspectExportAsync(dialog.FileName, profile)
                 .ConfigureAwait(true);
-            OperationProgress = 100;
-            FileOperationProgressText = "Backup concluído.";
-            _diagnosticLog.Info(
-                "backup-export",
-                $"Exportação concluída. perfil={profile}; destino={dialog.FileName}");
-            StatusText = $"Backup {profile.ToString().ToLowerInvariant()} criado em {dialog.FileName}";
-        }).ConfigureAwait(true);
+        }
+        catch (Exception exception)
+        {
+            _diagnosticLog.Error("backup-export", "Falha na prévia da exportação.", exception);
+            MessageBox.Show(
+                $"Não foi possível preparar o backup.\n\n{exception.Message}",
+                "Exportar backup",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            return;
+        }
+
+        if (inspection.ExceedsDestinationFileLimit)
+        {
+            MessageBox.Show(
+                "A unidade de destino usa FAT32 e este backup pode ultrapassar 4 GiB. " +
+                "Escolha uma unidade NTFS ou exFAT.",
+                "Destino incompatível",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+
+        var spaceSummary = inspection.SharesStagingAndDestinationVolume
+            ? $"Unidade compartilhada ({inspection.DestinationVolumeRoot}): " +
+              $"{FormatBytes(inspection.DestinationAvailableBytes)} livres / " +
+              $"{FormatBytes(inspection.DestinationRequiredBytes)} necessários"
+            : $"Staging ({inspection.StagingVolumeRoot}): " +
+              $"{FormatBytes(inspection.StagingAvailableBytes)} livres / " +
+              $"{FormatBytes(inspection.StagingRequiredBytes)} necessários\n" +
+              $"Destino ({inspection.DestinationVolumeRoot}): " +
+              $"{FormatBytes(inspection.DestinationAvailableBytes)} livres / " +
+              $"{FormatBytes(inspection.DestinationRequiredBytes)} necessários";
+
+        if (!inspection.HasEnoughSpace)
+        {
+            MessageBox.Show(
+                "Não há espaço livre suficiente para criar o backup com segurança.\n\n" +
+                spaceSummary,
+                "Espaço insuficiente",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+
+        var profileLabel = profile == BackupProfile.Full
+            ? "Completo — recomendado"
+            : "Compacto — itens/preços serão reconstruídos";
+        if (MessageBox.Show(
+                "PRÉVIA DO BACKUP\n\n" +
+                $"Perfil: {profileLabel}\n" +
+                $"Contratações: {inspection.ContractCount:N0}\n" +
+                $"Itens: {inspection.ItemCount:N0}\n" +
+                $"Resultados homologados: {inspection.ResultCount:N0}\n" +
+                $"Banco descompactado: {FormatBytes(inspection.DatabaseBytes)}\n" +
+                $"Evidências: {FormatBytes(inspection.EvidenceBytes)}\n" +
+                $"{spaceSummary}\n\n" +
+                "O snapshot será submetido ao PRAGMA integrity_check integral antes de ser gravado. Continuar?",
+                "Confirmar exportação",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question) != MessageBoxResult.Yes)
+        {
+            StatusText = "Exportação cancelada antes do snapshot.";
+            return;
+        }
+
+        _contractSearchCancellation?.Cancel();
+        _contractCountCancellation?.Cancel();
+        _selectedContractCacheCancellation?.Cancel();
+        StopItemSearch();
+        _maintenanceTimer.Stop();
+        using var backgroundSuppression = _requestScheduler.SuppressBackgroundRequests();
+        _priceCacheService.PauseForVisibleActivity();
+        try
+        {
+            await RunFileOperationAsync(async cancellationToken =>
+            {
+                BackupExportStage? lastLoggedStage = null;
+                var lastLoggedBucket = -1;
+                var exportProgress = new Progress<BackupExportProgress>(item =>
+                {
+                    OperationProgress = item.Percentage;
+                    IsFileOperationIndeterminate = item.IsIndeterminate;
+                    CanCancelFileOperation = item.CanCancel;
+                    FileOperationProgressText = item.Message;
+                    StatusText = item.Message;
+                    var bucket = (int)(item.Percentage / 10d);
+                    if (lastLoggedStage != item.Stage || bucket != lastLoggedBucket)
+                    {
+                        _diagnosticLog.Info(
+                            "backup-export",
+                            $"fase={item.Stage}; progresso={item.Percentage:N1}%; " +
+                            $"bytes={item.BytesProcessed}/{item.TotalBytes}; mensagem={item.Message}");
+                        lastLoggedStage = item.Stage;
+                        lastLoggedBucket = bucket;
+                    }
+                });
+                _diagnosticLog.Info(
+                    "backup-export",
+                    $"Exportação iniciada. perfil={profile}; destino={dialog.FileName}");
+                await Task.Run(
+                        () => _backupService.ExportAsync(
+                            dialog.FileName,
+                            profile,
+                            exportProgress,
+                            cancellationToken),
+                        cancellationToken)
+                    .ConfigureAwait(true);
+                OperationProgress = 100;
+                IsFileOperationIndeterminate = false;
+                FileOperationProgressText = "Backup concluído.";
+                _diagnosticLog.Info(
+                    "backup-export",
+                    $"Exportação concluída. perfil={profile}; destino={dialog.FileName}");
+                StatusText = $"Backup {profile.ToString().ToLowerInvariant()} criado em {dialog.FileName}";
+            }).ConfigureAwait(true);
+        }
+        finally
+        {
+            _priceCacheService.ResumeAfterVisibleActivity();
+            if (!_disposed)
+            {
+                _maintenanceTimer.Start();
+            }
+        }
     }
 
     private async Task ImportBackupAsync()
@@ -3196,12 +3347,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             var spaceMessage =
                 "Não há espaço livre suficiente para uma importação recuperável.\n\n" +
                 $"Banco descompactado: {FormatBytes(inspection.DatabaseBytes)}\n" +
-                $"Temporários ({inspection.TemporaryRoot}): " +
-                $"{FormatBytes(inspection.TemporaryAvailableBytes)} livres / " +
-                $"{FormatBytes(inspection.TemporaryRequiredBytes)} necessários\n" +
-                $"Dados ({inspection.DataRoot}): " +
-                $"{FormatBytes(inspection.DataAvailableBytes)} livres / " +
-                $"{FormatBytes(inspection.DataRequiredBytes)} necessários\n\n" +
+                $"Staging ao lado do banco ({inspection.StagingRoot}): " +
+                $"{FormatBytes(inspection.StagingAvailableBytes)} livres / " +
+                $"{FormatBytes(inspection.StagingRequiredBytes)} necessários\n\n" +
                 "Libere espaço e tente novamente; nenhum banco foi alterado.";
             _diagnosticLog.Warning("backup-import", spaceMessage.ReplaceLineEndings(" | "));
             MessageBox.Show(
@@ -3219,9 +3367,15 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 $"Banco descompactado: {FormatBytes(inspection.DatabaseBytes)}\n" +
                 $"Esquema: {inspection.SchemaVersion} → {SqliteContractRepository.CurrentSchemaVersion}\n" +
                 $"Perfil: {profile}\n" +
-                $"Espaço temporário livre: {FormatBytes(inspection.TemporaryAvailableBytes)}\n\n" +
+                $"Contratações: {inspection.ContractCount:N0}\n" +
+                $"Itens: {inspection.ItemCount:N0}\n" +
+                $"Resultados homologados: {inspection.ResultCount:N0}\n" +
+                $"Evidências: {inspection.EvidenceCount:N0} ({FormatBytes(inspection.EvidenceBytes)})\n" +
+                $"Staging: {inspection.StagingRoot}\n" +
+                $"Espaço necessário: {FormatBytes(inspection.StagingRequiredBytes)}\n\n" +
                 "A operação pode levar vários minutos em computadores lentos. O progresso será mostrado e " +
-                "uma cópia recuperável do banco atual será preservada. Não encerre o programa durante a instalação final. Continuar?",
+                "a base atual será preservada por renomeação, sem uma cópia física adicional. " +
+                "Não encerre o programa durante a instalação final. Continuar?",
                 "Confirmar importação",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Warning) != MessageBoxResult.Yes)
@@ -3230,8 +3384,13 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
+        _contractSearchCancellation?.Cancel();
+        _contractCountCancellation?.Cancel();
+        _selectedContractCacheCancellation?.Cancel();
         StopItemSearch();
         _maintenanceTimer.Stop();
+        using var backgroundSuppression = _requestScheduler.SuppressBackgroundRequests();
+        _priceCacheService.PauseForVisibleActivity();
         try
         {
             await RunFileOperationAsync(async cancellationToken =>
@@ -3241,6 +3400,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 var importProgress = new Progress<BackupImportProgress>(item =>
                 {
                     OperationProgress = item.Percentage;
+                    IsFileOperationIndeterminate = item.IsIndeterminate;
+                    CanCancelFileOperation = item.CanCancel;
                     FileOperationProgressText = item.Message;
                     StatusText = item.Message;
                     var bucket = (int)(item.Percentage / 10d);
@@ -3265,17 +3426,25 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 _diagnosticLog.Info(
                     "backup-import",
                     $"Importação concluída. banco_anterior={recovery}");
-                StatusText = $"Backup importado. Base anterior preservada em {recovery}";
+                StatusText = string.IsNullOrEmpty(recovery)
+                    ? "Backup importado; não havia uma base anterior para preservar."
+                    : $"Backup importado. Base anterior preservada em {recovery}";
                 FileOperationProgressText = "Importação concluída; atualizando a tela…";
+                IsFileOperationIndeterminate = false;
                 Preflight = null;
                 await RefreshDatasetSummaryAsync().ConfigureAwait(true);
                 await RefreshCoverageAsync().ConfigureAwait(true);
                 await RefreshPriceCacheProgressAsync().ConfigureAwait(true);
-                await SearchAsync(resetSession: true, restartPriceSession: true).ConfigureAwait(true);
+                await SearchAsync(
+                        resetSession: true,
+                        restartPriceSession: true,
+                        revalidateStalePrices: false)
+                    .ConfigureAwait(true);
             }).ConfigureAwait(true);
         }
         finally
         {
+            _priceCacheService.ResumeAfterVisibleActivity();
             if (!_disposed)
             {
                 _maintenanceTimer.Start();
@@ -3335,6 +3504,44 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }).ConfigureAwait(true);
     }
 
+    private async Task ClearBackupRecoveriesAsync()
+    {
+        var recoveries = _backupService.GetRecoveryBackups();
+        if (recoveries.Count == 0)
+        {
+            MessageBox.Show(
+                "Não há bases anteriores de importação para excluir.",
+                "Limpeza",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var totalBytes = recoveries.Aggregate(0L, (total, recovery) =>
+            total > long.MaxValue - recovery.Bytes ? long.MaxValue : total + recovery.Bytes);
+        if (MessageBox.Show(
+                $"Excluir {recoveries.Count:N0} base(s) anterior(es) de importação, " +
+                $"ocupando {FormatBytes(totalBytes)}?\n\n" +
+                "Somente arquivos de recuperação do banco atual serão removidos. " +
+                "A exclusão não poderá ser desfeita.",
+                "Excluir bases anteriores",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        await RunFileOperationAsync(_ =>
+        {
+            var deleted = _backupService.DeleteRecoveryBackups();
+            OperationProgress = 100;
+            FileOperationProgressText = "Limpeza de bases anteriores concluída.";
+            StatusText = $"{deleted.Count:N0} base(s) anterior(es) excluída(s); " +
+                         $"{FormatBytes(deleted.Bytes)} liberados.";
+            return Task.CompletedTask;
+        }).ConfigureAwait(true);
+    }
+
     private async Task RunFileOperationAsync(Func<CancellationToken, Task> action)
     {
         if (IsFileBusy)
@@ -3344,11 +3551,20 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
         IsFileBusy = true;
         OperationProgress = 0;
+        IsFileOperationIndeterminate = false;
+        CanCancelFileOperation = true;
         FileOperationProgressText = "Preparando operação de arquivo…";
         using var cancellation = new CancellationTokenSource();
+        _fileOperationCancellation = cancellation;
+        NotifyCommands();
         try
         {
             await action(cancellation.Token).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            StatusText = "Operação de arquivo cancelada; os dados ativos não foram alterados.";
+            FileOperationProgressText = "Operação de arquivo cancelada.";
         }
         catch (Exception exception)
         {
@@ -3362,7 +3578,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         finally
         {
+            _fileOperationCancellation = null;
+            CanCancelFileOperation = false;
+            IsFileOperationIndeterminate = false;
             IsFileBusy = false;
+            NotifyCommands();
         }
     }
 
@@ -3872,7 +4092,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      OpenPncpCommand, AccessDocumentsCommand, AccessItemDocumentsCommand,
                      ClearDocumentCacheCommand,
                      CancelDocumentOperationCommand,
-                     ExportBackupCommand, ImportBackupCommand, ClearCacheCommand,
+                     ExportBackupCommand, ImportBackupCommand, CancelFileOperationCommand,
+                     ClearBackupRecoveriesCommand, ClearCacheCommand,
                      ToggleDesktopShortcutCommand,
                      ManageSweetCodesCommand, ToggleContractsPanelCommand,
                      CloseContractsPanelCommand, OpenSelectedContractCacheCommand,

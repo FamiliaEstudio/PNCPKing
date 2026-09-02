@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 25;
+    public const int CurrentSchemaVersion = 26;
 
     private const string GeographicGroupExpression = "CASE WHEN c.geo_layer = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -657,6 +657,43 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             span.Complete();
             version = 25;
+        }
+
+        if (version < 26)
+        {
+            EnsureMigrationSpace();
+            using var span = _performance.Begin("startup", "schema-v26");
+            ReportInitialization(
+                progress,
+                previousVersion,
+                75,
+                "Preparando pesquisa por prefixo",
+                "Reconstruindo o índice de itens para acelerar pesquisas por prefixo…");
+            await using (var migrationPragmas = connection.CreateCommand())
+            {
+                migrationPragmas.CommandText =
+                    $"PRAGMA cache_size=-{_connections.MigrationCacheKib}; " +
+                    $"PRAGMA mmap_size={_connections.MmapBytes}; PRAGMA temp_store=FILE; " +
+                    $"PRAGMA threads={_connections.WorkerThreads};";
+                await migrationPragmas.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
+                .ConfigureAwait(false);
+            await using (var migration = connection.CreateCommand())
+            {
+                migration.Transaction = (SqliteTransaction)transaction;
+                migration.CommandText = SchemaV26Sql;
+                await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using var updateVersion = connection.CreateCommand();
+            updateVersion.Transaction = (SqliteTransaction)transaction;
+            updateVersion.CommandText = "UPDATE schema_info SET version = 26 WHERE id = 1;";
+            await updateVersion.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            span.Complete();
+            version = 26;
         }
 
         stopwatch.Stop();
@@ -4598,7 +4635,8 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             search_text,
             content='items',
             content_rowid='rowid',
-            tokenize='unicode61 remove_diacritics 2'
+            tokenize='unicode61 remove_diacritics 2',
+            prefix='2 3'
         );
 
         CREATE TRIGGER items_fts_insert AFTER INSERT ON items BEGIN
@@ -5700,6 +5738,35 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                    price_index_result_count = 0,
                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE contract_id = new.pncp_id;
+        END;
+        """;
+
+    private const string SchemaV26Sql = """
+        DROP TRIGGER IF EXISTS items_fts_insert;
+        DROP TRIGGER IF EXISTS items_fts_delete;
+        DROP TRIGGER IF EXISTS items_fts_update;
+        DROP TABLE IF EXISTS items_fts;
+
+        CREATE VIRTUAL TABLE items_fts USING fts5(
+            search_text,
+            content='items',
+            content_rowid='rowid',
+            tokenize='unicode61 remove_diacritics 2',
+            prefix='2 3'
+        );
+        INSERT INTO items_fts(items_fts) VALUES('rebuild');
+
+        CREATE TRIGGER items_fts_insert AFTER INSERT ON items BEGIN
+            INSERT INTO items_fts(rowid, search_text) VALUES(new.rowid, new.search_text);
+        END;
+        CREATE TRIGGER items_fts_delete AFTER DELETE ON items BEGIN
+            INSERT INTO items_fts(items_fts, rowid, search_text)
+            VALUES('delete', old.rowid, old.search_text);
+        END;
+        CREATE TRIGGER items_fts_update AFTER UPDATE OF search_text ON items BEGIN
+            INSERT INTO items_fts(items_fts, rowid, search_text)
+            VALUES('delete', old.rowid, old.search_text);
+            INSERT INTO items_fts(rowid, search_text) VALUES(new.rowid, new.search_text);
         END;
         """;
 

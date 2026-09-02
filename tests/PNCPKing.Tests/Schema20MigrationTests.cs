@@ -27,8 +27,8 @@ public sealed class Schema20MigrationTests
         var result = await repository.InitializeAsync();
 
         Assert.Equal(19, result.PreviousVersion);
-        Assert.Equal(25, result.CurrentVersion);
-        Assert.Equal([20, 21, 22, 23, 24, 25], result.AppliedMigrations);
+        Assert.Equal(26, result.CurrentVersion);
+        Assert.Equal([20, 21, 22, 23, 24, 25, 26], result.AppliedMigrations);
         var restored = Assert.IsType<QuotationAutomationRun>(
             await quotations.GetLatestAutomationRunAsync(project.Id));
         Assert.Equal(created.Id, restored.Id);
@@ -38,8 +38,8 @@ public sealed class Schema20MigrationTests
 
         var repeated = await repository.InitializeAsync();
 
-        Assert.Equal(25, repeated.PreviousVersion);
-        Assert.Equal(25, repeated.CurrentVersion);
+        Assert.Equal(26, repeated.PreviousVersion);
+        Assert.Equal(26, repeated.CurrentVersion);
         Assert.Empty(repeated.AppliedMigrations);
     }
 

@@ -9,12 +9,21 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
 {
+    private const long SimpleFtsCandidateLimit = 250;
+    private const long FilteredFtsCandidateLimit = 1_000;
+    private const long PostFilteredFtsCandidateLimit = 5_000;
+    private const long MaximumFtsCandidateLimit = 2_000_000_000;
+    private const int FtsCandidateExpansionFactor = 4;
+    private const int HighCardinalityFtsThreshold = 20_000;
     private const long MinimumBytesPerContract = 14_000;
     private const long MaximumBytesPerContract = 28_000;
     private const long MinimumSafetyReserve = 2L * 1024 * 1024 * 1024;
     private readonly ISqliteConnectionFactory _connections;
     private readonly string _databasePath;
     private readonly IPerformanceTelemetry _performance;
+    private readonly long _initialFtsCandidateLimit;
+    private readonly int _highCardinalityFtsThreshold;
+    private readonly bool _useAdaptiveFtsCandidateLimit;
 
     public SqlitePriceCacheRepository(
         string databasePath,
@@ -26,10 +35,50 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
     public SqlitePriceCacheRepository(
         ISqliteConnectionFactory connections,
         IPerformanceTelemetry? performance = null)
+        : this(
+            connections,
+            performance,
+            SimpleFtsCandidateLimit,
+            HighCardinalityFtsThreshold,
+            useAdaptiveFtsCandidateLimit: true)
+    {
+    }
+
+    internal SqlitePriceCacheRepository(
+        ISqliteConnectionFactory connections,
+        IPerformanceTelemetry? performance,
+        long initialFtsCandidateLimit,
+        int highCardinalityFtsThreshold)
+        : this(
+            connections,
+            performance,
+            initialFtsCandidateLimit,
+            highCardinalityFtsThreshold,
+            useAdaptiveFtsCandidateLimit: false)
+    {
+    }
+
+    private SqlitePriceCacheRepository(
+        ISqliteConnectionFactory connections,
+        IPerformanceTelemetry? performance,
+        long initialFtsCandidateLimit,
+        int highCardinalityFtsThreshold,
+        bool useAdaptiveFtsCandidateLimit)
     {
         _connections = connections ?? throw new ArgumentNullException(nameof(connections));
+        if (initialFtsCandidateLimit <= 0 || initialFtsCandidateLimit > MaximumFtsCandidateLimit)
+        {
+            throw new ArgumentOutOfRangeException(nameof(initialFtsCandidateLimit));
+        }
+        if (highCardinalityFtsThreshold < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(highCardinalityFtsThreshold));
+        }
         _databasePath = connections.DatabasePath;
         _performance = performance ?? NullPerformanceTelemetry.Instance;
+        _initialFtsCandidateLimit = initialFtsCandidateLimit;
+        _highCardinalityFtsThreshold = highCardinalityFtsThreshold;
+        _useAdaptiveFtsCandidateLimit = useAdaptiveFtsCandidateLimit;
     }
 
     public async Task<PriceCachePolicy> GetPolicyAsync(CancellationToken cancellationToken = default)
@@ -887,70 +936,122 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         CancellationToken cancellationToken = default)
     {
         using var span = _performance.Begin("price-search", "local-page");
-        ArgumentNullException.ThrowIfNull(filters);
-        ArgumentNullException.ThrowIfNull(expression);
-        var page = (cursor?.Page ?? 0) + 1;
-        pageSize = Math.Clamp(pageSize, 1, 200);
-        if (expression.IsEmpty)
+        try
         {
-            return new PriceCacheLocalPage([], page, pageSize, false, 0);
+            ArgumentNullException.ThrowIfNull(filters);
+            ArgumentNullException.ThrowIfNull(expression);
+            var page = (cursor?.Page ?? 0) + 1;
+            pageSize = Math.Clamp(pageSize, 1, 200);
+            if (expression.IsEmpty)
+            {
+                span.Complete();
+                return new PriceCacheLocalPage([], page, pageSize, false, 0);
+            }
+
+            IAsyncDisposable readerLease;
+            using (var queueSpan = _performance.Begin("price-search", "sqlite-queue"))
+            {
+                try
+                {
+                    readerLease = await _connections.WorkCoordinator
+                        .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+                        .ConfigureAwait(false);
+                    queueSpan.Complete();
+                }
+                catch (Exception exception)
+                {
+                    queueSpan.Fail(exception);
+                    throw;
+                }
+            }
+
+            await using var readerLeaseScope = readerLease;
+            using var sqlSpan = _performance.Begin("price-search", "sql-execution");
+            try
+            {
+                var result = await SearchLocalAfterCoreAsync(
+                        filters,
+                        expression,
+                        minimumUnitPrice,
+                        maximumUnitPrice,
+                        cursor,
+                        page,
+                        pageSize,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                sqlSpan.Complete(result.Rows?.Count ?? 0);
+                span.Complete(result.Rows?.Count ?? 0);
+                return result;
+            }
+            catch (Exception exception)
+            {
+                sqlSpan.Fail(exception);
+                throw;
+            }
         }
+        catch (Exception exception)
+        {
+            span.Fail(exception);
+            throw;
+        }
+    }
 
-
-        using var queueSpan = _performance.Begin("price-search", "sqlite-queue");
-        await using var readerLease = await _connections.WorkCoordinator
-            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
-            .ConfigureAwait(false);
-        queueSpan.Complete();
-        using var sqlSpan = _performance.Begin("price-search", "sql-execution");
-
+    private async Task<PriceCacheLocalPage> SearchLocalAfterCoreAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice,
+        PriceCacheLocalCursor? cursor,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken)
+    {
         var itemMatch = expression.ItemMatchQuery;
         var explicitMatch = expression.ExplicitContractMatchQuery;
-        var conditions = new List<string>
+        var detailConditions = BuildLocalDetailConditions(filters, minimumUnitPrice, maximumUnitPrice);
+
+        if (explicitMatch.Length == 0)
         {
-            "i.hydration_status = $complete",
-            "COALESCE(s.source_global_updated_at, '') = COALESCE(c.global_updated_at, '')"
-        };
+            if (filters.Sort == SearchSort.Relevance && itemMatch.Length > 0)
+            {
+                var optimized = await SearchLocalByFtsCandidatesAsync(
+                        filters,
+                        expression,
+                        minimumUnitPrice,
+                        maximumUnitPrice,
+                        cursor,
+                        page,
+                        pageSize,
+                        detailConditions,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (optimized is not null)
+                {
+                    return optimized;
+                }
+            }
+            else if (filters.Sort != SearchSort.Relevance &&
+                     (_highCardinalityFtsThreshold == 0 ||
+                      await ShouldUseContractChunksAsync(itemMatch, cancellationToken).ConfigureAwait(false)))
+            {
+                return await SearchLocalByContractChunksAsync(
+                        filters,
+                        expression,
+                        minimumUnitPrice,
+                        maximumUnitPrice,
+                        cursor,
+                        page,
+                        pageSize,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+
+        var conditions = new List<string>(detailConditions);
         if (itemMatch.Length > 0)
         {
             conditions.Add("items_fts MATCH $itemMatch");
         }
-
-        switch (filters.EffectiveGeoFilter.Kind)
-        {
-            case SearchGeoFilterKind.Southeast:
-                conditions.Add("c.uf IN ('ES','MG','RJ','SP')");
-                break;
-            case SearchGeoFilterKind.State:
-                conditions.Add("c.uf = $uf");
-                break;
-            case SearchGeoFilterKind.NearRibeirao:
-                conditions.Add("c.geo_layer = 0");
-                break;
-        }
-
-        if (filters.StartDate is not null)
-        {
-            conditions.Add("c.publication_date >= $startDate");
-        }
-        if (filters.EndDate is not null)
-        {
-            conditions.Add("c.publication_date < $endDateExclusive");
-        }
-        var activePriceConditions = new List<string>
-        {
-            "r.result_status_id = 1",
-            "r.unit_value_scaled > 0"
-        };
-        if (minimumUnitPrice is not null)
-        {
-            activePriceConditions.Add("r.unit_value_scaled >= $minimum");
-        }
-        if (maximumUnitPrice is not null)
-        {
-            activePriceConditions.Add("r.unit_value_scaled <= $maximum");
-        }
-        conditions.AddRange(activePriceConditions);
 
         var itemSource = itemMatch.Length > 0
             ? """
@@ -968,65 +1069,14 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
             SearchSort.Relevance when itemMatch.Length > 0 => ("bm25(items_fts)", "0.0"),
             _ => ("0.0", "0.0")
         };
-        if (filters.Sort != SearchSort.Relevance && explicitMatch.Length == 0 &&
-            await ShouldUseContractChunksAsync(itemMatch, cancellationToken).ConfigureAwait(false))
-        {
-            var chunked = await SearchLocalByContractChunksAsync(
-                    filters,
-                    expression,
-                    minimumUnitPrice,
-                    maximumUnitPrice,
-                    cursor,
-                    page,
-                    pageSize,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            sqlSpan.Complete(chunked.Rows?.Count ?? 0);
-            span.Complete(chunked.Rows?.Count ?? 0);
-            return chunked;
-        }
-        var cursorWhere = cursor is null
-            ? string.Empty
-            : """
-              WHERE sort_priority > $cursorPriority
-                 OR (sort_priority = $cursorPriority AND primary_rank > $cursorPrimary)
-                 OR (sort_priority = $cursorPriority AND primary_rank = $cursorPrimary
-                     AND secondary_rank > $cursorSecondary)
-                 OR (sort_priority = $cursorPriority AND primary_rank = $cursorPrimary
-                     AND secondary_rank = $cursorSecondary AND publication_date < $cursorPublication)
-                 OR (sort_priority = $cursorPriority AND primary_rank = $cursorPrimary
-                     AND secondary_rank = $cursorSecondary AND publication_date = $cursorPublication
-                     AND pncp_id > $cursorContract)
-                 OR (sort_priority = $cursorPriority AND primary_rank = $cursorPrimary
-                     AND secondary_rank = $cursorSecondary AND publication_date = $cursorPublication
-                     AND pncp_id = $cursorContract AND item_number > $cursorItem)
-                 OR (sort_priority = $cursorPriority AND primary_rank = $cursorPrimary
-                     AND secondary_rank = $cursorSecondary AND publication_date = $cursorPublication
-                     AND pncp_id = $cursorContract AND item_number = $cursorItem
-                     AND result_sequence > $cursorResult)
-              """;
+        var cursorWhere = BuildLocalCursorWhere(cursor);
         var scanLimit = Math.Min(10_000, Math.Max(pageSize * 4, pageSize + 1));
 
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = $"""
             WITH ranked_items AS (
-                SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
-                       c.additional_information, c.process, c.organization, c.unit, c.municipality,
-                       c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
-                       c.publication_date, c.global_updated_at, c.total_homologated_scaled,
-                       c.distance_from_ribeirao_km,
-                       i.contract_id, i.item_number, i.description, i.unit, i.requested_quantity_scaled,
-                       i.additional_information, i.item_category, i.ncm_nbs_code, i.ncm_nbs_description,
-                       i.catalog_code, i.catalog_name, i.catalog_category, i.status, i.has_result,
-                       i.source_updated_at, i.hydration_status, i.last_error,
-                       {explicitPriority} AS sort_priority,
-                       {primaryRank} AS primary_rank,
-                       {secondaryRank} AS secondary_rank,
-                       r.result_sequence, r.supplier_tax_id, r.supplier_name, r.supplier_type,
-                       r.supplier_municipality, r.supplier_uf, r.quantity_scaled,
-                       r.unit_value_scaled, r.total_value_scaled, r.result_date,
-                       r.result_status_id, r.result_status_name
+                SELECT {BuildLocalSearchColumns(explicitPriority, primaryRank, secondaryRank)}
                   FROM {itemSource}
                   CROSS JOIN contracts c ON c.pncp_id = i.contract_id
                   CROSS JOIN contract_item_snapshots s ON s.contract_id = i.contract_id
@@ -1039,6 +1089,279 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
                       publication_date DESC, pncp_id, item_number, result_sequence
              LIMIT $scanLimit;
             """;
+        AddLocalSearchParameters(
+            command,
+            filters,
+            itemMatch,
+            explicitMatch,
+            minimumUnitPrice,
+            maximumUnitPrice,
+            cursor,
+            scanLimit);
+        var scan = await ReadLocalSearchScanAsync(
+                command,
+                expression,
+                cursor,
+                page,
+                pageSize,
+                includesCandidateMetadata: false,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return BuildLocalSearchPage(scan, cursor, page, pageSize, scanLimit);
+    }
+
+    private async Task<PriceCacheLocalPage?> SearchLocalByFtsCandidatesAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice,
+        PriceCacheLocalCursor? cursor,
+        int page,
+        int pageSize,
+        IReadOnlyList<string> detailConditions,
+        CancellationToken cancellationToken)
+    {
+        var cursorWhere = BuildLocalCursorWhere(cursor);
+        var scanLimit = Math.Min(10_000, Math.Max(pageSize * 4, pageSize + 1));
+        var candidateLimit = _useAdaptiveFtsCandidateLimit
+            ? SelectInitialFtsCandidateLimit(
+                filters,
+                expression,
+                minimumUnitPrice,
+                maximumUnitPrice,
+                pageSize)
+            : _initialFtsCandidateLimit;
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            using var batchSpan = _performance.Begin("price-search", "fts-candidate-batch");
+            try
+            {
+                await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+                await using var command = connection.CreateCommand();
+                command.CommandText = BuildFtsCandidateSearchSql(detailConditions, cursorWhere);
+                AddLocalSearchParameters(
+                    command,
+                    filters,
+                    expression.ItemMatchQuery,
+                    explicitMatch: string.Empty,
+                    minimumUnitPrice,
+                    maximumUnitPrice,
+                    cursor,
+                    scanLimit);
+                command.Parameters.AddWithValue("$candidateLimit", candidateLimit);
+                command.Parameters.AddWithValue("$candidateWindow", candidateLimit + 1);
+
+                var scan = await ReadLocalSearchScanAsync(
+                        command,
+                        expression,
+                        cursor,
+                        page,
+                        pageSize,
+                        includesCandidateMetadata: true,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (scan.CandidateCount is null)
+                {
+                    var probe = await ProbeFtsCandidateWindowAsync(
+                            connection,
+                            expression.ItemMatchQuery,
+                            candidateLimit,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    scan = scan with
+                    {
+                        CandidateCount = probe.CandidateCount,
+                        FtsExhausted = probe.Exhausted
+                    };
+                }
+
+                batchSpan.Complete(scan.CandidateCount ?? 0);
+                var pageWindowSatisfied = scan.Matches.Count > pageSize || scan.Scanned >= scanLimit;
+                var boundaryIsSafe = scan.FtsExhausted ||
+                    (scan.LastScannedCursor is not null &&
+                     scan.NextRank is not null &&
+                     scan.NextRank.Value > scan.LastScannedCursor.PrimaryRank);
+                if ((pageWindowSatisfied && boundaryIsSafe) || scan.FtsExhausted)
+                {
+                    return BuildLocalSearchPage(scan, cursor, page, pageSize, scanLimit);
+                }
+
+                if (candidateLimit >= MaximumFtsCandidateLimit)
+                {
+                    return null;
+                }
+
+                candidateLimit = Math.Min(
+                    MaximumFtsCandidateLimit,
+                    checked(candidateLimit * FtsCandidateExpansionFactor));
+            }
+            catch (Exception exception)
+            {
+                batchSpan.Fail(exception);
+                throw;
+            }
+        }
+    }
+
+    private static long SelectInitialFtsCandidateLimit(
+        SearchQuery filters,
+        SearchExpression expression,
+        decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice,
+        int pageSize)
+    {
+        var hasDescriptionPostFilter = expression.AcceptedUnits.Count > 0 ||
+            expression.PositiveGroups.Any(group => (group.ApproximateNumbers?.Count ?? 0) > 0);
+        if (pageSize > 50 || hasDescriptionPostFilter)
+        {
+            return PostFilteredFtsCandidateLimit;
+        }
+
+        var hasDetailFilters = filters.EffectiveGeoFilter.Kind != SearchGeoFilterKind.All ||
+            filters.StartDate is not null ||
+            filters.EndDate is not null ||
+            minimumUnitPrice is not null ||
+            maximumUnitPrice is not null;
+        return hasDetailFilters ? FilteredFtsCandidateLimit : SimpleFtsCandidateLimit;
+    }
+
+    private static string BuildFtsCandidateSearchSql(
+        IReadOnlyList<string> detailConditions,
+        string cursorWhere) => $"""
+        WITH fts_window AS MATERIALIZED (
+            SELECT items_fts.rowid AS item_rowid,
+                   rank AS primary_rank
+              FROM items_fts
+             WHERE items_fts MATCH $itemMatch
+             ORDER BY rank
+             LIMIT $candidateWindow
+        ),
+        fts_candidates AS MATERIALIZED (
+            SELECT item_rowid, primary_rank
+              FROM fts_window
+             ORDER BY primary_rank
+             LIMIT $candidateLimit
+        ),
+        ranked_items AS (
+            SELECT {BuildLocalSearchColumns("0", "f.primary_rank", "0.0")}
+              FROM fts_candidates f
+              CROSS JOIN items i ON i.rowid = f.item_rowid
+              CROSS JOIN contracts c ON c.pncp_id = i.contract_id
+              CROSS JOIN contract_item_snapshots s ON s.contract_id = i.contract_id
+              CROSS JOIN item_results r ON r.contract_id = i.contract_id AND r.item_number = i.item_number
+             WHERE {string.Join(" AND ", detailConditions)}
+        )
+        SELECT ranked_items.*,
+               (SELECT COUNT(*) FROM fts_candidates) AS candidate_count,
+               (SELECT primary_rank
+                  FROM fts_window
+                 ORDER BY primary_rank
+                 LIMIT 1 OFFSET $candidateLimit) AS next_rank
+          FROM ranked_items
+        {cursorWhere}
+         ORDER BY sort_priority, primary_rank, secondary_rank,
+                  publication_date DESC, pncp_id, item_number, result_sequence
+         LIMIT $scanLimit;
+        """;
+
+    private static List<string> BuildLocalDetailConditions(
+        SearchQuery filters,
+        decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice)
+    {
+        var conditions = new List<string>
+        {
+            "i.hydration_status = $complete",
+            "COALESCE(s.source_global_updated_at, '') = COALESCE(c.global_updated_at, '')"
+        };
+        switch (filters.EffectiveGeoFilter.Kind)
+        {
+            case SearchGeoFilterKind.Southeast:
+                conditions.Add("c.uf IN ('ES','MG','RJ','SP')");
+                break;
+            case SearchGeoFilterKind.State:
+                conditions.Add("c.uf = $uf");
+                break;
+            case SearchGeoFilterKind.NearRibeirao:
+                conditions.Add("c.geo_layer = 0");
+                break;
+        }
+        if (filters.StartDate is not null)
+        {
+            conditions.Add("c.publication_date >= $startDate");
+        }
+        if (filters.EndDate is not null)
+        {
+            conditions.Add("c.publication_date < $endDateExclusive");
+        }
+        conditions.Add("r.result_status_id = 1");
+        conditions.Add("r.unit_value_scaled > 0");
+        if (minimumUnitPrice is not null)
+        {
+            conditions.Add("r.unit_value_scaled >= $minimum");
+        }
+        if (maximumUnitPrice is not null)
+        {
+            conditions.Add("r.unit_value_scaled <= $maximum");
+        }
+        return conditions;
+    }
+
+    private static string BuildLocalCursorWhere(PriceCacheLocalCursor? cursor) => cursor is null
+        ? string.Empty
+        : """
+          WHERE sort_priority > $cursorPriority
+             OR (sort_priority = $cursorPriority AND primary_rank > $cursorPrimary)
+             OR (sort_priority = $cursorPriority AND primary_rank = $cursorPrimary
+                 AND secondary_rank > $cursorSecondary)
+             OR (sort_priority = $cursorPriority AND primary_rank = $cursorPrimary
+                 AND secondary_rank = $cursorSecondary AND publication_date < $cursorPublication)
+             OR (sort_priority = $cursorPriority AND primary_rank = $cursorPrimary
+                 AND secondary_rank = $cursorSecondary AND publication_date = $cursorPublication
+                 AND pncp_id > $cursorContract)
+             OR (sort_priority = $cursorPriority AND primary_rank = $cursorPrimary
+                 AND secondary_rank = $cursorSecondary AND publication_date = $cursorPublication
+                 AND pncp_id = $cursorContract AND item_number > $cursorItem)
+             OR (sort_priority = $cursorPriority AND primary_rank = $cursorPrimary
+                 AND secondary_rank = $cursorSecondary AND publication_date = $cursorPublication
+                 AND pncp_id = $cursorContract AND item_number = $cursorItem
+                 AND result_sequence > $cursorResult)
+          """;
+
+    private static string BuildLocalSearchColumns(
+        string explicitPriority,
+        string primaryRank,
+        string secondaryRank) => $"""
+        c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
+        c.additional_information, c.process, c.organization, c.unit, c.municipality,
+        c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
+        c.publication_date, c.global_updated_at, c.total_homologated_scaled,
+        c.distance_from_ribeirao_km,
+        i.contract_id, i.item_number, i.description, i.unit, i.requested_quantity_scaled,
+        i.additional_information, i.item_category, i.ncm_nbs_code, i.ncm_nbs_description,
+        i.catalog_code, i.catalog_name, i.catalog_category, i.status, i.has_result,
+        i.source_updated_at, i.hydration_status, i.last_error,
+        {explicitPriority} AS sort_priority,
+        {primaryRank} AS primary_rank,
+        {secondaryRank} AS secondary_rank,
+        r.result_sequence, r.supplier_tax_id, r.supplier_name, r.supplier_type,
+        r.supplier_municipality, r.supplier_uf, r.quantity_scaled,
+        r.unit_value_scaled, r.total_value_scaled, r.result_date,
+        r.result_status_id, r.result_status_name
+        """;
+
+    private static void AddLocalSearchParameters(
+        SqliteCommand command,
+        SearchQuery filters,
+        string itemMatch,
+        string explicitMatch,
+        decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice,
+        PriceCacheLocalCursor? cursor,
+        int scanLimit)
+    {
         command.Parameters.AddWithValue("$complete", (int)ItemHydrationStatus.Complete);
         command.Parameters.AddWithValue("$scanLimit", scanLimit);
         if (itemMatch.Length > 0)
@@ -1068,14 +1391,33 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         {
             command.Parameters.AddWithValue("$maximum", DecimalScale.ToScaled(maximumUnitPrice.Value)!.Value);
         }
+    }
 
-        var matches = new List<(ItemSearchHit Hit, ItemSearchRow Row, PriceCacheLocalCursor Cursor)>(pageSize + 1);
+    private static async Task<LocalSearchScan> ReadLocalSearchScanAsync(
+        SqliteCommand command,
+        SearchExpression expression,
+        PriceCacheLocalCursor? cursor,
+        int page,
+        int pageSize,
+        bool includesCandidateMetadata,
+        CancellationToken cancellationToken)
+    {
+        var matches = new List<(ItemSearchHit Hit, ItemSearchRow Row, PriceCacheLocalCursor Cursor)>(
+            pageSize + 1);
         var scanned = 0;
         PriceCacheLocalCursor? lastScannedCursor = cursor;
+        long? candidateCount = null;
+        double? nextRank = null;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             scanned++;
+            if (includesCandidateMetadata && candidateCount is null)
+            {
+                candidateCount = reader.GetInt64(51);
+                nextRank = reader.IsDBNull(52) ? null : reader.GetDouble(52);
+            }
+
             var item = ReadItem(reader, 19);
             var rowCursor = new PriceCacheLocalCursor(
                 page,
@@ -1087,58 +1429,74 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
                 reader.GetInt64(20),
                 reader.GetInt64(39));
             lastScannedCursor = rowCursor;
-            if (expression.MatchesItem(item.Description, item.Unit))
+            if (!expression.MatchesItem(item.Description, item.Unit))
             {
-                var contract = ReadContract(reader);
-                var result = new HomologationResult
-                {
-                    ContractId = contract.PncpId,
-                    ItemNumber = item.ItemNumber,
-                    ResultSequence = reader.GetInt64(39),
-                    SupplierTaxId = reader.GetString(40),
-                    SupplierName = reader.GetString(41),
-                    SupplierType = reader.GetString(42),
-                    SupplierMunicipality = reader.GetString(43),
-                    SupplierUf = reader.GetString(44),
-                    HomologatedQuantityScaled = reader.IsDBNull(45) ? null : reader.GetInt64(45),
-                    HomologatedUnitValueScaled = reader.IsDBNull(46) ? null : reader.GetInt64(46),
-                    HomologatedTotalValueScaled = reader.IsDBNull(47) ? null : reader.GetInt64(47),
-                    ResultDate = ParseDate(reader, 48),
-                    ResultStatusId = reader.GetInt32(49),
-                    ResultStatusName = reader.GetString(50)
-                };
-                var hit = new ItemSearchHit(contract, item);
-                matches.Add((
-                    hit,
-                    new ItemSearchRow(
-                        contract,
-                        item,
-                        result,
-                        ItemSearchPriceState.Homologated,
-                        "Preço homologado do cache local",
-                        false),
-                    rowCursor));
-                if (matches.Count > pageSize)
-                {
-                    break;
-                }
+                continue;
+            }
+
+            var contract = ReadContract(reader);
+            var result = new HomologationResult
+            {
+                ContractId = contract.PncpId,
+                ItemNumber = item.ItemNumber,
+                ResultSequence = reader.GetInt64(39),
+                SupplierTaxId = reader.GetString(40),
+                SupplierName = reader.GetString(41),
+                SupplierType = reader.GetString(42),
+                SupplierMunicipality = reader.GetString(43),
+                SupplierUf = reader.GetString(44),
+                HomologatedQuantityScaled = reader.IsDBNull(45) ? null : reader.GetInt64(45),
+                HomologatedUnitValueScaled = reader.IsDBNull(46) ? null : reader.GetInt64(46),
+                HomologatedTotalValueScaled = reader.IsDBNull(47) ? null : reader.GetInt64(47),
+                ResultDate = ParseDate(reader, 48),
+                ResultStatusId = reader.GetInt32(49),
+                ResultStatusName = reader.GetString(50)
+            };
+            var hit = new ItemSearchHit(contract, item);
+            matches.Add((
+                hit,
+                new ItemSearchRow(
+                    contract,
+                    item,
+                    result,
+                    ItemSearchPriceState.Homologated,
+                    "Preço homologado do cache local",
+                    false),
+                rowCursor));
+            if (matches.Count > pageSize)
+            {
+                break;
             }
         }
 
-        var selectedMatches = matches.Take(pageSize).ToArray();
+        return new LocalSearchScan(
+            matches,
+            scanned,
+            lastScannedCursor,
+            candidateCount,
+            nextRank,
+            includesCandidateMetadata && nextRank is null && candidateCount is not null);
+    }
+
+    private static PriceCacheLocalPage BuildLocalSearchPage(
+        LocalSearchScan scan,
+        PriceCacheLocalCursor? cursor,
+        int page,
+        int pageSize,
+        int scanLimit)
+    {
+        var selectedMatches = scan.Matches.Take(pageSize).ToArray();
         var hits = selectedMatches
             .Select(value => value.Hit)
             .DistinctBy(hit => (hit.Contract.PncpId, hit.Item.ItemNumber))
             .ToArray();
         var rows = selectedMatches.Select(value => value.Row).ToArray();
-        var hasMore = matches.Count > pageSize || scanned >= scanLimit;
-        var continuation = matches.Count > pageSize
+        var hasMore = scan.Matches.Count > pageSize || scan.Scanned >= scanLimit;
+        var continuation = scan.Matches.Count > pageSize
             ? selectedMatches[^1].Cursor
             : hasMore
-                ? lastScannedCursor
+                ? scan.LastScannedCursor
                 : selectedMatches.LastOrDefault().Cursor ?? cursor;
-        sqlSpan.Complete(rows.Length);
-        span.Complete(rows.Length);
         return new PriceCacheLocalPage(
             hits,
             page,
@@ -1147,6 +1505,30 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
             hits.Length,
             rows,
             continuation);
+    }
+
+    private static async Task<(long CandidateCount, bool Exhausted)> ProbeFtsCandidateWindowAsync(
+        SqliteConnection connection,
+        string itemMatch,
+        long candidateLimit,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT COUNT(*)
+              FROM (
+                  SELECT rowid
+                    FROM items_fts
+                   WHERE items_fts MATCH $itemMatch
+                   LIMIT $candidateWindow
+              );
+            """;
+        command.Parameters.AddWithValue("$itemMatch", itemMatch);
+        command.Parameters.AddWithValue("$candidateWindow", candidateLimit + 1);
+        var windowCount = Convert.ToInt64(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture);
+        return (Math.Min(candidateLimit, windowCount), windowCount <= candidateLimit);
     }
 
     private async Task<bool> ShouldUseContractChunksAsync(
@@ -1158,22 +1540,33 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
             return true;
         }
 
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT COUNT(*)
-              FROM (
-                  SELECT rowid
-                    FROM items_fts
-                   WHERE items_fts MATCH $itemMatch
-                   LIMIT 20001
-              );
-            """;
-        command.Parameters.AddWithValue("$itemMatch", itemMatch);
-        var occurrences = Convert.ToInt32(
-            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
-            CultureInfo.InvariantCulture);
-        return occurrences > 20_000;
+        using var span = _performance.Begin("price-search", "fts-cardinality");
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT COUNT(*)
+                  FROM (
+                      SELECT rowid
+                        FROM items_fts
+                       WHERE items_fts MATCH $itemMatch
+                       LIMIT $limit
+                  );
+                """;
+            command.Parameters.AddWithValue("$itemMatch", itemMatch);
+            command.Parameters.AddWithValue("$limit", _highCardinalityFtsThreshold + 1);
+            var occurrences = Convert.ToInt32(
+                await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                CultureInfo.InvariantCulture);
+            span.Complete(occurrences);
+            return occurrences > _highCardinalityFtsThreshold;
+        }
+        catch (Exception exception)
+        {
+            span.Fail(exception);
+            throw;
+        }
     }
 
     private async Task<PriceCacheLocalPage> SearchLocalByContractChunksAsync(
@@ -1650,6 +2043,14 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         HydrationStatus = (ItemHydrationStatus)reader.GetInt32(offset + 15),
         LastError = reader.IsDBNull(offset + 16) ? null : reader.GetString(offset + 16)
     };
+
+    private sealed record LocalSearchScan(
+        List<(ItemSearchHit Hit, ItemSearchRow Row, PriceCacheLocalCursor Cursor)> Matches,
+        int Scanned,
+        PriceCacheLocalCursor? LastScannedCursor,
+        long? CandidateCount,
+        double? NextRank,
+        bool FtsExhausted);
 
     private static DateOnly? ParseDate(SqliteDataReader reader, int ordinal) =>
         reader.IsDBNull(ordinal) ||

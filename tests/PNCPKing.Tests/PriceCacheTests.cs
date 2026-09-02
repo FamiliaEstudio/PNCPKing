@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using System.Net;
+using System.Reflection;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
 using PNCPKing.Core.Search;
@@ -66,7 +67,7 @@ public sealed class PriceCacheTests
         Assert.False(policy.Authorized);
         Assert.Equal(1, progress.TotalContracts);
         Assert.Equal(1, progress.CompletedContracts);
-        Assert.Equal(25, SqliteContractRepository.CurrentSchemaVersion);
+        Assert.Equal(26, SqliteContractRepository.CurrentSchemaVersion);
         Assert.Equal((1L, 1L, 1L), await database.Repository.GetCountsAsync());
     }
 
@@ -196,6 +197,244 @@ public sealed class PriceCacheTests
                 .Distinct(StringComparer.Ordinal)
                 .Count());
         Assert.False(third.HasMore);
+    }
+
+    [Fact]
+    public async Task RelevanceSearch_ExpandsRankTiesAndPreservesFiltersAndPagesWithoutCardinalityCount()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var contract = RecentContract("fts-candidates", today, 1);
+        await database.Repository.UpsertContractsAsync([contract]);
+        await SeedHighCardinalityItemsAsync(database.Repository.DatabasePath, contract.PncpId);
+        var telemetry = new RecordingSearchTelemetry();
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath, telemetry);
+        const string text = "\"cafe comum\" -torrado";
+        var expression = SearchText.Parse(text);
+        var query = new SearchQuery(
+            text,
+            SearchGeoFilter.State("SP"),
+            today.AddDays(-1),
+            today,
+            Sort: SearchSort.Relevance);
+
+        var first = await cache.SearchLocalAfterAsync(
+            query,
+            expression,
+            20m,
+            30m,
+            cursor: null,
+            pageSize: 25);
+        var second = await cache.SearchLocalAfterAsync(
+            query,
+            expression,
+            20m,
+            30m,
+            first.Cursor,
+            pageSize: 25);
+        var legacy = await ReadLegacyHighCardinalityPageAsync(
+            database.Repository.DatabasePath,
+            expression,
+            today);
+
+        var expected = Enumerable.Range(1, 30_001)
+            .Where(number => number % 2 == 0 && number % 4 != 0)
+            .Take(50)
+            .Select(number => (long)number)
+            .ToArray();
+        var optimizedKeys = first.Rows!.Concat(second.Rows!)
+            .Select(row => (
+                row.Contract.PncpId,
+                row.Item.ItemNumber,
+                row.Result!.ResultSequence))
+            .ToArray();
+        Assert.Equal(legacy, optimizedKeys);
+        Assert.Equal(expected[..25], first.Rows!.Select(row => row.Item.ItemNumber));
+        Assert.Equal(expected[25..], second.Rows!.Select(row => row.Item.ItemNumber));
+        Assert.True(first.HasMore);
+        Assert.Equal(
+            50,
+            first.Rows!.Concat(second.Rows!).Select(row => row.Item.ItemNumber).Distinct().Count());
+        Assert.Contains(telemetry.Measurements, value =>
+            value.Operation == "price-search" && value.Phase == "sqlite-queue" && value.Succeeded);
+        Assert.Contains(telemetry.Measurements, value =>
+            value.Operation == "price-search" && value.Phase == "sql-execution" && value.Succeeded);
+        Assert.DoesNotContain(telemetry.Measurements, value =>
+            value.Operation == "price-search" && value.Phase == "fts-cardinality");
+        Assert.Contains(telemetry.Measurements, value =>
+            value.Operation == "price-search" && value.Phase == "fts-candidate-batch" &&
+            value.Rows == 1_000 && value.Succeeded);
+        Assert.Contains(telemetry.Measurements, value =>
+            value.Operation == "price-search" && value.Phase == "fts-candidate-batch" &&
+            value.Rows == 4_000 && value.Succeeded);
+        Assert.Contains(telemetry.Measurements, value =>
+            value.Operation == "price-search" && value.Phase == "fts-candidate-batch" &&
+            value.Rows == 16_000 && value.Succeeded);
+        Assert.Contains(telemetry.Measurements, value =>
+            value.Operation == "price-search" && value.Phase == "fts-candidate-batch" &&
+            value.Rows == 22_501 && value.Succeeded);
+
+        using var cancellation = new CancellationTokenSource();
+        telemetry.CancelAtCandidateBatch = cancellation;
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cache.SearchLocalAfterAsync(
+            query,
+            expression,
+            20m,
+            30m,
+            cursor: null,
+            pageSize: 25,
+            cancellation.Token));
+        Assert.Contains(telemetry.Measurements, value =>
+            value.Phase == "fts-candidate-batch" && !value.Succeeded &&
+            value.ErrorKind is nameof(OperationCanceledException) or nameof(TaskCanceledException));
+        Assert.Contains(telemetry.Measurements, value =>
+            value.Phase == "sql-execution" && !value.Succeeded &&
+            value.ErrorKind is nameof(OperationCanceledException) or nameof(TaskCanceledException));
+
+        using var queueCancellation = new CancellationTokenSource();
+        queueCancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cache.SearchLocalAfterAsync(
+            query,
+            expression,
+            20m,
+            30m,
+            cursor: null,
+            pageSize: 25,
+            queueCancellation.Token));
+        Assert.Contains(telemetry.Measurements, value =>
+            value.Phase == "sqlite-queue" && !value.Succeeded &&
+            value.ErrorKind is nameof(OperationCanceledException) or nameof(TaskCanceledException));
+    }
+
+    [Fact]
+    public async Task RelevanceSearch_RecordsCandidateSqlErrorsWithoutQueryText()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await using (var connection = new SqliteConnection($"Data Source={database.Repository.DatabasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "DROP TABLE items_fts;";
+            await command.ExecuteNonQueryAsync();
+        }
+        var telemetry = new RecordingSearchTelemetry();
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath, telemetry);
+        var expression = SearchText.Parse("segredo-nao-deve-ser-registrado");
+        var query = new SearchQuery(
+            "segredo-nao-deve-ser-registrado",
+            GeoScope.All,
+            Sort: SearchSort.Relevance);
+
+        await Assert.ThrowsAsync<SqliteException>(() => cache.SearchLocalAfterAsync(
+            query,
+            expression,
+            null,
+            null,
+            null,
+            25));
+
+        var failure = Assert.Single(
+            telemetry.Measurements,
+            value => value.Phase == "fts-candidate-batch" && !value.Succeeded);
+        Assert.Equal(nameof(SqliteException), failure.ErrorKind);
+        Assert.DoesNotContain(telemetry.Measurements, value => value.Phase == "fts-cardinality");
+        Assert.Contains(telemetry.Measurements, value =>
+            value.Phase == "sql-execution" && !value.Succeeded &&
+            value.ErrorKind == nameof(SqliteException));
+        Assert.DoesNotContain("segredo", failure.Operation, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("segredo", failure.Phase, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RelevanceSearch_SelectsAdaptiveInitialCandidateLimits()
+    {
+        var selector = typeof(SqlitePriceCacheRepository).GetMethod(
+            "SelectInitialFtsCandidateLimit",
+            BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(selector);
+
+        static long Select(
+            MethodInfo method,
+            SearchQuery query,
+            SearchExpression expression,
+            decimal? minimum = null,
+            decimal? maximum = null,
+            int pageSize = 25) => Assert.IsType<long>(method.Invoke(
+                null,
+                [query, expression, minimum, maximum, pageSize]));
+
+        var simple = new SearchQuery("cafe", GeoScope.All, Sort: SearchSort.Relevance);
+        Assert.Equal(250, Select(selector, simple, SearchText.Parse(simple.Text)));
+
+        var filtered = new SearchQuery(
+            "cafe",
+            SearchGeoFilter.State("SP"),
+            Sort: SearchSort.Relevance);
+        Assert.Equal(1_000, Select(selector, filtered, SearchText.Parse(filtered.Text)));
+        Assert.Equal(1_000, Select(selector, simple, SearchText.Parse(simple.Text), minimum: 1m));
+
+        var postFiltered = new SearchQuery("cafe %500 g", GeoScope.All, Sort: SearchSort.Relevance);
+        Assert.Equal(5_000, Select(
+            selector,
+            postFiltered,
+            SearchText.Parse(postFiltered.Text)));
+        Assert.Equal(5_000, Select(selector, simple, SearchText.Parse(simple.Text), pageSize: 200));
+    }
+
+    [Fact]
+    public async Task CandidateQueryPlan_MaterializesFtsBeforeDetailTableSearches()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var builder = typeof(SqlitePriceCacheRepository).GetMethod(
+            "BuildFtsCandidateSearchSql",
+            BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(builder);
+        var sql = Assert.IsType<string>(builder.Invoke(null, [
+            new[]
+            {
+                "i.hydration_status = $complete",
+                "COALESCE(s.source_global_updated_at, '') = COALESCE(c.global_updated_at, '')",
+                "r.result_status_id = 1",
+                "r.unit_value_scaled > 0"
+            },
+            string.Empty
+        ]));
+        await using var connection = new SqliteConnection($"Data Source={database.Repository.DatabasePath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "EXPLAIN QUERY PLAN " + sql;
+        command.Parameters.AddWithValue("$itemMatch", "cafe*");
+        command.Parameters.AddWithValue("$candidateLimit", 5_000);
+        command.Parameters.AddWithValue("$candidateWindow", 5_001);
+        command.Parameters.AddWithValue("$complete", (int)ItemHydrationStatus.Complete);
+        command.Parameters.AddWithValue("$scanLimit", 200);
+        var details = new List<string>();
+        await using (var reader = await command.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+            {
+                details.Add(reader.GetString(3));
+            }
+        }
+
+        var materializeWindow = details.FindIndex(value => value.Contains(
+            "MATERIALIZE fts_window",
+            StringComparison.OrdinalIgnoreCase));
+        var materializeCandidates = details.FindIndex(value => value.Contains(
+            "MATERIALIZE fts_candidates",
+            StringComparison.OrdinalIgnoreCase));
+        var rankedFtsScan = details.FindIndex(value =>
+            value.Contains("SCAN items_fts VIRTUAL TABLE INDEX 32:", StringComparison.OrdinalIgnoreCase));
+        var firstDetailSearch = details.FindIndex(value =>
+            value.Contains("SEARCH i ", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("SEARCH c ", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("SEARCH s ", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("SEARCH r ", StringComparison.OrdinalIgnoreCase));
+        Assert.True(materializeWindow >= 0, string.Join(Environment.NewLine, details));
+        Assert.True(materializeCandidates >= 0, string.Join(Environment.NewLine, details));
+        Assert.True(rankedFtsScan >= 0, string.Join(Environment.NewLine, details));
+        Assert.True(materializeWindow < firstDetailSearch, string.Join(Environment.NewLine, details));
+        Assert.True(firstDetailSearch > materializeCandidates, string.Join(Environment.NewLine, details));
     }
 
     [Fact]
@@ -548,6 +787,112 @@ public sealed class PriceCacheTests
         Assert.Single((await database.Repository.GetCachedItemResultsAsync(pinned.PncpId, 1))!.Results);
     }
 
+    private static async Task SeedHighCardinalityItemsAsync(string path, string contractId)
+    {
+        SqliteConnection.ClearAllPools();
+        await using var connection = new SqliteConnection($"Data Source={path}");
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText = """
+            WITH RECURSIVE numbers(value) AS (
+                VALUES(1)
+                UNION ALL
+                SELECT value + 1 FROM numbers WHERE value < 30001
+            )
+            INSERT INTO items(
+                contract_id, item_number, description, unit, status, has_result,
+                hydration_status, cache_updated_at, search_text)
+            SELECT $contract, value,
+                   'Cafe comum lote ' || value ||
+                       CASE WHEN value % 4 = 0 THEN ' torrado' ELSE '' END,
+                   'KG', '', 1, $complete, $now,
+                   'cafe comum lote ' || value ||
+                       CASE WHEN value % 4 = 0 THEN ' torrado' ELSE '' END
+              FROM numbers;
+
+            WITH RECURSIVE numbers(value) AS (
+                VALUES(1)
+                UNION ALL
+                SELECT value + 1 FROM numbers WHERE value < 30001
+            )
+            INSERT INTO item_results(
+                contract_id, item_number, result_sequence, supplier_name,
+                unit_value_scaled, result_status_id, result_status_name)
+            SELECT $contract, value, 1, 'Fornecedor',
+                   CASE WHEN value % 2 = 0 THEN $includedPrice ELSE $excludedPrice END,
+                   1, 'Ativo'
+              FROM numbers;
+
+            INSERT INTO contract_item_snapshots(
+                contract_id, fetched_at, item_count, source_global_updated_at)
+            SELECT pncp_id, $now, 30001, global_updated_at
+              FROM contracts
+             WHERE pncp_id = $contract;
+            """;
+        command.Parameters.AddWithValue("$contract", contractId);
+        command.Parameters.AddWithValue("$complete", (int)ItemHydrationStatus.Complete);
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$includedPrice", DecimalScale.ToScaled(25m)!.Value);
+        command.Parameters.AddWithValue("$excludedPrice", DecimalScale.ToScaled(10m)!.Value);
+        await command.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+    }
+
+    private static async Task<IReadOnlyList<(string ContractId, long ItemNumber, long ResultSequence)>>
+        ReadLegacyHighCardinalityPageAsync(
+            string path,
+            SearchExpression expression,
+            DateOnly today)
+    {
+        await using var connection = new SqliteConnection($"Data Source={path}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT c.pncp_id, i.item_number, r.result_sequence, i.description, i.unit
+              FROM items_fts
+              CROSS JOIN items i ON i.rowid = items_fts.rowid
+              CROSS JOIN contracts c ON c.pncp_id = i.contract_id
+              CROSS JOIN contract_item_snapshots s ON s.contract_id = i.contract_id
+              CROSS JOIN item_results r
+                ON r.contract_id = i.contract_id AND r.item_number = i.item_number
+             WHERE items_fts MATCH $itemMatch
+               AND i.hydration_status = $complete
+               AND COALESCE(s.source_global_updated_at, '') = COALESCE(c.global_updated_at, '')
+               AND c.uf = 'SP'
+               AND c.publication_date >= $start
+               AND c.publication_date < $endExclusive
+               AND r.result_status_id = 1
+               AND r.unit_value_scaled >= $minimum
+               AND r.unit_value_scaled <= $maximum
+             ORDER BY bm25(items_fts), c.publication_date DESC,
+                      c.pncp_id, i.item_number, r.result_sequence
+             LIMIT 800;
+            """;
+        command.Parameters.AddWithValue("$itemMatch", expression.ItemMatchQuery);
+        command.Parameters.AddWithValue("$complete", (int)ItemHydrationStatus.Complete);
+        command.Parameters.AddWithValue("$start", today.AddDays(-1).ToString("yyyy-MM-dd"));
+        command.Parameters.AddWithValue("$endExclusive", today.AddDays(1).ToString("yyyy-MM-dd"));
+        command.Parameters.AddWithValue("$minimum", DecimalScale.ToScaled(20m)!.Value);
+        command.Parameters.AddWithValue("$maximum", DecimalScale.ToScaled(30m)!.Value);
+        var rows = new List<(string ContractId, long ItemNumber, long ResultSequence)>(50);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            if (!expression.MatchesItem(reader.GetString(3), reader.GetString(4)))
+            {
+                continue;
+            }
+            rows.Add((reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2)));
+            if (rows.Count == 50)
+            {
+                break;
+            }
+        }
+        return rows;
+    }
+
     internal static ContractRecord RecentContract(string id, DateOnly date, int sequence) =>
         RepositorySearchTests.Contract(id, $"Compra de café {id}", "SP", sequence) with
         {
@@ -579,6 +924,42 @@ public sealed class PriceCacheTests
         ResultStatusId = active ? 1 : 2,
         ResultStatusName = active ? "Ativo" : "Cancelado"
     };
+
+    private sealed class RecordingSearchTelemetry : IPerformanceTelemetry
+    {
+        public List<SearchMeasurement> Measurements { get; } = [];
+
+        public CancellationTokenSource? CancelAtCandidateBatch { get; set; }
+
+        public PerformanceSpan Begin(string operation, string phase = "total")
+        {
+            if (phase == "fts-candidate-batch" && CancelAtCandidateBatch is not null)
+            {
+                CancelAtCandidateBatch.Cancel();
+                CancelAtCandidateBatch = null;
+            }
+            return new PerformanceSpan(this, operation, phase);
+        }
+
+        public void Record(
+            string operation,
+            string phase,
+            TimeSpan duration,
+            long rows = 0,
+            long bytes = 0,
+            bool succeeded = true,
+            string? errorKind = null) =>
+            Measurements.Add(new SearchMeasurement(operation, phase, rows, succeeded, errorKind));
+
+        public PerformanceReport CreateReport() => throw new NotSupportedException();
+    }
+
+    private sealed record SearchMeasurement(
+        string Operation,
+        string Phase,
+        long Rows,
+        bool Succeeded,
+        string? ErrorKind);
 
     private sealed class CacheClient(string failOnceContractId) : IPncpClient
     {

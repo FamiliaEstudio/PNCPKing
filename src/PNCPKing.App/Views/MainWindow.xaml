@@ -74,6 +74,8 @@
                         <MenuItem Header="_Limpeza">
                             <MenuItem Header="Limpar cache permanente" Command="{Binding ClearCacheCommand}" />
                             <MenuItem Header="Limpar cache de documentos" Command="{Binding ClearDocumentCacheCommand}" />
+                            <MenuItem Header="Excluir bases anteriores de importação"
+                                      Command="{Binding ClearBackupRecoveriesCommand}" />
                         </MenuItem>
                         <MenuItem Header="PNCP _Guard…" Click="PncpGuard_Click"
                                   ToolTip="Cria campanhas distribuídas e importa pacotes de listas de itens." />
@@ -946,7 +948,11 @@
                                ToolTip="{Binding FileOperationProgressText}" />
                     <ProgressBar Width="135" Height="10" Margin="7,0"
                                  Minimum="0" Maximum="100"
+                                 IsIndeterminate="{Binding IsFileOperationIndeterminate, Mode=OneWay}"
                                  Value="{Binding OperationProgress, Mode=OneWay}" />
+                    <Button Content="Cancelar operação de arquivo"
+                            Command="{Binding CancelFileOperationCommand}"
+                            Padding="7,2" Margin="0,0,4,0" />
                 </StackPanel>
             </StatusBarItem>
             <Separator />

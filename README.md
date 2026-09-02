@@ -54,7 +54,7 @@ A distribuição autocontida mais recente para Windows x64 está em `artifacts\w
 - plano de consulta adaptado ao volume: FTS primeiro para relevância ou até 20 mil ocorrências e contratos ordenados em chunks ajustáveis de 64 a 512 para termos amplos, sem `OFFSET` e mantendo somente uma página mais um resultado em memória;
 - `PRAGMA optimize` marcado após atualizações concluídas e executado somente em ociosidade, com registro de sucesso para evitar manutenção concorrente com a primeira página;
 - link para a página oficial da contratação e comandos explícitos para obter seus documentos quando solicitado;
-- backup/importação validado no formato `.pncpking`, com perfil compacto (sem cache reconstruível) ou completo, prévia de espaço, progresso por etapa, execução sem bloquear a interface e migração segura de backups antigos do próprio PNCP King;
+- backup/importação validado no formato `.pncpking`, com **Completo — recomendado** como perfil padrão (contratações, itens, preços, snapshots e checkpoints), prévia detalhada de espaço, progresso cancelável por etapa, ativação atômica e migração segura de backups antigos do próprio PNCP King;
 - logs de diagnóstico por execução em `%LOCALAPPDATA%\PNCP King\logs`, acessíveis pelo botão **Logs de diagnóstico**, incluindo abertura, pasta do banco, fases da importação e exceções completas.
 
 O aplicativo não fez a carga nacional durante a compilação. A medição atual será feita pela própria interface e nenhum download começará sem a confirmação dos números e da margem adicional de 20% de espaço livre.
@@ -82,6 +82,16 @@ Para gerar uma distribuição Windows autocontida:
 Somente `artifacts\win-x64\PNCPKing.exe` será publicado. O projeto PNCP Guard também é compilado em Release pela solução, mas não integra essa distribuição.
 
 A suíte automatizada cobre pesquisa por objeto e item, geografia, faixa de preço, valores homologados, rejeição de valores estimados, múltiplos resultados, falha parcial, `429`, timeout, cobertura diária, retomada por checkpoint e validação de backups.
+
+## Backup e importação de bancos grandes
+
+Em **Opções → Arquivo → Exportar backup**, o perfil **Completo — recomendado** é a escolha padrão. Ele preserva o banco integral, inclusive relações de itens, todos os resultados homologados, snapshots de atualização, índices nacionais, checkpoints, cotações, cestas, CATMAT/CATSER, Sweet Codes e referências de evidências web. O perfil **Compacto** preserva os dados permanentes, mas remove do snapshot descartável os itens, preços, FTS e checkpoints de cache que podem ser reconstruídos.
+
+Antes da exportação, a prévia mostra perfil, contagens materializadas, tamanho descompactado, evidências, unidades usadas e espaço necessário. O perfil completo precisa de espaço para o snapshot e para o arquivo `.partial`; o compacto também reserva espaço adicional para o `VACUUM`. A exportação cria um único `.pncpking` com ZIP64, calcula SHA-256 durante a própria compactação e executa uma única verificação integral `PRAGMA integrity_check` no snapshot. Destinos FAT32 são recusados quando o arquivo pode ultrapassar 4 GiB; use NTFS ou exFAT.
+
+Na importação, o banco é extraído em staging ao lado do banco ativo, portanto a troca final ocorre por renomeação na mesma unidade. Backups atuais que já foram integralmente validados na origem passam por SHA-256 e conferência estrutural, sem repetir a longa varredura integral no HDD de destino. Backups legados sem essa declaração e bancos modificados por uma migração continuam recebendo `integrity_check` integral.
+
+No instante da ativação, o banco atual é renomeado para `nome-do-banco.db.before-import-...bak`, o banco validado assume o caminho oficial e é aberto para confirmação. Se essa etapa falhar, a base anterior é restaurada automaticamente. O cancelamento fica disponível até o começo dessa curta troca. Depois de confirmar que não precisa mais da recuperação, use **Opções → Limpeza → Excluir bases anteriores de importação**; a ação mostra quantidade e tamanho e não alcança arquivos fora do padrão de recuperação do banco atual.
 
 ## Uso
 

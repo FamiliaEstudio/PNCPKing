@@ -124,7 +124,7 @@ public sealed class SystemResourceTests
     }
 
     [Theory]
-    [InlineData(8, 2, 4, "Restrito", 64, 32, 1)]
+    [InlineData(8, 2, 4, "Restrito", 64, 128, 1)]
     [InlineData(12, 4, 8, "Balanceado", 128, 64, 2)]
     [InlineData(16, 4, 8, "Amplo", 256, 128, 2)]
     public void SqliteProfile_UsesExpectedMigrationCacheMmapAndThreads(
@@ -148,6 +148,45 @@ public sealed class SystemResourceTests
         Assert.Equal(migrationCacheMibibytes * 1024, factory.MigrationCacheKib);
         Assert.Equal(mmapMibibytes * 1024L * 1024, factory.MmapBytes);
         Assert.Equal(threads, factory.WorkerThreads);
+    }
+
+    [Theory]
+    [InlineData(8, 2, 4, -32768, 128)]
+    [InlineData(12, 4, 8, -32768, 64)]
+    [InlineData(16, 4, 8, -65536, 128)]
+    public async Task SqliteProfile_AppliesExpectedActiveCacheMmapAndFileTempStore(
+        int totalGibibytes,
+        int availableGibibytes,
+        int processors,
+        long expectedCacheKib,
+        long expectedMmapMibibytes)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"active-profile-{Guid.NewGuid():N}.db");
+        var resources = SystemResourceProbe.CreateSnapshot(
+            totalGibibytes * Gibibyte,
+            availableGibibytes * Gibibyte,
+            50,
+            processors);
+        var factory = new SqliteConnectionFactory(path, resourceProbe: new FixedProbe(resources));
+
+        try
+        {
+            await using var connection = await factory.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA cache_size;";
+            Assert.Equal(expectedCacheKib, Convert.ToInt64(await command.ExecuteScalarAsync()));
+            command.CommandText = "PRAGMA mmap_size;";
+            Assert.Equal(
+                expectedMmapMibibytes * 1024 * 1024,
+                Convert.ToInt64(await command.ExecuteScalarAsync()));
+            command.CommandText = "PRAGMA temp_store;";
+            Assert.Equal(1L, Convert.ToInt64(await command.ExecuteScalarAsync()));
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            File.Delete(path);
+        }
     }
 
     private sealed class FixedProbe(SystemResourceSnapshot snapshot) : ISystemResourceProbe

@@ -53,9 +53,9 @@ public sealed class SqliteConnectionFactory : ISqliteConnectionFactory
         if (resources.Pressure != SystemResourcePressure.Normal)
         {
             ProfileName = "Restrito";
-            _cacheKib = 16 * 1024;
+            _cacheKib = 32 * 1024;
             MigrationCacheKib = 64 * 1024;
-            MmapBytes = 32L * 1024 * 1024;
+            MmapBytes = 128L * 1024 * 1024;
             WorkerThreads = 1;
         }
         else if (spacious)

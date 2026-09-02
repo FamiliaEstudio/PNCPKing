@@ -31,6 +31,7 @@ public sealed class BackupTests
 
         Assert.True(File.Exists(recoveryPath));
         Assert.True(manifest.DatabaseIntegrityValidatedAtExport is true);
+        Assert.Equal(BackupProfile.Full, manifest.BackupProfile);
         Assert.Single(result.Results);
         Assert.Equal("original", result.Results[0].PncpId);
     }
@@ -45,8 +46,16 @@ public sealed class BackupTests
         var telemetry = new RecordingPerformanceTelemetry();
         var service = new BackupService(database.Repository, telemetry);
         var backupPath = Path.Combine(database.Directory, "progress.pncpking");
-        await service.ExportAsync(backupPath, BackupProfile.Compact);
+        var exportProgress = new RecordingProgress<BackupExportProgress>();
+        var exportInspection = await service.InspectExportAsync(backupPath, BackupProfile.Compact);
+        await service.ExportAsync(backupPath, BackupProfile.Compact, exportProgress);
         Assert.Contains(("backup", "export-integrity"), telemetry.Measurements);
+        Assert.True(exportInspection.CanExport);
+        Assert.Equal(BackupProfile.Compact, exportInspection.Profile);
+        Assert.Contains(exportProgress.Values, item => item.Stage == BackupExportStage.Snapshotting);
+        Assert.Contains(exportProgress.Values, item => item.Stage == BackupExportStage.CheckingIntegrity);
+        Assert.Contains(exportProgress.Values, item =>
+            item.Stage == BackupExportStage.Completed && item.Percentage == 100d);
         telemetry.Clear();
         var inspection = await service.InspectAsync(backupPath);
         var progress = new RecordingProgress<BackupImportProgress>();
@@ -63,7 +72,7 @@ public sealed class BackupTests
         Assert.Contains(progress.Values, item => item.Stage == BackupImportStage.Completed && item.Percentage == 100d);
         Assert.Contains(("backup", "import-extraction"), telemetry.Measurements);
         Assert.Contains(("backup", "import-origin-validation"), telemetry.Measurements);
-        Assert.Contains(("backup", "import-installation"), telemetry.Measurements);
+        Assert.Contains(("backup", "import-activation"), telemetry.Measurements);
         Assert.DoesNotContain(("backup", "import-full-integrity"), telemetry.Measurements);
     }
 
@@ -103,6 +112,7 @@ public sealed class BackupTests
 
         Assert.Equal(SqliteContractRepository.CurrentSchemaVersion, initialization.CurrentVersion);
         Assert.Contains(("backup", "import-origin-validation"), telemetry.Measurements);
+        Assert.Contains(("backup", "import-migration"), telemetry.Measurements);
         Assert.Contains(("backup", "import-full-integrity"), telemetry.Measurements);
     }
 
@@ -134,6 +144,71 @@ public sealed class BackupTests
     }
 
     [Fact]
+    public async Task Import_RejectsCorruptedEvidenceBeforeReplacingCurrentDatabase()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await database.Repository.UpsertContractsAsync([
+            RepositorySearchTests.Contract("preserved", "Base que deve permanecer", "SP", 1)
+        ]);
+        var service = new BackupService(database.Repository);
+        var backupPath = Path.Combine(database.Directory, "evidence-corrupted.pncpking");
+        await service.ExportAsync(backupPath);
+        var expectedHash = new string('0', 64);
+        ReplaceEntry(backupPath, "manifest.json", bytes =>
+        {
+            var manifest = JsonSerializer.Deserialize<DatasetManifest>(bytes)! with
+            {
+                EvidenceAssets =
+                [
+                    new EvidenceAssetManifest
+                    {
+                        Sha256 = expectedHash,
+                        ArchivePath = $"internet-evidence/{expectedHash}.png",
+                        ByteLength = 1
+                    }
+                ]
+            };
+            return JsonSerializer.SerializeToUtf8Bytes(manifest);
+        });
+        using (var archive = ZipFile.Open(backupPath, ZipArchiveMode.Update))
+        {
+            var evidence = archive.CreateEntry($"internet-evidence/{expectedHash}.png");
+            await using var output = evidence.Open();
+            await output.WriteAsync(new byte[] { 1 });
+        }
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => service.ImportAsync(backupPath));
+
+        Assert.NotNull(await database.Repository.GetContractAsync("preserved"));
+        Assert.Empty(service.GetRecoveryBackups());
+    }
+
+    [Fact]
+    public async Task Export_CancellationRemovesPartialArchive()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await database.Repository.UpsertContractsAsync([
+            RepositorySearchTests.Contract("cancel", "Cancelar backup", "SP", 1)
+        ]);
+        var service = new BackupService(database.Repository);
+        var backupPath = Path.Combine(database.Directory, "cancelled.pncpking");
+        using var cancellation = new CancellationTokenSource();
+        var progress = new CallbackProgress<BackupExportProgress>(item =>
+        {
+            if (item.Stage == BackupExportStage.ArchivingDatabase)
+            {
+                cancellation.Cancel();
+            }
+        });
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            service.ExportAsync(backupPath, BackupProfile.Full, progress, cancellation.Token));
+
+        Assert.False(File.Exists(backupPath));
+        Assert.False(File.Exists(backupPath + ".partial"));
+    }
+
+    [Fact]
     public async Task Export_CanReplaceBackupWithoutLeakingTemporaryDatabaseHandles()
     {
         await using var database = await TestDatabase.CreateAsync();
@@ -150,6 +225,91 @@ public sealed class BackupTests
         Assert.NotNull(archive.GetEntry("data.db"));
         Assert.NotNull(archive.GetEntry("manifest.json"));
         Assert.False(File.Exists(backupPath + ".partial"));
+    }
+
+    [Fact]
+    public async Task FullBackup_RoundTripsItemsResultsSnapshotsAndCheckpoints()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var current = PriceCacheTests.RecentContract("full-current", today, 1);
+        var stale = PriceCacheTests.RecentContract("full-stale", today, 2);
+        await database.Repository.UpsertContractsAsync([current, stale]);
+        var currentItem = PriceCacheTests.Item(current, 1) with
+        {
+            Description = "Coffee Break completo",
+            HydrationStatus = ItemHydrationStatus.Complete
+        };
+        var staleItem = PriceCacheTests.Item(stale, 1) with
+        {
+            Description = "Café invalidado",
+            HydrationStatus = ItemHydrationStatus.Complete
+        };
+        await database.Repository.UpsertItemsAsync(current.PncpId, [currentItem], false);
+        await database.Repository.UpsertItemsAsync(stale.PncpId, [staleItem], false);
+        await database.Repository.ReplaceItemResultsAsync(current.PncpId, 1,
+        [
+            PriceCacheTests.Result(current, 1, 1, true),
+            PriceCacheTests.Result(current, 1, 2, true) with { SupplierName = "Segundo vencedor" }
+        ]);
+        await database.Repository.ReplaceItemResultsAsync(stale.PncpId, 1,
+        [
+            PriceCacheTests.Result(stale, 1, 1, true)
+        ]);
+        var changedStale = stale with { GlobalUpdatedAt = stale.GlobalUpdatedAt?.AddMinutes(1) };
+        await database.Repository.UpsertContractsAsync([changedStale]);
+        await database.Repository.SavePartitionProgressAsync("backup-checkpoint", 7, false);
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
+        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        await cache.MarkContractDownloadingAsync(current.PncpId, true);
+        await cache.MarkContractCompleteAsync(current.PncpId, current.GlobalUpdatedAt);
+
+        var service = new BackupService(database.Repository);
+        var backupPath = Path.Combine(database.Directory, "complete.pncpking");
+        await service.ExportAsync(backupPath, BackupProfile.Full);
+        var manifest = await ReadManifestAsync(backupPath);
+        await database.Repository.ClearItemCacheAsync();
+
+        var recovery = await service.ImportAsync(backupPath);
+
+        var restoredCurrent = await database.Repository.GetCachedItemResultsAsync(current.PncpId, 1);
+        var restoredStale = await database.Repository.GetCachedItemResultsAsync(stale.PncpId, 1);
+        Assert.NotNull(restoredCurrent);
+        Assert.Equal(2, restoredCurrent.Results.Count);
+        Assert.Equal("Segundo vencedor", restoredCurrent.Results[1].SupplierName);
+        Assert.NotNull(await database.Repository.GetItemSnapshotAsync(current.PncpId));
+        Assert.NotNull(restoredStale);
+        Assert.Equal(ItemHydrationStatus.Stale, restoredStale.Item.HydrationStatus);
+        Assert.Null(await database.Repository.GetItemSnapshotAsync(stale.PncpId));
+        Assert.Equal(7, await database.Repository.GetPartitionNextPageAsync("backup-checkpoint"));
+        Assert.Single(await database.Repository.SearchItemsAsync(current.PncpId, "Coffee Break"));
+        Assert.True((await cache.GetPolicyAsync()).Authorized);
+        Assert.Equal(2, manifest.ArchiveFormatVersion);
+        Assert.Equal(BackupProfile.Full, manifest.BackupProfile);
+        Assert.Equal("PRAGMA integrity_check", manifest.DatabaseIntegrityKind);
+        Assert.NotNull(manifest.DatabaseIntegrityValidatedAt);
+        Assert.True(manifest.DatabaseBytes > 0);
+        Assert.Contains(service.GetRecoveryBackups(), item => item.Path == recovery);
+    }
+
+    [Fact]
+    public async Task RecoveryCleanup_DeletesOnlyExactCurrentDatabaseRecoveryPattern()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var service = new BackupService(database.Repository);
+        var valid = $"{database.Repository.DatabasePath}.before-import-" +
+                    $"20260830-120000-000-{Guid.NewGuid():N}.bak";
+        var decoy = database.Repository.DatabasePath + ".before-import-manual.bak";
+        await File.WriteAllBytesAsync(valid, [1, 2, 3]);
+        await File.WriteAllBytesAsync(decoy, [4, 5]);
+
+        var deleted = service.DeleteRecoveryBackups();
+
+        Assert.Equal(1, deleted.Count);
+        Assert.Equal(3, deleted.Bytes);
+        Assert.False(File.Exists(valid));
+        Assert.True(File.Exists(decoy));
     }
 
     [Fact]
@@ -208,6 +368,23 @@ public sealed class BackupTests
         Assert.False(pricePolicy.Enabled);
         Assert.Equal(0, counts.Items);
         Assert.Equal(0, counts.Results);
+        await using var connection = new SqliteConnection(
+            $"Data Source={database.Repository.DatabasePath};Pooling=False");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT (SELECT COUNT(*) FROM items_fts),
+                   (SELECT COUNT(*) FROM contract_item_snapshots),
+                   (SELECT COUNT(*) FROM price_cache_contracts),
+                   (SELECT sql FROM sqlite_master
+                     WHERE type = 'table' AND name = 'items_fts');
+            """;
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(0, reader.GetInt64(0));
+        Assert.Equal(0, reader.GetInt64(1));
+        Assert.Equal(0, reader.GetInt64(2));
+        Assert.Contains("prefix='2 3'", reader.GetString(3), StringComparison.Ordinal);
     }
 
     private static async Task<DatasetManifest> ReadManifestAsync(string archivePath)
@@ -288,6 +465,11 @@ public sealed class BackupTests
         public List<T> Values { get; } = [];
 
         public void Report(T value) => Values.Add(value);
+    }
+
+    private sealed class CallbackProgress<T>(Action<T> callback) : IProgress<T>
+    {
+        public void Report(T value) => callback(value);
     }
 
     private sealed class RecordingPerformanceTelemetry : IPerformanceTelemetry

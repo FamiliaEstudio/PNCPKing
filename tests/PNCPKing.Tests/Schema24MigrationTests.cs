@@ -39,8 +39,8 @@ public sealed class Schema24MigrationTests
 
         var result = await database.Repository.InitializeAsync();
         Assert.Equal(23, result.PreviousVersion);
-        Assert.Equal(25, result.CurrentVersion);
-        Assert.Equal([24, 25], result.AppliedMigrations);
+        Assert.Equal(26, result.CurrentVersion);
+        Assert.Equal([24, 25, 26], result.AppliedMigrations);
 
         await using var verify = new SqliteConnection($"Data Source={database.Repository.DatabasePath}");
         await verify.OpenAsync();

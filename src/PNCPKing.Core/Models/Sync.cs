@@ -100,6 +100,7 @@ public sealed record IncompleteSyncState(
 
 public sealed record DatasetManifest
 {
+    public int? ArchiveFormatVersion { get; init; }
     public int SchemaVersion { get; init; }
     public string AppVersion { get; init; } = string.Empty;
     public DateOnly? StartDate { get; init; }
@@ -110,13 +111,64 @@ public sealed record DatasetManifest
     public long ResultCount { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
     public string DatabaseSha256 { get; init; } = string.Empty;
+    public long? DatabaseBytes { get; init; }
     public bool? DatabaseIntegrityValidatedAtExport { get; init; }
+    public string? DatabaseIntegrityKind { get; init; }
+    public DateTimeOffset? DatabaseIntegrityValidatedAt { get; init; }
     public IReadOnlyList<EvidenceAssetManifest> EvidenceAssets { get; init; } = [];
     public BackupProfile? BackupProfile { get; init; }
     public bool? ContainsPriceCache { get; init; }
     public long? PriceCacheContractCount { get; init; }
     public long? PriceCacheItemCount { get; init; }
     public long? PriceCacheResultCount { get; init; }
+}
+
+public enum BackupExportStage
+{
+    Inspecting = 0,
+    Checkpointing = 1,
+    Snapshotting = 2,
+    Compacting = 3,
+    CheckingIntegrity = 4,
+    ArchivingDatabase = 5,
+    ArchivingEvidence = 6,
+    Completed = 7
+}
+
+public sealed record BackupExportProgress(
+    BackupExportStage Stage,
+    double Percentage,
+    string Message,
+    long BytesProcessed = 0,
+    long TotalBytes = 0,
+    bool IsIndeterminate = false,
+    bool CanCancel = true);
+
+public sealed record BackupExportInspection
+{
+    public required BackupProfile Profile { get; init; }
+    public required string DestinationPath { get; init; }
+    public required string StagingDirectoryRoot { get; init; }
+    public required string StagingVolumeRoot { get; init; }
+    public required string DestinationVolumeRoot { get; init; }
+    public required long DatabaseBytes { get; init; }
+    public required long EvidenceBytes { get; init; }
+    public required long ContractCount { get; init; }
+    public required long ItemCount { get; init; }
+    public required long ResultCount { get; init; }
+    public required long StagingAvailableBytes { get; init; }
+    public required long DestinationAvailableBytes { get; init; }
+    public required long StagingRequiredBytes { get; init; }
+    public required long DestinationRequiredBytes { get; init; }
+    public required bool SharesStagingAndDestinationVolume { get; init; }
+    public string DestinationDriveFormat { get; init; } = string.Empty;
+    public bool ExceedsDestinationFileLimit { get; init; }
+
+    public bool HasEnoughSpace =>
+        StagingAvailableBytes >= StagingRequiredBytes &&
+        DestinationAvailableBytes >= DestinationRequiredBytes;
+
+    public bool CanExport => HasEnoughSpace && !ExceedsDestinationFileLimit;
 }
 
 public enum BackupImportStage
@@ -137,7 +189,9 @@ public sealed record BackupImportProgress(
     double Percentage,
     string Message,
     long BytesProcessed = 0,
-    long TotalBytes = 0);
+    long TotalBytes = 0,
+    bool IsIndeterminate = false,
+    bool CanCancel = true);
 
 public sealed record BackupInspection
 {
@@ -154,11 +208,27 @@ public sealed record BackupInspection
     public required long TemporaryRequiredBytes { get; init; }
     public required long DataRequiredBytes { get; init; }
     public required bool SharesTemporaryAndDataVolume { get; init; }
+    public long ContractCount { get; init; }
+    public long ItemCount { get; init; }
+    public long ResultCount { get; init; }
+    public long EvidenceBytes { get; init; }
+    public int EvidenceCount { get; init; }
+    public bool RequiresMigration { get; init; }
+    public string StagingRoot { get; init; } = string.Empty;
+    public long StagingAvailableBytes { get; init; }
+    public long StagingRequiredBytes { get; init; }
 
     public bool HasEnoughSpace =>
-        TemporaryAvailableBytes >= TemporaryRequiredBytes &&
+        (StagingRoot.Length == 0
+            ? TemporaryAvailableBytes >= TemporaryRequiredBytes
+            : StagingAvailableBytes >= StagingRequiredBytes) &&
         DataAvailableBytes >= DataRequiredBytes;
 }
+
+public sealed record BackupRecoveryInfo(
+    string Path,
+    long Bytes,
+    DateTimeOffset CreatedAt);
 
 public sealed record EvidenceAssetManifest
 {
