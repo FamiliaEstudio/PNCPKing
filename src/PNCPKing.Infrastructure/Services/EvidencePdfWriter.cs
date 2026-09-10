@@ -30,13 +30,11 @@ internal sealed class EvidencePdfWriter : IDisposable
         AddBitmapPage(bitmap, portalUrl);
     }
 
-    public void AddOccurrencePage(
+    public void AddDocumentPage(
         string heading,
         IReadOnlyList<string> lines,
         string portalUrl,
-        RenderedPdfPage rendered,
-        DocumentPageIndex pageIndex,
-        IReadOnlyList<TextOccurrence> occurrences)
+        RenderedPdfPage rendered)
     {
         using var bitmap = CreateCanvas();
         using var canvas = new SKCanvas(bitmap);
@@ -45,7 +43,6 @@ internal sealed class EvidencePdfWriter : IDisposable
         using var source = SKBitmap.Decode(rendered.PngBytes)
                            ?? throw new InvalidDataException("A página renderizada não pôde ser lida.");
 
-        var fullPage = new DocumentRectangle(0, 0, pageIndex.Width, pageIndex.Height);
         var sourceRectangle = new SKRect(
             0,
             0,
@@ -54,36 +51,6 @@ internal sealed class EvidencePdfWriter : IDisposable
         var available = new SKRect(70, contentTop + 35, CanvasWidth - 70, CanvasHeight - 120);
         var fitted = Fit(sourceRectangle, available);
         canvas.DrawBitmap(source, sourceRectangle, fitted);
-
-        using var highlight = new SKPaint
-        {
-            Color = new SKColor(
-                EvidenceHighlightStyle.FillRed,
-                EvidenceHighlightStyle.FillGreen,
-                EvidenceHighlightStyle.FillBlue,
-                EvidenceHighlightStyle.FillAlpha),
-            Style = SKPaintStyle.Fill,
-            IsAntialias = true
-        };
-        using var border = new SKPaint
-        {
-            Color = new SKColor(
-                EvidenceHighlightStyle.BorderRed,
-                EvidenceHighlightStyle.BorderGreen,
-                EvidenceHighlightStyle.BorderBlue),
-            Style = SKPaintStyle.Stroke,
-            StrokeWidth = EvidenceHighlightStyle.BorderWidthCanvas,
-            IsAntialias = true
-        };
-        foreach (var wordIndex in occurrences
-                     .SelectMany(value => value.WordIndexes)
-                     .Distinct())
-        {
-            var word = pageIndex.Words[wordIndex].Bounds;
-            var rectangle = MapToDestination(word, fullPage, fitted);
-            canvas.DrawRect(rectangle, highlight);
-            canvas.DrawRect(rectangle, border);
-        }
 
         AddBitmapPage(bitmap, portalUrl);
     }
@@ -284,20 +251,6 @@ internal sealed class EvidencePdfWriter : IDisposable
         var left = available.Left + (available.Width - width) / 2;
         var top = available.Top + (available.Height - height) / 2;
         return new SKRect(left, top, left + width, top + height);
-    }
-
-    private static SKRect MapToDestination(
-        DocumentRectangle word,
-        DocumentRectangle context,
-        SKRect destination)
-    {
-        var left = destination.Left + (float)((word.X - context.X) / context.Width * destination.Width);
-        var top = destination.Top + (float)((word.Y - context.Y) / context.Height * destination.Height);
-        var right = destination.Left +
-                    (float)((word.X + word.Width - context.X) / context.Width * destination.Width);
-        var bottom = destination.Top +
-                     (float)((word.Y + word.Height - context.Y) / context.Height * destination.Height);
-        return new SKRect(left, top, right, bottom);
     }
 
     private sealed class TextStyle(

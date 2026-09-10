@@ -1873,10 +1873,31 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             totalContracts);
     }
 
-    public async Task<ItemSearchLocalSummary> GetItemSearchLocalSummaryAsync(
+    public Task<ItemSearchLocalSummary> GetItemSearchLocalSummaryAsync(
         SearchQuery filters,
         SearchExpression expression,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetItemSearchLocalSummaryCoreAsync(
+            filters,
+            expression,
+            SqliteWorkPriority.Visible,
+            cancellationToken);
+
+    public Task<ItemSearchLocalSummary> GetDeferredItemSearchLocalSummaryAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        CancellationToken cancellationToken = default) =>
+        GetItemSearchLocalSummaryCoreAsync(
+            filters,
+            expression,
+            SqliteWorkPriority.Background,
+            cancellationToken);
+
+    private async Task<ItemSearchLocalSummary> GetItemSearchLocalSummaryCoreAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        SqliteWorkPriority priority,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(filters);
         ArgumentNullException.ThrowIfNull(expression);
@@ -1884,10 +1905,6 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         {
             return new ItemSearchLocalSummary(0, 0, 0);
         }
-
-        await using var readerLease = await _connections.WorkCoordinator
-            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
-            .ConfigureAwait(false);
 
         var candidateMatch = expression.CandidateMatchQuery;
         var itemMatch = expression.ItemMatchQuery;
@@ -1990,8 +2007,11 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             ? "WHERE items_fts MATCH $itemMatch"
             : string.Empty;
 
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         long candidateContracts;
+        await using (var candidateLease = await _connections.WorkCoordinator
+                         .EnterReaderAsync(priority, cancellationToken)
+                         .ConfigureAwait(false))
+        await using (var connection = await OpenAsync(cancellationToken).ConfigureAwait(false))
         await using (var count = connection.CreateCommand())
         {
             count.CommandText = $"""
@@ -2020,8 +2040,13 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
                 CultureInfo.InvariantCulture);
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         long cachedMatchingItems = 0;
         long cachedItemsWithPrices = 0;
+        await using (var cacheLease = await _connections.WorkCoordinator
+                         .EnterReaderAsync(priority, cancellationToken)
+                         .ConfigureAwait(false))
+        await using (var connection = await OpenAsync(cancellationToken).ConfigureAwait(false))
         await using (var cached = connection.CreateCommand())
         {
             cached.CommandText = $"""

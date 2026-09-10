@@ -117,4 +117,13 @@ public interface IPriceCacheRepository
         PriceCacheLocalCursor? cursor,
         int pageSize,
         CancellationToken cancellationToken = default);
+    Task<PriceCacheLocalPage> SearchLocalAfterAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice,
+        PriceCacheLocalCursor? cursor,
+        int pageSize,
+        IProgress<PriceCacheLocalProgress>? progress,
+        CancellationToken cancellationToken = default);
 }

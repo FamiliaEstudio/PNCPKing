@@ -282,24 +282,20 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
                         {
                             var evidenceLines = lines.Concat(
                             [
-                                $"Critério localizado: {matchedExpression.Label} — {matchedExpression.Text}",
                                 $"Documento: {pageMatch.Pdf.DocumentTitle}" +
                                 (pageMatch.Pdf.ArchivePath.Length == 0
                                     ? string.Empty
                                     : $" · {pageMatch.Pdf.ArchivePath}"),
                                 $"Página original: {pageMatch.Page.PageNumber:N0} · leitura: " +
                                 (pageMatch.Page.Source == DocumentTextSource.Native ? "texto nativo" : "OCR"),
-                                $"Ocorrências destacadas nesta página: {pageMatch.Occurrences.Count:N0}",
                                 $"Páginas incluídas: {renderedSelections.Count:N0} de {rankedPages.Length:N0} páginas localizadas."
                             ]).Concat(referenceNotes.Distinct(StringComparer.Ordinal).Take(1).Select(note => $"Aviso: {note}"))
                             .ToArray();
-                            unitWriter.AddOccurrencePage(
+                            unitWriter.AddDocumentPage(
                                 heading,
                                 evidenceLines,
                                 reference.PortalUrl,
-                                rendered,
-                                pageMatch.Page,
-                                pageMatch.Occurrences);
+                                rendered);
                             referenceOccurrences += pageMatch.Occurrences.Count;
                             occurrenceCount += pageMatch.Occurrences.Count;
                         }
@@ -309,9 +305,7 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
                     {
                         var message = bundle.Pdfs.Count == 0
                             ? "Nenhum PDF processável foi encontrado nesta contratação."
-                            : "Nenhuma ocorrência foi localizada, mesmo após a busca básica por identidade. " +
-                              $"Critérios tentados: {string.Join("; ", searchExpressions.Select(
-                                  expression => $"{expression.Label} = {expression.Text}"))}.";
+                            : "Nenhuma página relevante foi localizada nos documentos da contratação.";
                         unitWriter.AddTextPage(
                             heading,
                             lines.Concat(referenceNotes.Distinct(StringComparer.Ordinal)).Append(message).ToArray(),
@@ -355,8 +349,8 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
                         $"Projeto: {report.Project.Name}",
                         $"Gerado em: {generatedAt:dd/MM/yyyy HH:mm}",
                         $"Parte {partIndex + 1:N0} de {partitions.Count:N0}.",
-                        "Cada preço possui no máximo duas páginas distintas de evidência; texto nativo, " +
-                        "quantidade de correspondências e ordem documental definem a prioridade.",
+                        "Cada preço possui no máximo duas páginas distintas de evidência, " +
+                        "selecionadas automaticamente pelo programa.",
                         "Cada arquivo contém no máximo 49 páginas e as páginas de um preço nunca são separadas."
                     ]);
                 foreach (var unit in partitions[partIndex])

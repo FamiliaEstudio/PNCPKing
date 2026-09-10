@@ -172,6 +172,14 @@ public sealed record PriceCacheLocalPage(
     IReadOnlyList<ItemSearchRow>? Rows = null,
     PriceCacheLocalCursor? Cursor = null);
 
+public sealed record PriceCacheLocalProgress(
+    IReadOnlyList<ItemSearchRow> Rows,
+    PriceCacheLocalCursor? Cursor,
+    long ContractsExamined,
+    int MatchingRows,
+    bool HasMore,
+    bool Completed);
+
 public sealed record PriceCacheLocalCursor(
     int Page,
     int ExplicitPriority,

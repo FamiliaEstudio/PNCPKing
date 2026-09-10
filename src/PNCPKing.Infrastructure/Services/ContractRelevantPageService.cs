@@ -1,4 +1,3 @@
-using PdfSharp.Drawing;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
 using PNCPKing.Core.Interfaces;
@@ -112,7 +111,7 @@ public sealed class ContractRelevantPageService : IContractRelevantPageService
                             continue;
                         }
 
-                        if (!TryAddHighlightedPage(
+                        if (!TryAddRelevantPage(
                                 output,
                                 input.Pages[match.Page.PageNumber - 1],
                                 match,
@@ -215,17 +214,10 @@ public sealed class ContractRelevantPageService : IContractRelevantPageService
                 FlexiblePhraseMatcher.Find(expression, page)))
             .Where(match => match.Occurrences.Count > 0)
             .ToArray();
-        var wordIndexes = expressionMatches
-            .SelectMany(match => match.Occurrences)
-            .SelectMany(occurrence => occurrence.WordIndexes)
-            .Where(index => index >= 0 && index < page.Words.Count)
-            .Distinct()
-            .OrderBy(index => index)
-            .ToArray();
-        return new PageMatch(page, expressionMatches, wordIndexes);
+        return new PageMatch(page, expressionMatches);
     }
 
-    private static bool TryAddHighlightedPage(
+    private static bool TryAddRelevantPage(
         PdfDocument output,
         PdfPage sourcePage,
         PageMatch match,
@@ -238,22 +230,6 @@ public sealed class ContractRelevantPageService : IContractRelevantPageService
             // Importing the source page preserves its media/crop boxes, rotation,
             // searchable text, vector content and original image resolution.
             outputPage = output.AddPage(sourcePage);
-            using var graphics = XGraphics.FromPdfPage(
-                outputPage,
-                XGraphicsPdfPageOptions.Append,
-                XPageDirection.Downwards);
-            try
-            {
-                DrawHighlights(graphics, outputPage, match);
-            }
-            catch (Exception exception)
-            {
-                warnings.Add(
-                    $"{sourcePdf.DocumentTitle}, página {match.Page.PageNumber:N0}: " +
-                    $"a página foi preservada, mas não foi possível aplicar os realces " +
-                    $"({exception.Message}).");
-            }
-
             return true;
         }
         catch (Exception exception)
@@ -270,117 +246,9 @@ public sealed class ContractRelevantPageService : IContractRelevantPageService
         }
     }
 
-    private static void DrawHighlights(
-        XGraphics graphics,
-        PdfPage outputPage,
-        PageMatch match)
-    {
-        var fill = new XSolidBrush(XColor.FromArgb(
-            EvidenceHighlightStyle.FillAlpha,
-            EvidenceHighlightStyle.FillRed,
-            EvidenceHighlightStyle.FillGreen,
-            EvidenceHighlightStyle.FillBlue));
-        var border = new XPen(
-            XColor.FromArgb(
-                EvidenceHighlightStyle.BorderRed,
-                EvidenceHighlightStyle.BorderGreen,
-                EvidenceHighlightStyle.BorderBlue),
-            EvidenceHighlightStyle.BorderWidthPoints);
-        foreach (var wordIndex in match.WordIndexes)
-        {
-            var rectangle = MapRectangle(
-                match.Page.Words[wordIndex].Bounds,
-                match.Page,
-                outputPage);
-            if (rectangle.Width <= 0 || rectangle.Height <= 0)
-            {
-                continue;
-            }
-
-            graphics.DrawRectangle(border, fill, rectangle);
-        }
-    }
-
-    internal static XRect MapRectangle(
-        DocumentRectangle source,
-        DocumentPageIndex indexPage,
-        PdfPage pdfPage)
-    {
-        var crop = pdfPage.EffectiveCropBoxReadOnly;
-        if (crop.IsZero)
-        {
-            crop = pdfPage.MediaBoxReadOnly;
-        }
-
-        var cropWidth = Math.Abs(crop.Width);
-        var cropHeight = Math.Abs(crop.Height);
-        if (indexPage.Width <= 0 ||
-            indexPage.Height <= 0 ||
-            cropWidth <= 0 ||
-            cropHeight <= 0)
-        {
-            return XRect.Empty;
-        }
-
-        var rotation = ((pdfPage.Rotate % 360) + 360) % 360;
-        var displayWidth = rotation is 90 or 270 ? cropHeight : cropWidth;
-        var displayHeight = rotation is 90 or 270 ? cropWidth : cropHeight;
-        var scaleX = displayWidth / indexPage.Width;
-        var scaleY = displayHeight / indexPage.Height;
-        var displayLeft = Math.Clamp(source.X * scaleX, 0, displayWidth);
-        var displayRight = Math.Clamp(
-            (source.X + source.Width) * scaleX,
-            0,
-            displayWidth);
-        var displayTopFromTop = Math.Clamp(source.Y * scaleY, 0, displayHeight);
-        var displayBottomFromTop = Math.Clamp(
-            (source.Y + source.Height) * scaleY,
-            0,
-            displayHeight);
-        if (displayRight <= displayLeft || displayBottomFromTop <= displayTopFromTop)
-        {
-            return XRect.Empty;
-        }
-
-        var displayBottom = displayHeight - displayBottomFromTop;
-        var displayTop = displayHeight - displayTopFromTop;
-        var corners = new[]
-        {
-            ToUnrotated(displayLeft, displayBottom, cropWidth, cropHeight, rotation),
-            ToUnrotated(displayLeft, displayTop, cropWidth, cropHeight, rotation),
-            ToUnrotated(displayRight, displayBottom, cropWidth, cropHeight, rotation),
-            ToUnrotated(displayRight, displayTop, cropWidth, cropHeight, rotation)
-        };
-        var left = corners.Min(point => point.X) + crop.X1;
-        var right = corners.Max(point => point.X) + crop.X1;
-        var bottom = corners.Min(point => point.Y) + crop.Y1;
-        var top = corners.Max(point => point.Y) + crop.Y1;
-        var topFromPageTop = pdfPage.Height.Point - top;
-        return right <= left || top <= bottom
-            ? XRect.Empty
-            : new XRect(left, topFromPageTop, right - left, top - bottom);
-    }
-
-    private static XPoint ToUnrotated(
-        double displayX,
-        double displayY,
-        double unrotatedWidth,
-        double unrotatedHeight,
-        int rotation) =>
-        rotation switch
-        {
-            90 => new XPoint(unrotatedWidth - displayY, displayX),
-            180 => new XPoint(
-                unrotatedWidth - displayX,
-                unrotatedHeight - displayY),
-            270 => new XPoint(displayY, unrotatedHeight - displayX),
-            _ => new XPoint(displayX, displayY)
-        };
-
     private sealed record PageMatch(
         DocumentPageIndex Page,
-        IReadOnlyList<ExpressionPageMatch> ExpressionMatches,
-        IReadOnlyList<int> WordIndexes);
+        IReadOnlyList<ExpressionPageMatch> ExpressionMatches);
 
     private sealed record ExpressionPageMatch(
         int ExpressionIndex,

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using PNCPKing.Core.Models;
@@ -13,6 +14,187 @@ namespace PNCPKing.Tests;
 
 public sealed class PerformanceTests(ITestOutputHelper output)
 {
+    [Fact]
+    [Trait("Category", "Performance")]
+    public async Task RealDatabaseCopy_BenchmarksPriceStreamingScenario()
+    {
+        var path = Environment.GetEnvironmentVariable("PNCPKING_PERFORMANCE_DATABASE_COPY");
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            output.WriteLine(
+                "Opt-in: informe PNCPKING_PERFORMANCE_DATABASE_COPY com uma cópia isolada do banco.");
+            return;
+        }
+
+        Assert.True(File.Exists(path), $"A cópia de desempenho não existe: {path}");
+        var rounds = ReadPositiveEnvironmentInteger("PNCPKING_PERFORMANCE_ROUNDS", 6);
+        var reportPath = Environment.GetEnvironmentVariable("PNCPKING_PERFORMANCE_REPORT");
+        if (string.IsNullOrWhiteSpace(reportPath))
+        {
+            reportPath = Path.Combine(Path.GetDirectoryName(path)!, "price-streaming-benchmark.json");
+        }
+
+        const string searchText =
+            "Café -máquina -cápsula -xicara -hotelaria -copo -talher -coador " +
+            "-cafeteira -refeição -garrafa -cafeina \"pacote \"unidade";
+        var query = new SearchQuery(searchText, GeoScope.All, Sort: SearchSort.Newest);
+        var expression = SearchText.Parse(searchText);
+        var connections = new SqliteConnectionFactory(path);
+        var priceCache = new SqlitePriceCacheRepository(connections);
+        var contracts = new SqliteContractRepository(connections);
+        var pageMeasurements = new List<PriceStreamingBenchmarkMeasurement>(rounds);
+        var loadMoreMeasurements = new List<PriceStreamingBenchmarkMeasurement>(rounds);
+        var summaryMeasurements = new List<double>(rounds);
+
+        for (var round = 1; round <= rounds; round++)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            double? firstProgressMilliseconds = null;
+            double? firstRowMilliseconds = null;
+            double? fiveRowsMilliseconds = null;
+            double? fiftyRowsMilliseconds = null;
+            var streamedRows = 0;
+            long contractsExamined = 0;
+            var progress = new InlineProgress<PriceCacheLocalProgress>(value =>
+            {
+                firstProgressMilliseconds ??= stopwatch.Elapsed.TotalMilliseconds;
+                streamedRows += value.Rows.Count;
+                contractsExamined = Math.Max(contractsExamined, value.ContractsExamined);
+                if (streamedRows > 0)
+                {
+                    firstRowMilliseconds ??= stopwatch.Elapsed.TotalMilliseconds;
+                }
+                if (streamedRows >= 5)
+                {
+                    fiveRowsMilliseconds ??= stopwatch.Elapsed.TotalMilliseconds;
+                }
+                if (streamedRows >= 50)
+                {
+                    fiftyRowsMilliseconds ??= stopwatch.Elapsed.TotalMilliseconds;
+                }
+            });
+            var page = await priceCache.SearchLocalAfterAsync(
+                query,
+                expression,
+                null,
+                null,
+                null,
+                50,
+                progress);
+            stopwatch.Stop();
+            var rows = page.Rows?.Count ?? 0;
+            pageMeasurements.Add(new PriceStreamingBenchmarkMeasurement(
+                round,
+                FirstProgressMilliseconds: firstProgressMilliseconds ?? stopwatch.Elapsed.TotalMilliseconds,
+                FirstRowMilliseconds: firstRowMilliseconds,
+                FiveRowsMilliseconds: fiveRowsMilliseconds,
+                FiftyRowsMilliseconds: fiftyRowsMilliseconds,
+                TotalMilliseconds: stopwatch.Elapsed.TotalMilliseconds,
+                rows,
+                contractsExamined,
+                Process.GetCurrentProcess().WorkingSet64,
+                CursorKey(page.Cursor)));
+
+            stopwatch.Restart();
+            firstProgressMilliseconds = null;
+            firstRowMilliseconds = null;
+            fiveRowsMilliseconds = null;
+            fiftyRowsMilliseconds = null;
+            streamedRows = 0;
+            contractsExamined = 0;
+            var loadMoreProgress = new InlineProgress<PriceCacheLocalProgress>(value =>
+            {
+                firstProgressMilliseconds ??= stopwatch.Elapsed.TotalMilliseconds;
+                streamedRows += value.Rows.Count;
+                contractsExamined = Math.Max(contractsExamined, value.ContractsExamined);
+                if (streamedRows > 0)
+                {
+                    firstRowMilliseconds ??= stopwatch.Elapsed.TotalMilliseconds;
+                }
+                if (streamedRows >= 5)
+                {
+                    fiveRowsMilliseconds ??= stopwatch.Elapsed.TotalMilliseconds;
+                }
+                if (streamedRows >= 50)
+                {
+                    fiftyRowsMilliseconds ??= stopwatch.Elapsed.TotalMilliseconds;
+                }
+            });
+            var loadMorePage = await priceCache.SearchLocalAfterAsync(
+                query,
+                expression,
+                null,
+                null,
+                page.Cursor,
+                50,
+                loadMoreProgress);
+            stopwatch.Stop();
+            var loadMoreRows = loadMorePage.Rows?.Count ?? 0;
+            loadMoreMeasurements.Add(new PriceStreamingBenchmarkMeasurement(
+                round,
+                FirstProgressMilliseconds: firstProgressMilliseconds ?? stopwatch.Elapsed.TotalMilliseconds,
+                FirstRowMilliseconds: firstRowMilliseconds,
+                FiveRowsMilliseconds: fiveRowsMilliseconds,
+                FiftyRowsMilliseconds: fiftyRowsMilliseconds,
+                TotalMilliseconds: stopwatch.Elapsed.TotalMilliseconds,
+                loadMoreRows,
+                contractsExamined,
+                Process.GetCurrentProcess().WorkingSet64,
+                CursorKey(loadMorePage.Cursor)));
+
+            stopwatch.Restart();
+            _ = await contracts.GetItemSearchLocalSummaryAsync(query, expression);
+            stopwatch.Stop();
+            summaryMeasurements.Add(stopwatch.Elapsed.TotalMilliseconds);
+        }
+
+        var database = new FileInfo(path);
+        var report = new PriceStreamingBenchmarkReport(
+            DateTimeOffset.UtcNow,
+            searchText,
+            query.Sort.ToString(),
+            connections.ProfileName,
+            database.Length,
+            database.LastWriteTimeUtc,
+            StreamingEnabled: true,
+            pageMeasurements,
+            summaryMeasurements)
+        {
+            OperatingSystem = RuntimeInformation.OSDescription,
+            Framework = RuntimeInformation.FrameworkDescription,
+            LogicalProcessors = Environment.ProcessorCount,
+            AvailableMemoryBytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes,
+            DatabaseSchemaVersion = await ReadSchemaVersionAsync(connections),
+            LoadMoreMeasurements = loadMoreMeasurements
+        };
+        await WritePriceStreamingBenchmarkReportAsync(reportPath, report);
+        var baselinePath = Environment.GetEnvironmentVariable("PNCPKING_PERFORMANCE_BASELINE");
+        if (!string.IsNullOrWhiteSpace(baselinePath) && File.Exists(baselinePath))
+        {
+            var comparisonPath = Environment.GetEnvironmentVariable("PNCPKING_PERFORMANCE_COMPARISON_REPORT");
+            if (string.IsNullOrWhiteSpace(comparisonPath))
+            {
+                comparisonPath = Path.Combine(
+                    Path.GetDirectoryName(reportPath)!,
+                    "price-streaming-comparison.json");
+            }
+
+            await WritePriceStreamingComparisonAsync(baselinePath, reportPath, comparisonPath, report);
+        }
+
+        output.WriteLine(
+            "streaming={0}; first_row_median_ms={1:N1}; first_row_p95_ms={2:N1}; " +
+            "page_median_ms={3:N1}; summary_median_ms={4:N1}; report={5}",
+            report.StreamingEnabled,
+            Median(pageMeasurements.Where(value => value.FirstRowMilliseconds is not null)
+                .Select(value => value.FirstRowMilliseconds!.Value).ToArray()),
+            P95(pageMeasurements.Where(value => value.FirstRowMilliseconds is not null)
+                .Select(value => value.FirstRowMilliseconds!.Value).ToArray()),
+            Median(pageMeasurements.Select(value => value.TotalMilliseconds).ToArray()),
+            Median(summaryMeasurements),
+            reportPath);
+    }
+
     [Fact]
     [Trait("Category", "Performance")]
     public async Task RealDatabaseCopy_MeasuresOptimizedCriticalPaths()
@@ -1669,6 +1851,202 @@ public sealed class PerformanceTests(ITestOutputHelper output)
         return (stopwatch.Elapsed, rows);
     }
 
+    private static string CursorKey(PriceCacheLocalCursor? cursor) => cursor is null
+        ? string.Empty
+        : string.Join(
+            '|',
+            cursor.Page,
+            cursor.ExplicitPriority,
+            cursor.PrimaryRank.ToString("R", CultureInfo.InvariantCulture),
+            cursor.SecondaryRank.ToString("R", CultureInfo.InvariantCulture),
+            cursor.PublicationDate,
+            cursor.ContractId,
+            cursor.ItemNumber,
+            cursor.ResultSequence);
+
+    private sealed class InlineProgress<T>(Action<T> callback) : IProgress<T>
+    {
+        public void Report(T value) => callback(value);
+    }
+
+    private static async Task WritePriceStreamingBenchmarkReportAsync(
+        string path,
+        PriceStreamingBenchmarkReport report)
+    {
+        var fullPath = Path.GetFullPath(path);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        await File.WriteAllTextAsync(
+            fullPath,
+            JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
+        var pageTimes = report.PageMeasurements.Select(value => value.TotalMilliseconds).ToArray();
+        var firstRowTimes = report.PageMeasurements
+            .Where(value => value.FirstRowMilliseconds is not null)
+            .Select(value => value.FirstRowMilliseconds!.Value)
+            .ToArray();
+        var loadMoreFirstRowTimes = report.LoadMoreMeasurements
+            .Where(value => value.FirstRowMilliseconds is not null)
+            .Select(value => value.FirstRowMilliseconds!.Value)
+            .ToArray();
+        var loadMorePageTimes = report.LoadMoreMeasurements
+            .Select(value => value.TotalMilliseconds)
+            .ToArray();
+        var text = string.Join(
+            Environment.NewLine,
+            "PNCP King — benchmark de streaming de preços",
+            $"Gerado em: {report.StartedAt:O}",
+            $"Streaming: {report.StreamingEnabled}",
+            $"Consulta: {report.Query}",
+            $"Ordenação/perfil: {report.Sort}/{report.SqliteProfile}",
+            $"Banco: {report.DatabaseBytes:N0} bytes; modificado em {report.DatabaseLastWriteUtc:O}",
+            $"Máquina: {report.OperatingSystem}; {report.Framework}; " +
+            $"{report.LogicalProcessors:N0} processador(es) lógico(s); " +
+            $"{report.AvailableMemoryBytes:N0} bytes disponíveis ao GC",
+            $"Esquema SQLite: {report.DatabaseSchemaVersion}; " +
+            "a primeira rodada representa a primeira execução do processo e as demais usam cache aquecido",
+            $"Rodadas: {report.PageMeasurements.Count}",
+            $"Primeira linha mediana/p95: {Median(firstRowTimes):N1}/{P95(firstRowTimes):N1} ms",
+            $"Carregar mais — primeira linha mediana/p95: " +
+            $"{Median(loadMoreFirstRowTimes):N1}/{P95(loadMoreFirstRowTimes):N1} ms",
+            $"Carregar mais — página mediana/p95: " +
+            $"{Median(loadMorePageTimes):N1}/{P95(loadMorePageTimes):N1} ms",
+            $"Página mediana/p95: {Median(pageTimes):N1}/{P95(pageTimes):N1} ms",
+            $"Resumo exato mediana/p95: {Median(report.SummaryMilliseconds):N1}/{P95(report.SummaryMilliseconds):N1} ms");
+        await File.WriteAllTextAsync(Path.ChangeExtension(fullPath, ".txt"), text);
+    }
+
+    private static async Task WritePriceStreamingComparisonAsync(
+        string baselinePath,
+        string currentReportPath,
+        string comparisonPath,
+        PriceStreamingBenchmarkReport current)
+    {
+        var baseline = JsonSerializer.Deserialize<PriceStreamingBenchmarkReport>(
+            await File.ReadAllTextAsync(baselinePath)) ??
+            throw new InvalidDataException("Relatório-base de streaming inválido.");
+        var baselineFirstRows = baseline.PageMeasurements
+            .Where(value => value.FirstRowMilliseconds is not null)
+            .Select(value => value.FirstRowMilliseconds!.Value)
+            .ToArray();
+        var currentFirstRows = current.PageMeasurements
+            .Where(value => value.FirstRowMilliseconds is not null)
+            .Select(value => value.FirstRowMilliseconds!.Value)
+            .ToArray();
+        var firstProgress = CompareMetric(
+            baseline.PageMeasurements.Select(value => value.FirstProgressMilliseconds).ToArray(),
+            current.PageMeasurements.Select(value => value.FirstProgressMilliseconds).ToArray());
+        var baselinePages = baseline.PageMeasurements.Select(value => value.TotalMilliseconds).ToArray();
+        var currentPages = current.PageMeasurements.Select(value => value.TotalMilliseconds).ToArray();
+        var firstRow = CompareMetric(baselineFirstRows, currentFirstRows);
+        var fiveRows = CompareMetric(
+            baseline.PageMeasurements.Where(value => value.FiveRowsMilliseconds is not null)
+                .Select(value => value.FiveRowsMilliseconds!.Value).ToArray(),
+            current.PageMeasurements.Where(value => value.FiveRowsMilliseconds is not null)
+                .Select(value => value.FiveRowsMilliseconds!.Value).ToArray());
+        var fiftyRows = CompareMetric(
+            baseline.PageMeasurements.Where(value => value.FiftyRowsMilliseconds is not null)
+                .Select(value => value.FiftyRowsMilliseconds!.Value).ToArray(),
+            current.PageMeasurements.Where(value => value.FiftyRowsMilliseconds is not null)
+                .Select(value => value.FiftyRowsMilliseconds!.Value).ToArray());
+        var fullPage = CompareMetric(baselinePages, currentPages);
+        var summary = CompareMetric(
+            baseline.SummaryMilliseconds.ToArray(),
+            current.SummaryMilliseconds.ToArray());
+        var expectedPages = baseline.PageMeasurements
+            .Select(value => (value.Rows, value.Cursor))
+            .Distinct()
+            .ToArray();
+        var contentEquivalent = expectedPages.Length == 1 &&
+                                current.PageMeasurements.All(value =>
+                                    (value.Rows, value.Cursor) == expectedPages[0]);
+        var loadMoreFirstRows = current.LoadMoreMeasurements
+            .Where(value => value.FirstRowMilliseconds is not null)
+            .Select(value => value.FirstRowMilliseconds!.Value)
+            .ToArray();
+        var loadMorePages = current.LoadMoreMeasurements
+            .Select(value => (value.Rows, value.Cursor))
+            .Distinct()
+            .ToArray();
+        var comparison = new PriceStreamingBenchmarkComparison(
+            DateTimeOffset.UtcNow,
+            Path.GetFullPath(baselinePath),
+            Path.GetFullPath(currentReportPath),
+            baseline.Query,
+            firstProgress,
+            firstRow,
+            fiveRows,
+            fiftyRows,
+            fullPage,
+            summary,
+            baseline.PageMeasurements.Max(value => value.WorkingSetBytes),
+            current.PageMeasurements.Max(value => value.WorkingSetBytes),
+            contentEquivalent,
+            FirstRowTargetMet: firstRow.CurrentP95Milliseconds <= 3_000 &&
+                               firstRow.ImprovementPercent >= 80,
+            FullPageRegressionTargetMet: fullPage.CurrentMedianMilliseconds <=
+                                         fullPage.BaselineMedianMilliseconds * 1.15)
+        {
+            LoadMoreFirstRowP95Milliseconds = P95(loadMoreFirstRows),
+            LoadMoreFirstBatchTargetMet = P95(loadMoreFirstRows) <= 3_000,
+            LoadMoreContentAndCursorStable = loadMorePages.Length == 1
+        };
+        var fullPath = Path.GetFullPath(comparisonPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        await File.WriteAllTextAsync(
+            fullPath,
+            JsonSerializer.Serialize(comparison, new JsonSerializerOptions { WriteIndented = true }));
+        var text = string.Join(
+            Environment.NewLine,
+            "PNCP King — comparação do streaming de preços",
+            $"Gerado em: {comparison.GeneratedAt:O}",
+            $"Consulta: {comparison.Query}",
+            $"Primeiro progresso p95: {firstProgress.BaselineP95Milliseconds:N1} -> " +
+            $"{firstProgress.CurrentP95Milliseconds:N1} ms",
+            $"Primeira linha mediana: {firstRow.BaselineMedianMilliseconds:N1} -> " +
+            $"{firstRow.CurrentMedianMilliseconds:N1} ms ({firstRow.ImprovementPercent:N1}% de melhoria)",
+            $"Primeira linha p95: {firstRow.BaselineP95Milliseconds:N1} -> " +
+            $"{firstRow.CurrentP95Milliseconds:N1} ms",
+            $"Cinco linhas p95: {fiveRows.BaselineP95Milliseconds:N1} -> " +
+            $"{fiveRows.CurrentP95Milliseconds:N1} ms",
+            $"Cinquenta linhas p95: {fiftyRows.BaselineP95Milliseconds:N1} -> " +
+            $"{fiftyRows.CurrentP95Milliseconds:N1} ms",
+            $"Página mediana: {fullPage.BaselineMedianMilliseconds:N1} -> " +
+            $"{fullPage.CurrentMedianMilliseconds:N1} ms",
+            $"Resumo exato mediano: {summary.BaselineMedianMilliseconds:N1} -> " +
+            $"{summary.CurrentMedianMilliseconds:N1} ms (fora do caminho crítico)",
+            $"Pico de memória: {comparison.BaselinePeakWorkingSetBytes:N0} -> " +
+            $"{comparison.CurrentPeakWorkingSetBytes:N0} bytes",
+            $"Carregar mais — primeira linha p95: " +
+            $"{comparison.LoadMoreFirstRowP95Milliseconds:N1} ms",
+            $"Conteúdo/cursores equivalentes: {comparison.ContentAndCursorEquivalent}",
+            $"Carregar mais — conteúdo/cursor estáveis: " +
+            $"{comparison.LoadMoreContentAndCursorStable}",
+            $"Meta primeira linha: {comparison.FirstRowTargetMet}",
+            $"Meta primeiro lote de Carregar mais: {comparison.LoadMoreFirstBatchTargetMet}",
+            $"Meta regressão página completa: {comparison.FullPageRegressionTargetMet}");
+        await File.WriteAllTextAsync(Path.ChangeExtension(fullPath, ".txt"), text);
+    }
+
+    private static async Task<int> ReadSchemaVersionAsync(ISqliteConnectionFactory connections)
+    {
+        await using var connection = await connections.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT version FROM schema_info WHERE id = 1;";
+        var value = await command.ExecuteScalarAsync();
+        return Convert.ToInt32(value, CultureInfo.InvariantCulture);
+    }
+
+    private static PriceStreamingMetricComparison CompareMetric(double[] baseline, double[] current)
+    {
+        var baselineMedian = Median(baseline);
+        var currentMedian = Median(current);
+        return new PriceStreamingMetricComparison(
+            baselineMedian,
+            P95(baseline),
+            currentMedian,
+            P95(current),
+            baselineMedian <= 0 ? 0 : (baselineMedian - currentMedian) * 100d / baselineMedian);
+    }
+
     private static ContractRecord CreateContract(int number)
     {
         var date = new DateTimeOffset(2025, 1, 1, 12, 0, 0, TimeSpan.Zero).AddDays(number % 700);
@@ -1707,6 +2085,66 @@ public sealed class PerformanceTests(ITestOutputHelper output)
     }
 
     private sealed record FtsBenchmarkKey(string ContractId, long ItemNumber, long ResultSequence);
+
+    private sealed record PriceStreamingBenchmarkMeasurement(
+        int Round,
+        double FirstProgressMilliseconds,
+        double? FirstRowMilliseconds,
+        double? FiveRowsMilliseconds,
+        double? FiftyRowsMilliseconds,
+        double TotalMilliseconds,
+        int Rows,
+        long ContractsExamined,
+        long WorkingSetBytes,
+        string Cursor);
+
+    private sealed record PriceStreamingBenchmarkReport(
+        DateTimeOffset StartedAt,
+        string Query,
+        string Sort,
+        string SqliteProfile,
+        long DatabaseBytes,
+        DateTime DatabaseLastWriteUtc,
+        bool StreamingEnabled,
+        IReadOnlyList<PriceStreamingBenchmarkMeasurement> PageMeasurements,
+        IReadOnlyList<double> SummaryMilliseconds)
+    {
+        public string OperatingSystem { get; init; } = string.Empty;
+        public string Framework { get; init; } = string.Empty;
+        public int LogicalProcessors { get; init; }
+        public long AvailableMemoryBytes { get; init; }
+        public int DatabaseSchemaVersion { get; init; }
+        public IReadOnlyList<PriceStreamingBenchmarkMeasurement> LoadMoreMeasurements { get; init; } = [];
+    }
+
+    private sealed record PriceStreamingMetricComparison(
+        double BaselineMedianMilliseconds,
+        double BaselineP95Milliseconds,
+        double CurrentMedianMilliseconds,
+        double CurrentP95Milliseconds,
+        double ImprovementPercent);
+
+    private sealed record PriceStreamingBenchmarkComparison(
+        DateTimeOffset GeneratedAt,
+        string BaselineReport,
+        string CurrentReport,
+        string Query,
+        PriceStreamingMetricComparison FirstProgress,
+        PriceStreamingMetricComparison FirstRow,
+        PriceStreamingMetricComparison FiveRows,
+        PriceStreamingMetricComparison FiftyRows,
+        PriceStreamingMetricComparison FullPage,
+        PriceStreamingMetricComparison ExactSummary,
+        long BaselinePeakWorkingSetBytes,
+        long CurrentPeakWorkingSetBytes,
+        bool ContentAndCursorEquivalent,
+        bool FirstRowTargetMet,
+        bool FullPageRegressionTargetMet)
+    {
+        public double LoadMoreFirstRowP95Milliseconds { get; init; }
+        public bool LoadMoreFirstBatchTargetMet { get; init; }
+        public bool LoadMoreContentAndCursorStable { get; init; }
+    }
 
     private sealed record FtsBenchmarkResult(
         IReadOnlyList<double> LegacyMilliseconds,

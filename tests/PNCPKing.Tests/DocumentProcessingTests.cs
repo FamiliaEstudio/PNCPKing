@@ -4,7 +4,6 @@ using PNCPKing.Core.Models;
 using PNCPKing.Infrastructure.Services;
 using SkiaSharp;
 using UglyToad.PdfPig.Core;
-using UglyToad.PdfPig.DocumentLayoutAnalysis.WordExtractor;
 using UglyToad.PdfPig.Fonts.Standard14Fonts;
 using UglyToad.PdfPig.Graphics.Operations.PathConstruction;
 using UglyToad.PdfPig.Writer;
@@ -112,7 +111,7 @@ public sealed class DocumentProcessingTests
     }
 
     [Fact]
-    public async Task RelevantPages_CombinesExpressionsCopiesPagesOnceAndHighlightsDistinctWords()
+    public async Task RelevantPages_CombinesExpressionsAndCopiesPagesWithoutVisualHighlights()
     {
         var root = CreateTemporaryFolder();
         try
@@ -200,8 +199,8 @@ public sealed class DocumentProcessingTests
                 "PAGINA DOIS COM CAFE TORRADO E ACUCAR",
                 output.GetPage(2).Text,
                 StringComparison.OrdinalIgnoreCase);
-            Assert.Single(output.GetPage(1).Operations.OfType<AppendRectangle>());
-            Assert.Equal(3, output.GetPage(2).Operations.OfType<AppendRectangle>().Count());
+            Assert.Empty(output.GetPage(1).Operations.OfType<AppendRectangle>());
+            Assert.Empty(output.GetPage(2).Operations.OfType<AppendRectangle>());
         }
         finally
         {
@@ -214,7 +213,7 @@ public sealed class DocumentProcessingTests
     [InlineData(90)]
     [InlineData(180)]
     [InlineData(270)]
-    public async Task RelevantPages_PreservesSearchableTextAndAlignsHighlightsOnCroppedRotatedPages(
+    public async Task RelevantPages_PreservesSearchableTextWithoutHighlightsOnCroppedRotatedPages(
         int rotation)
     {
         var root = CreateTemporaryFolder();
@@ -256,25 +255,9 @@ public sealed class DocumentProcessingTests
             var page = output.GetPage(1);
             Assert.Equal(index.Pages[0].Width, page.Width, 2);
             Assert.Equal(index.Pages[0].Height, page.Height, 2);
-            var relevantWords = NearestNeighbourWordExtractor.Instance
-                .GetWords(page.Letters)
-                .Where(word => word.Text.Equals("CAFE", StringComparison.OrdinalIgnoreCase) ||
-                               word.Text.Equals("TORRADO", StringComparison.OrdinalIgnoreCase))
-                .ToArray();
-            Assert.Equal(2, relevantWords.Length);
-            var highlightRectangles = page.Paths
-                .Where(path => path.IsFilled && path.IsStroked)
-                .Select(path => path.GetBoundingRectangle())
-                .OfType<PdfRectangle>()
-                .ToArray();
-            Assert.Equal(2, highlightRectangles.Length);
-            Assert.All(
-                relevantWords,
-                word => Assert.True(
-                    highlightRectangles.Any(rectangle => Intersects(rectangle, word.BoundingBox)),
-                    $"O realce não cruzou {word.Text} em {word.BoundingBox}; " +
-                    $"realces: {string.Join(", ", highlightRectangles)}; " +
-                    $"índice: {string.Join(", ", index.Pages[0].Words.Select(indexed => $"{indexed.Text}={indexed.Bounds}"))}"));
+            Assert.Contains("CAFE", page.Text, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("TORRADO", page.Text, StringComparison.OrdinalIgnoreCase);
+            Assert.Empty(page.Operations.OfType<AppendRectangle>());
         }
         finally
         {
@@ -674,7 +657,7 @@ public sealed class DocumentProcessingTests
     }
 
     [Fact]
-    public async Task EvidenceReport_OrdersReferenceAndWritesFullOccurrencePage()
+    public async Task EvidenceReport_OrdersReferenceAndWritesFullPageWithoutKeywordHighlights()
     {
         var root = CreateTemporaryFolder();
         try
@@ -711,6 +694,10 @@ public sealed class DocumentProcessingTests
             Assert.Contains(
                 reportBitmap.Pixels,
                 color => color.Blue > 210 && color.Green > 210 && color.Red < 80);
+            Assert.DoesNotContain(
+                reportBitmap.Pixels,
+                color => color.Red > 180 && color.Green > 100 && color.Green < 250 &&
+                         color.Blue + 50 < color.Green);
         }
         finally
         {
@@ -937,31 +924,6 @@ public sealed class DocumentProcessingTests
                     0))
                 .ToArray()
         };
-
-    private static bool Intersects(PdfRectangle first, PdfRectangle second)
-    {
-        const double tolerance = 0.01;
-        var firstX = new[]
-        {
-            first.TopLeft.X, first.TopRight.X, first.BottomLeft.X, first.BottomRight.X
-        };
-        var firstY = new[]
-        {
-            first.TopLeft.Y, first.TopRight.Y, first.BottomLeft.Y, first.BottomRight.Y
-        };
-        var secondX = new[]
-        {
-            second.TopLeft.X, second.TopRight.X, second.BottomLeft.X, second.BottomRight.X
-        };
-        var secondY = new[]
-        {
-            second.TopLeft.Y, second.TopRight.Y, second.BottomLeft.Y, second.BottomRight.Y
-        };
-        return firstX.Min() <= secondX.Max() + tolerance &&
-               firstX.Max() + tolerance >= secondX.Min() &&
-               firstY.Min() <= secondY.Max() + tolerance &&
-               firstY.Max() + tolerance >= secondY.Min();
-    }
 
     private static byte[] BuildZip(params (string Name, byte[] Bytes)[] files)
     {

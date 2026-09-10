@@ -441,6 +441,7 @@ public sealed class UiBindingTests
                 Commands = new[]
                 {
                     "{Binding ExportQuotationCommand}",
+                    "{Binding ExportQuotationWithoutEvidenceCommand}",
                     "{Binding ExportQuotationPackageCommand}",
                     "{Binding ImportQuotationPackageCommand}"
                 }

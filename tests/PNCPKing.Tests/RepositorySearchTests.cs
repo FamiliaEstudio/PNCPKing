@@ -143,11 +143,15 @@ public sealed class RepositorySearchTests
         var summary = await database.Repository.GetItemSearchLocalSummaryAsync(
             query,
             PNCPKing.Core.Search.SearchText.Parse(query.Text));
+        var deferred = await database.Repository.GetDeferredItemSearchLocalSummaryAsync(
+            query,
+            PNCPKing.Core.Search.SearchText.Parse(query.Text));
 
         Assert.Equal(2, summary.CandidateContracts);
         Assert.Equal(2, summary.CachedMatchingItems);
         Assert.Equal(1, summary.CachedItemsWithActivePrices);
         Assert.True(summary.IsPartial);
+        Assert.Equal(summary, deferred);
     }
 
     internal static ContractRecord Contract(string id, string objectText, string uf, int sequence) => new()

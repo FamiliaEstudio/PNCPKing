@@ -53,6 +53,7 @@ public sealed partial class MainViewModel
     public ICommand AdjustQuotationWeightsCommand { get; private set; } = null!;
     public ICommand ConfirmQuotationBasketCommand { get; private set; } = null!;
     public ICommand ExportQuotationCommand { get; private set; } = null!;
+    public ICommand ExportQuotationWithoutEvidenceCommand { get; private set; } = null!;
     public ICommand ExportQuotationPackageCommand { get; private set; } = null!;
     public ICommand ImportQuotationPackageCommand { get; private set; } = null!;
     public ICommand PreviousQuotationBasketPageCommand { get; private set; } = null!;
@@ -222,7 +223,11 @@ public sealed partial class MainViewModel
             ConfirmSelectedBasketAsync,
             () => !IsFileBusy && SelectedQuotationLine is not null && SelectedQuotationBasket is not null);
         ExportQuotationCommand = new AsyncRelayCommand(
-            ExportQuotationAsync,
+            () => ExportQuotationAsync(includeEvidence: true),
+            () => !IsAnyAggressivePncpMode && !IsFileBusy && !IsDocumentBusy &&
+                  SelectedQuotationProject is not null && QuotationLines.Count > 0);
+        ExportQuotationWithoutEvidenceCommand = new AsyncRelayCommand(
+            () => ExportQuotationAsync(includeEvidence: false),
             () => !IsAnyAggressivePncpMode && !IsFileBusy && !IsDocumentBusy &&
                   SelectedQuotationProject is not null && QuotationLines.Count > 0);
         ExportQuotationPackageCommand = new AsyncRelayCommand(
@@ -1238,10 +1243,7 @@ public sealed partial class MainViewModel
                         SearchSort.Nearest,
                         1,
                         200);
-                    _localItemSearchSummary = await _repository.GetItemSearchLocalSummaryAsync(
-                        automationQuery,
-                        SearchText.Parse(line.SearchText),
-                        cancellationToken).ConfigureAwait(true);
+                    _localItemSearchSummary = null;
                     _searchTelemetryBaseline = _telemetry.GetSnapshot();
                     await _transientItemSearchService.StartAsync(
                         automationQuery,
@@ -1253,7 +1255,8 @@ public sealed partial class MainViewModel
                         UpdateItemSearchProgress(value);
                         ItemSearchSummary = prefix + ItemSearchSummary;
                     });
-                    var rowsProgress = new Progress<IReadOnlyList<ItemSearchRow>>(AppendUniqueRows);
+                    var rowsProgress = new Progress<IReadOnlyList<ItemSearchRow>>(rows =>
+                        AppendUniqueRows(rows));
                     await _transientItemSearchService.RunContinuousAsync(
                         new PriceBatchRequest(
                             line.RequestedBatchCount,
@@ -1264,6 +1267,7 @@ public sealed partial class MainViewModel
                         progress,
                         rowsProgress,
                         cancellationToken).ConfigureAwait(true);
+                    await _itemResultBuffer.FlushAsync().ConfigureAwait(true);
                     var rows = await _transientItemSearchService.GetDiscoveredRowsAsync(
                         line.MinimumUnitPrice,
                         line.MaximumUnitPrice,
@@ -1860,7 +1864,7 @@ public sealed partial class MainViewModel
         }
     }
 
-    private async Task ExportQuotationAsync()
+    private async Task ExportQuotationAsync(bool includeEvidence)
     {
         var project = SelectedQuotationProject;
         if (project is null)
@@ -1897,6 +1901,12 @@ public sealed partial class MainViewModel
                 report,
                 responsibleName).ConfigureAwait(true);
             workbookExported = true;
+            if (!includeEvidence)
+            {
+                StatusText = $"Cotação exportada sem evidências: {dialog.FileName}";
+                return;
+            }
+
             var evidence = await ExportEvidenceAsync(
                 GetEvidencePath(dialog.FileName),
                 report,
@@ -1918,7 +1928,7 @@ public sealed partial class MainViewModel
         }
         catch (Exception exception)
         {
-            var message = workbookExported
+            var message = includeEvidence && workbookExported
                 ? $"A planilha foi salva em:\n{dialog.FileName}\n\n" +
                   $"Não foi possível concluir o relatório de evidências: {exception.Message}"
                 : exception.Message;

@@ -830,12 +830,17 @@ public sealed class ItemSearchSessionTests
                 initialConcurrency: 8));
         await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
         var streamed = new List<ItemSearchRow>();
+        var streamedBatchSizes = new List<int>();
         var progressValues = new List<int>();
 
         var result = await service.RunContinuousAsync(
             new PriceBatchRequest(2),
             progress: new InlineProgress<PriceBatchProgress>(value => progressValues.Add(value.CompletedItemCalls)),
-            rowProgress: new InlineProgress<IReadOnlyList<ItemSearchRow>>(rows => streamed.AddRange(rows)));
+            rowProgress: new InlineProgress<IReadOnlyList<ItemSearchRow>>(rows =>
+            {
+                streamedBatchSizes.Add(rows.Count);
+                streamed.AddRange(rows);
+            }));
 
         Assert.Equal(1, result.ProcessedContracts);
         Assert.Equal(120, result.CompletedItemCalls);
@@ -847,6 +852,7 @@ public sealed class ItemSearchSessionTests
                 .Select(row => (row.Contract.PncpId, row.Item.ItemNumber, row.Result!.ResultSequence))
                 .Distinct()
                 .Count());
+        Assert.All(streamedBatchSizes, size => Assert.InRange(size, 1, 10));
         Assert.True(progressValues.SequenceEqual(progressValues.Order()));
         Assert.True(result.CandidateSetExhausted);
     }

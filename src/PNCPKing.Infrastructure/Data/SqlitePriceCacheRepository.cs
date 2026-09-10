@@ -926,6 +926,24 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         return result;
     }
 
+    public Task<PriceCacheLocalPage> SearchLocalAfterAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice,
+        PriceCacheLocalCursor? cursor,
+        int pageSize,
+        CancellationToken cancellationToken = default) =>
+        SearchLocalAfterAsync(
+            filters,
+            expression,
+            minimumUnitPrice,
+            maximumUnitPrice,
+            cursor,
+            pageSize,
+            progress: null,
+            cancellationToken);
+
     public async Task<PriceCacheLocalPage> SearchLocalAfterAsync(
         SearchQuery filters,
         SearchExpression expression,
@@ -933,6 +951,7 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         decimal? maximumUnitPrice,
         PriceCacheLocalCursor? cursor,
         int pageSize,
+        IProgress<PriceCacheLocalProgress>? progress,
         CancellationToken cancellationToken = default)
     {
         using var span = _performance.Begin("price-search", "local-page");
@@ -944,6 +963,13 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
             pageSize = Math.Clamp(pageSize, 1, 200);
             if (expression.IsEmpty)
             {
+                progress?.Report(new PriceCacheLocalProgress(
+                    [],
+                    cursor,
+                    0,
+                    0,
+                    HasMore: false,
+                    Completed: true));
                 span.Complete();
                 return new PriceCacheLocalPage([], page, pageSize, false, 0);
             }
@@ -969,6 +995,9 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
             using var sqlSpan = _performance.Begin("price-search", "sql-execution");
             try
             {
+                var trackedProgress = progress is null
+                    ? null
+                    : new TrackingProgress<PriceCacheLocalProgress>(progress);
                 var result = await SearchLocalAfterCoreAsync(
                         filters,
                         expression,
@@ -977,8 +1006,19 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
                         cursor,
                         page,
                         pageSize,
+                        trackedProgress,
                         cancellationToken)
                     .ConfigureAwait(false);
+                if (trackedProgress is not null && !trackedProgress.HasReported)
+                {
+                    trackedProgress.Report(new PriceCacheLocalProgress(
+                        result.Rows ?? [],
+                        result.Cursor,
+                        0,
+                        result.Rows?.Count ?? 0,
+                        result.HasMore,
+                        Completed: true));
+                }
                 sqlSpan.Complete(result.Rows?.Count ?? 0);
                 span.Complete(result.Rows?.Count ?? 0);
                 return result;
@@ -1004,6 +1044,7 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         PriceCacheLocalCursor? cursor,
         int page,
         int pageSize,
+        IProgress<PriceCacheLocalProgress>? progress,
         CancellationToken cancellationToken)
     {
         var itemMatch = expression.ItemMatchQuery;
@@ -1042,6 +1083,7 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
                         cursor,
                         page,
                         pageSize,
+                        progress,
                         cancellationToken)
                     .ConfigureAwait(false);
             }
@@ -1577,6 +1619,7 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         PriceCacheLocalCursor? initialCursor,
         int page,
         int pageSize,
+        IProgress<PriceCacheLocalProgress>? progress,
         CancellationToken cancellationToken)
     {
         using var span = _performance.Begin("price-search", "local-contract-chunks");
@@ -1587,6 +1630,10 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
             pageSize + 1);
         var scanCursor = initialCursor;
         var hasMoreContracts = true;
+        var contractsExamined = 0L;
+        var reportedMatches = 0;
+        var scanStarted = Stopwatch.GetTimestamp();
+        var firstProgressReported = false;
 
         while (matches.Count <= pageSize && hasMoreContracts)
         {
@@ -1685,8 +1732,17 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
             }
             if (contracts.Count == 0)
             {
+                progress?.Report(new PriceCacheLocalProgress(
+                    [],
+                    scanCursor,
+                    contractsExamined,
+                    Math.Min(matches.Count, pageSize),
+                    HasMore: false,
+                    Completed: true));
                 break;
             }
+
+            contractsExamined += contracts.Count;
 
             await using var command = connection.CreateCommand();
             var contractParameters = new string[contracts.Count];
@@ -1823,22 +1879,64 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
                 }
             }
 
+            var duration = Stopwatch.GetElapsedTime(chunkStarted);
+            var completed = matches.Count > pageSize || !hasMoreContracts;
+            PriceCacheLocalCursor? progressCursor;
+            if (matches.Count > pageSize)
+            {
+                progressCursor = matches[pageSize - 1].Cursor;
+            }
+            else
+            {
+                var lastContract = contracts[^1];
+                scanCursor = new PriceCacheLocalCursor(
+                    page,
+                    0,
+                    lastContract.Primary,
+                    lastContract.Secondary,
+                    lastContract.Publication,
+                    lastContract.Id,
+                    long.MaxValue,
+                    long.MaxValue);
+                progressCursor = scanCursor;
+            }
+
+            var stableMatchCount = Math.Min(matches.Count, pageSize);
+            var newRows = stableMatchCount <= reportedMatches
+                ? []
+                : matches
+                    .Skip(reportedMatches)
+                    .Take(stableMatchCount - reportedMatches)
+                    .Select(value => value.Row)
+                    .ToArray();
+            reportedMatches = stableMatchCount;
+            _performance.Record(
+                "price-search",
+                "local-scan-chunk",
+                duration,
+                newRows.Length);
+            progress?.Report(new PriceCacheLocalProgress(
+                newRows,
+                progressCursor,
+                contractsExamined,
+                stableMatchCount,
+                matches.Count > pageSize || hasMoreContracts,
+                completed));
+            if (!firstProgressReported && progress is not null)
+            {
+                firstProgressReported = true;
+                _performance.Record(
+                    "price-search",
+                    "local-first-progress",
+                    Stopwatch.GetElapsedTime(scanStarted),
+                    stableMatchCount);
+            }
+
             if (matches.Count > pageSize)
             {
                 break;
             }
 
-            var lastContract = contracts[^1];
-            scanCursor = new PriceCacheLocalCursor(
-                page,
-                0,
-                lastContract.Primary,
-                lastContract.Secondary,
-                lastContract.Publication,
-                lastContract.Id,
-                long.MaxValue,
-                long.MaxValue);
-            var duration = Stopwatch.GetElapsedTime(chunkStarted);
             if (duration < TimeSpan.FromMilliseconds(150))
             {
                 chunkSize = Math.Min(512, chunkSize * 2);
@@ -2051,6 +2149,17 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         long? CandidateCount,
         double? NextRank,
         bool FtsExhausted);
+
+    private sealed class TrackingProgress<T>(IProgress<T> inner) : IProgress<T>
+    {
+        public bool HasReported { get; private set; }
+
+        public void Report(T value)
+        {
+            HasReported = true;
+            inner.Report(value);
+        }
+    }
 
     private static DateOnly? ParseDate(SqliteDataReader reader, int ordinal) =>
         reader.IsDBNull(ordinal) ||

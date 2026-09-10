@@ -16,6 +16,7 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
 {
     private static readonly TimeSpan NormalProgressInterval = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan ConstrainedProgressInterval = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan RowProgressInterval = TimeSpan.FromMilliseconds(150);
     private const int DefaultNetworkConcurrency = 4;
     private const int MaximumPersistenceConcurrency = 1;
     public const int CachedContractsPerSlice = 20 * ItemSearchDefaults.ContractsPerBatch;
@@ -1147,7 +1148,7 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         await _operationGate.WaitAsync(linked.Token).ConfigureAwait(false);
         var progressInterval = CurrentProgressInterval;
         var throttledProgress = new ThrottledProgress<PriceBatchProgress>(progress, progressInterval);
-        var throttledRows = new CoalescingRowProgress(rowProgress, progressInterval);
+        var throttledRows = new CoalescingRowProgress(rowProgress, RowProgressInterval);
         try
         {
             var callsAtStart = Volatile.Read(ref _completedResultCalls);
@@ -2868,6 +2869,7 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         IProgress<IReadOnlyList<ItemSearchRow>>? inner,
         TimeSpan interval) : IProgress<IReadOnlyList<ItemSearchRow>>
     {
+        private const int MaximumBatchSize = 10;
         private readonly object _gate = new();
         private readonly List<ItemSearchRow> _pending = [];
         private long _lastReportTimestamp;
@@ -2879,23 +2881,38 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 return;
             }
 
-            IReadOnlyList<ItemSearchRow>? toReport = null;
+            List<IReadOnlyList<ItemSearchRow>>? toReport = null;
             lock (_gate)
             {
                 _pending.AddRange(value);
                 var now = Stopwatch.GetTimestamp();
-                if (_lastReportTimestamp == 0 ||
+                if (_pending.Count >= MaximumBatchSize ||
+                    _lastReportTimestamp == 0 ||
                     Stopwatch.GetElapsedTime(_lastReportTimestamp, now) >= interval)
                 {
-                    toReport = _pending.ToArray();
-                    _pending.Clear();
+                    toReport = [];
+                    while (_pending.Count >= MaximumBatchSize)
+                    {
+                        toReport.Add(_pending.Take(MaximumBatchSize).ToArray());
+                        _pending.RemoveRange(0, MaximumBatchSize);
+                    }
+
+                    if (toReport.Count == 0 && _pending.Count > 0)
+                    {
+                        toReport.Add(_pending.ToArray());
+                        _pending.Clear();
+                    }
+
                     _lastReportTimestamp = now;
                 }
             }
 
             if (toReport is not null)
             {
-                inner.Report(toReport);
+                foreach (var batch in toReport)
+                {
+                    inner.Report(batch);
+                }
             }
         }
 
@@ -2906,7 +2923,7 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 return;
             }
 
-            IReadOnlyList<ItemSearchRow>? toReport = null;
+            IReadOnlyList<ItemSearchRow>[]? toReport = null;
             lock (_gate)
             {
                 if (_pending.Count == 0)
@@ -2914,12 +2931,18 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                     return;
                 }
 
-                toReport = _pending.ToArray();
+                toReport = _pending
+                    .Chunk(MaximumBatchSize)
+                    .Select(batch => (IReadOnlyList<ItemSearchRow>)batch)
+                    .ToArray();
                 _pending.Clear();
                 _lastReportTimestamp = Stopwatch.GetTimestamp();
             }
 
-            inner.Report(toReport);
+            foreach (var batch in toReport)
+            {
+                inner.Report(batch);
+            }
         }
     }
 

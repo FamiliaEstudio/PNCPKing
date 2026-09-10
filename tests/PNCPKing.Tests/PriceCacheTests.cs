@@ -200,6 +200,62 @@ public sealed class PriceCacheTests
     }
 
     [Fact]
+    public async Task ContractChunkSearch_StreamsStableRowsAndSafeCursorBeforeReturningPage()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var contracts = Enumerable.Range(1, 12)
+            .Select(sequence => RecentContract(
+                $"stream-{sequence:D2}",
+                today.AddDays(-(sequence - 1)),
+                sequence))
+            .ToArray();
+        await database.Repository.UpsertContractsAsync(contracts);
+        foreach (var contract in contracts)
+        {
+            await database.Repository.UpsertItemsAsync(contract.PncpId, [
+                Item(contract, 1) with
+                {
+                    Unit = "PACOTE",
+                    HydrationStatus = ItemHydrationStatus.Complete
+                }
+            ], false);
+            await database.Repository.ReplaceItemResultsAsync(
+                contract.PncpId,
+                1,
+                [Result(contract, 1, 1, true)]);
+        }
+
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
+        var expression = SearchText.Parse("\"pacote");
+        var query = new SearchQuery(
+            "\"pacote",
+            GeoScope.All,
+            today.AddDays(-30),
+            today,
+            Sort: SearchSort.Newest);
+        var streamed = new List<PriceCacheLocalProgress>();
+        var page = await cache.SearchLocalAfterAsync(
+            query,
+            expression,
+            null,
+            null,
+            null,
+            5,
+            new InlineProgress<PriceCacheLocalProgress>(streamed.Add));
+
+        Assert.NotEmpty(streamed);
+        Assert.True(streamed[^1].Completed);
+        Assert.NotNull(streamed[^1].Cursor);
+        Assert.True(streamed[^1].ContractsExamined > 0);
+        Assert.Equal(5, streamed[^1].MatchingRows);
+        Assert.Equal(
+            page.Rows!.Select(RowKey),
+            streamed.SelectMany(value => value.Rows).Select(RowKey));
+        Assert.Equal(CursorKey(page.Cursor), CursorKey(streamed[^1].Cursor));
+    }
+
+    [Fact]
     public async Task RelevanceSearch_ExpandsRankTiesAndPreservesFiltersAndPagesWithoutCardinalityCount()
     {
         await using var database = await TestDatabase.CreateAsync();
@@ -924,6 +980,18 @@ public sealed class PriceCacheTests
         ResultStatusId = active ? 1 : 2,
         ResultStatusName = active ? "Ativo" : "Cancelado"
     };
+
+    private static string RowKey(ItemSearchRow row) =>
+        $"{row.Contract.PncpId}|{row.Item.ItemNumber}|{row.Result?.ResultSequence ?? 0}";
+
+    private static string CursorKey(PriceCacheLocalCursor? cursor) => cursor is null
+        ? string.Empty
+        : $"{cursor.Page}|{cursor.ContractId}|{cursor.ItemNumber}|{cursor.ResultSequence}";
+
+    private sealed class InlineProgress<T>(Action<T> callback) : IProgress<T>
+    {
+        public void Report(T value) => callback(value);
+    }
 
     private sealed class RecordingSearchTelemetry : IPerformanceTelemetry
     {

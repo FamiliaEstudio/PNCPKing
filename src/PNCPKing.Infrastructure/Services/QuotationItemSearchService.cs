@@ -44,6 +44,19 @@ public sealed class QuotationItemSearchService(
             .ConfigureAwait(false);
     }
 
+    public async Task<ItemSearchLocalSummary> GetDeferredLocalSummaryAsync(
+        QuotationItemSearchWorkspace workspace,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(workspace);
+        var expression = SearchText.Parse(workspace.SearchText);
+        return await contracts.GetDeferredItemSearchLocalSummaryAsync(
+                BuildQuery(workspace),
+                expression,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public async Task SavePreferencesAsync(
         QuotationItemSearchWorkspace workspace,
         CancellationToken cancellationToken = default)

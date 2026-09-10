@@ -25,6 +25,8 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     private readonly string _dataFolder;
     private readonly Guid _projectId;
     private readonly Guid _lineId;
+    private readonly UiBatchBuffer<ItemSearchDisplayRow> _searchResultBuffer;
+    private readonly HashSet<string> _searchRowKeys = new(StringComparer.Ordinal);
     private QuotationLineDisplay? _line;
     private QuotationBasketDisplay? _selectedBasket;
     private QuotationPriceDisplayRow? _selectedPrice;
@@ -56,6 +58,9 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     private bool _disposed;
     private DateTimeOffset _lastRefresh = DateTimeOffset.MinValue;
     private CancellationTokenSource? _searchCancellation;
+    private CancellationTokenSource? _summaryCancellation;
+    private int _searchGeneration;
+    private int _summaryGeneration;
     private string _catalogQuery = string.Empty;
     private CatalogKindOption _selectedCatalogKind = new("Todos", null);
     private CatalogSearchResultDisplay? _selectedCatalogResult;
@@ -93,6 +98,13 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         _dataFolder = dataFolder;
         _projectId = projectId;
         _lineId = lineId;
+        _searchResultBuffer = new UiBatchBuffer<ItemSearchDisplayRow>(rows =>
+        {
+            foreach (var row in rows)
+            {
+                SearchRows.Add(row);
+            }
+        });
         GeoFilters = BuildGeoFilters();
         SortOptions =
         [
@@ -793,20 +805,25 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         _ = SearchParser.Parse(workspace.SearchText);
         IsSearchBusy = true;
         SearchProgress = 0;
+        _summaryCancellation?.Cancel();
+        _summaryCancellation?.Dispose();
+        _summaryCancellation = null;
+        Interlocked.Increment(ref _summaryGeneration);
         _searchCancellation?.Cancel();
         _searchCancellation?.Dispose();
         _searchCancellation = new CancellationTokenSource();
+        var searchGeneration = Interlocked.Increment(ref _searchGeneration);
+        if (restart)
+        {
+            _searchResultBuffer.Clear();
+            SearchRows.Clear();
+            _searchRowKeys.Clear();
+        }
+
         try
         {
-            var local = await _itemSearch.GetLocalSummaryAsync(
-                    workspace,
-                    _searchCancellation.Token)
-                .ConfigureAwait(true);
             SearchSummary =
-                $"{local.CandidateContracts:N0} contratação(ões) candidatas; " +
-                $"{local.CachedMatchingItems:N0} item(ns) parcial(is) no cache; " +
-                $"{local.CachedItemsWithActivePrices:N0} com preço parcial no cache. " +
-                $"Iniciando {workspace.BatchCount:N0} lote(s).";
+                "Pesquisa em andamento; a contagem exata será refinada depois dos resultados visíveis.";
             var progress = new Progress<QuotationItemSearchProgress>(value =>
             {
                 SearchProgress = value.Percentage;
@@ -816,10 +833,16 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                     $"{value.RevealedPrices:N0} preços; listas cache/API " +
                     $"{value.ItemListsFromCache:N0}/{value.ItemListsFromApi:N0}; " +
                     $"contratos cache/API {value.FullyResolvedContracts:N0}/{value.ExpandedContracts:N0}; " +
-                    $"restantes estimadas {Math.Max(0, local.CandidateContracts - value.ContractsExamined):N0}; " +
+                    "restantes ainda não estimadas; " +
                     $"resultados API {value.ItemResultApiCalls:N0}; falhas {value.FailedCalls:N0}.";
             });
-            var rowProgress = new Progress<IReadOnlyList<ItemSearchRow>>(AppendSearchRows);
+            var rowProgress = new Progress<IReadOnlyList<ItemSearchRow>>(rows =>
+            {
+                if (searchGeneration == Volatile.Read(ref _searchGeneration))
+                {
+                    QueueSearchRows(rows);
+                }
+            });
             var state = await _itemSearch.RunAsync(
                     workspace,
                     restart,
@@ -827,14 +850,24 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                     rowProgress,
                     _searchCancellation.Token)
                 .ConfigureAwait(true);
-            ApplyWorkspace(state);
+            if (searchGeneration != Volatile.Read(ref _searchGeneration))
+            {
+                return;
+            }
+
+            QueueSearchRows(state.Rows);
+            await _searchResultBuffer.FlushAsync().ConfigureAwait(true);
+            ApplyWorkspace(state, replaceRows: false);
             SearchProgress = 100;
+            StartDeferredSummary(workspace);
         }
         catch (OperationCanceledException)
         {
             SearchSummary = "Pesquisa interrompida; o checkpoint do último contrato concluído foi preservado.";
             var state = await _itemSearch.LoadAsync(workspace, CancellationToken.None).ConfigureAwait(true);
-            ApplyWorkspace(state);
+            QueueSearchRows(state.Rows);
+            await _searchResultBuffer.FlushAsync().ConfigureAwait(true);
+            ApplyWorkspace(state, replaceRows: false);
         }
         finally
         {
@@ -1249,8 +1282,10 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         }
 
         _disposed = true;
+        Interlocked.Increment(ref _searchGeneration);
         _main.TimedQuotationProgressChanged -= OnTimedProgress;
         _searchCancellation?.Cancel();
+        _summaryCancellation?.Cancel();
         if (_workspace is not null && !string.IsNullOrWhiteSpace(SearchText))
         {
             try
@@ -1273,6 +1308,8 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         }
 
         _searchCancellation?.Dispose();
+        _summaryCancellation?.Dispose();
+        _searchResultBuffer.Dispose();
     }
 
     private async Task PreparePncpDocumentsAsync(
@@ -1449,7 +1486,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         };
     }
 
-    private void ApplyWorkspace(QuotationItemSearchState state)
+    private void ApplyWorkspace(QuotationItemSearchState state, bool replaceRows = true)
     {
         _workspace = state.Workspace;
         SearchText = state.Workspace.SearchText;
@@ -1465,7 +1502,13 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         MinimumPriceText = state.Workspace.MinimumUnitPrice?.ToString("N4") ?? string.Empty;
         MaximumPriceText = state.Workspace.MaximumUnitPrice?.ToString("N4") ?? string.Empty;
         BatchCount = state.Workspace.BatchCount;
-        SearchRows.Clear();
+        if (replaceRows)
+        {
+            _searchResultBuffer.Clear();
+            SearchRows.Clear();
+            _searchRowKeys.Clear();
+        }
+
         AppendSearchRows(state.Rows);
         SearchSummary = state.Workspace.Checkpoint.ContractsExamined == 0
             ? "Pesquisa ainda não iniciada neste prompt."
@@ -1476,12 +1519,68 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
 
     private void AppendSearchRows(IEnumerable<ItemSearchRow> rows)
     {
-        var keys = SearchRows.Select(RowKey).ToHashSet(StringComparer.Ordinal);
         foreach (var row in rows.Select(value => new ItemSearchDisplayRow(value)))
         {
-            if (keys.Add(RowKey(row)))
+            if (_searchRowKeys.Add(RowKey(row)))
             {
                 SearchRows.Add(row);
+            }
+        }
+    }
+
+    private void QueueSearchRows(IReadOnlyList<ItemSearchRow> rows)
+    {
+        var pending = new List<ItemSearchDisplayRow>(rows.Count);
+        foreach (var row in rows.Select(value => new ItemSearchDisplayRow(value)))
+        {
+            if (_searchRowKeys.Add(RowKey(row)))
+            {
+                pending.Add(row);
+            }
+        }
+
+        _searchResultBuffer.Enqueue(pending);
+    }
+
+    private void StartDeferredSummary(QuotationItemSearchWorkspace workspace)
+    {
+        _summaryCancellation?.Cancel();
+        _summaryCancellation?.Dispose();
+        _summaryCancellation = new CancellationTokenSource();
+        var generation = Interlocked.Increment(ref _summaryGeneration);
+        _ = RefreshDeferredSummaryAsync(workspace, generation, _summaryCancellation.Token);
+    }
+
+    private async Task RefreshDeferredSummaryAsync(
+        QuotationItemSearchWorkspace workspace,
+        int generation,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            SearchSummary += " Refinando a contagem exata em baixa prioridade…";
+            var local = await _itemSearch.GetDeferredLocalSummaryAsync(workspace, cancellationToken)
+                .ConfigureAwait(true);
+            if (generation != Volatile.Read(ref _summaryGeneration) || _disposed)
+            {
+                return;
+            }
+
+            SearchSummary =
+                $"{local.CandidateContracts:N0} contratação(ões) candidatas; " +
+                $"{local.CachedMatchingItems:N0} item(ns) parcial(is) no cache; " +
+                $"{local.CachedItemsWithActivePrices:N0} com preço parcial no cache. " +
+                $"{SearchRows.Count:N0} linha(s) visível(is).";
+        }
+        catch (OperationCanceledException)
+        {
+            // Uma nova pesquisa ou o fechamento da janela tornou este total obsoleto.
+        }
+        catch (Exception)
+        {
+            if (generation == Volatile.Read(ref _summaryGeneration) && !_disposed)
+            {
+                SearchSummary += " A contagem exata não pôde ser refinada; os resultados foram preservados.";
             }
         }
     }

@@ -47,6 +47,9 @@ public interface IQuotationItemSearchService
     Task<ItemSearchLocalSummary> GetLocalSummaryAsync(
         QuotationItemSearchWorkspace workspace,
         CancellationToken cancellationToken = default);
+    Task<ItemSearchLocalSummary> GetDeferredLocalSummaryAsync(
+        QuotationItemSearchWorkspace workspace,
+        CancellationToken cancellationToken = default);
     Task SavePreferencesAsync(
         QuotationItemSearchWorkspace workspace,
         CancellationToken cancellationToken = default);

@@ -715,7 +715,10 @@
                             <Button Content="Exportar/Importar ▾" Click="DropdownMenu_Click">
                                 <Button.ContextMenu>
                                     <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
-                                        <MenuItem Header="Exportar Excel" Command="{Binding ExportQuotationCommand}" />
+                                        <MenuItem Header="Exportar Excel e evidências"
+                                                  Command="{Binding ExportQuotationCommand}" />
+                                        <MenuItem Header="Exportar somente Excel"
+                                                  Command="{Binding ExportQuotationWithoutEvidenceCommand}" />
                                         <Separator />
                                         <MenuItem Header="Exportar pacote"
                                                   Command="{Binding ExportQuotationPackageCommand}"
