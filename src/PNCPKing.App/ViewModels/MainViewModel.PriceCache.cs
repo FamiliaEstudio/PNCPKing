@@ -17,7 +17,7 @@ public sealed partial class MainViewModel
     private PriceCacheProgress? _lastPriceCacheProgress;
     private double _priceCacheProgress;
     private string _priceCacheSummary = "Índice nacional de itens ainda não autorizado.";
-    private string _priceCacheActivityText = "Índice de itens de 365 dias: inativo";
+    private string _priceCacheActivityText = "Índice de itens de 11 meses: inativo";
 
     public ICommand EstimateAndActivatePriceCacheCommand { get; private set; } = null!;
     public ICommand PausePriceCacheCommand { get; private set; } = null!;
@@ -170,7 +170,7 @@ public sealed partial class MainViewModel
         _maintenanceCoordinator.CancelActiveSlice();
         _maintenanceTimer.Stop();
         MaintenanceActivityText = "Manutenção: modo agressivo dedicado ao índice de itens";
-        PriceCacheActivityText = "Índice de itens de 365 dias: iniciando modo agressivo";
+        PriceCacheActivityText = "Índice de itens de 11 meses: iniciando modo agressivo";
         _ = StartPriceCacheCycleAsync(aggressive: true);
     }
 
@@ -225,18 +225,18 @@ public sealed partial class MainViewModel
     private async Task EstimateAndActivatePriceCacheAsync()
     {
         var end = DateOnly.FromDateTime(DateTime.Today);
-        var start = end.AddDays(-(PriceCacheService.WindowDays - 1));
+        var start = DataWindow.Start(end);
         PriceCacheActivityText = "Calculando contratos, espaço e duração…";
         if (_repository is ICoverageRepository coverage &&
             !await coverage.IsCoverageCompleteAsync(start, end).ConfigureAwait(true))
         {
             MessageBox.Show(
-                "Conclua primeiro a cobertura do índice PNCP para os últimos 365 dias. " +
+                "Conclua primeiro a cobertura do índice PNCP para os últimos 11 meses. " +
                 "A autorização depende dessa cobertura para calcular o volume corretamente.",
                 "Índice nacional de itens",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);
-            PriceCacheActivityText = "Índice de itens de 365 dias: aguardando cobertura PNCP";
+            PriceCacheActivityText = "Índice de itens de 11 meses: aguardando cobertura PNCP";
             return;
         }
 
@@ -245,7 +245,7 @@ public sealed partial class MainViewModel
         if (estimate.ContractCount == 0)
         {
             MessageBox.Show(
-                "O índice ainda não possui contratações no período. Conclua primeiro a cobertura dos últimos 365 dias.",
+                "O índice ainda não possui contratações no período. Conclua primeiro a cobertura dos últimos 11 meses.",
                 "Índice nacional de itens",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);
@@ -279,12 +279,12 @@ public sealed partial class MainViewModel
             "A carga armazenará somente as listas de itens. Preços homologados serão consultados e preservados " +
             "apenas quando um item corresponder a uma pesquisa. Ela continuará nas próximas aberturas, " +
             "sempre cedendo a API às ações do usuário. Autorizar?",
-            "Confirmar índice de itens de 365 dias",
+            "Confirmar índice de itens de 11 meses",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question);
         if (answer != MessageBoxResult.Yes)
         {
-            PriceCacheActivityText = "Índice de itens de 365 dias: autorização cancelada";
+            PriceCacheActivityText = "Índice de itens de 11 meses: autorização cancelada";
             return;
         }
 
@@ -327,7 +327,7 @@ public sealed partial class MainViewModel
         }
 
         var end = DateOnly.FromDateTime(DateTime.Today);
-        var start = end.AddDays(-(PriceCacheService.WindowDays - 1));
+        var start = DataWindow.Start(end);
         await _priceCacheRepository.SetAuthorizationAsync(false, start, end).ConfigureAwait(true);
         _priceCacheCycleCancellation?.Cancel();
         await RefreshPriceCacheProgressAsync().ConfigureAwait(true);
@@ -338,7 +338,7 @@ public sealed partial class MainViewModel
     {
         var progress = await _priceCacheRepository.GetProgressAsync().ConfigureAwait(true);
         if (MessageBox.Show(
-                $"Remover {FormatBytes(progress.OccupiedBytes)} de listas reconstruíveis do índice de 365 dias?\n\n" +
+                $"Remover {FormatBytes(progress.OccupiedBytes)} de listas reconstruíveis do índice de 11 meses?\n\n" +
                 "Preços consultados sob demanda e referências usadas em cotações serão preservados.",
                 "Remover índice nacional de itens",
                 MessageBoxButton.YesNo,
@@ -439,7 +439,7 @@ public sealed partial class MainViewModel
 
         IsPriceCacheBusy = true;
         IsPriceCachePaused = false;
-        PriceCacheActivityText = "Índice de itens de 365 dias: aguardando oportunidade na API";
+        PriceCacheActivityText = "Índice de itens de 11 meses: aguardando oportunidade na API";
         var progress = new Progress<PriceCacheProgress>(UpdatePriceCacheProgress);
         try
         {
@@ -505,7 +505,7 @@ public sealed partial class MainViewModel
             if (_aggressivePriceCacheResourcePressure == SystemResourcePressure.Critical)
             {
                 PriceCacheActivityText =
-                    "Índice de itens de 365 dias: modo agressivo aguardando a RAM sair do nível crítico";
+                    "Índice de itens de 11 meses: modo agressivo aguardando a RAM sair do nível crítico";
                 await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(true);
                 continue;
             }
@@ -522,7 +522,7 @@ public sealed partial class MainViewModel
                 if (coverageRan)
                 {
                     PriceCacheActivityText =
-                        "Índice de itens de 365 dias: cobertura atualizada; iniciando listas em modo agressivo";
+                        "Índice de itens de 11 meses: cobertura atualizada; iniciando listas em modo agressivo";
                 }
 
                 await Task.Run(
@@ -538,7 +538,7 @@ public sealed partial class MainViewModel
                 _aggressivePriceCacheResourcePressure == SystemResourcePressure.Critical)
             {
                 PriceCacheActivityText =
-                    "Índice de itens de 365 dias: chamadas interrompidas por pressão crítica de RAM; retomada automática";
+                    "Índice de itens de 11 meses: chamadas interrompidas por pressão crítica de RAM; retomada automática";
             }
             finally
             {
@@ -598,16 +598,16 @@ public sealed partial class MainViewModel
         {
             PriceCacheActivityText = progress.Status switch
             {
-                PriceCacheStatus.NotAuthorized => "Índice de itens de 365 dias: aguardando autorização",
+                PriceCacheStatus.NotAuthorized => "Índice de itens de 11 meses: aguardando autorização",
                 PriceCacheStatus.Downloading when !string.IsNullOrWhiteSpace(progress.Message) =>
-                    $"Índice de itens de 365 dias: {progress.Message}",
-                PriceCacheStatus.Downloading => "Índice de itens de 365 dias: baixando listas em segundo plano",
-                PriceCacheStatus.Paused => "Índice de itens de 365 dias: pausado",
-                PriceCacheStatus.Complete => "Índice de itens de 365 dias: completo",
-                PriceCacheStatus.Failed => "Índice de itens de 365 dias: há falhas aguardando repetição",
-                PriceCacheStatus.InsufficientSpace => "Índice de itens de 365 dias: pausado por falta de espaço",
-                PriceCacheStatus.Disabled => "Índice de itens de 365 dias: desativado",
-                _ => "Índice de itens de 365 dias: aguardando cobertura ou próxima tentativa"
+                    $"Índice de itens de 11 meses: {progress.Message}",
+                PriceCacheStatus.Downloading => "Índice de itens de 11 meses: baixando listas em segundo plano",
+                PriceCacheStatus.Paused => "Índice de itens de 11 meses: pausado",
+                PriceCacheStatus.Complete => "Índice de itens de 11 meses: completo",
+                PriceCacheStatus.Failed => "Índice de itens de 11 meses: há falhas aguardando repetição",
+                PriceCacheStatus.InsufficientSpace => "Índice de itens de 11 meses: pausado por falta de espaço",
+                PriceCacheStatus.Disabled => "Índice de itens de 11 meses: desativado",
+                _ => "Índice de itens de 11 meses: aguardando cobertura ou próxima tentativa"
             };
         }
         if (progress.Status is PriceCacheStatus.Failed or PriceCacheStatus.InsufficientSpace)
@@ -628,14 +628,14 @@ public sealed partial class MainViewModel
         if (_aggressivePriceCacheResourcePressure == SystemResourcePressure.Critical)
         {
             PriceCacheActivityText =
-                "Índice de itens de 365 dias: modo agressivo aguardando a RAM sair do nível crítico";
+                "Índice de itens de 11 meses: modo agressivo aguardando a RAM sair do nível crítico";
             return;
         }
 
         if (IsIndexBusy)
         {
             PriceCacheActivityText =
-                "Índice de itens de 365 dias: AGRESSIVO · finalizando a cobertura PNCP antes das listas";
+                "Índice de itens de 11 meses: AGRESSIVO · finalizando a cobertura PNCP antes das listas";
             return;
         }
 
@@ -651,7 +651,7 @@ public sealed partial class MainViewModel
             ? " · aguardando checkpoint retomável"
             : string.Empty;
         PriceCacheActivityText =
-            $"Índice de itens de 365 dias: AGRESSIVO · " +
+            $"Índice de itens de 11 meses: AGRESSIVO · " +
             $"{scheduler.ActiveBackgroundPriceCache:N0} ativa(s) · " +
             $"concorrência {scheduler.EffectiveConcurrency:N0}/{scheduler.MaximumConcurrency:N0} · " +
             $"{throughput:N1} chamada(s)/min{recovery}{waiting}";

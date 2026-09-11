@@ -417,10 +417,14 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         sheet.Cell(row, 3).Value = FormatBrazilianTaxId(reference.SupplierTaxId);
         sheet.Cell(row, 3).Style.NumberFormat.Format = "@";
         sheet.Cell(row, 4).Value = FormatResearchSource(reference.Source);
-        if (Uri.TryCreate(reference.PortalUrl, UriKind.Absolute, out _))
+        if (reference.ResultDate is { } priceDate)
         {
-            sheet.Cell(row, 5).Value = reference.PortalUrl;
-            sheet.Cell(row, 5).Style.NumberFormat.Format = "@";
+            sheet.Cell(row, 5).Value = priceDate.ToDateTime(TimeOnly.MinValue);
+            sheet.Cell(row, 5).Style.NumberFormat.Format = "dd/MM/yyyy";
+        }
+        else
+        {
+            sheet.Cell(row, 5).Value = "Não informada";
         }
 
         sheet.Cell(row, 6).Value = exported.Entry.EffectiveUnitPrice;

@@ -31,7 +31,7 @@ public sealed record QuotationItemSearchWorkspace
     public ItemSearchPromptSlot Slot { get; init; }
     public string SearchText { get; init; } = string.Empty;
     public SearchGeoFilter GeoFilter { get; init; } = SearchGeoFilter.All;
-    public DateOnly StartDate { get; init; } = DateOnly.FromDateTime(DateTime.Today.AddDays(-364));
+    public DateOnly StartDate { get; init; } = DataWindow.Start(DateOnly.FromDateTime(DateTime.Today));
     public DateOnly EndDate { get; init; } = DateOnly.FromDateTime(DateTime.Today);
     public SearchSort Sort { get; init; } = SearchSort.Nearest;
     public decimal? MinimumUnitPrice { get; init; }

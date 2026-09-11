@@ -27,14 +27,14 @@ public sealed class Schema25MigrationTests
         var result = await repository.InitializeAsync();
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
         var policy = await cache.GetNationalPriceIndexPolicyAsync();
-        await cache.SetNationalPriceIndexAuthorizationAsync(true, today.AddDays(-364), today);
-        await cache.PrepareNationalPriceIndexAsync(today.AddDays(-364), today);
+        await cache.SetNationalPriceIndexAuthorizationAsync(true, DataWindow.Start(today), today);
+        await cache.PrepareNationalPriceIndexAsync(DataWindow.Start(today), today);
         var progress = await cache.GetNationalPriceIndexProgressAsync();
         var cached = await repository.GetCachedItemResultsAsync(contract.PncpId, 1);
 
         Assert.Equal(24, result.PreviousVersion);
-        Assert.Equal(26, result.CurrentVersion);
-        Assert.Equal([25, 26], result.AppliedMigrations);
+        Assert.Equal(27, result.CurrentVersion);
+        Assert.Equal([25, 26, 27], result.AppliedMigrations);
         Assert.False(policy.Authorized);
         Assert.False(policy.Enabled);
         Assert.Equal(1, progress.EligibleItems);
@@ -45,8 +45,8 @@ public sealed class Schema25MigrationTests
         Assert.Single(cached.Results);
 
         var repeated = await repository.InitializeAsync();
-        Assert.Equal(26, repeated.PreviousVersion);
-        Assert.Equal(26, repeated.CurrentVersion);
+        Assert.Equal(27, repeated.PreviousVersion);
+        Assert.Equal(27, repeated.CurrentVersion);
         Assert.Empty(repeated.AppliedMigrations);
     }
 

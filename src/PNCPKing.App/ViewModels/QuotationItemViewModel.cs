@@ -58,6 +58,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     private bool _disposed;
     private DateTimeOffset _lastRefresh = DateTimeOffset.MinValue;
     private CancellationTokenSource? _searchCancellation;
+    private TaskCompletionSource? _searchCompletion;
     private CancellationTokenSource? _summaryCancellation;
     private int _searchGeneration;
     private int _summaryGeneration;
@@ -119,11 +120,12 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             new DateRangeOption("Últimos 30 dias", 30),
             new DateRangeOption("Últimos 90 dias", 90),
             new DateRangeOption("Últimos 180 dias", 180),
-            new DateRangeOption("Últimos 365 dias", 365),
+            new DateRangeOption("Últimos 10 meses", null, Months: 10),
+            new DateRangeOption("Últimos 11 meses", null, Months: DataWindow.Months),
             new DateRangeOption("Datas personalizadas", null, true)
         ];
-        _selectedDateRange = DateRanges[4];
-        _customStartDate = DateTime.Today.AddDays(-364);
+        _selectedDateRange = DateRanges[5];
+        _customStartDate = DataWindow.Start(DateOnly.FromDateTime(DateTime.Today)).ToDateTime(TimeOnly.MinValue);
         _customEndDate = DateTime.Today;
         _main.TimedQuotationProgressChanged += OnTimedProgress;
         CatalogKinds =
@@ -804,6 +806,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         var workspace = BuildWorkspace();
         _ = SearchParser.Parse(workspace.SearchText);
         IsSearchBusy = true;
+        _searchCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         SearchProgress = 0;
         _summaryCancellation?.Cancel();
         _summaryCancellation?.Dispose();
@@ -872,6 +875,8 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         finally
         {
             IsSearchBusy = false;
+            _searchCompletion?.TrySetResult();
+            _searchCompletion = null;
         }
     }
 
@@ -890,6 +895,25 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     }
 
     public void StopSearch() => _searchCancellation?.Cancel();
+
+    public async Task PrepareForRetentionAsync()
+    {
+        StopSearch();
+        _summaryCancellation?.Cancel();
+        if (_searchCompletion is { } completion)
+            await completion.Task.ConfigureAwait(true);
+        while (IsBusy)
+            await Task.Delay(50).ConfigureAwait(true);
+        Interlocked.Increment(ref _searchGeneration);
+        Interlocked.Increment(ref _summaryGeneration);
+        _workspace = null;
+        _searchResultBuffer.Clear();
+        SearchRows.Clear();
+        _searchRowKeys.Clear();
+        Baskets.Clear();
+        References.Clear();
+        VisibleReferences.Clear();
+    }
 
     public async Task AddSearchRowsAsync(IReadOnlyList<ItemSearchDisplayRow> rows)
     {
@@ -1448,7 +1472,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             Slot = slot,
             SearchText = GetPromptText(slot),
             GeoFilter = SearchGeoFilter.All,
-            StartDate = today.AddDays(-364),
+            StartDate = DataWindow.Start(today),
             EndDate = today,
             Sort = SearchSort.Nearest,
             BatchCount = ItemSearchDefaults.InitialBatchCount
@@ -1606,8 +1630,8 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         CustomStartDate = start.ToDateTime(TimeOnly.MinValue);
         CustomEndDate = end.ToDateTime(TimeOnly.MinValue);
         var today = DateOnly.FromDateTime(DateTime.Today);
-        var days = end == today ? end.DayNumber - start.DayNumber + 1 : -1;
-        SelectedDateRange = DateRanges.FirstOrDefault(value => value.Days == days) ??
+        SelectedDateRange = DateRanges.FirstOrDefault(value =>
+                                !value.IsCustom && end == today && value.Start(today) == start) ??
                             DateRanges.Single(value => value.IsCustom);
     }
 
@@ -1616,8 +1640,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         var today = DateOnly.FromDateTime(DateTime.Today);
         if (!SelectedDateRange.IsCustom)
         {
-            var days = SelectedDateRange.Days ?? 365;
-            return (today.AddDays(-(days - 1)), today);
+            return (SelectedDateRange.Start(today), today);
         }
 
         if (CustomStartDate is null || CustomEndDate is null)
@@ -1627,11 +1650,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
 
         var start = DateOnly.FromDateTime(CustomStartDate.Value.Date);
         var end = DateOnly.FromDateTime(CustomEndDate.Value.Date);
-        if (start > end)
-        {
-            throw new ArgumentException("A data inicial deve ser anterior ou igual à data final.");
-        }
-
+        DataWindow.Validate(start, end, today);
         return (start, end);
     }
 

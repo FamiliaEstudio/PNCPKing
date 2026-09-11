@@ -810,7 +810,7 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
     public async Task<PriceCacheProgress> GetProgressAsync(CancellationToken cancellationToken = default)
     {
         var today = DateOnly.FromDateTime(DateTime.Today);
-        var start = today.AddDays(-364);
+        var start = DataWindow.Start(today);
         var end = today;
         var status = PriceCacheStatus.Disabled;
         var message = string.Empty;
@@ -1071,9 +1071,18 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
                     return optimized;
                 }
             }
-            else if (filters.Sort != SearchSort.Relevance &&
-                     (_highCardinalityFtsThreshold == 0 ||
-                      await ShouldUseContractChunksAsync(itemMatch, cancellationToken).ConfigureAwait(false)))
+            else if (filters.Sort != SearchSort.Relevance && itemMatch.Length > 0 &&
+                     (expression.AcceptedUnits.Count > 0 ||
+                      expression.PositiveGroups.Any(group => group.ApproximateNumbers is { Count: > 0 }) ||
+                      (_highCardinalityFtsThreshold != 0 &&
+                       !await ShouldUseContractChunksAsync(itemMatch, cancellationToken).ConfigureAwait(false))))
+            {
+                return await SearchLocalByItemIndexAsync(
+                        filters, expression, minimumUnitPrice, maximumUnitPrice,
+                        cursor, page, pageSize, detailConditions, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else if (filters.Sort != SearchSort.Relevance)
             {
                 return await SearchLocalByContractChunksAsync(
                         filters,
@@ -1150,6 +1159,87 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
                 cancellationToken)
             .ConfigureAwait(false);
         return BuildLocalSearchPage(scan, cursor, page, pageSize, scanLimit);
+    }
+
+    private async Task<PriceCacheLocalPage> SearchLocalByItemIndexAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice,
+        PriceCacheLocalCursor? cursor,
+        int page,
+        int pageSize,
+        IReadOnlyList<string> detailConditions,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        connection.CreateFunction<string?, string?, bool>(
+            "pncp_item_matches",
+            (description, unit) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return expression.MatchesItem(description, unit);
+            },
+            isDeterministic: true);
+        var (primaryRank, secondaryRank) = filters.Sort == SearchSort.Nearest
+            ? ("CAST(COALESCE(c.geo_layer, 1) AS REAL)",
+                "CAST(COALESCE(c.municipality_distance_rank, 999999) AS REAL)")
+            : ("0.0", "0.0");
+        var scanLimit = pageSize + 1;
+        await using var command = connection.CreateCommand();
+        // Apply the complete item expression before joining contract/result details or limiting
+        // the page. A selective unit must not cause repeated scans of discarded price pages.
+        // Materialize only keys; load the wide records for the selected page afterwards.
+        command.CommandText = $"""
+            WITH matched_items AS MATERIALIZED (
+                SELECT i.rowid AS item_rowid, i.contract_id, i.item_number, i.hydration_status
+                  FROM items_fts
+                  CROSS JOIN items i ON i.rowid = items_fts.rowid
+                 WHERE items_fts MATCH $itemMatch
+                   AND i.hydration_status = $complete
+                   AND pncp_item_matches(i.description, i.unit) = 1
+            ), ranked_prices AS (
+                SELECT i.item_rowid, c.rowid AS contract_rowid, r.rowid AS result_rowid,
+                       c.pncp_id, i.item_number, r.result_sequence,
+                       COALESCE(c.publication_date, '') AS publication_date,
+                       0 AS sort_priority, {primaryRank} AS primary_rank,
+                       {secondaryRank} AS secondary_rank
+                  FROM matched_items i
+                  CROSS JOIN contracts c ON c.pncp_id = i.contract_id
+                  CROSS JOIN contract_item_snapshots s ON s.contract_id = i.contract_id
+                  CROSS JOIN item_results r ON r.contract_id = i.contract_id AND r.item_number = i.item_number
+                 WHERE {string.Join(" AND ", detailConditions)}
+            ), page_keys AS MATERIALIZED (
+                SELECT * FROM ranked_prices
+                {BuildLocalCursorWhere(cursor)}
+                 ORDER BY sort_priority, primary_rank, secondary_rank,
+                          publication_date DESC, pncp_id, item_number, result_sequence
+                 LIMIT $scanLimit
+            )
+            SELECT {BuildLocalSearchColumns("k.sort_priority", "k.primary_rank", "k.secondary_rank")}
+              FROM page_keys k
+              CROSS JOIN contracts c ON c.rowid = k.contract_rowid
+              CROSS JOIN items i ON i.rowid = k.item_rowid
+              CROSS JOIN item_results r ON r.rowid = k.result_rowid
+             ORDER BY k.sort_priority, k.primary_rank, k.secondary_rank,
+                      k.publication_date DESC, k.pncp_id, k.item_number, k.result_sequence;
+            """;
+        AddLocalSearchParameters(
+            command, filters, expression.ItemMatchQuery, string.Empty,
+            minimumUnitPrice, maximumUnitPrice, cursor, scanLimit);
+        try
+        {
+            var scan = await ReadLocalSearchScanAsync(
+                    command, expression, cursor, page, pageSize,
+                    includesCandidateMetadata: false, cancellationToken)
+                .ConfigureAwait(false);
+            return BuildLocalSearchPage(scan, cursor, page, pageSize, scanLimit);
+        }
+        catch (SqliteException) when (cancellationToken.IsCancellationRequested)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            throw;
+        }
     }
 
     private async Task<PriceCacheLocalPage?> SearchLocalByFtsCandidatesAsync(
@@ -1379,7 +1469,7 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
         c.additional_information, c.process, c.organization, c.unit, c.municipality,
         c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
-        c.publication_date, c.global_updated_at, c.total_homologated_scaled,
+        COALESCE(c.publication_date, '') AS publication_date, c.global_updated_at, c.total_homologated_scaled,
         c.distance_from_ribeirao_km,
         i.contract_id, i.item_number, i.description, i.unit, i.requested_quantity_scaled,
         i.additional_information, i.item_category, i.ncm_nbs_code, i.ncm_nbs_description,
@@ -1677,6 +1767,13 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
             {
                 var inclusiveContract = scanCursor.ItemNumber != long.MaxValue;
                 var contractComparison = inclusiveContract ? ">=" : ">";
+                // Let the publication index seek to subsequent chunks instead of visiting
+                // all newer contracts again. The full cursor below resolves date ties.
+                if (filters.Sort != SearchSort.Nearest && scanCursor.PublicationDate.Length > 0 &&
+                    (filters.StartDate is not null || filters.EndDate is not null))
+                {
+                    contractConditions.Add("c.publication_date <= $cursorPublication");
+                }
                 contractConditions.Add($"""
                     (({primaryRank}) > $cursorPrimary
                      OR (({primaryRank}) = $cursorPrimary AND ({secondaryRank}) > $cursorSecondary)
@@ -1695,12 +1792,18 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
                 chunkSize + 1);
             await using (var contractCommand = connection.CreateCommand())
             {
+                // Ordering by constant ranks and COALESCE prevented SQLite from using the
+                // existing date index. Period searches already exclude null publications.
+                var contractOrder = filters.Sort != SearchSort.Nearest &&
+                                    (filters.StartDate is not null || filters.EndDate is not null)
+                    ? "c.publication_date DESC, c.pncp_id"
+                    : "2, 3, 4 DESC, c.pncp_id";
                 contractCommand.CommandText = $"""
                     SELECT c.pncp_id, {primaryRank}, {secondaryRank},
                            COALESCE(c.publication_date, '')
                       FROM contracts c
                       {contractWhere}
-                     ORDER BY 2, 3, 4 DESC, c.pncp_id
+                     ORDER BY {contractOrder}
                      LIMIT $contractLimit;
                     """;
                 contractCommand.Parameters.AddWithValue("$contractLimit", chunkSize + 1);

@@ -54,6 +54,9 @@ public sealed class SyncService(
                 nameof(queryStartDate),
                 $"A data inicial {queryStartDate:dd/MM/yyyy} não pode ser posterior à data final {endDate:dd/MM/yyyy}.");
         }
+        var minimumStart = DataWindow.Start(endDate);
+        if (queryStartDate < minimumStart)
+            queryStartDate = minimumStart;
 
         // Persist the authorization/run before the first network call. If even
         // the modality catalog times out, the 10-minute maintenance tick can
@@ -154,7 +157,7 @@ public sealed class SyncService(
 
             if (options.FinalizeDataset)
             {
-                var rollingStart = endDate.AddDays(-364);
+                var rollingStart = DataWindow.Start(endDate);
                 await repository.PruneContractsBeforeAsync(rollingStart, cancellationToken).ConfigureAwait(false);
                 await repository.SetDatasetStateAsync(
                     rollingStart,

@@ -14,7 +14,6 @@ public sealed class PriceCacheService(
     TimeSpan? requestTimeout = null,
     IPerformanceTelemetry? performance = null)
 {
-    public const int WindowDays = 365;
     public static TimeSpan DefaultRequestTimeout { get; } = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan MaximumRetryDelay = TimeSpan.FromHours(6);
     private readonly TimeSpan? _requestTimeout = ValidateRequestTimeout(requestTimeout);
@@ -61,7 +60,7 @@ public sealed class PriceCacheService(
     {
         using var span = _performance.Begin("price-cache", "synchronize");
         var today = DateOnly.FromDateTime(DateTime.Today);
-        var start = today.AddDays(-(WindowDays - 1));
+        var start = DataWindow.Start(today);
         var policy = await cache.GetPolicyAsync(cancellationToken).ConfigureAwait(false);
         if (!policy.Authorized || !policy.Enabled)
         {
@@ -72,7 +71,7 @@ public sealed class PriceCacheService(
         {
             await cache.SetStatusAsync(
                     PriceCacheStatus.Idle,
-                    "Aguardando a cobertura completa do índice PNCP para os últimos 365 dias.",
+                    "Aguardando a cobertura completa do índice PNCP para os últimos 11 meses.",
                     cancellationToken)
                 .ConfigureAwait(false);
             progress?.Report(await cache.GetProgressAsync(cancellationToken).ConfigureAwait(false));
@@ -184,7 +183,7 @@ public sealed class PriceCacheService(
                     {
                         await cache.SetStatusAsync(
                                 PriceCacheStatus.Complete,
-                                "Índice móvel de itens dos últimos 365 dias completamente armazenado.",
+                                "Índice móvel de itens dos últimos 11 meses completamente armazenado.",
                                 cancellationToken)
                             .ConfigureAwait(false);
                     }

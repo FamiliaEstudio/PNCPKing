@@ -32,8 +32,8 @@ public sealed class QuotationItemSearchTests
             .InitializeAsync();
 
         Assert.Equal(18, initialization.PreviousVersion);
-        Assert.Equal(26, initialization.CurrentVersion);
-        Assert.Equal([19, 20, 21, 22, 23, 24, 25, 26], initialization.AppliedMigrations);
+        Assert.Equal(27, initialization.CurrentVersion);
+        Assert.Equal([19, 20, 21, 22, 23, 24, 25, 26, 27], initialization.AppliedMigrations);
     }
 
     [Fact]
@@ -450,8 +450,8 @@ public sealed class QuotationItemSearchTests
             LineId = lineId,
             Slot = slot,
             SearchText = text,
-            StartDate = new DateOnly(2025, 7, 26),
-            EndDate = new DateOnly(2026, 7, 25)
+            StartDate = DataWindow.Start(DateOnly.FromDateTime(DateTime.Today)),
+            EndDate = DateOnly.FromDateTime(DateTime.Today)
         };
 
     private static ContractRecord Contract(int number) =>

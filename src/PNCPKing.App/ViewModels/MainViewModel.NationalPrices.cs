@@ -17,7 +17,7 @@ public sealed partial class MainViewModel
     private NationalPriceIndexProgress? _lastNationalPriceIndexProgress;
     private double _nationalPriceIndexProgress;
     private string _nationalPriceIndexSummary = "Índice nacional de preços ainda não autorizado.";
-    private string _nationalPriceIndexActivityText = "Índice de preços de 365 dias: inativo";
+    private string _nationalPriceIndexActivityText = "Índice de preços de 11 meses: inativo";
 
     public ICommand EstimateAndActivateNationalPriceIndexCommand { get; private set; } = null!;
     public ICommand PauseNationalPriceIndexCommand { get; private set; } = null!;
@@ -126,7 +126,7 @@ public sealed partial class MainViewModel
             itemProgress.CompletedContracts < itemProgress.TotalContracts)
         {
             MessageBox.Show(
-                "Conclua primeiro o índice nacional de itens dos últimos 365 dias. " +
+                "Conclua primeiro o índice nacional de itens dos últimos 11 meses. " +
                 "A relação completa é necessária para calcular e baixar somente os preços elegíveis.",
                 "Índice nacional de preços",
                 MessageBoxButton.OK,
@@ -136,7 +136,7 @@ public sealed partial class MainViewModel
         }
 
         var end = DateOnly.FromDateTime(DateTime.Today);
-        var start = end.AddDays(-(PriceCacheService.WindowDays - 1));
+        var start = DataWindow.Start(end);
         NationalPriceIndexActivityText = "Calculando itens elegíveis, espaço e duração…";
         var estimate = await _priceCacheRepository.EstimateNationalPriceIndexAsync(start, end)
             .ConfigureAwait(true);
@@ -178,12 +178,12 @@ public sealed partial class MainViewModel
             "Normalmente há uma vencedora; múltiplas vencedoras oficiais do mesmo item serão preservadas.\n\n" +
             "A autorização não inicia chamadas. O download só começará quando você ativar o botão " +
             "Download agressivo desta barra. Autorizar?",
-            "Confirmar índice de preços de 365 dias",
+            "Confirmar índice de preços de 11 meses",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question);
         if (answer != MessageBoxResult.Yes)
         {
-            NationalPriceIndexActivityText = "Índice de preços de 365 dias: autorização cancelada";
+            NationalPriceIndexActivityText = "Índice de preços de 11 meses: autorização cancelada";
             return;
         }
 
@@ -269,7 +269,7 @@ public sealed partial class MainViewModel
         _maintenanceCoordinator.CancelActiveSlice();
         _maintenanceTimer.Stop();
         MaintenanceActivityText = "Manutenção: modo agressivo dedicado ao índice de preços";
-        NationalPriceIndexActivityText = "Índice de preços de 365 dias: iniciando modo agressivo";
+        NationalPriceIndexActivityText = "Índice de preços de 11 meses: iniciando modo agressivo";
         _ = StartNationalPriceIndexCycleAsync();
     }
 
@@ -316,7 +316,7 @@ public sealed partial class MainViewModel
         }
 
         var end = DateOnly.FromDateTime(DateTime.Today);
-        var start = end.AddDays(-(PriceCacheService.WindowDays - 1));
+        var start = DataWindow.Start(end);
         await _priceCacheRepository.SetNationalPriceIndexAuthorizationAsync(false, start, end)
             .ConfigureAwait(true);
         _nationalPriceCycleCancellation?.Cancel();
@@ -556,15 +556,15 @@ public sealed partial class MainViewModel
         {
             NationalPriceIndexActivityText = progress.Status switch
             {
-                PriceCacheStatus.NotAuthorized => "Índice de preços de 365 dias: aguardando autorização",
+                PriceCacheStatus.NotAuthorized => "Índice de preços de 11 meses: aguardando autorização",
                 PriceCacheStatus.Downloading when !string.IsNullOrWhiteSpace(progress.Message) =>
-                    $"Índice de preços de 365 dias: {progress.Message}",
-                PriceCacheStatus.Downloading => "Índice de preços de 365 dias: consultando resultados",
-                PriceCacheStatus.Paused => "Índice de preços de 365 dias: pausado",
-                PriceCacheStatus.Complete => "Índice de preços de 365 dias: completo",
+                    $"Índice de preços de 11 meses: {progress.Message}",
+                PriceCacheStatus.Downloading => "Índice de preços de 11 meses: consultando resultados",
+                PriceCacheStatus.Paused => "Índice de preços de 11 meses: pausado",
+                PriceCacheStatus.Complete => "Índice de preços de 11 meses: completo",
                 PriceCacheStatus.Failed => "Índice de preços: há falhas aguardando repetição",
                 PriceCacheStatus.InsufficientSpace => "Índice de preços: pausado por falta de espaço",
-                PriceCacheStatus.Disabled => "Índice de preços de 365 dias: desativado",
+                PriceCacheStatus.Disabled => "Índice de preços de 11 meses: desativado",
                 _ => "Índice de preços: autorizado; ative Download agressivo para continuar"
             };
         }

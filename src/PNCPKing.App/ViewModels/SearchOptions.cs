@@ -3,8 +3,12 @@ using PNCPKing.Core.Geography;
 
 namespace PNCPKing.App.ViewModels;
 
-public sealed record DateRangeOption(string Label, int? Days, bool IsCustom = false)
+public sealed record DateRangeOption(string Label, int? Days, bool IsCustom = false, int? Months = null)
 {
+    public DateOnly Start(DateOnly today) => Months is { } months
+        ? DataWindow.Start(today, months)
+        : Days is { } days ? today.AddDays(-(days - 1)) : DataWindow.Start(today);
+
     public override string ToString() => Label;
 }
 

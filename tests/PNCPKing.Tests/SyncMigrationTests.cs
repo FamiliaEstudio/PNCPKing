@@ -254,6 +254,8 @@ public sealed class SyncMigrationTests
                     DROP TABLE quotation_internet_price_evidence;
                     DROP TABLE quotation_internet_price_drafts;
                     DROP TABLE quotation_internet_evidence_assets;
+                    DROP TRIGGER IF EXISTS quotation_references_retention_insert;
+                    DROP TRIGGER IF EXISTS quotation_references_retention_update;
                     ALTER TABLE quotation_references DROP COLUMN source_kind;
                     UPDATE schema_info SET version = 10 WHERE id = 1;
                     PRAGMA foreign_keys=ON;

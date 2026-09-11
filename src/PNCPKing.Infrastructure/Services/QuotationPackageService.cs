@@ -407,6 +407,14 @@ public sealed class QuotationPackageService : IQuotationPackageService
                 .ConfigureAwait(false);
             try
             {
+                // Imported rows and their dependent baskets are reconciled together,
+                // within this transaction, before the retention guard is restored.
+                await using (var guard = connection.CreateCommand())
+                {
+                    guard.Transaction = (SqliteTransaction)transaction;
+                    guard.CommandText = "UPDATE maintenance_state SET retention_cutoff = '' WHERE id = 1;";
+                    await guard.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
                 if (mode == QuotationPackageImportMode.Replace)
                 {
                     await using var delete = connection.CreateCommand();
@@ -433,8 +441,24 @@ public sealed class QuotationPackageService : IQuotationPackageService
                         "porque esses contratos ainda não existem no índice PNCP deste computador.");
                 }
 
+                var today = DateOnly.FromDateTime(DateTime.Today);
+                var retention = await SqliteContractRepository.PruneExpiredDataAsync(
+                    connection, (SqliteTransaction)transaction, DataWindow.Start(today), cancellationToken).ConfigureAwait(false);
+                await SqliteContractRepository.NormalizeRetentionWindowsAsync(
+                    connection, (SqliteTransaction)transaction, DataWindow.Start(today), today, cancellationToken).ConfigureAwait(false);
+                if (retention.RemovedReferences > 0)
+                    warnings.Add($"{retention.RemovedReferences:N0} referência(s) anterior(es) à janela de 11 meses foram descartadas; revise e reconfirme as cestas afetadas.");
+                var retainedHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                await using (var assets = connection.CreateCommand())
+                {
+                    assets.Transaction = (SqliteTransaction)transaction;
+                    assets.CommandText = "SELECT sha256 FROM quotation_internet_evidence_assets;";
+                    await using var reader = await assets.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                    while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                        retainedHashes.Add(reader.GetString(0));
+                }
                 await InstallEvidenceAsync(
-                        package.Manifest.EvidenceAssets,
+                        package.Manifest.EvidenceAssets.Where(asset => retainedHashes.Contains(asset.Sha256)).ToArray(),
                         stagingFolder,
                         createdEvidencePaths,
                         cancellationToken)

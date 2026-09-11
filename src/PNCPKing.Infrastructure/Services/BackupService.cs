@@ -705,6 +705,15 @@ public sealed class BackupService(
                 await DisableImportedCompactCacheAsync(importedDatabase, cancellationToken).ConfigureAwait(false);
             }
 
+            var retainedRepository = new SqliteContractRepository(importedDatabase, _performance);
+            var retention = await retainedRepository.MaintainRetentionAsync(
+                DateOnly.FromDateTime(DateTime.Today), compact: true, force: true,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            Report(progress, BackupImportStage.Migrating, 78, retention.Message);
+            databaseAssets = await ReadReferencedEvidenceAssetsAsync(importedDatabase, cancellationToken).ConfigureAwait(false);
+            manifestHashes = databaseAssets.Select(asset => asset.Sha256).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            SqliteConnection.ClearAllPools();
+
             var dataFolder = Path.GetDirectoryName(repository.DatabasePath)!;
             Report(progress, BackupImportStage.InstallingEvidence, 80, "Validando e instalando evidências…");
             await InstallStagedEvidenceAsync(
@@ -799,7 +808,7 @@ public sealed class BackupService(
                 progress,
                 BackupImportStage.Completed,
                 100,
-                "Backup importado e aberto com sucesso.",
+                "Backup importado e aberto com sucesso. " + retention.Message,
                 canCancel: false);
 
             span.Complete(bytes: inspection.DatabaseBytes);

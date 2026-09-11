@@ -268,7 +268,7 @@ public sealed class PerformanceTests(ITestOutputHelper output)
         var newestQuery = new SearchQuery(
             string.Empty,
             GeoScope.All,
-            today.AddDays(-364),
+            DataWindow.Start(today),
             today,
             Page: 1,
             PageSize: 50,
@@ -301,7 +301,7 @@ public sealed class PerformanceTests(ITestOutputHelper output)
                 new SearchQuery(
                     "cafe",
                     GeoScope.All,
-                    today.AddDays(-364),
+                    DataWindow.Start(today),
                     today,
                     Page: 1,
                     PageSize: 50,
@@ -1508,7 +1508,7 @@ public sealed class PerformanceTests(ITestOutputHelper output)
             new SearchQuery(
                 "material escolar -servico -locacao",
                 SearchGeoFilter.State("SP"),
-                newestDate.AddDays(-364),
+                DataWindow.Start(newestDate),
                 newestDate,
                 Sort: SearchSort.Relevance),
             MinimumUnitPrice: 1m,
@@ -1518,7 +1518,7 @@ public sealed class PerformanceTests(ITestOutputHelper output)
             new SearchQuery(
                 "cafe %500 g -capsula",
                 SearchGeoFilter.Southeast,
-                newestDate.AddDays(-364),
+                DataWindow.Start(newestDate),
                 newestDate,
                 Sort: SearchSort.Relevance),
             MinimumUnitPrice: .01m,
@@ -1559,7 +1559,7 @@ public sealed class PerformanceTests(ITestOutputHelper output)
                 new SearchQuery(
                     "arame galvanizado",
                     SearchGeoFilter.State("SP"),
-                    newestDate.AddDays(-364),
+                    DataWindow.Start(newestDate),
                     newestDate,
                     Sort: SearchSort.Relevance),
                 MinimumUnitPrice: 1m,
@@ -1569,7 +1569,7 @@ public sealed class PerformanceTests(ITestOutputHelper output)
                 new SearchQuery(
                     "\"papel a4\"",
                     SearchGeoFilter.State("SP"),
-                    newestDate.AddDays(-364),
+                    DataWindow.Start(newestDate),
                     newestDate,
                     Sort: SearchSort.Relevance),
                 MinimumUnitPrice: 1m,
@@ -1579,7 +1579,7 @@ public sealed class PerformanceTests(ITestOutputHelper output)
                 new SearchQuery(
                     "arame",
                     SearchGeoFilter.State("SP"),
-                    newestDate.AddDays(-364),
+                    DataWindow.Start(newestDate),
                     newestDate,
                     Sort: SearchSort.Relevance),
                 MinimumUnitPrice: 1m,
@@ -1589,7 +1589,7 @@ public sealed class PerformanceTests(ITestOutputHelper output)
                 new SearchQuery(
                     "cafe OU cha -capsula -maquina -soluvel",
                     SearchGeoFilter.State("SP"),
-                    newestDate.AddDays(-364),
+                    DataWindow.Start(newestDate),
                     newestDate,
                     Sort: SearchSort.Relevance),
                 MinimumUnitPrice: 1m,

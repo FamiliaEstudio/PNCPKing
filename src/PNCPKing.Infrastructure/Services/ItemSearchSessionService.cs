@@ -550,6 +550,12 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(contractSearch);
+        if (contractSearch.StartDate is not null || contractSearch.EndDate is not null)
+        {
+            var today = DateOnly.FromDateTime(DateTime.Today);
+            var range = DataWindow.Normalize(contractSearch.StartDate ?? DataWindow.Start(today), contractSearch.EndDate ?? today, today);
+            contractSearch = contractSearch with { StartDate = range.Start, EndDate = range.End };
+        }
         var expression = SearchText.Parse(contractSearch.Text);
         var anchorKey = CreateAnchorKey(expression, contractSearch.Text);
         var scopeKey = CreateScopeKey(contractSearch, expression);
@@ -1544,6 +1550,32 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
     }
 
     public void Stop() => _sessionCancellation?.Cancel();
+
+    public async Task InvalidateAsync(CancellationToken cancellationToken = default)
+    {
+        Stop();
+        await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _temporaryStoreLifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                _session = null;
+                _contractSearchQuery = null;
+                _hits.Clear();
+                _hitKeys.Clear();
+                _candidates.Clear();
+                _candidateKeys.Clear();
+                _processedContracts.Clear();
+                _processedContractKeys.Clear();
+                _priceAvailability.Clear();
+                _availableSessionRows = 0;
+                await _temporaryResults.ResetAsync(Guid.NewGuid(), cancellationToken).ConfigureAwait(false);
+            }
+            finally { _temporaryStoreLifecycleGate.Release(); }
+        }
+        finally { _operationGate.Release(); }
+    }
 
     public async ValueTask DisposeAsync()
     {

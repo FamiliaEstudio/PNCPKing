@@ -1027,7 +1027,7 @@ public sealed class QuotationTests
             Assert.Equal(
                 "FONTE DE PESQUISA                                                  IN SEGES Nº 65, ART. 5º",
                 sheet.Cell("D5").GetString());
-            Assert.Equal("LINK PNCP", sheet.Cell("E5").GetString());
+            Assert.Equal("DATA HOMOLOGAÇÃO/OBTENÇÃO DOS PREÇOS", sheet.Cell("E5").GetString());
             Assert.Equal("VALOR DA COTAÇÃO", sheet.Cell("F5").GetString());
             Assert.Equal(
                 "Fornecedor a (Ribeirão Preto/SP)",
@@ -1199,7 +1199,7 @@ public sealed class QuotationTests
     }
 
     [Fact]
-    public async Task Workbook_WritesLinksAndCnpjsAsTextWithoutChangingTemplateColumns()
+    public async Task Workbook_WritesPriceDatesAndPreservesSourceLinksInReferences()
     {
         var analyzer = new QuotationAnalyzer(Today);
         var project = new QuotationProject(
@@ -1235,10 +1235,13 @@ public sealed class QuotationTests
             Assert.Contains("NI123", taxIds);
             Assert.All(sheet.Range("C6:C8").Cells(), cell => Assert.Equal(XLDataType.Text, cell.DataType));
             Assert.Equal("Inciso II", sheet.Cell("D6").GetString());
-            Assert.Equal(longUrl, sheet.Cell("E6").GetString());
-            Assert.Equal(XLDataType.Text, sheet.Cell("E6").DataType);
+            Assert.Equal("DATA HOMOLOGAÇÃO/OBTENÇÃO DOS PREÇOS", sheet.Cell("E5").GetString());
+            Assert.Equal(Today.AddDays(-20).ToDateTime(TimeOnly.MinValue), sheet.Cell("E6").GetDateTime());
+            Assert.Equal(XLDataType.DateTime, sheet.Cell("E6").DataType);
+            Assert.Equal("dd/MM/yyyy", sheet.Cell("E6").Style.NumberFormat.Format);
+            Assert.Contains(workbook.Worksheet("Referências").Column(26).CellsUsed(), cell => cell.GetString() == longUrl);
             Assert.False(sheet.Hyperlinks.TryGet(sheet.Cell("E6").Address, out _));
-            Assert.InRange(sheet.Column(5).Width, 44.8, 45.0);
+            Assert.InRange(sheet.Column(5).Width, 26.0, 28.0);
             Assert.Contains("0.00", sheet.Cell("F6").Style.NumberFormat.Format, StringComparison.Ordinal);
             Assert.DoesNotContain("0.0000", sheet.Cell("F6").Style.NumberFormat.Format, StringComparison.Ordinal);
         }
@@ -1248,6 +1251,28 @@ public sealed class QuotationTests
             var directory = Path.GetDirectoryName(path)!;
             if (Directory.Exists(directory)) Directory.Delete(directory, true);
         }
+    }
+
+    [Fact]
+    public async Task Workbook_ExportsEachResultDateAndDoesNotInventMissingDates()
+    {
+        var analyzer = new QuotationAnalyzer(Today);
+        var project = new QuotationProject(Guid.NewGuid(), "Datas", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+        var analysis = analyzer.Analyze(Line("Café", 10m, "pacote"),
+        [
+            Reference("missing", "c1", "03370573000103", 40m) with { ResultDate = null },
+            Reference("first", "c2", "60701190000104", 41m) with { ResultDate = Today.AddDays(-5) },
+            Reference("second", "c3", "11222333000181", 42m) with { ResultDate = Today.AddDays(-1) }
+        ]);
+        analysis = Confirm(analysis, analysis.Baskets.Single(basket => basket.IsRecommended));
+        await using var database = await TestDatabase.CreateAsync();
+        var path = Path.Combine(database.Directory, "dates.xlsx");
+        await new QuotationWorkbookService().ExportAsync(path, new QuotationProjectReport(project, [analysis]), "Responsável");
+        using var workbook = new XLWorkbook(path);
+        var sheet = workbook.Worksheet(1);
+        Assert.Equal("Não informada", sheet.Cell("E6").GetString());
+        Assert.Equal(Today.AddDays(-5).ToDateTime(TimeOnly.MinValue), sheet.Cell("E7").GetDateTime());
+        Assert.Equal(Today.AddDays(-1).ToDateTime(TimeOnly.MinValue), sheet.Cell("E8").GetDateTime());
     }
 
     [Fact]

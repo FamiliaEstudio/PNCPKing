@@ -22,6 +22,8 @@ public sealed class TimedQuotationAutomationService(
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(run);
+        var period = DataWindow.Normalize(run.StartDate, run.EndDate, DateOnly.FromDateTime(DateTime.Today));
+        run = run with { StartDate = period.Start, EndDate = period.End };
         if (run.Mode != QuotationAutomationMode.TimedRoundRobin)
         {
             throw new ArgumentException("A execução informada não usa o modo temporal.", nameof(run));

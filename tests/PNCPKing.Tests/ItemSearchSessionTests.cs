@@ -967,6 +967,37 @@ public sealed class ItemSearchSessionTests
     }
 
     [Fact]
+    public async Task PersistentSession_RetentionInvalidationRemovesStoredPricesAndCheckpoint()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contract = Assert.Single(CandidateContracts(1, "retention-session"));
+        await database.Repository.UpsertContractsAsync([contract]);
+        var path = Path.Combine(database.Directory, "retention-session.db");
+        await using var service = new ItemSearchSessionService(
+            new SessionPncpClient(new Dictionary<string, IReadOnlyList<ProcurementItem>> {
+                [contract.PncpId] = [Item(contract.PncpId, 1, "Café em grãos", true)] }),
+            database.Repository, path, persistentSession: true);
+        var previous = await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
+        await service.RunContinuousAsync(new PriceBatchRequest(1, true));
+        Assert.Single(await service.GetDiscoveredRowsAsync());
+
+        await service.InvalidateAsync();
+
+        Assert.Null(service.CurrentSession);
+        await using (var connection = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT (SELECT COUNT(*) FROM item_results) + " +
+                "(SELECT COUNT(*) FROM queried_items) + (SELECT COUNT(*) FROM search_hits) + " +
+                "(SELECT COUNT(*) FROM processed_contracts);";
+            Assert.Equal(0L, await command.ExecuteScalarAsync());
+        }
+        var restarted = await service.StartAsync(new SearchQuery("cafe", GeoScope.All));
+        Assert.NotEqual(previous.Id, restarted.Id);
+    }
+
+    [Fact]
     public async Task PersistentSession_ResumesAfterDisposalWithoutRepeatingCompletedCandidates()
     {
         await using var database = await TestDatabase.CreateAsync();

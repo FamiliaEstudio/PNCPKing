@@ -313,6 +313,31 @@ public sealed class GuardTests
     }
 
     [Fact]
+    public async Task Import_SkipsAContractThatExpiredAfterTheCampaignWasCreated()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contract = Contract("late-package", 1, DateTimeOffset.UtcNow);
+        await database.Repository.UpsertContractsAsync([contract]);
+        var root = Path.Combine(database.Directory, "drive");
+        var service = new GuardMasterService(new SqliteConnectionFactory(database.Repository.DatabasePath));
+        var campaign = await service.CreateOrReplaceCampaignAsync(root, [new GuardWorkerInput("Casa", 1)]);
+        var worker = Assert.Single(campaign.Workers);
+        var directory = Path.Combine(root, "packages", campaign.CampaignId, worker.WorkerId);
+        Directory.CreateDirectory(directory);
+        await GuardFileCodec.WritePackageAsync(Path.Combine(directory, "late" + GuardFormat.PackageExtension),
+            campaign.CampaignId, worker.WorkerId, [Snapshot(contract, DateTimeOffset.UtcNow, "Antigo", 1)]);
+        var cutoff = DataWindow.Start(DateOnly.FromDateTime(DateTime.Today));
+        await database.Repository.UpsertContractsAsync([contract with {
+            PublicationDate = cutoff.AddDays(-1).ToDateTime(TimeOnly.MinValue) }]);
+        var result = await service.ImportPackagesAsync(root);
+        Assert.Equal(0, result.ImportedContracts);
+        Assert.Equal(1, result.MissingContracts);
+        Assert.Null(await database.Repository.GetItemAsync(contract.PncpId, 1));
+        var next = await service.CreateOrReplaceCampaignAsync(root, [new GuardWorkerInput("Casa", 1)]);
+        Assert.Equal(0, next.ContractCount);
+    }
+
+    [Fact]
     public async Task Import_RollsBackWholePackageWhenCommitFails()
     {
         await using var database = await TestDatabase.CreateAsync();

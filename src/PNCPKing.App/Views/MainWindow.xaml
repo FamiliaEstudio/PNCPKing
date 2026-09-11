@@ -208,7 +208,7 @@
                                     </Style>
                                 </Border.Style>
                             </Border>
-                            <TextBlock Text="Índice nacional de itens — últimos 365 dias"
+                            <TextBlock Text="Índice nacional de itens — últimos 11 meses"
                                        FontWeight="SemiBold" VerticalAlignment="Center" />
                             <TextBlock Text="{Binding PriceCacheActivityText, Mode=OneWay}"
                                        Margin="12,0,0,0" VerticalAlignment="Center"
@@ -266,7 +266,7 @@
                                     </Style>
                                 </Border.Style>
                             </Border>
-                            <TextBlock Text="Índice nacional de preços — últimos 365 dias"
+                            <TextBlock Text="Índice nacional de preços — últimos 11 meses"
                                        FontWeight="SemiBold" VerticalAlignment="Center" />
                             <TextBlock Text="{Binding NationalPriceIndexActivityText, Mode=OneWay}"
                                        Margin="12,0,0,0" VerticalAlignment="Center"

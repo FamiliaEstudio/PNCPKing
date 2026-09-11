@@ -589,7 +589,7 @@ public sealed partial class SqlitePriceCacheRepository
         CancellationToken cancellationToken = default)
     {
         var today = DateOnly.FromDateTime(DateTime.Today);
-        var start = today.AddDays(-364);
+        var start = DataWindow.Start(today);
         var end = today;
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();

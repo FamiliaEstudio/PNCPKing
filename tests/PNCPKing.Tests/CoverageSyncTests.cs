@@ -168,7 +168,7 @@ public sealed class CoverageSyncTests
         await using var database = await TestDatabase.CreateAsync();
         var coverage = (ICoverageRepository)database.Repository;
         var today = new DateOnly(2026, 7, 20);
-        var start = today.AddDays(-364);
+        var start = DataWindow.Start(today);
         var olderGap = today.AddDays(-20);
         var modalities = new[] { 6L, 8L };
         await SeedCompleteCoverageAsync(coverage, start, today, modalities);
@@ -221,7 +221,7 @@ public sealed class CoverageSyncTests
         await using var database = await TestDatabase.CreateAsync();
         var coverage = (ICoverageRepository)database.Repository;
         var today = new DateOnly(2026, 7, 20);
-        var start = today.AddDays(-364);
+        var start = DataWindow.Start(today);
         await SeedCompleteCoverageAsync(coverage, start, today, [6]);
         await database.Repository.UpsertContractsAsync([
             RepositorySearchTests.Contract("preserved", "Registro preservado", "SP", 1) with
@@ -258,7 +258,7 @@ public sealed class CoverageSyncTests
         await using var database = await TestDatabase.CreateAsync();
         var coverage = (ICoverageRepository)database.Repository;
         var today = new DateOnly(2026, 7, 20);
-        var start = today.AddDays(-364);
+        var start = DataWindow.Start(today);
         await SeedCompleteCoverageAsync(coverage, start, today, [6]);
         await coverage.SetCoverageStatusAsync(today, today, 6, "ALL", CoverageStatus.Missing);
         await database.Repository.UpsertContractsAsync([

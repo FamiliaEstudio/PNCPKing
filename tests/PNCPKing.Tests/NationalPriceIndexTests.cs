@@ -283,7 +283,7 @@ public sealed class NationalPriceIndexTests
         IReadOnlyList<ProcurementItem> items)
     {
         var today = DateOnly.FromDateTime(DateTime.Today);
-        var start = today.AddDays(-364);
+        var start = DataWindow.Start(today);
         await database.Repository.UpsertContractsAsync(contracts);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
         await cache.SetAuthorizationAsync(true, start, today);

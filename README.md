@@ -1,6 +1,6 @@
 # PNCP King
 
-Aplicativo desktop Windows para manter um índice local dos últimos 365 dias do PNCP, pesquisar preços homologados por item e reunir as evidências documentais das cotações.
+Aplicativo desktop Windows para manter um índice local dos últimos 11 meses do PNCP, pesquisar preços homologados por item e reunir as evidências documentais das cotações.
 
 ## Executável pronto
 
@@ -11,15 +11,15 @@ A distribuição autocontida mais recente para Windows x64 está em `artifacts\w
 - prévia obrigatória com quantidade exata, estimativa de rede/banco/cache, tempo e espaço livre;
 - recálculo da prévia e confirmação explícita imediatamente antes da carga nacional;
 - sincronização por modalidade e período, com checkpoint estruturado, pausa, cancelamento e retomada;
-- manutenção automática enquanto o aplicativo está aberto, preenchendo primeiro os dias novos e as lacunas do último ano;
-- barra de cobertura com 365 segmentos, do dia mais antigo ao mais recente, e estados ausente, parcial, baixando, completo e falha;
-- remoção de contratações vencidas somente depois que a nova borda da janela estiver comprovadamente completa;
+- manutenção automática enquanto o aplicativo está aberto, preenchendo primeiro os dias novos e as lacunas dos últimos 11 meses;
+- barra de cobertura com um segmento por dia da janela de 11 meses de calendário, do dia mais antigo ao mais recente, e estados ausente, parcial, baixando, completo e falha;
+- remoção local de contratações vencidas na abertura e na mudança de dia, independentemente da conexão com o PNCP;
 - atualização por `dataAtualizacaoGlobal` com sobreposição de 48 horas;
 - SQLite em WAL com FTS5 e pesquisa sem diferença entre acentos/maiúsculas, sempre por prefixo;
 - sintaxe textual com E implícito ou `+`, OU por `OU`, `OR` ou `|`, frases entre aspas fechadas, exclusões globais por `-palavra` ou `-"frase"` e unidades aceitas por marcadores como `"pacote "unidade`; expressões antigas com `C:(...)` continuam aceitas, mas o bloco não é mais gerado nem recomendado para novas pesquisas;
 - pesquisa local primeiro: a primeira página entrega imediatamente até 50 preços homologados atuais exclusivamente do banco, com ordenação exata, eliminação de duplicidades e paginação por cursor, sem iniciar uma ampliação silenciosa pela API;
 - revalidação automática, visível e cancelável somente das contratações anteriormente carregadas cujos itens foram invalidados por uma nova `dataAtualizacaoGlobal`; itens ausentes ou nunca indexados continuam exclusivos da ação **Ampliar pela API**, e a grade só é substituída depois da revalidação completa;
-- filtros `Todos`, `Cidades Próximas`, `Sudeste` e UF, períodos de 7 a 365 dias ou personalizados e ordenação por relevância, data ou proximidade;
+- filtros `Todos`, `Cidades Próximas`, `Sudeste` e UF, períodos de 7, 30, 90 e 180 dias, 10 e 11 meses, ou personalizados dentro dessa janela e ordenação por relevância, data ou proximidade;
 - catálogo nacional embutido das localidades oficiais de 2022 do IBGE, usado somente para distância e ordem geográfica, sem consultas remotas por município;
 - percurso fixo de candidatos: Ribeirão Preto e os outros 49 municípios mais próximos por distância, restante de SP em amostra aleatória estável e depois cada UF pela proximidade de sua sede municipal mais próxima;
 - sorteio estável durante cada pesquisa, paginação por cursor sem repetição e nova rotação aleatória ao iniciar outra pesquisa;
@@ -28,9 +28,9 @@ A distribuição autocontida mais recente para Windows x64 está em `artifacts\w
 - grade de preços inicialmente enxuta com as nove colunas principais e layouts de visibilidade, ordem e largura persistidos por grade; o seletor permite restaurar o padrão;
 - biblioteca opcional Sweet Code, persistida no backup, com um crivo por linha e autocomplete por prefixo usando setas e `TAB`;
 - sessão retomável separada para a última pesquisa geral, com cursor, resultados e falhas preservados ao fechar; a automação continua usando armazenamento temporário isolado;
-- índice nacional opcional e móvel das listas de itens dos últimos 365 dias, autorizado somente após estimativa de espaço/tempo, com checkpoint por contratação, pausa, retomada, poda seletiva e reserva mínima de disco; a carga de fundo não consulta resultados homologados;
-- resultados homologados consultados somente para itens compatíveis com a pesquisa e preservados no banco principal para reutilização até a contratação receber uma atualização global;
-- segundo índice nacional opcional de preços dos últimos 365 dias, com autorização própria e download exclusivamente pelo botão agressivo; ele consulta somente itens com `temResultado=true`, conserva todos os resultados `Informado` com valor unitário homologado positivo e conclui sem repetir respostas vazias, canceladas, sem valor útil ou `404`;
+- índice nacional opcional e móvel das listas de itens dos últimos 11 meses, autorizado somente após estimativa de espaço/tempo, com checkpoint por contratação, pausa, retomada, poda seletiva e reserva mínima de disco; a carga de fundo não consulta resultados homologados;
+- resultados homologados consultados somente para itens compatíveis com a pesquisa e preservados no banco principal para reutilização até a contratação receber uma atualização global ou sair da janela de 11 meses;
+- segundo índice nacional opcional de preços dos últimos 11 meses, com autorização própria e download exclusivamente pelo botão agressivo; ele consulta somente itens com `temResultado=true`, conserva todos os resultados `Informado` com valor unitário homologado positivo e conclui sem repetir respostas vazias, canceladas, sem valor útil ou `404`;
 - faixa inclusiva de preço unitário homologado, aplicada somente a resultados ativos e sem conversão entre unidades;
 - projetos persistentes de cotação que copiam a amostra já coletada, respeitando a faixa informada e sem novas chamadas ao PNCP;
 - qualificação auditável por cobertura do descritivo solicitado, unidade/embalagem, quantidade em faixas graduais, proximidade e atualidade;
@@ -99,8 +99,8 @@ No instante da ativação, o banco atual é renomeado para `nome-do-banco.db.bef
 2. Clique em **Calcular tamanho** e aguarde a contagem das modalidades.
 3. Revise o volume, o espaço e a duração estimados.
 4. Clique em **Baixar/atualizar dados** e confirme os números exibidos.
-5. Opcionalmente, depois de concluir a cobertura das contratações, use **Índice nacional de itens — últimos 365 dias → Estimar e ativar**. Revise chamadas de listas, espaço e duração antes de autorizar. A carga armazena somente listas de itens; no modo normal ela cede o PNCP às ações visíveis, e o botão **Download agressivo** dedica a sessão às listas.
-6. Depois que as listas estiverem completas, você também pode usar **Índice nacional de preços — últimos 365 dias → Estimar e ativar**. A autorização não chama o PNCP: as consultas em massa só começam ao ativar o **Download agressivo** dessa segunda barra. Normalmente cada item produz uma vencedora positiva; quando o PNCP registrar várias vencedoras válidas para o mesmo item, todas são preservadas.
+5. Opcionalmente, depois de concluir a cobertura das contratações, use **Índice nacional de itens — últimos 11 meses → Estimar e ativar**. Revise chamadas de listas, espaço e duração antes de autorizar. A carga armazena somente listas de itens; no modo normal ela cede o PNCP às ações visíveis, e o botão **Download agressivo** dedica a sessão às listas.
+6. Depois que as listas estiverem completas, você também pode usar **Índice nacional de preços — últimos 11 meses → Estimar e ativar**. A autorização não chama o PNCP: as consultas em massa só começam ao ativar o **Download agressivo** dessa segunda barra. Normalmente cada item produz uma vencedora positiva; quando o PNCP registrar várias vencedoras válidas para o mesmo item, todas são preservadas.
 7. Digite o objeto, escolha geografia, período e ordenação e clique em **Pesquisar**.
 8. Você pode combinar termos: `café filtro` ou `café + filtro` exigem ambos; `café OU chá` aceita qualquer um; `"café torrado"` busca a frase; `café -cafeteira -"filtro de papel"` exclui descrições; `"pacote "unidade` aceita qualquer uma dessas unidades estruturadas do item. O parser continua aceitando `C:(...)` em expressões antigas, mas novas pesquisas e sugestões da IA não precisam nem recebem esse bloco.
 9. Ao clicar em **Pesquisar**, a primeira página de até 50 preços homologados atuais vem exclusivamente do banco local. Se houver contratações previamente carregadas e invalidadas por uma atualização oficial, o aplicativo mostra **Revalidando preços alterados no PNCP**, consulta somente essas contratações e atualiza a grade de uma vez ao concluir. **Parar preços** cancela essa revalidação sem apagar os preços locais nem seus checkpoints.
@@ -111,7 +111,7 @@ No instante da ativação, o banco atual é renomeado para `nome-do-banco.db.bef
 14. Faça novas pesquisas e adicione outros itens ao mesmo projeto. Se ampliar a coleta de um item, use **Atualizar amostra com a pesquisa atual**; a escolha anterior ficará marcada para reconfirmação.
 15. Use **Importar XLSX** para carregar vários itens pelas colunas A:G e, opcionalmente, o alvo da cesta em H. H vazia usa 3. A automação interpreta a coluna G como lotes de 50 contratações; falhas podem ser retomadas. **Exportar Excel e evidências** preenche o modelo de avaliação e salva o PDF na mesma pasta; **Exportar somente Excel** não gera documentos de evidência.
 16. Na aba **Cotações**, use **Exportar pacote** para criar um `.pncpcotacao` portátil com a cotação selecionada e seus prints. **Importar pacote** mostra uma prévia e, se o mesmo identificador já existir, permite importar como cópia, substituir com recuperação automática ou cancelar.
-17. Para manter uma contratação no cache permanente, selecione-a na segunda aba e use **Buscar/atualizar todos os preços**.
+17. Para fixar uma contratação no cache enquanto estiver na janela de 11 meses, selecione-a na segunda aba e use **Buscar/atualizar todos os preços**.
 18. Use **Abrir contratação no PNCP** para acessar a página oficial. Use **Acessar documentos** para baixar, extrair e consolidar os PDFs; o arquivo será salvo em `Downloads` e somente será aberto se você escolher **Abrir PDF** ao final.
 19. Use **Escolher colunas** para ajustar cada grade uma vez. Visibilidade, ordem e largura são restauradas nos usos seguintes; **Restaurar padrão** volta ao layout original.
 20. Se ocorrer uma falha de abertura ou importação, use **Logs de diagnóstico**, copie o arquivo `.log` mais recente e envie-o para análise. Mesmo quando a janela principal não abre, a mensagem de erro informa o caminho exato do log.
@@ -126,8 +126,14 @@ Os pacotes prontos aparecem em `packages` e contêm somente listas de itens, nun
 
 O total homologado geral mostrado na grade de contratações é apenas um resumo. Os preços dos itens vêm exclusivamente dos campos de resultado homologado do PNCP; valores estimados nunca são usados como substitutos.
 
-Após a primeira carga autorizada, o programa verifica periodicamente se o calendário avançou ou se há lacunas. Ele baixa primeiro as publicações ausentes, faz a atualização global com sobreposição de 48 horas e só então ajusta a borda antiga da janela de 365 dias. Uma falha nunca antecipa a exclusão de registros.
+A janela inclusiva começa no mesmo dia de 11 meses de calendário atrás e termina hoje. O corte PNCP continua usando a publicação da contratação; a data do resultado/homologação aparece na coluna **Data Homologação/Obtenção do Preço** do Excel. Para preços web, essa coluna usa a captura já registrada. Datas de resultado ausentes são exportadas como **Não informada**, e os links permanecem na aba **Referências**.
 
-O estudo de custo está em `docs/price-load-study.md`. Os índices de listas e preços são opcionais, limitados à janela móvel de 365 dias e exigem estimativas e autorizações independentes. Autorizar preços não inicia tráfego; somente seu modo agressivo consulta um endpoint de resultado por item elegível ainda incompleto.
+A limpeza ocorre ao abrir e quando o dia muda, inclusive offline. Ela remove contratações vencidas mesmo que fixadas e referências antigas das cotações, preservando os projetos e itens e exigindo reconfirmação das cestas afetadas. Contratações sem publicação mantêm o tratamento anterior: não são excluídas por ausência de data e ficam fora das buscas por período. Backups e pacotes antigos passam pela mesma regra ao serem importados; os arquivos originais permanecem preservados.
+
+Na primeira atualização de um banco existente, o aplicativo também compacta o SQLite e verifica sua integridade. A operação exige reserva de espaço livre de duas vezes o tamanho do banco; se faltar espaço, a compactação fica pendente para a próxima abertura. As limpezas posteriores reutilizam o espaço interno. Após a carga autorizada, a sincronização continua preenchendo lacunas e aplicando a atualização global com sobreposição de 48 horas.
+
+As medições em cópias isoladas e os cenários de validação estão em [docs/retention-validation.md](docs/retention-validation.md).
+
+O estudo de custo está em `docs/price-load-study.md`. Os índices de listas e preços são opcionais, limitados à janela móvel de 11 meses e exigem estimativas e autorizações independentes. Autorizar preços não inicia tráfego; somente seu modo agressivo consulta um endpoint de resultado por item elegível ainda incompleto.
 
 O Sweet Code pode ser aberto ao lado da pesquisa. Cole um crivo por linha, ative as sugestões e use ↑/↓ e `TAB` para preencher sem impedir a digitação livre.

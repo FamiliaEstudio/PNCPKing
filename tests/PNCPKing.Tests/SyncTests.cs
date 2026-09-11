@@ -47,11 +47,11 @@ public sealed class SyncTests
     }
 
     [Fact]
-    public async Task Synchronization_PrunesOnlyContractsOutsideTheRolling365Days()
+    public async Task Synchronization_PrunesOnlyContractsOutsideTheRollingElevenMonths()
     {
         await using var database = await TestDatabase.CreateAsync();
         var end = new DateOnly(2026, 7, 20);
-        var cutoff = end.AddDays(-364);
+        var cutoff = DataWindow.Start(end);
         await database.Repository.UpsertContractsAsync([
             RepositorySearchTests.Contract("expired", "Antiga", "SP", 1) with
             {

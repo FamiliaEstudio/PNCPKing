@@ -29,7 +29,7 @@ Mesmo no ritmo ideal observado na amostra e com duas chamadas simultâneas, o pi
 
 ## Índice nacional de itens implementado
 
-A carga indiscriminada de resultados não integra mais a fila nacional. Depois da cobertura completa das contratações e de uma autorização separada, o PNCP King mantém somente as listas de itens da janela móvel de 365 dias.
+A carga indiscriminada de resultados não integra mais a fila nacional. Depois da cobertura completa das contratações e de uma autorização separada, o PNCP King mantém somente as listas de itens da janela móvel de 11 meses.
 
 Para as 1.491.875 contratações da projeção, a carga inicial passa a ter:
 

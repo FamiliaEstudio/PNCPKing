@@ -97,7 +97,7 @@ public partial class AiQuotationWindow : Window
         var geoChoices = BuildGeoChoices();
         GeoFilterComboBox.ItemsSource = geoChoices;
         GeoFilterComboBox.SelectedIndex = geoChoices.Count - 1;
-        StartDatePicker.SelectedDate = DateTime.Today.AddDays(-364);
+        StartDatePicker.SelectedDate = DataWindow.Start(DateOnly.FromDateTime(DateTime.Today)).ToDateTime(TimeOnly.MinValue);
         EndDatePicker.SelectedDate = DateTime.Today;
         EstimateChoiceComboBox.SelectedIndex = 0;
         SafetyMarginTextBox.Text = settings.AiSafetyMarginPercent.ToString("N0", CultureInfo.CurrentCulture);
@@ -513,8 +513,9 @@ public partial class AiQuotationWindow : Window
             }
 
             var geo = ((GeoChoice)GeoFilterComboBox.SelectedItem).Filter;
-            var start = DateOnly.FromDateTime(StartDatePicker.SelectedDate ?? DateTime.Today.AddDays(-364));
+            var start = DateOnly.FromDateTime(StartDatePicker.SelectedDate ?? DataWindow.Start(DateOnly.FromDateTime(DateTime.Today)).ToDateTime(TimeOnly.MinValue));
             var end = DateOnly.FromDateTime(EndDatePicker.SelectedDate ?? DateTime.Today);
+            DataWindow.Validate(start, end, DateOnly.FromDateTime(DateTime.Today));
             long candidates = 0;
             long cachedItems = 0;
             long cachedPrices = 0;

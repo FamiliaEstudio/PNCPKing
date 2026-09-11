@@ -108,7 +108,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private ItemSearchDisplayRow? _selectedItemSearchRow;
     private string _statusText = "Pronto";
     private string _datasetSummary = "Nenhuma carga concluída.";
-    private string _coverageSummary = "0 de 365 dias completos - 0,0%";
+    private string _coverageSummary = "Cobertura dos últimos 11 meses: aguardando leitura";
     private string _preflightSummary = "Calcule o tamanho antes de iniciar a primeira carga nacional.";
     private string _itemSummary = "Selecione uma contratação para consultar seu cache permanente.";
     private string _itemSearchSummary = "Digite um objeto para pesquisar também dentro dos itens.";
@@ -296,12 +296,13 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             new DateRangeOption("Últimos 30 dias", 30),
             new DateRangeOption("Últimos 90 dias", 90),
             new DateRangeOption("Últimos 180 dias", 180),
-            new DateRangeOption("Últimos 365 dias", 365),
+            new DateRangeOption("Últimos 10 meses", null, Months: 10),
+            new DateRangeOption("Últimos 11 meses", null, Months: DataWindow.Months),
             new DateRangeOption("Datas personalizadas", null, true)
         ];
-        _selectedDateRange = DateRanges[4];
+        _selectedDateRange = DateRanges[5];
         var today = DateTime.Today;
-        _customStartDate = today.AddDays(-364);
+        _customStartDate = DataWindow.Start(DateOnly.FromDateTime(today)).ToDateTime(TimeOnly.MinValue);
         _customEndDate = today;
 
         SearchCommand = new AsyncRelayCommand(
@@ -403,7 +404,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _maintenanceTimer = new DispatcherTimer { Interval = SyncService.AutomaticRetryDelay };
         _maintenanceTimer.Tick += OnMaintenanceTimerTick;
         _healthTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-        _healthTimer.Tick += (_, _) => RefreshPerformanceHealth();
+        _healthTimer.Tick += async (_, _) =>
+        {
+            RefreshPerformanceHealth();
+            await ApplyDailyRetentionAsync().ConfigureAwait(true);
+        };
     }
 
     public RangeObservableCollection<ContractRecord> ContractResults { get; } = [];
@@ -1181,6 +1186,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        await ApplyLocalRetentionAsync(compact: true, cancellationToken).ConfigureAwait(true);
         await LoadSweetCodesAsync().ConfigureAwait(true);
     }
 
@@ -2364,8 +2370,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                     added);
             }
             var message =
-                $"{value.ContractsExamined:N0} contratações examinadas; " +
-                $"{actionRowsAlreadyLoaded + loaded:N0}/{targetRows:N0} preços encontrados";
+                $"{actionRowsAlreadyLoaded + loaded:N0}/{targetRows:N0} preços encontrados no banco local";
+            if (value.ContractsExamined > 0)
+            {
+                message = $"{value.ContractsExamined:N0} contratações examinadas; " + message;
+            }
             ItemSearchSummary = value.Completed ? message : message + "; continuando…";
             StatusText = ItemSearchSummary;
             HasMoreItemCandidates = value.HasMore || !_remotePriceExpansionStarted;
@@ -2728,7 +2737,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private async Task CalculatePreflightCoreAsync(CancellationToken cancellationToken)
     {
         var endDate = DateOnly.FromDateTime(DateTime.Today);
-        var startDate = endDate.AddDays(-364);
+        var startDate = DataWindow.Start(endDate);
         var progress = new Progress<string>(message => StatusText = message);
         Preflight = await _preflightService.CalculateAsync(
             startDate,
@@ -2796,7 +2805,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         if (state.LastSuccessfulSync is null)
         {
             var incomplete = await _repository.GetLatestIncompleteSyncAsync(cancellationToken).ConfigureAwait(true);
-            var targetStart = currentEnd.AddDays(-364);
+            var targetStart = DataWindow.Start(currentEnd);
             var canResume = incomplete is { Mode: SyncMode.Publication };
             var start = canResume && incomplete!.StartDate > targetStart
                 ? incomplete.StartDate
@@ -2806,7 +2815,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 : currentEnd;
 
             // A checkpoint may have fallen completely outside the moving
-            // one-year window while the application was closed. In that case
+            // 11-month window while the application was closed. In that case
             // start a valid current load; never send an inverted date range.
             if (start > end)
             {
@@ -2839,7 +2848,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         await _repository.MarkOptimizePendingAsync(cancellationToken).ConfigureAwait(true);
         _lastOptimizeDate = null;
         OperationProgress = 100;
-        StatusText = "Sincronização concluída; janela móvel de 365 dias atualizada.";
+        StatusText = "Sincronização concluída; janela móvel de 11 meses atualizada.";
         await RefreshDatasetSummaryAsync().ConfigureAwait(true);
         await RefreshCoverageAsync().ConfigureAwait(true);
         if (_activeSearchQuery is not null)
@@ -2864,7 +2873,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             var incomplete = await _repository.GetLatestIncompleteSyncAsync(visibleActivityCancellation)
                 .ConfigureAwait(false);
             var today = DateOnly.FromDateTime(DateTime.Today);
-            var targetStart = today.AddDays(-364);
+            var targetStart = DataWindow.Start(today);
             var coverageComplete = _repository is ICoverageRepository coverage &&
                                    await coverage.IsCoverageCompleteAsync(
                                            targetStart,
@@ -3242,12 +3251,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private async Task RefreshCoverageAsync()
     {
         var end = DateOnly.FromDateTime(DateTime.Today);
-        var start = end.AddDays(-364);
+        var start = DataWindow.Start(end);
         IReadOnlyList<CoverageDay> stored = _repository is ICoverageRepository coverageRepository
             ? await Task.Run(() => coverageRepository.GetCoverageDaysAsync(start, end)).ConfigureAwait(true)
             : [];
         var byDate = stored.ToDictionary(day => day.Date);
-        var displayDays = new List<CoverageDay>(365);
+        var displayDays = new List<CoverageDay>(end.DayNumber - start.DayNumber + 1);
         for (var date = start; date <= end; date = date.AddDays(1))
         {
             displayDays.Add(byDate.TryGetValue(date, out var day)
@@ -4154,8 +4163,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         var today = DateOnly.FromDateTime(DateTime.Today);
         if (!SelectedDateRange.IsCustom)
         {
-            var days = SelectedDateRange.Days ?? 365;
-            return (today.AddDays(-(days - 1)), today);
+            return (SelectedDateRange.Start(today), today);
         }
 
         if (CustomStartDate is null || CustomEndDate is null)
@@ -4165,11 +4173,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
         var start = DateOnly.FromDateTime(CustomStartDate.Value.Date);
         var end = DateOnly.FromDateTime(CustomEndDate.Value.Date);
-        if (start > end)
-        {
-            throw new ArgumentException("A data inicial deve ser anterior ou igual à data final.");
-        }
-
+        DataWindow.Validate(start, end, today);
         return (start, end);
     }
 

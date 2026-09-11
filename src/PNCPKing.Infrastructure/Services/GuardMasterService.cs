@@ -572,8 +572,9 @@ public sealed class GuardMasterService
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT global_updated_at FROM contracts WHERE pncp_id = $id;";
+        command.CommandText = "SELECT global_updated_at FROM contracts WHERE pncp_id = $id AND publication_date >= $cutoff;";
         command.Parameters.AddWithValue("$id", contractId);
+        command.Parameters.AddWithValue("$cutoff", DataWindow.Start(DateOnly.FromDateTime(DateTime.Today)).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -619,10 +620,14 @@ public sealed class GuardMasterService
                    c.publication_date, c.global_updated_at
               FROM contracts c
              LEFT JOIN contract_item_snapshots s ON s.contract_id = c.pncp_id
-             WHERE s.contract_id IS NULL
-                OR COALESCE(s.source_global_updated_at, '') <> COALESCE(c.global_updated_at, '')
+             WHERE c.publication_date >= $cutoff AND c.publication_date < $end
+               AND (s.contract_id IS NULL
+                OR COALESCE(s.source_global_updated_at, '') <> COALESCE(c.global_updated_at, ''))
              ORDER BY c.pncp_id;
             """;
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        command.Parameters.AddWithValue("$cutoff", DataWindow.Start(today).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$end", today.AddDays(1).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
         var contracts = new List<GuardPlanContract>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))

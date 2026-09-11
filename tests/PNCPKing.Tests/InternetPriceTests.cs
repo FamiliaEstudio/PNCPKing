@@ -54,7 +54,7 @@ public sealed class InternetPriceTests
             SupplierTaxId = "11222333000181",
             PriceImage = priceImage,
             TaxIdImage = taxImage,
-            CapturedAt = now,
+            CapturedAt = now.AddDays(-5),
             CreatedAt = now,
             UpdatedAt = now
         };
@@ -96,7 +96,8 @@ public sealed class InternetPriceTests
             Assert.Single(sourceLabels, value => value == "Inciso III");
             Assert.Equal("11.222.333/0001-81", sheet.Cell(internetRow, 3).GetString());
             Assert.Equal("Inciso III", sheet.Cell(internetRow, 4).GetString());
-            Assert.Equal(draft.SourceUrl, sheet.Cell(internetRow, 5).GetString());
+            Assert.Equal(draft.CapturedAt.LocalDateTime.Date, sheet.Cell(internetRow, 5).GetDateTime());
+            Assert.Equal("dd/MM/yyyy", sheet.Cell(internetRow, 5).Style.NumberFormat.Format);
             Assert.Equal(105m, sheet.Cell(internetRow, 6).GetValue<decimal>());
             Assert.False(sheet.Hyperlinks.TryGet(sheet.Cell(internetRow, 5).Address, out _));
         }

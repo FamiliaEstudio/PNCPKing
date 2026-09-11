@@ -22,6 +22,14 @@ public sealed class QuotationItemSearchService(
                 workspace.Slot,
                 cancellationToken)
             .ConfigureAwait(false) ?? workspace;
+        var period = DataWindow.Normalize(stored.StartDate, stored.EndDate, DateOnly.FromDateTime(DateTime.Today));
+        if (period.Start != stored.StartDate || period.End != stored.EndDate)
+        {
+            stored = stored with { StartDate = period.Start, EndDate = period.End,
+                Checkpoint = new QuotationItemSearchCheckpoint(),
+                StatusMessage = "Período ajustado à janela de 11 meses; candidatas reiniciadas." };
+            await workspaces.SaveWorkspaceAsync(stored, cancellationToken).ConfigureAwait(false);
+        }
         var hits = await workspaces.GetWorkspaceHitsAsync(
                 workspace.LineId,
                 workspace.Slot,
@@ -591,10 +599,7 @@ public sealed class QuotationItemSearchService(
             throw new ArgumentException("Informe uma expressão de pesquisa.");
         }
 
-        if (workspace.StartDate > workspace.EndDate)
-        {
-            throw new ArgumentException("A data inicial deve ser anterior ou igual à data final.");
-        }
+        DataWindow.Validate(workspace.StartDate, workspace.EndDate, DateOnly.FromDateTime(DateTime.Today));
 
         if (workspace.BatchCount is < 1 or > 100)
         {

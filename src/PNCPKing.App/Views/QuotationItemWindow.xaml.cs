@@ -660,6 +660,14 @@ public partial class QuotationItemWindow : Window
         menu.IsOpen = true;
     }
 
+    public async Task PrepareForRetentionAsync()
+    {
+        ViewModel.StopSearch();
+        await _interactionGate.WaitAsync().ConfigureAwait(true);
+        try { await ViewModel.PrepareForRetentionAsync().ConfigureAwait(true); }
+        finally { _interactionGate.Release(); }
+    }
+
     private async Task RunAsync(Func<Task> action)
     {
         if (!await _interactionGate.WaitAsync(0).ConfigureAwait(true))

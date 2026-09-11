@@ -4,13 +4,12 @@ using PNCPKing.Core.Models;
 namespace PNCPKing.Infrastructure.Services;
 
 /// <summary>
-/// Keeps the authorized national dataset complete for the rolling 365-day
+/// Keeps the authorized national dataset complete for the rolling 11-month
 /// window. The coordinator never performs the initial user authorization; it
 /// is intended to run only after the application has recorded that decision.
 /// </summary>
 public sealed class AutoSyncCoordinator
 {
-    public const int WindowDays = 365;
     public const int WorkItemReadLimit = 512;
 
     private readonly IPncpClient _client;
@@ -40,7 +39,7 @@ public sealed class AutoSyncCoordinator
         CancellationToken cancellationToken = default)
     {
         var endDate = DateOnly.FromDateTime(_timeProvider.GetLocalNow().DateTime);
-        var startDate = endDate.AddDays(-(WindowDays - 1));
+        var startDate = DataWindow.Start(endDate);
         var modalities = (await _client.GetModalitiesAsync(cancellationToken).ConfigureAwait(false))
             .Where(modality => modality.Active)
             .DistinctBy(modality => modality.Id)
@@ -129,7 +128,7 @@ public sealed class AutoSyncCoordinator
             0,
             coverageBatches,
             coverageBatches,
-            "Cobertura dos 365 dias completa; atualizando as últimas 48 horas"));
+            "Cobertura dos 11 meses completa; atualizando as últimas 48 horas"));
 
         // Date-only PNCP endpoints are inclusive. Starting two dates before
         // today conservatively covers every instant in the preceding 48 hours.
@@ -147,9 +146,8 @@ public sealed class AutoSyncCoordinator
             progress,
             cancellationToken).ConfigureAwait(false);
 
-        // Pruning and the dataset completion marker are deliberately last. A
-        // failure in either the gap fill or global overlap preserves old data
-        // and leaves the previous successful dataset state untouched.
+        // Finalize network coverage only after gap filling and global updates
+        // succeed. Local retention also runs independently at startup/day rollover.
         await _repository.PruneContractsBeforeAsync(startDate, cancellationToken).ConfigureAwait(false);
         await _repository.SetDatasetStateAsync(
             startDate,

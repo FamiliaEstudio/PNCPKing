@@ -35,7 +35,7 @@ public sealed class NationalPriceIndexService(
 
         using var span = _performance.Begin("national-price-index", "synchronize");
         var today = DateOnly.FromDateTime(DateTime.Today);
-        var start = today.AddDays(-(PriceCacheService.WindowDays - 1));
+        var start = DataWindow.Start(today);
         var policy = await cache.GetNationalPriceIndexPolicyAsync(cancellationToken).ConfigureAwait(false);
         if (!policy.Authorized || !policy.Enabled || policy.Paused)
         {
@@ -137,7 +137,7 @@ public sealed class NationalPriceIndexService(
                     {
                         await cache.SetNationalPriceIndexStatusAsync(
                                 PriceCacheStatus.Complete,
-                                "Índice móvel de preços dos últimos 365 dias completamente consultado.",
+                                "Índice móvel de preços dos últimos 11 meses completamente consultado.",
                                 cancellationToken)
                             .ConfigureAwait(false);
                     }

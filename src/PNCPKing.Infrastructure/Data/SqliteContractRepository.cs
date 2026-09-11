@@ -7,9 +7,9 @@ using PNCPKing.Core.Search;
 
 namespace PNCPKing.Infrastructure.Data;
 
-public sealed class SqliteContractRepository : IContractRepository, ICoverageRepository
+public sealed partial class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 26;
+    public const int CurrentSchemaVersion = 27;
 
     private const string GeographicGroupExpression = "CASE WHEN c.geo_layer = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -694,6 +694,21 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             span.Complete();
             version = 26;
+        }
+
+        if (version < 27)
+        {
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = transaction;
+            await ApplySchemaV27Async(connection, transaction, cancellationToken).ConfigureAwait(false);
+            if (previousVersion == 0)
+            {
+                migration.CommandText = "UPDATE maintenance_state SET retention_compaction_completed = 1 WHERE id = 1;";
+                await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 27;
         }
 
         stopwatch.Stop();
@@ -3389,19 +3404,9 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
             .ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            DELETE FROM contracts
-             WHERE publication_date < $cutoff
-               AND NOT EXISTS(
-                   SELECT 1 FROM price_cache_contracts pc
-                    WHERE pc.contract_id = contracts.pncp_id AND pc.user_pinned = 1)
-               AND NOT EXISTS(
-                   SELECT 1 FROM quotation_references qr
-                    WHERE qr.contract_id = contracts.pncp_id);
-            """;
-        command.Parameters.AddWithValue("$cutoff", cutoff.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await PruneExpiredDataAsync(connection, transaction, cutoff, cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<long> GetCacheSizeBytesAsync(CancellationToken cancellationToken = default)
@@ -3910,8 +3915,17 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
         update.CommandText = ContractUpdateSql;
         AddContractParameters(update);
         long inserted = 0;
+        await using var retention = connection.CreateCommand();
+        retention.Transaction = transaction;
+        retention.CommandText = "SELECT retention_cutoff FROM maintenance_state WHERE id = 1;";
+        var cutoffText = await retention.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+        var hasCutoff = DateOnly.TryParseExact(cutoffText, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+            DateTimeStyles.None, out var cutoff);
+        var receivedExpired = false;
         foreach (var contract in contracts)
         {
+            receivedExpired |= hasCutoff && contract.PublicationDate is { } published &&
+                DateOnly.FromDateTime(published.DateTime) < cutoff;
             SetContractParameters(insert, contract);
             if (await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1)
             {
@@ -3923,6 +3937,8 @@ public sealed class SqliteContractRepository : IContractRepository, ICoverageRep
             await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        if (receivedExpired)
+            await PruneExpiredDataAsync(connection, transaction, cutoff, cancellationToken).ConfigureAwait(false);
         return inserted;
     }
 

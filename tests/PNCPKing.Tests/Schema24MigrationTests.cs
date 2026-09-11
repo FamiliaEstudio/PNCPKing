@@ -1,3 +1,4 @@
+using PNCPKing.Core.Models;
 using Microsoft.Data.Sqlite;
 using PNCPKing.Infrastructure.Data;
 
@@ -10,7 +11,7 @@ public sealed class Schema24MigrationTests
     {
         await using var database = await TestDatabase.CreateAsync();
         var today = DateOnly.FromDateTime(DateTime.Today);
-        var start = today.AddDays(-364);
+        var start = DataWindow.Start(today);
         var contract = PriceCacheTests.RecentContract("schema-24", today, 1);
         await database.Repository.UpsertContractsAsync([contract]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
@@ -39,8 +40,8 @@ public sealed class Schema24MigrationTests
 
         var result = await database.Repository.InitializeAsync();
         Assert.Equal(23, result.PreviousVersion);
-        Assert.Equal(26, result.CurrentVersion);
-        Assert.Equal([24, 25, 26], result.AppliedMigrations);
+        Assert.Equal(27, result.CurrentVersion);
+        Assert.Equal([24, 25, 26, 27], result.AppliedMigrations);
 
         await using var verify = new SqliteConnection($"Data Source={database.Repository.DatabasePath}");
         await verify.OpenAsync();

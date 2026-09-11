@@ -24,8 +24,8 @@ public sealed class PriceCacheTests
             1,
             [Result(contract, 1, 1, true)]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
-        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
+        await cache.PrepareWindowAsync(DataWindow.Start(today), today);
 
         var itemCacheBytes = await database.Repository.GetCacheSizeBytesAsync();
         var priceCacheBytes = (await cache.GetProgressAsync()).OccupiedBytes;
@@ -60,30 +60,30 @@ public sealed class PriceCacheTests
         await database.Repository.InitializeAsync();
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
         var policy = await cache.GetPolicyAsync();
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
-        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
+        await cache.PrepareWindowAsync(DataWindow.Start(today), today);
         var progress = await cache.GetProgressAsync();
 
         Assert.False(policy.Authorized);
         Assert.Equal(1, progress.TotalContracts);
         Assert.Equal(1, progress.CompletedContracts);
-        Assert.Equal(26, SqliteContractRepository.CurrentSchemaVersion);
+        Assert.Equal(27, SqliteContractRepository.CurrentSchemaVersion);
         Assert.Equal((1L, 1L, 1L), await database.Repository.GetCountsAsync());
     }
 
     [Fact]
-    public async Task Window_IsInclusiveNewestFirstAndExcludesTheThreeHundredSixtyFifthPreviousDay()
+    public async Task Window_IsInclusiveNewestFirstAndExcludesPricesBeforeElevenMonths()
     {
         await using var database = await TestDatabase.CreateAsync();
         var today = DateOnly.FromDateTime(DateTime.Today);
         await database.Repository.UpsertContractsAsync([
             RecentContract("newest", today, 1),
-            RecentContract("edge", today.AddDays(-364), 2),
-            RecentContract("outside", today.AddDays(-365), 3)
+            RecentContract("edge", DataWindow.Start(today), 2),
+            RecentContract("outside", DataWindow.Start(today).AddDays(-1), 3)
         ]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
-        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
+        await cache.PrepareWindowAsync(DataWindow.Start(today), today);
 
         var progress = await cache.GetProgressAsync();
         var next = await cache.GetNextWorkAsync(DateTimeOffset.UtcNow);
@@ -101,8 +101,8 @@ public sealed class PriceCacheTests
         var contract = RecentContract("coffee", today, 1);
         await database.Repository.UpsertContractsAsync([contract]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
-        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
+        await cache.PrepareWindowAsync(DataWindow.Start(today), today);
         await cache.MarkContractDownloadingAsync(contract.PncpId, true);
         await database.Repository.UpsertItemsAsync(contract.PncpId, [Item(contract, 1)], false);
         await database.Repository.ReplaceItemResultsAsync(contract.PncpId, 1, [
@@ -253,6 +253,41 @@ public sealed class PriceCacheTests
             page.Rows!.Select(RowKey),
             streamed.SelectMany(value => value.Rows).Select(RowKey));
         Assert.Equal(CursorKey(page.Cursor), CursorKey(streamed[^1].Cursor));
+    }
+
+    [Fact]
+    public async Task NewestSearch_WithUnitUsesItemIndexAboveCardinalityThreshold()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var contract = RecentContract("indexed-broad", today, 1);
+        await database.Repository.UpsertContractsAsync([contract]);
+        await SeedHighCardinalityItemsAsync(database.Repository.DatabasePath, contract.PncpId);
+        var telemetry = new RecordingSearchTelemetry();
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath, telemetry);
+        const string text = "cafe comum -torrado \"kg";
+        var query = new SearchQuery(text, GeoScope.All, today.AddDays(-1), today, Sort: SearchSort.Newest);
+        var expression = SearchText.Parse(text);
+        var progress = new List<PriceCacheLocalProgress>();
+        var first = await cache.SearchLocalAfterAsync(query, expression, 20m, 30m, null, 25,
+            new InlineProgress<PriceCacheLocalProgress>(progress.Add));
+        var second = await cache.SearchLocalAfterAsync(query, expression, 20m, 30m, first.Cursor, 25);
+
+        var expected = Enumerable.Range(1, 30_001).Where(n => n % 2 == 0 && n % 4 != 0).Take(50);
+        Assert.Equal(expected.Select(n => (long)n), first.Rows!.Concat(second.Rows!).Select(row => row.Item.ItemNumber));
+        Assert.DoesNotContain(telemetry.Measurements, value =>
+            value.Phase is "fts-cardinality" or "local-contract-chunks");
+        Assert.True(progress[^1].Completed);
+        Assert.Equal(first.Rows!.Select(RowKey), progress.SelectMany(value => value.Rows).Select(RowKey));
+        Assert.Equal(CursorKey(first.Cursor), CursorKey(progress[^1].Cursor));
+
+        // Broad expressions without post-filters can fill a page from recent contracts;
+        // preserve that path instead of loading every matching item in the entire archive.
+        const string broadText = "cafe comum -torrado";
+        var broad = await cache.SearchLocalAfterAsync(query with { Text = broadText },
+            SearchText.Parse(broadText), 20m, 30m, null, 25);
+        Assert.Equal(first.Rows!.Select(RowKey), broad.Rows!.Select(RowKey));
+        Assert.Contains(telemetry.Measurements, value => value.Phase == "local-contract-chunks");
     }
 
     [Fact]
@@ -502,8 +537,8 @@ public sealed class PriceCacheTests
         var pinned = RecentContract("pinned", today, 2);
         await database.Repository.UpsertContractsAsync([removable, pinned]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
-        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
+        await cache.PrepareWindowAsync(DataWindow.Start(today), today);
         foreach (var contract in new[] { removable, pinned })
         {
             await cache.MarkContractDownloadingAsync(contract.PncpId, true);
@@ -531,7 +566,7 @@ public sealed class PriceCacheTests
         var healthy = RecentContract("healthy", today.AddDays(-1), 2);
         await database.Repository.UpsertContractsAsync([failing, healthy]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
         var client = new CacheClient(failing.PncpId);
         var service = new PriceCacheService(
             client,
@@ -566,11 +601,11 @@ public sealed class PriceCacheTests
         var contract = RecentContract("interrupted", today, 1);
         await database.Repository.UpsertContractsAsync([contract]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
-        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
+        await cache.PrepareWindowAsync(DataWindow.Start(today), today);
         await cache.MarkContractDownloadingAsync(contract.PncpId, true);
 
-        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        await cache.PrepareWindowAsync(DataWindow.Start(today), today);
         var recovered = await cache.GetNextWorkAsync(DateTimeOffset.UtcNow);
 
         Assert.NotNull(recovered);
@@ -586,8 +621,8 @@ public sealed class PriceCacheTests
         var first = RecentContract("prepared-first", today.AddDays(-1), 1);
         await database.Repository.UpsertContractsAsync([first]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
-        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
+        await cache.PrepareWindowAsync(DataWindow.Start(today), today);
 
         await using (var connection = new SqliteConnection($"Data Source={database.Repository.DatabasePath}"))
         {
@@ -601,7 +636,7 @@ public sealed class PriceCacheTests
             await sentinel.ExecuteNonQueryAsync();
         }
 
-        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        await cache.PrepareWindowAsync(DataWindow.Start(today), today);
         var second = RecentContract("prepared-second", today, 2);
         await database.Repository.UpsertContractsAsync([second]);
 
@@ -631,8 +666,8 @@ public sealed class PriceCacheTests
         var failed = RecentContract("statistics-failed", today.AddDays(-1), 2);
         await database.Repository.UpsertContractsAsync([completed, failed]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
-        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
+        await cache.PrepareWindowAsync(DataWindow.Start(today), today);
 
         await cache.MarkContractDownloadingAsync(completed.PncpId, true);
         await database.Repository.UpsertItemsAsync(completed.PncpId, [Item(completed, 1)], false);
@@ -668,7 +703,7 @@ public sealed class PriceCacheTests
 
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
         var before = DateTimeOffset.UtcNow.AddSeconds(-1);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
         var policy = await cache.GetPolicyAsync();
 
         Assert.NotNull(policy.AuthorizedAt);
@@ -684,7 +719,7 @@ public sealed class PriceCacheTests
         var healthy = RecentContract("healthy-after-timeout", today.AddDays(-1), 2);
         await database.Repository.UpsertContractsAsync([hanging, healthy]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
         var service = new PriceCacheService(
             new TimeoutCacheClient(hanging.PncpId),
             database.Repository,
@@ -709,7 +744,7 @@ public sealed class PriceCacheTests
         var contract = RecentContract("missing-list", today, 1);
         await database.Repository.UpsertContractsAsync([contract]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
         var client = new NotFoundCacheClient(failItemList: true);
         var service = new PriceCacheService(
             client,
@@ -734,7 +769,7 @@ public sealed class PriceCacheTests
         var contract = RecentContract("missing-results", today, 1);
         await database.Repository.UpsertContractsAsync([contract]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
         var service = new PriceCacheService(
             new NotFoundCacheClient(failItemList: false),
             database.Repository,
@@ -761,7 +796,7 @@ public sealed class PriceCacheTests
             .ToArray();
         await database.Repository.UpsertContractsAsync(contracts);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
         var client = new ConcurrentCacheClient();
         var service = new PriceCacheService(
             client,
@@ -789,7 +824,7 @@ public sealed class PriceCacheTests
             .ToArray();
         await database.Repository.UpsertContractsAsync(contracts);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
         var client = new BlockingConcurrentCacheClient(expectedConcurrentCalls: 3);
         var service = new PriceCacheService(
             client,
@@ -810,7 +845,7 @@ public sealed class PriceCacheTests
     }
 
     [Fact]
-    public async Task WindowPruning_RemovesReconstructibleContractsButPreservesPinnedResults()
+    public async Task WindowPruning_RemovesExpiredContractsIncludingPinnedResults()
     {
         await using var database = await TestDatabase.CreateAsync();
         var today = DateOnly.FromDateTime(DateTime.Today);
@@ -818,8 +853,8 @@ public sealed class PriceCacheTests
         var pinned = RecentContract("old-pinned", today, 2);
         await database.Repository.UpsertContractsAsync([removable, pinned]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
-        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
+        await cache.PrepareWindowAsync(DataWindow.Start(today), today);
         foreach (var contract in new[] { removable, pinned })
         {
             await cache.MarkContractDownloadingAsync(contract.PncpId, true);
@@ -836,11 +871,11 @@ public sealed class PriceCacheTests
             pinned with { PublicationDate = oldDate }
         ]);
 
-        await database.Repository.PruneContractsBeforeAsync(today.AddDays(-364));
+        await database.Repository.PruneContractsBeforeAsync(DataWindow.Start(today));
 
         Assert.Null(await database.Repository.GetContractAsync(removable.PncpId));
-        Assert.NotNull(await database.Repository.GetContractAsync(pinned.PncpId));
-        Assert.Single((await database.Repository.GetCachedItemResultsAsync(pinned.PncpId, 1))!.Results);
+        Assert.Null(await database.Repository.GetContractAsync(pinned.PncpId));
+        Assert.Null(await database.Repository.GetCachedItemResultsAsync(pinned.PncpId, 1));
     }
 
     private static async Task SeedHighCardinalityItemsAsync(string path, string contractId)

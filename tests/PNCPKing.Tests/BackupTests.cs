@@ -12,6 +12,28 @@ namespace PNCPKing.Tests;
 public sealed class BackupTests
 {
     [Fact]
+    public async Task Import_PrunesExpiredContractsAndPreservesTheOriginalArchive()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var old = PriceCacheTests.RecentContract("expired-backup", DataWindow.Start(today).AddDays(-1), 1);
+        var recent = PriceCacheTests.RecentContract("recent-backup", today, 2);
+        await database.Repository.UpsertContractsAsync([old, recent]);
+        var service = new BackupService(database.Repository);
+        var path = Path.Combine(database.Directory, "old-window.pncpking");
+        await service.ExportAsync(path);
+        var beforeHash = SHA256.HashData(await File.ReadAllBytesAsync(path));
+        var progress = new RecordingProgress<BackupImportProgress>();
+        var recovery = await service.ImportAsync(path, progress);
+        Assert.True(File.Exists(recovery));
+        Assert.Null(await database.Repository.GetContractAsync(old.PncpId));
+        Assert.NotNull(await database.Repository.GetContractAsync(recent.PncpId));
+        Assert.Equal(beforeHash, SHA256.HashData(await File.ReadAllBytesAsync(path)));
+        Assert.Contains(progress.Values, item => item.Stage == BackupImportStage.Completed && item.Message.Contains("11 meses"));
+        Assert.Equal(1, (await database.Repository.GetCountsAsync()).Contracts);
+    }
+
+    [Fact]
     public async Task Backup_RestoresValidatedSnapshotAndPreservesRecoveryCopy()
     {
         await using var database = await TestDatabase.CreateAsync();
@@ -260,8 +282,8 @@ public sealed class BackupTests
         await database.Repository.UpsertContractsAsync([changedStale]);
         await database.Repository.SavePartitionProgressAsync("backup-checkpoint", 7, false);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
-        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
+        await cache.PrepareWindowAsync(DataWindow.Start(today), today);
         await cache.MarkContractDownloadingAsync(current.PncpId, true);
         await cache.MarkContractCompleteAsync(current.PncpId, current.GlobalUpdatedAt);
 
@@ -320,9 +342,9 @@ public sealed class BackupTests
         var contract = PriceCacheTests.RecentContract("bulk", today, 1);
         await database.Repository.UpsertContractsAsync([contract]);
         var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
-        await cache.SetAuthorizationAsync(true, today.AddDays(-364), today);
-        await cache.SetNationalPriceIndexAuthorizationAsync(true, today.AddDays(-364), today);
-        await cache.PrepareWindowAsync(today.AddDays(-364), today);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
+        await cache.SetNationalPriceIndexAuthorizationAsync(true, DataWindow.Start(today), today);
+        await cache.PrepareWindowAsync(DataWindow.Start(today), today);
         await cache.MarkContractDownloadingAsync(contract.PncpId, true);
         var items = Enumerable.Range(1, 250).Select(number =>
             PriceCacheTests.Item(contract, number) with
