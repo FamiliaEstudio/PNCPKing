@@ -149,8 +149,8 @@ public sealed class DataRetentionTests
         await DowngradeTo26Async(database.Repository.DatabasePath);
         var migrated = await database.Repository.InitializeAsync();
         Assert.Equal(26, migrated.PreviousVersion);
-        Assert.Equal(27, migrated.CurrentVersion);
-        Assert.Equal([27], migrated.AppliedMigrations);
+        Assert.Equal(28, migrated.CurrentVersion);
+        Assert.Equal([27, 28], migrated.AppliedMigrations);
         Assert.Empty((await database.Repository.InitializeAsync()).AppliedMigrations);
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
@@ -214,6 +214,22 @@ public sealed class DataRetentionTests
     };
 
     internal static Task DowngradeTo26Async(string path) => ExecuteAsync(path, """
+        DROP TRIGGER IF EXISTS official_contracts_INSERT;
+        DROP TRIGGER IF EXISTS official_contracts_UPDATE;
+        DROP TRIGGER IF EXISTS official_contract_item_snapshots_INSERT;
+        DROP TRIGGER IF EXISTS official_contract_item_snapshots_UPDATE;
+        DROP TRIGGER IF EXISTS official_catalog_entries_INSERT;
+        DROP TRIGGER IF EXISTS official_catalog_entries_UPDATE;
+        DROP TRIGGER IF EXISTS official_items_invalidate;
+        DROP TRIGGER IF EXISTS official_contract_invalidate;
+        DROP TRIGGER IF EXISTS official_contract_delete;
+        DROP TRIGGER IF EXISTS official_coverage_insert;
+        DROP TRIGGER IF EXISTS official_coverage_update;
+        DROP TABLE IF EXISTS official_result_snapshots;
+        DROP TABLE IF EXISTS official_transfer_state;
+        DROP TABLE IF EXISTS official_changes;
+        DROP TABLE IF EXISTS official_imports;
+        DROP TABLE IF EXISTS official_conflicts;
         DROP TRIGGER IF EXISTS contracts_retention_insert;
         DROP TRIGGER IF EXISTS quotation_references_retention_insert;
         DROP TRIGGER IF EXISTS quotation_references_retention_update;

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using PNCPKing.Core.Models;
 
 namespace PNCPKing.App.Services;
 
@@ -31,10 +32,11 @@ public sealed record AppSettings(
     string? LastAiProviderId = null,
     decimal AiSafetyMarginPercent = 10m,
     int? CatalogRefreshIntervalDays = null,
-    bool? DesktopShortcutEnabled = null)
+    bool? DesktopShortcutEnabled = null,
+    SavedSqliteCalibration? SqliteCalibration = null)
 {
     public const int CurrentVersion = 5;
-    public const int DefaultCatalogRefreshIntervalDays = 7;
+    public const int DefaultCatalogRefreshIntervalDays = 0;
 
     public int EffectiveCatalogRefreshIntervalDays =>
         NormalizeCatalogRefreshIntervalDays(CatalogRefreshIntervalDays);
@@ -42,7 +44,7 @@ public sealed record AppSettings(
     public bool EffectiveDesktopShortcutEnabled => DesktopShortcutEnabled ?? true;
 
     public static int NormalizeCatalogRefreshIntervalDays(int? value) =>
-        value is 0 or 2 or 7 or 15 ? value.Value : DefaultCatalogRefreshIntervalDays;
+        0;
 }
 
 public sealed class AppSettingsService

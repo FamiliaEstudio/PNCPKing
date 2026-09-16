@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed partial class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 27;
+    public const int CurrentSchemaVersion = 28;
 
     private const string GeographicGroupExpression = "CASE WHEN c.geo_layer = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -711,6 +711,14 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
             version = 27;
         }
 
+        if (version < 28)
+        {
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await ApplySchemaV28Async(connection, transaction, cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 28;
+        }
+
         stopwatch.Stop();
         ReportInitialization(
             progress,
@@ -1237,115 +1245,124 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
         SyncPartitionCheckpoint checkpoint,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(contracts);
-        ArgumentNullException.ThrowIfNull(checkpoint);
-        using var span = _performance.Begin("sync", "database-commit");
-        using var queueSpan = _performance.Begin("sync", "sqlite-queue");
-        await using var writer = await _connections.WorkCoordinator
-            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
-            .ConfigureAwait(false);
-        queueSpan.Complete();
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        using var sqlSpan = _performance.Begin("sync", "sql-execution");
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        if (contracts.Count > 0)
+
+        try
         {
-            var inserted = await ExecuteContractUpsertsAsync(
-                connection,
-                (SqliteTransaction)transaction,
-                contracts,
-                cancellationToken).ConfigureAwait(false);
+            ArgumentNullException.ThrowIfNull(contracts);
+            ArgumentNullException.ThrowIfNull(checkpoint);
+            using var span = _performance.Begin("sync", "database-commit");
+            using var queueSpan = _performance.Begin("sync", "sqlite-queue");
+            await using var writer = await _connections.WorkCoordinator
+                .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+                .ConfigureAwait(false);
+            queueSpan.Complete();
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            using var sqlSpan = _performance.Begin("sync", "sql-execution");
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            if (contracts.Count > 0)
+            {
+                var inserted = await ExecuteContractUpsertsAsync(
+                    connection,
+                    (SqliteTransaction)transaction,
+                    contracts,
+                    cancellationToken).ConfigureAwait(false);
 
-            await IncrementContractStatisticsAsync(
-                connection,
-                (SqliteTransaction)transaction,
-                inserted,
-                cancellationToken).ConfigureAwait(false);
-        }
+                await IncrementContractStatisticsAsync(
+                    connection,
+                    (SqliteTransaction)transaction,
+                    inserted,
+                    cancellationToken).ConfigureAwait(false);
+            }
 
-        await using var checkpointCommand = connection.CreateCommand();
-        checkpointCommand.Transaction = (SqliteTransaction)transaction;
-        checkpointCommand.CommandText = """
-            INSERT INTO sync_partitions(
-                partition_key, next_page, completed, updated_at, mode, start_date,
-                end_date, modality_id, uf, total_pages, status, last_error, next_retry_at)
-            VALUES($key, $page, $completed, $updated, $mode, $start, $end,
-                   $modality, $uf, $totalPages, $status, $error, $nextRetry)
-            ON CONFLICT(partition_key) DO UPDATE SET
-                next_page = excluded.next_page,
-                completed = excluded.completed,
-                updated_at = excluded.updated_at,
-                mode = excluded.mode,
-                start_date = excluded.start_date,
-                end_date = excluded.end_date,
-                modality_id = excluded.modality_id,
-                uf = excluded.uf,
-                total_pages = excluded.total_pages,
-                status = excluded.status,
-                last_error = excluded.last_error,
-                next_retry_at = excluded.next_retry_at;
-            """;
-        var complete = checkpoint.Status == SyncPartitionStatus.Complete;
-        checkpointCommand.Parameters.AddWithValue("$key", checkpoint.PartitionKey);
-        checkpointCommand.Parameters.AddWithValue("$page", complete ? 0 : Math.Max(1, checkpoint.NextPage));
-        checkpointCommand.Parameters.AddWithValue("$completed", complete ? 1 : 0);
-        checkpointCommand.Parameters.AddWithValue(
-            "$updated",
-            (checkpoint.UpdatedAt == default ? DateTimeOffset.UtcNow : checkpoint.UpdatedAt)
-                .ToString("O", CultureInfo.InvariantCulture));
-        checkpointCommand.Parameters.AddWithValue("$mode", (int)checkpoint.Mode);
-        checkpointCommand.Parameters.AddWithValue("$start", FormatDate(checkpoint.StartDate));
-        checkpointCommand.Parameters.AddWithValue("$end", FormatDate(checkpoint.EndDate));
-        checkpointCommand.Parameters.AddWithValue("$modality", checkpoint.ModalityId);
-        checkpointCommand.Parameters.AddWithValue("$uf", NormalizeCoverageUf(checkpoint.Uf));
-        checkpointCommand.Parameters.AddWithValue("$totalPages", DbValue(checkpoint.TotalPages));
-        checkpointCommand.Parameters.AddWithValue("$status", (int)checkpoint.Status);
-        checkpointCommand.Parameters.AddWithValue("$error", DbValue(checkpoint.LastError));
-        checkpointCommand.Parameters.AddWithValue("$nextRetry", DbValue(checkpoint.NextRetryAt));
-        await checkpointCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-
-        if (checkpoint.Mode == SyncMode.Publication)
-        {
-            await using var coverage = connection.CreateCommand();
-            coverage.Transaction = (SqliteTransaction)transaction;
-            coverage.CommandText = """
-                INSERT INTO coverage_day_modalities(
-                    coverage_date, modality_id, uf, status, records_count, updated_at, last_error)
-                VALUES($date, $modality, $uf, $status, NULL, $updated, $error)
-                ON CONFLICT(coverage_date, modality_id, uf) DO UPDATE SET
-                    status = CASE
-                        WHEN coverage_day_modalities.status IN ($complete, $assumedComplete)
-                            THEN coverage_day_modalities.status
-                        ELSE excluded.status
-                    END,
+            await using var checkpointCommand = connection.CreateCommand();
+            checkpointCommand.Transaction = (SqliteTransaction)transaction;
+            checkpointCommand.CommandText = """
+                INSERT INTO sync_partitions(
+                    partition_key, next_page, completed, updated_at, mode, start_date,
+                    end_date, modality_id, uf, total_pages, status, last_error, next_retry_at)
+                VALUES($key, $page, $completed, $updated, $mode, $start, $end,
+                       $modality, $uf, $totalPages, $status, $error, $nextRetry)
+                ON CONFLICT(partition_key) DO UPDATE SET
+                    next_page = excluded.next_page,
+                    completed = excluded.completed,
                     updated_at = excluded.updated_at,
-                    last_error = excluded.last_error;
+                    mode = excluded.mode,
+                    start_date = excluded.start_date,
+                    end_date = excluded.end_date,
+                    modality_id = excluded.modality_id,
+                    uf = excluded.uf,
+                    total_pages = excluded.total_pages,
+                    status = excluded.status,
+                    last_error = excluded.last_error,
+                    next_retry_at = excluded.next_retry_at;
                 """;
-            coverage.Parameters.Add("$date", SqliteType.Text);
-            coverage.Parameters.AddWithValue("$modality", checkpoint.ModalityId);
-            coverage.Parameters.AddWithValue("$uf", NormalizeCoverageUf(checkpoint.Uf));
-            coverage.Parameters.AddWithValue(
-                "$status",
-                (int)(complete ? CoverageStatus.Complete : CoverageStatus.Partial));
-            coverage.Parameters.AddWithValue(
+            var complete = checkpoint.Status == SyncPartitionStatus.Complete;
+            checkpointCommand.Parameters.AddWithValue("$key", checkpoint.PartitionKey);
+            checkpointCommand.Parameters.AddWithValue("$page", complete ? 0 : Math.Max(1, checkpoint.NextPage));
+            checkpointCommand.Parameters.AddWithValue("$completed", complete ? 1 : 0);
+            checkpointCommand.Parameters.AddWithValue(
                 "$updated",
                 (checkpoint.UpdatedAt == default ? DateTimeOffset.UtcNow : checkpoint.UpdatedAt)
                     .ToString("O", CultureInfo.InvariantCulture));
-            coverage.Parameters.AddWithValue("$error", DbValue(checkpoint.LastError));
-            coverage.Parameters.AddWithValue("$complete", (int)CoverageStatus.Complete);
-            coverage.Parameters.AddWithValue("$assumedComplete", (int)CoverageStatus.AssumedComplete);
-            for (var date = checkpoint.StartDate; date <= checkpoint.EndDate; date = date.AddDays(1))
-            {
-                coverage.Parameters["$date"].Value = FormatDate(date);
-                await coverage.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            }
-        }
+            checkpointCommand.Parameters.AddWithValue("$mode", (int)checkpoint.Mode);
+            checkpointCommand.Parameters.AddWithValue("$start", FormatDate(checkpoint.StartDate));
+            checkpointCommand.Parameters.AddWithValue("$end", FormatDate(checkpoint.EndDate));
+            checkpointCommand.Parameters.AddWithValue("$modality", checkpoint.ModalityId);
+            checkpointCommand.Parameters.AddWithValue("$uf", NormalizeCoverageUf(checkpoint.Uf));
+            checkpointCommand.Parameters.AddWithValue("$totalPages", DbValue(checkpoint.TotalPages));
+            checkpointCommand.Parameters.AddWithValue("$status", (int)checkpoint.Status);
+            checkpointCommand.Parameters.AddWithValue("$error", DbValue(checkpoint.LastError));
+            checkpointCommand.Parameters.AddWithValue("$nextRetry", DbValue(checkpoint.NextRetryAt));
+            await checkpointCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
-        sqlSpan.Complete(contracts.Count);
-        using var commitSpan = _performance.Begin("sync", "commit");
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        commitSpan.Complete(contracts.Count);
-        span.Complete(contracts.Count);
+            if (checkpoint.Mode == SyncMode.Publication)
+            {
+                await using var coverage = connection.CreateCommand();
+                coverage.Transaction = (SqliteTransaction)transaction;
+                coverage.CommandText = """
+                    INSERT INTO coverage_day_modalities(
+                        coverage_date, modality_id, uf, status, records_count, updated_at, last_error)
+                    VALUES($date, $modality, $uf, $status, NULL, $updated, $error)
+                    ON CONFLICT(coverage_date, modality_id, uf) DO UPDATE SET
+                        status = CASE
+                            WHEN coverage_day_modalities.status IN ($complete, $assumedComplete)
+                                THEN coverage_day_modalities.status
+                            ELSE excluded.status
+                        END,
+                        updated_at = excluded.updated_at,
+                        last_error = excluded.last_error;
+                    """;
+                coverage.Parameters.Add("$date", SqliteType.Text);
+                coverage.Parameters.AddWithValue("$modality", checkpoint.ModalityId);
+                coverage.Parameters.AddWithValue("$uf", NormalizeCoverageUf(checkpoint.Uf));
+                coverage.Parameters.AddWithValue(
+                    "$status",
+                    (int)(complete ? CoverageStatus.Complete : CoverageStatus.Partial));
+                coverage.Parameters.AddWithValue(
+                    "$updated",
+                    (checkpoint.UpdatedAt == default ? DateTimeOffset.UtcNow : checkpoint.UpdatedAt)
+                        .ToString("O", CultureInfo.InvariantCulture));
+                coverage.Parameters.AddWithValue("$error", DbValue(checkpoint.LastError));
+                coverage.Parameters.AddWithValue("$complete", (int)CoverageStatus.Complete);
+                coverage.Parameters.AddWithValue("$assumedComplete", (int)CoverageStatus.AssumedComplete);
+                for (var date = checkpoint.StartDate; date <= checkpoint.EndDate; date = date.AddDays(1))
+                {
+                    coverage.Parameters["$date"].Value = FormatDate(date);
+                    await coverage.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            sqlSpan.Complete(contracts.Count);
+            using var commitSpan = _performance.Begin("sync", "commit");
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            commitSpan.Complete(contracts.Count);
+            span.Complete(contracts.Count);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
+        }
     }
 
     public async Task<SearchPage> SearchAsync(SearchQuery query, CancellationToken cancellationToken = default)
@@ -1365,75 +1382,91 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
         SearchQuery query,
         CancellationToken cancellationToken = default)
     {
-        using var span = _performance.Begin("contract-search", "exact-count");
-        using var queueSpan = _performance.Begin("contract-search", "sqlite-queue");
-        await using var readerLease = await _connections.WorkCoordinator
-            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
-            .ConfigureAwait(false);
-        queueSpan.Complete();
-        using var sqlSpan = _performance.Begin("contract-search", "sql-execution");
-        var sql = BuildContractSearchSql(query);
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT COUNT(*) FROM {sql.From}{sql.Where};";
-        AddSearchParameters(command, query, sql.Match);
-        var total = Convert.ToInt64(
-            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
-            CultureInfo.InvariantCulture);
-        sqlSpan.Complete(total);
-        span.Complete(total);
-        return total;
+        try
+        {
+            using var span = _performance.Begin("contract-search", "exact-count");
+            using var queueSpan = _performance.Begin("contract-search", "sqlite-queue");
+            await using var readerLease = await _connections.WorkCoordinator
+                .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+                .ConfigureAwait(false);
+            queueSpan.Complete();
+            using var sqlSpan = _performance.Begin("contract-search", "sql-execution");
+            var sql = BuildContractSearchSql(query);
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"SELECT COUNT(*) FROM {sql.From}{sql.Where};";
+            AddSearchParameters(command, query, sql.Match);
+            var total = Convert.ToInt64(
+                await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                CultureInfo.InvariantCulture);
+            sqlSpan.Complete(total);
+            span.Complete(total);
+            return total;
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
+        }
     }
 
     public async Task<SearchPageSlice> SearchPageAsync(
         SearchQuery query,
         CancellationToken cancellationToken = default)
     {
-        using var span = _performance.Begin("contract-search", "page");
-        using var queueSpan = _performance.Begin("contract-search", "sqlite-queue");
-        await using var readerLease = await _connections.WorkCoordinator
-            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
-            .ConfigureAwait(false);
-        queueSpan.Complete();
-        using var sqlSpan = _performance.Begin("contract-search", "sql-execution");
-        var page = Math.Max(1, query.Page);
-        var pageSize = Math.Clamp(query.PageSize, 1, 200);
-        var sql = BuildContractSearchSql(query);
-
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = $"""
-            SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
-                   c.additional_information, c.process, c.organization, c.unit, c.municipality,
-                   c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status, c.publication_date,
-                   c.global_updated_at, c.total_homologated_scaled, c.distance_from_ribeirao_km
-              FROM {sql.From}{sql.Where}{sql.Order}
-             LIMIT $limit OFFSET $offset;
-            """;
-        AddSearchParameters(command, query, sql.Match);
-        if (sql.ExplicitMatch.Length > 0)
+        try
         {
-            command.Parameters.AddWithValue("$explicitMatch", sql.ExplicitMatch);
-        }
-        command.Parameters.AddWithValue("$limit", pageSize + 1);
-        command.Parameters.AddWithValue("$offset", (page - 1) * pageSize);
+            using var span = _performance.Begin("contract-search", "page");
+            using var queueSpan = _performance.Begin("contract-search", "sqlite-queue");
+            await using var readerLease = await _connections.WorkCoordinator
+                .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+                .ConfigureAwait(false);
+            queueSpan.Complete();
+            using var sqlSpan = _performance.Begin("contract-search", "sql-execution");
+            var page = Math.Max(1, query.Page);
+            var pageSize = Math.Clamp(query.PageSize, 1, 200);
+            var sql = BuildContractSearchSql(query);
 
-        var results = new List<ContractRecord>(pageSize + 1);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"""
+                SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
+                       c.additional_information, c.process, c.organization, c.unit, c.municipality,
+                       c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status, c.publication_date,
+                       c.global_updated_at, c.total_homologated_scaled, c.distance_from_ribeirao_km
+                  FROM {sql.From}{sql.Where}{sql.Order}
+                 LIMIT $limit OFFSET $offset;
+                """;
+            AddSearchParameters(command, query, sql.Match);
+            if (sql.ExplicitMatch.Length > 0)
+            {
+                command.Parameters.AddWithValue("$explicitMatch", sql.ExplicitMatch);
+            }
+            command.Parameters.AddWithValue("$limit", pageSize + 1);
+            command.Parameters.AddWithValue("$offset", (page - 1) * pageSize);
+
+            var results = new List<ContractRecord>(pageSize + 1);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                results.Add(ReadContract(reader));
+            }
+
+            var mayHaveMore = results.Count > pageSize;
+            if (mayHaveMore)
+            {
+                results.RemoveAt(results.Count - 1);
+            }
+
+            sqlSpan.Complete(results.Count);
+            span.Complete(results.Count);
+            return new SearchPageSlice(results, page, pageSize, mayHaveMore);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
         {
-            results.Add(ReadContract(reader));
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
         }
-
-        var mayHaveMore = results.Count > pageSize;
-        if (mayHaveMore)
-        {
-            results.RemoveAt(results.Count - 1);
-        }
-
-        sqlSpan.Complete(results.Count);
-        span.Complete(results.Count);
-        return new SearchPageSlice(results, page, pageSize, mayHaveMore);
     }
 
     public async Task<ItemCandidatePage> SearchItemCandidatesAsync(
@@ -1444,201 +1477,209 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
         int pageSize = 200,
         CancellationToken cancellationToken = default)
     {
-        using var span = _performance.Begin("price-search", "explicit-candidate-chunk");
-        ArgumentNullException.ThrowIfNull(filters);
-        ArgumentNullException.ThrowIfNull(expression);
-        if (expression.IsEmpty)
+        try
         {
-            span.Complete();
-            return new ItemCandidatePage([], null, false);
-        }
+            using var span = _performance.Begin("price-search", "explicit-candidate-chunk");
+            ArgumentNullException.ThrowIfNull(filters);
+            ArgumentNullException.ThrowIfNull(expression);
+            if (expression.IsEmpty)
+            {
+                span.Complete();
+                return new ItemCandidatePage([], null, false);
+            }
 
-        await using var readerLease = await _connections.WorkCoordinator
-            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
-            .ConfigureAwait(false);
+            await using var readerLease = await _connections.WorkCoordinator
+                .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+                .ConfigureAwait(false);
 
-        pageSize = Math.Clamp(pageSize, 1, 500);
-        randomPivot = Math.Clamp(randomPivot, 0, long.MaxValue - 1);
-        var candidateMatch = expression.CandidateMatchQuery;
-        var itemMatch = expression.ItemMatchQuery;
-        var explicitMatch = expression.ExplicitContractMatchQuery;
-        var conditions = new List<string>();
-        var geoFilter = filters.EffectiveGeoFilter;
-        switch (geoFilter.Kind)
-        {
-            case SearchGeoFilterKind.Southeast:
-                conditions.Add("c.uf IN ('ES','MG','RJ','SP')");
-                break;
-            case SearchGeoFilterKind.State:
-                conditions.Add("c.uf = $uf");
-                break;
-            case SearchGeoFilterKind.NearRibeirao:
-                conditions.Add("c.geo_layer = 0");
-                break;
-        }
+            pageSize = Math.Clamp(pageSize, 1, 500);
+            randomPivot = Math.Clamp(randomPivot, 0, long.MaxValue - 1);
+            var candidateMatch = expression.CandidateMatchQuery;
+            var itemMatch = expression.ItemMatchQuery;
+            var explicitMatch = expression.ExplicitContractMatchQuery;
+            var conditions = new List<string>();
+            var geoFilter = filters.EffectiveGeoFilter;
+            switch (geoFilter.Kind)
+            {
+                case SearchGeoFilterKind.Southeast:
+                    conditions.Add("c.uf IN ('ES','MG','RJ','SP')");
+                    break;
+                case SearchGeoFilterKind.State:
+                    conditions.Add("c.uf = $uf");
+                    break;
+                case SearchGeoFilterKind.NearRibeirao:
+                    conditions.Add("c.geo_layer = 0");
+                    break;
+            }
 
-        if (filters.StartDate is not null)
-        {
-            conditions.Add("c.publication_date >= $startDate");
-        }
+            if (filters.StartDate is not null)
+            {
+                conditions.Add("c.publication_date >= $startDate");
+            }
 
-        if (filters.EndDate is not null)
-        {
-            conditions.Add("c.publication_date < $endDateExclusive");
-        }
+            if (filters.EndDate is not null)
+            {
+                conditions.Add("c.publication_date < $endDateExclusive");
+            }
 
-        var where = conditions.Count == 0 ? string.Empty : " WHERE " + string.Join(" AND ", conditions);
-        var indexedContractSource = itemMatch.Length > 0
-            ? """
-              SELECT DISTINCT indexed_contract.rowid
-                FROM items_fts
-                CROSS JOIN items indexed_item ON indexed_item.rowid = items_fts.rowid
-                CROSS JOIN contracts indexed_contract
-                  ON indexed_contract.pncp_id = indexed_item.contract_id
-                CROSS JOIN contract_item_snapshots snapshot
-                  ON snapshot.contract_id = indexed_contract.pncp_id
-                 AND COALESCE(snapshot.source_global_updated_at, '') =
-                     COALESCE(indexed_contract.global_updated_at, '')
-               WHERE items_fts MATCH $itemMatch
-              """
-            : """
-              SELECT DISTINCT indexed_contract.rowid
-                FROM items indexed_item
-                CROSS JOIN contracts indexed_contract
-                  ON indexed_contract.pncp_id = indexed_item.contract_id
-                CROSS JOIN contract_item_snapshots snapshot
-                  ON snapshot.contract_id = indexed_contract.pncp_id
-                 AND COALESCE(snapshot.source_global_updated_at, '') =
-                     COALESCE(indexed_contract.global_updated_at, '')
-              """;
-        var unindexedContractSource = candidateMatch.Length > 0
-            ? """
-              SELECT fallback.rowid
-                FROM contracts fallback
-                JOIN contracts_fts ON contracts_fts.rowid = fallback.rowid
-               WHERE contracts_fts MATCH $candidateMatch
-                 AND NOT EXISTS(
-                     SELECT 1
-                       FROM contract_item_snapshots s
-                      WHERE s.contract_id = fallback.pncp_id
-                        AND COALESCE(s.source_global_updated_at, '') =
-                            COALESCE(fallback.global_updated_at, ''))
-              """
-            : """
-              SELECT fallback.rowid
-                FROM contracts fallback
-              WHERE NOT EXISTS(
-                     SELECT 1
-                       FROM contract_item_snapshots s
-                      WHERE s.contract_id = fallback.pncp_id
-                        AND COALESCE(s.source_global_updated_at, '') =
-                            COALESCE(fallback.global_updated_at, ''))
-              """;
-        var explicitContractUnion = explicitMatch.Length > 0
-            ? """
-              UNION
-              SELECT explicit_contract.rowid
-                FROM contracts explicit_contract
-                JOIN contracts_fts ON contracts_fts.rowid = explicit_contract.rowid
-               WHERE contracts_fts MATCH $explicitMatch
-              """
-            : string.Empty;
-        var geographicLayerExpression = explicitMatch.Length > 0
-            ? """
-              CASE WHEN c.rowid IN (
-                  SELECT rowid FROM contracts_fts
+            var where = conditions.Count == 0 ? string.Empty : " WHERE " + string.Join(" AND ", conditions);
+            var indexedContractSource = itemMatch.Length > 0
+                ? """
+                  SELECT DISTINCT indexed_contract.rowid
+                    FROM items_fts
+                    CROSS JOIN items indexed_item ON indexed_item.rowid = items_fts.rowid
+                    CROSS JOIN contracts indexed_contract
+                      ON indexed_contract.pncp_id = indexed_item.contract_id
+                    CROSS JOIN contract_item_snapshots snapshot
+                      ON snapshot.contract_id = indexed_contract.pncp_id
+                     AND COALESCE(snapshot.source_global_updated_at, '') =
+                         COALESCE(indexed_contract.global_updated_at, '')
+                   WHERE items_fts MATCH $itemMatch
+                  """
+                : """
+                  SELECT DISTINCT indexed_contract.rowid
+                    FROM items indexed_item
+                    CROSS JOIN contracts indexed_contract
+                      ON indexed_contract.pncp_id = indexed_item.contract_id
+                    CROSS JOIN contract_item_snapshots snapshot
+                      ON snapshot.contract_id = indexed_contract.pncp_id
+                     AND COALESCE(snapshot.source_global_updated_at, '') =
+                         COALESCE(indexed_contract.global_updated_at, '')
+                  """;
+            var unindexedContractSource = candidateMatch.Length > 0
+                ? """
+                  SELECT fallback.rowid
+                    FROM contracts fallback
+                    JOIN contracts_fts ON contracts_fts.rowid = fallback.rowid
+                   WHERE contracts_fts MATCH $candidateMatch
+                     AND NOT EXISTS(
+                         SELECT 1
+                           FROM contract_item_snapshots s
+                          WHERE s.contract_id = fallback.pncp_id
+                            AND COALESCE(s.source_global_updated_at, '') =
+                                COALESCE(fallback.global_updated_at, ''))
+                  """
+                : """
+                  SELECT fallback.rowid
+                    FROM contracts fallback
+                  WHERE NOT EXISTS(
+                         SELECT 1
+                           FROM contract_item_snapshots s
+                          WHERE s.contract_id = fallback.pncp_id
+                            AND COALESCE(s.source_global_updated_at, '') =
+                                COALESCE(fallback.global_updated_at, ''))
+                  """;
+            var explicitContractUnion = explicitMatch.Length > 0
+                ? """
+                  UNION
+                  SELECT explicit_contract.rowid
+                    FROM contracts explicit_contract
+                    JOIN contracts_fts ON contracts_fts.rowid = explicit_contract.rowid
                    WHERE contracts_fts MATCH $explicitMatch
-              ) THEN -1 ELSE COALESCE(c.geo_layer, 1) END
-              """
-            : "COALESCE(c.geo_layer, 1)";
-        var cursorWhere = cursor is null
-            ? string.Empty
-            : """
-               WHERE geographic_layer > $cursorLayer
-                  OR (geographic_layer = $cursorLayer AND group_rank > $cursorGroup)
-                  OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band > $cursorBand)
-                  OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band = $cursorBand
-                      AND random_order_key > $cursorRandom)
-                  OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band = $cursorBand
-                      AND random_order_key = $cursorRandom AND pncp_id > $cursorId)
-              """;
+                  """
+                : string.Empty;
+            var geographicLayerExpression = explicitMatch.Length > 0
+                ? """
+                  CASE WHEN c.rowid IN (
+                      SELECT rowid FROM contracts_fts
+                       WHERE contracts_fts MATCH $explicitMatch
+                  ) THEN -1 ELSE COALESCE(c.geo_layer, 1) END
+                  """
+                : "COALESCE(c.geo_layer, 1)";
+            var cursorWhere = cursor is null
+                ? string.Empty
+                : """
+                   WHERE geographic_layer > $cursorLayer
+                      OR (geographic_layer = $cursorLayer AND group_rank > $cursorGroup)
+                      OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band > $cursorBand)
+                      OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band = $cursorBand
+                          AND random_order_key > $cursorRandom)
+                      OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band = $cursorBand
+                          AND random_order_key = $cursorRandom AND pncp_id > $cursorId)
+                  """;
 
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = $"""
-            WITH candidate_rows AS (
-                {indexedContractSource}
-                UNION
-                {unindexedContractSource}
-                {explicitContractUnion}
-            ),
-            ranked AS (
-                SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
-                       c.additional_information, c.process, c.organization, c.unit, c.municipality,
-                       c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
-                       c.publication_date, c.global_updated_at, c.total_homologated_scaled,
-                       c.distance_from_ribeirao_km,
-                       ({geographicLayerExpression}) AS geographic_layer,
-                       {GeographicGroupExpression} AS group_rank,
-                       CASE WHEN COALESCE(c.random_order_key, 0) >= $randomPivot THEN 0 ELSE 1 END AS rotation_band,
-                       COALESCE(c.random_order_key, 0) AS random_order_key
-                  FROM candidate_rows candidate
-                  JOIN contracts c ON c.rowid = candidate.rowid
-                  {where}
-            )
-            SELECT * FROM ranked
-            {cursorWhere}
-             ORDER BY geographic_layer, group_rank, rotation_band, random_order_key, pncp_id
-             LIMIT $limit;
-            """;
-        if (candidateMatch.Length > 0)
-        {
-            command.Parameters.AddWithValue("$candidateMatch", candidateMatch);
-        }
-        if (itemMatch.Length > 0)
-        {
-            command.Parameters.AddWithValue("$itemMatch", itemMatch);
-        }
-        if (explicitMatch.Length > 0)
-        {
-            command.Parameters.AddWithValue("$explicitMatch", explicitMatch);
-        }
-        command.Parameters.AddWithValue("$randomPivot", randomPivot);
-        command.Parameters.AddWithValue("$limit", pageSize + 1);
-        AddFilterParameters(command, filters);
-        if (cursor is not null)
-        {
-            command.Parameters.AddWithValue("$cursorLayer", cursor.GeographicLayer);
-            command.Parameters.AddWithValue("$cursorGroup", cursor.GroupRank);
-            command.Parameters.AddWithValue("$cursorBand", cursor.RotationBand);
-            command.Parameters.AddWithValue("$cursorRandom", cursor.RandomOrderKey);
-            command.Parameters.AddWithValue("$cursorId", cursor.PncpId);
-        }
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"""
+                WITH candidate_rows AS (
+                    {indexedContractSource}
+                    UNION
+                    {unindexedContractSource}
+                    {explicitContractUnion}
+                ),
+                ranked AS (
+                    SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
+                           c.additional_information, c.process, c.organization, c.unit, c.municipality,
+                           c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
+                           c.publication_date, c.global_updated_at, c.total_homologated_scaled,
+                           c.distance_from_ribeirao_km,
+                           ({geographicLayerExpression}) AS geographic_layer,
+                           {GeographicGroupExpression} AS group_rank,
+                           CASE WHEN COALESCE(c.random_order_key, 0) >= $randomPivot THEN 0 ELSE 1 END AS rotation_band,
+                           COALESCE(c.random_order_key, 0) AS random_order_key
+                      FROM candidate_rows candidate
+                      JOIN contracts c ON c.rowid = candidate.rowid
+                      {where}
+                )
+                SELECT * FROM ranked
+                {cursorWhere}
+                 ORDER BY geographic_layer, group_rank, rotation_band, random_order_key, pncp_id
+                 LIMIT $limit;
+                """;
+            if (candidateMatch.Length > 0)
+            {
+                command.Parameters.AddWithValue("$candidateMatch", candidateMatch);
+            }
+            if (itemMatch.Length > 0)
+            {
+                command.Parameters.AddWithValue("$itemMatch", itemMatch);
+            }
+            if (explicitMatch.Length > 0)
+            {
+                command.Parameters.AddWithValue("$explicitMatch", explicitMatch);
+            }
+            command.Parameters.AddWithValue("$randomPivot", randomPivot);
+            command.Parameters.AddWithValue("$limit", pageSize + 1);
+            AddFilterParameters(command, filters);
+            if (cursor is not null)
+            {
+                command.Parameters.AddWithValue("$cursorLayer", cursor.GeographicLayer);
+                command.Parameters.AddWithValue("$cursorGroup", cursor.GroupRank);
+                command.Parameters.AddWithValue("$cursorBand", cursor.RotationBand);
+                command.Parameters.AddWithValue("$cursorRandom", cursor.RandomOrderKey);
+                command.Parameters.AddWithValue("$cursorId", cursor.PncpId);
+            }
 
-        var candidates = new List<ItemContractCandidate>(pageSize + 1);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            var candidateCursor = new ItemCandidateCursor(
-                reader.GetInt32(19),
-                reader.GetInt32(20),
-                reader.GetInt32(21),
-                reader.GetInt64(22),
-                reader.GetString(0));
-            candidates.Add(new ItemContractCandidate(ReadContract(reader), candidateCursor));
-        }
+            var candidates = new List<ItemContractCandidate>(pageSize + 1);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var candidateCursor = new ItemCandidateCursor(
+                    reader.GetInt32(19),
+                    reader.GetInt32(20),
+                    reader.GetInt32(21),
+                    reader.GetInt64(22),
+                    reader.GetString(0));
+                candidates.Add(new ItemContractCandidate(ReadContract(reader), candidateCursor));
+            }
 
-        var hasMore = candidates.Count > pageSize;
-        if (hasMore)
-        {
-            candidates.RemoveAt(candidates.Count - 1);
-        }
+            var hasMore = candidates.Count > pageSize;
+            if (hasMore)
+            {
+                candidates.RemoveAt(candidates.Count - 1);
+            }
 
-        span.Complete(candidates.Count);
-        return new ItemCandidatePage(
-            candidates,
-            candidates.Count == 0 ? cursor : candidates[^1].Cursor,
-            hasMore);
+            span.Complete(candidates.Count);
+            return new ItemCandidatePage(
+                candidates,
+                candidates.Count == 0 ? cursor : candidates[^1].Cursor,
+                hasMore);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
+        }
     }
 
     public async Task<ItemCandidatePage> SearchContractCandidatesAsync(
@@ -1649,110 +1690,118 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
         int pageSize = 200,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(filters);
-        var expression = SearchText.Parse(contractPrompt);
-        var contractMatch = expression.ContractMatchQuery;
-        if (string.IsNullOrWhiteSpace(contractMatch))
+        try
         {
-            return new ItemCandidatePage([], cursor, false);
+            ArgumentNullException.ThrowIfNull(filters);
+            var expression = SearchText.Parse(contractPrompt);
+            var contractMatch = expression.ContractMatchQuery;
+            if (string.IsNullOrWhiteSpace(contractMatch))
+            {
+                return new ItemCandidatePage([], cursor, false);
+            }
+
+            await using var readerLease = await _connections.WorkCoordinator
+                .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+                .ConfigureAwait(false);
+
+            pageSize = Math.Clamp(pageSize, 1, 500);
+            randomPivot = Math.Clamp(randomPivot, 0, long.MaxValue - 1);
+            var conditions = new List<string> { "contracts_fts MATCH $contractMatch" };
+            var geographicPriorityExpression = filters.EffectiveGeoFilter.Kind switch
+            {
+                SearchGeoFilterKind.Southeast =>
+                    "CASE WHEN c.uf IN ('ES','MG','RJ','SP') THEN 0 ELSE 1 END",
+                SearchGeoFilterKind.State =>
+                    "CASE WHEN c.uf = $uf THEN 0 ELSE 1 END",
+                _ => "COALESCE(c.geo_layer, 1)"
+            };
+            if (filters.StartDate is not null)
+            {
+                conditions.Add("c.publication_date >= $startDate");
+            }
+
+            if (filters.EndDate is not null)
+            {
+                conditions.Add("c.publication_date < $endDateExclusive");
+            }
+
+            var where = " WHERE " + string.Join(" AND ", conditions);
+            var cursorWhere = cursor is null
+                ? string.Empty
+                : """
+                   WHERE geographic_layer > $cursorLayer
+                      OR (geographic_layer = $cursorLayer AND group_rank > $cursorGroup)
+                      OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band > $cursorBand)
+                      OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band = $cursorBand
+                          AND random_order_key > $cursorRandom)
+                      OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band = $cursorBand
+                          AND random_order_key = $cursorRandom AND pncp_id > $cursorId)
+                  """;
+
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"""
+                WITH ranked AS (
+                    SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
+                           c.additional_information, c.process, c.organization, c.unit, c.municipality,
+                           c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
+                           c.publication_date, c.global_updated_at, c.total_homologated_scaled,
+                           c.distance_from_ribeirao_km,
+                           ({geographicPriorityExpression}) AS geographic_layer,
+                           {GeographicGroupExpression} AS group_rank,
+                           CASE WHEN COALESCE(c.random_order_key, 0) >= $randomPivot THEN 0 ELSE 1 END AS rotation_band,
+                           COALESCE(c.random_order_key, 0) AS random_order_key
+                      FROM contracts c
+                      JOIN contracts_fts ON contracts_fts.rowid = c.rowid
+                      {where}
+                )
+                SELECT * FROM ranked
+                {cursorWhere}
+                 ORDER BY geographic_layer, group_rank, rotation_band, random_order_key, pncp_id
+                 LIMIT $limit;
+                """;
+            command.Parameters.AddWithValue("$contractMatch", contractMatch);
+            command.Parameters.AddWithValue("$randomPivot", randomPivot);
+            command.Parameters.AddWithValue("$limit", pageSize + 1);
+            AddFilterParameters(command, filters);
+            if (cursor is not null)
+            {
+                command.Parameters.AddWithValue("$cursorLayer", cursor.GeographicLayer);
+                command.Parameters.AddWithValue("$cursorGroup", cursor.GroupRank);
+                command.Parameters.AddWithValue("$cursorBand", cursor.RotationBand);
+                command.Parameters.AddWithValue("$cursorRandom", cursor.RandomOrderKey);
+                command.Parameters.AddWithValue("$cursorId", cursor.PncpId);
+            }
+
+            var candidates = new List<ItemContractCandidate>(pageSize + 1);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var candidateCursor = new ItemCandidateCursor(
+                    reader.GetInt32(19),
+                    reader.GetInt32(20),
+                    reader.GetInt32(21),
+                    reader.GetInt64(22),
+                    reader.GetString(0));
+                candidates.Add(new ItemContractCandidate(ReadContract(reader), candidateCursor));
+            }
+
+            var hasMore = candidates.Count > pageSize;
+            if (hasMore)
+            {
+                candidates.RemoveAt(candidates.Count - 1);
+            }
+
+            return new ItemCandidatePage(
+                candidates,
+                candidates.Count == 0 ? cursor : candidates[^1].Cursor,
+                hasMore);
         }
-
-        await using var readerLease = await _connections.WorkCoordinator
-            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
-            .ConfigureAwait(false);
-
-        pageSize = Math.Clamp(pageSize, 1, 500);
-        randomPivot = Math.Clamp(randomPivot, 0, long.MaxValue - 1);
-        var conditions = new List<string> { "contracts_fts MATCH $contractMatch" };
-        var geographicPriorityExpression = filters.EffectiveGeoFilter.Kind switch
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
         {
-            SearchGeoFilterKind.Southeast =>
-                "CASE WHEN c.uf IN ('ES','MG','RJ','SP') THEN 0 ELSE 1 END",
-            SearchGeoFilterKind.State =>
-                "CASE WHEN c.uf = $uf THEN 0 ELSE 1 END",
-            _ => "COALESCE(c.geo_layer, 1)"
-        };
-        if (filters.StartDate is not null)
-        {
-            conditions.Add("c.publication_date >= $startDate");
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
         }
-
-        if (filters.EndDate is not null)
-        {
-            conditions.Add("c.publication_date < $endDateExclusive");
-        }
-
-        var where = " WHERE " + string.Join(" AND ", conditions);
-        var cursorWhere = cursor is null
-            ? string.Empty
-            : """
-               WHERE geographic_layer > $cursorLayer
-                  OR (geographic_layer = $cursorLayer AND group_rank > $cursorGroup)
-                  OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band > $cursorBand)
-                  OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band = $cursorBand
-                      AND random_order_key > $cursorRandom)
-                  OR (geographic_layer = $cursorLayer AND group_rank = $cursorGroup AND rotation_band = $cursorBand
-                      AND random_order_key = $cursorRandom AND pncp_id > $cursorId)
-              """;
-
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = $"""
-            WITH ranked AS (
-                SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
-                       c.additional_information, c.process, c.organization, c.unit, c.municipality,
-                       c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
-                       c.publication_date, c.global_updated_at, c.total_homologated_scaled,
-                       c.distance_from_ribeirao_km,
-                       ({geographicPriorityExpression}) AS geographic_layer,
-                       {GeographicGroupExpression} AS group_rank,
-                       CASE WHEN COALESCE(c.random_order_key, 0) >= $randomPivot THEN 0 ELSE 1 END AS rotation_band,
-                       COALESCE(c.random_order_key, 0) AS random_order_key
-                  FROM contracts c
-                  JOIN contracts_fts ON contracts_fts.rowid = c.rowid
-                  {where}
-            )
-            SELECT * FROM ranked
-            {cursorWhere}
-             ORDER BY geographic_layer, group_rank, rotation_band, random_order_key, pncp_id
-             LIMIT $limit;
-            """;
-        command.Parameters.AddWithValue("$contractMatch", contractMatch);
-        command.Parameters.AddWithValue("$randomPivot", randomPivot);
-        command.Parameters.AddWithValue("$limit", pageSize + 1);
-        AddFilterParameters(command, filters);
-        if (cursor is not null)
-        {
-            command.Parameters.AddWithValue("$cursorLayer", cursor.GeographicLayer);
-            command.Parameters.AddWithValue("$cursorGroup", cursor.GroupRank);
-            command.Parameters.AddWithValue("$cursorBand", cursor.RotationBand);
-            command.Parameters.AddWithValue("$cursorRandom", cursor.RandomOrderKey);
-            command.Parameters.AddWithValue("$cursorId", cursor.PncpId);
-        }
-
-        var candidates = new List<ItemContractCandidate>(pageSize + 1);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            var candidateCursor = new ItemCandidateCursor(
-                reader.GetInt32(19),
-                reader.GetInt32(20),
-                reader.GetInt32(21),
-                reader.GetInt64(22),
-                reader.GetString(0));
-            candidates.Add(new ItemContractCandidate(ReadContract(reader), candidateCursor));
-        }
-
-        var hasMore = candidates.Count > pageSize;
-        if (hasMore)
-        {
-            candidates.RemoveAt(candidates.Count - 1);
-        }
-
-        return new ItemCandidatePage(
-            candidates,
-            candidates.Count == 0 ? cursor : candidates[^1].Cursor,
-            hasMore);
     }
 
     public async Task<StaleItemCandidatePage> SearchStaleItemCandidatesAsync(
@@ -1762,130 +1811,138 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
         int pageSize = 200,
         CancellationToken cancellationToken = default)
     {
-        using var span = _performance.Begin("price-search", "stale-detection");
-        ArgumentNullException.ThrowIfNull(filters);
-        ArgumentNullException.ThrowIfNull(expression);
-        if (expression.IsEmpty)
+        try
         {
-            return new StaleItemCandidatePage([], null, false, 0);
-        }
+            using var span = _performance.Begin("price-search", "stale-detection");
+            ArgumentNullException.ThrowIfNull(filters);
+            ArgumentNullException.ThrowIfNull(expression);
+            if (expression.IsEmpty)
+            {
+                return new StaleItemCandidatePage([], null, false, 0);
+            }
 
-        await using var readerLease = await _connections.WorkCoordinator
-            .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
-            .ConfigureAwait(false);
+            await using var readerLease = await _connections.WorkCoordinator
+                .EnterReaderAsync(SqliteWorkPriority.Visible, cancellationToken)
+                .ConfigureAwait(false);
 
-        pageSize = Math.Clamp(pageSize, 1, 512);
-        var itemMatch = expression.ItemMatchQuery;
-        var conditions = new List<string>
-        {
-            "i.has_result = 1",
-            "i.hydration_status = $stale",
-            "pncp_item_matches(i.description, i.unit) = 1"
-        };
-        if (itemMatch.Length > 0)
-        {
-            conditions.Add("items_fts MATCH $itemMatch");
-        }
+            pageSize = Math.Clamp(pageSize, 1, 512);
+            var itemMatch = expression.ItemMatchQuery;
+            var conditions = new List<string>
+            {
+                "i.has_result = 1",
+                "i.hydration_status = $stale",
+                "pncp_item_matches(i.description, i.unit) = 1"
+            };
+            if (itemMatch.Length > 0)
+            {
+                conditions.Add("items_fts MATCH $itemMatch");
+            }
 
-        switch (filters.EffectiveGeoFilter.Kind)
-        {
-            case SearchGeoFilterKind.Southeast:
-                conditions.Add("c.uf IN ('ES','MG','RJ','SP')");
-                break;
-            case SearchGeoFilterKind.State:
-                conditions.Add("c.uf = $uf");
-                break;
-            case SearchGeoFilterKind.NearRibeirao:
-                conditions.Add("c.geo_layer = 0");
-                break;
-        }
+            switch (filters.EffectiveGeoFilter.Kind)
+            {
+                case SearchGeoFilterKind.Southeast:
+                    conditions.Add("c.uf IN ('ES','MG','RJ','SP')");
+                    break;
+                case SearchGeoFilterKind.State:
+                    conditions.Add("c.uf = $uf");
+                    break;
+                case SearchGeoFilterKind.NearRibeirao:
+                    conditions.Add("c.geo_layer = 0");
+                    break;
+            }
 
-        if (filters.StartDate is not null)
-        {
-            conditions.Add("c.publication_date >= $startDate");
-        }
-        if (filters.EndDate is not null)
-        {
-            conditions.Add("c.publication_date < $endDateExclusive");
-        }
+            if (filters.StartDate is not null)
+            {
+                conditions.Add("c.publication_date >= $startDate");
+            }
+            if (filters.EndDate is not null)
+            {
+                conditions.Add("c.publication_date < $endDateExclusive");
+            }
 
-        var source = itemMatch.Length > 0
-            ? """
-              items_fts
-              CROSS JOIN items i ON i.rowid = items_fts.rowid
-              CROSS JOIN contracts c ON c.pncp_id = i.contract_id
-              """
-            : """
-              items i
-              CROSS JOIN contracts c ON c.pncp_id = i.contract_id
-              """;
-        var cursorWhere = cursor is null
-            ? string.Empty
-            : "WHERE stale.pncp_id > $cursorContract";
+            var source = itemMatch.Length > 0
+                ? """
+                  items_fts
+                  CROSS JOIN items i ON i.rowid = items_fts.rowid
+                  CROSS JOIN contracts c ON c.pncp_id = i.contract_id
+                  """
+                : """
+                  items i
+                  CROSS JOIN contracts c ON c.pncp_id = i.contract_id
+                  """;
+            var cursorWhere = cursor is null
+                ? string.Empty
+                : "WHERE stale.pncp_id > $cursorContract";
 
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        connection.CreateFunction<string?, string?, bool>(
-            "pncp_item_matches",
-            (description, unit) => expression.MatchesItem(description, unit),
-            isDeterministic: true);
-        await using var command = connection.CreateCommand();
-        command.CommandText = $"""
-            WITH stale_contracts AS MATERIALIZED (
-                SELECT c.pncp_id
-                  FROM {source}
-                 WHERE {string.Join(" AND ", conditions)}
-                 GROUP BY c.pncp_id
-            ),
-            page AS (
-                SELECT stale.pncp_id
-                  FROM stale_contracts stale
-                  {cursorWhere}
-                 ORDER BY stale.pncp_id
-                 LIMIT $limit
-            )
-            SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
-                   c.additional_information, c.process, c.organization, c.unit, c.municipality,
-                   c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
-                   c.publication_date, c.global_updated_at, c.total_homologated_scaled,
-                   c.distance_from_ribeirao_km,
-                   (SELECT COUNT(*) FROM stale_contracts) AS total_contracts
-              FROM page
-              CROSS JOIN contracts c ON c.pncp_id = page.pncp_id
-             ORDER BY page.pncp_id;
-            """;
-        command.Parameters.AddWithValue("$stale", (int)ItemHydrationStatus.Stale);
-        command.Parameters.AddWithValue("$limit", pageSize + 1);
-        if (itemMatch.Length > 0)
-        {
-            command.Parameters.AddWithValue("$itemMatch", itemMatch);
-        }
-        if (cursor is not null)
-        {
-            command.Parameters.AddWithValue("$cursorContract", cursor.ContractId);
-        }
-        AddFilterParameters(command, filters);
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            connection.CreateFunction<string?, string?, bool>(
+                "pncp_item_matches",
+                (description, unit) => expression.MatchesItem(description, unit),
+                isDeterministic: true);
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"""
+                WITH stale_contracts AS MATERIALIZED (
+                    SELECT c.pncp_id
+                      FROM {source}
+                     WHERE {string.Join(" AND ", conditions)}
+                     GROUP BY c.pncp_id
+                ),
+                page AS (
+                    SELECT stale.pncp_id
+                      FROM stale_contracts stale
+                      {cursorWhere}
+                     ORDER BY stale.pncp_id
+                     LIMIT $limit
+                )
+                SELECT c.pncp_id, c.cnpj, c.purchase_year, c.purchase_sequence, c.object,
+                       c.additional_information, c.process, c.organization, c.unit, c.municipality,
+                       c.municipality_ibge_code, c.uf, c.modality_id, c.modality_name, c.status,
+                       c.publication_date, c.global_updated_at, c.total_homologated_scaled,
+                       c.distance_from_ribeirao_km,
+                       (SELECT COUNT(*) FROM stale_contracts) AS total_contracts
+                  FROM page
+                  CROSS JOIN contracts c ON c.pncp_id = page.pncp_id
+                 ORDER BY page.pncp_id;
+                """;
+            command.Parameters.AddWithValue("$stale", (int)ItemHydrationStatus.Stale);
+            command.Parameters.AddWithValue("$limit", pageSize + 1);
+            if (itemMatch.Length > 0)
+            {
+                command.Parameters.AddWithValue("$itemMatch", itemMatch);
+            }
+            if (cursor is not null)
+            {
+                command.Parameters.AddWithValue("$cursorContract", cursor.ContractId);
+            }
+            AddFilterParameters(command, filters);
 
-        var contracts = new List<ContractRecord>(pageSize + 1);
-        long totalContracts = 0;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            contracts.Add(ReadContract(reader));
-            totalContracts = reader.GetInt64(19);
-        }
+            var contracts = new List<ContractRecord>(pageSize + 1);
+            long totalContracts = 0;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                contracts.Add(ReadContract(reader));
+                totalContracts = reader.GetInt64(19);
+            }
 
-        var hasMore = contracts.Count > pageSize;
-        if (hasMore)
-        {
-            contracts.RemoveAt(contracts.Count - 1);
-        }
+            var hasMore = contracts.Count > pageSize;
+            if (hasMore)
+            {
+                contracts.RemoveAt(contracts.Count - 1);
+            }
 
-        span.Complete(contracts.Count);
-        return new StaleItemCandidatePage(
-            contracts,
-            contracts.Count == 0 ? cursor : new StaleItemCandidateCursor(contracts[^1].PncpId),
-            hasMore,
-            totalContracts);
+            span.Complete(contracts.Count);
+            return new StaleItemCandidatePage(
+                contracts,
+                contracts.Count == 0 ? cursor : new StaleItemCandidateCursor(contracts[^1].PncpId),
+                hasMore,
+                totalContracts);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
+        }
     }
 
     public Task<ItemSearchLocalSummary> GetItemSearchLocalSummaryAsync(
@@ -1914,215 +1971,224 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
         SqliteWorkPriority priority,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(filters);
-        ArgumentNullException.ThrowIfNull(expression);
-        if (expression.IsEmpty)
+        try
         {
-            return new ItemSearchLocalSummary(0, 0, 0);
-        }
+            ArgumentNullException.ThrowIfNull(filters);
+            ArgumentNullException.ThrowIfNull(expression);
+            if (expression.IsEmpty)
+            {
+                return new ItemSearchLocalSummary(0, 0, 0);
+            }
 
-        var candidateMatch = expression.CandidateMatchQuery;
-        var itemMatch = expression.ItemMatchQuery;
-        var explicitMatch = expression.ExplicitContractMatchQuery;
-        var candidateConditions = new List<string>();
+            var candidateMatch = expression.CandidateMatchQuery;
+            var itemMatch = expression.ItemMatchQuery;
+            var explicitMatch = expression.ExplicitContractMatchQuery;
+            var candidateConditions = new List<string>();
 
-        switch (filters.EffectiveGeoFilter.Kind)
-        {
-            case SearchGeoFilterKind.Southeast:
-                candidateConditions.Add("c.uf IN ('ES','MG','RJ','SP')");
-                break;
-            case SearchGeoFilterKind.State:
-                candidateConditions.Add("c.uf = $uf");
-                break;
-            case SearchGeoFilterKind.NearRibeirao:
-                candidateConditions.Add("c.geo_layer = 0");
-                break;
-        }
+            switch (filters.EffectiveGeoFilter.Kind)
+            {
+                case SearchGeoFilterKind.Southeast:
+                    candidateConditions.Add("c.uf IN ('ES','MG','RJ','SP')");
+                    break;
+                case SearchGeoFilterKind.State:
+                    candidateConditions.Add("c.uf = $uf");
+                    break;
+                case SearchGeoFilterKind.NearRibeirao:
+                    candidateConditions.Add("c.geo_layer = 0");
+                    break;
+            }
 
-        if (filters.StartDate is not null)
-        {
-            candidateConditions.Add("c.publication_date >= $startDate");
-        }
+            if (filters.StartDate is not null)
+            {
+                candidateConditions.Add("c.publication_date >= $startDate");
+            }
 
-        if (filters.EndDate is not null)
-        {
-            candidateConditions.Add("c.publication_date < $endDateExclusive");
-        }
+            if (filters.EndDate is not null)
+            {
+                candidateConditions.Add("c.publication_date < $endDateExclusive");
+            }
 
-        var candidateWhere = candidateConditions.Count == 0
-            ? string.Empty
-            : " WHERE " + string.Join(" AND ", candidateConditions);
-        var indexedContractSource = itemMatch.Length > 0
-            ? """
-              SELECT DISTINCT indexed_contract.rowid
-                FROM items_fts
-                CROSS JOIN items indexed_item ON indexed_item.rowid = items_fts.rowid
-                CROSS JOIN contracts indexed_contract
-                  ON indexed_contract.pncp_id = indexed_item.contract_id
-                CROSS JOIN contract_item_snapshots snapshot
-                  ON snapshot.contract_id = indexed_contract.pncp_id
-                 AND COALESCE(snapshot.source_global_updated_at, '') =
-                     COALESCE(indexed_contract.global_updated_at, '')
-               WHERE items_fts MATCH $itemMatch
-              """
-            : """
-              SELECT DISTINCT indexed_contract.rowid
-                FROM items indexed_item
-                CROSS JOIN contracts indexed_contract
-                  ON indexed_contract.pncp_id = indexed_item.contract_id
-                CROSS JOIN contract_item_snapshots snapshot
-                  ON snapshot.contract_id = indexed_contract.pncp_id
-                 AND COALESCE(snapshot.source_global_updated_at, '') =
-                     COALESCE(indexed_contract.global_updated_at, '')
-              """;
-        var unindexedContractSource = candidateMatch.Length > 0
-            ? """
-              SELECT fallback.rowid
-                FROM contracts fallback
-                JOIN contracts_fts ON contracts_fts.rowid = fallback.rowid
-               WHERE contracts_fts MATCH $candidateMatch
-                 AND NOT EXISTS(
-                     SELECT 1
-                       FROM contract_item_snapshots s
-                      WHERE s.contract_id = fallback.pncp_id
-                        AND COALESCE(s.source_global_updated_at, '') =
-                            COALESCE(fallback.global_updated_at, ''))
-              """
-            : """
-              SELECT fallback.rowid
-                FROM contracts fallback
-              WHERE NOT EXISTS(
-                     SELECT 1
-                       FROM contract_item_snapshots s
-                      WHERE s.contract_id = fallback.pncp_id
-                        AND COALESCE(s.source_global_updated_at, '') =
-                            COALESCE(fallback.global_updated_at, ''))
-              """;
-        var explicitContractUnion = explicitMatch.Length > 0
-            ? """
-              UNION
-              SELECT explicit_contract.rowid
-                FROM contracts explicit_contract
-                JOIN contracts_fts ON contracts_fts.rowid = explicit_contract.rowid
-               WHERE contracts_fts MATCH $explicitMatch
-              """
-            : string.Empty;
-        var candidateRowsCte = $"""
-            candidate_rows AS (
-                {indexedContractSource}
-                UNION
-                {unindexedContractSource}
-                {explicitContractUnion}
-            )
-            """;
-        var itemFtsJoin = itemMatch.Length > 0
-            ? "JOIN items_fts ON items_fts.rowid = i.rowid"
-            : string.Empty;
-        var itemWhere = itemMatch.Length > 0
-            ? "WHERE items_fts MATCH $itemMatch"
-            : string.Empty;
-
-        long candidateContracts;
-        await using (var candidateLease = await _connections.WorkCoordinator
-                         .EnterReaderAsync(priority, cancellationToken)
-                         .ConfigureAwait(false))
-        await using (var connection = await OpenAsync(cancellationToken).ConfigureAwait(false))
-        await using (var count = connection.CreateCommand())
-        {
-            count.CommandText = $"""
-                WITH {candidateRowsCte}
-                SELECT COUNT(*)
-                  FROM candidate_rows candidate
-                  JOIN contracts c ON c.rowid = candidate.rowid
-                  {candidateWhere};
+            var candidateWhere = candidateConditions.Count == 0
+                ? string.Empty
+                : " WHERE " + string.Join(" AND ", candidateConditions);
+            var indexedContractSource = itemMatch.Length > 0
+                ? """
+                  SELECT DISTINCT indexed_contract.rowid
+                    FROM items_fts
+                    CROSS JOIN items indexed_item ON indexed_item.rowid = items_fts.rowid
+                    CROSS JOIN contracts indexed_contract
+                      ON indexed_contract.pncp_id = indexed_item.contract_id
+                    CROSS JOIN contract_item_snapshots snapshot
+                      ON snapshot.contract_id = indexed_contract.pncp_id
+                     AND COALESCE(snapshot.source_global_updated_at, '') =
+                         COALESCE(indexed_contract.global_updated_at, '')
+                   WHERE items_fts MATCH $itemMatch
+                  """
+                : """
+                  SELECT DISTINCT indexed_contract.rowid
+                    FROM items indexed_item
+                    CROSS JOIN contracts indexed_contract
+                      ON indexed_contract.pncp_id = indexed_item.contract_id
+                    CROSS JOIN contract_item_snapshots snapshot
+                      ON snapshot.contract_id = indexed_contract.pncp_id
+                     AND COALESCE(snapshot.source_global_updated_at, '') =
+                         COALESCE(indexed_contract.global_updated_at, '')
+                  """;
+            var unindexedContractSource = candidateMatch.Length > 0
+                ? """
+                  SELECT fallback.rowid
+                    FROM contracts fallback
+                    JOIN contracts_fts ON contracts_fts.rowid = fallback.rowid
+                   WHERE contracts_fts MATCH $candidateMatch
+                     AND NOT EXISTS(
+                         SELECT 1
+                           FROM contract_item_snapshots s
+                          WHERE s.contract_id = fallback.pncp_id
+                            AND COALESCE(s.source_global_updated_at, '') =
+                                COALESCE(fallback.global_updated_at, ''))
+                  """
+                : """
+                  SELECT fallback.rowid
+                    FROM contracts fallback
+                  WHERE NOT EXISTS(
+                         SELECT 1
+                           FROM contract_item_snapshots s
+                          WHERE s.contract_id = fallback.pncp_id
+                            AND COALESCE(s.source_global_updated_at, '') =
+                                COALESCE(fallback.global_updated_at, ''))
+                  """;
+            var explicitContractUnion = explicitMatch.Length > 0
+                ? """
+                  UNION
+                  SELECT explicit_contract.rowid
+                    FROM contracts explicit_contract
+                    JOIN contracts_fts ON contracts_fts.rowid = explicit_contract.rowid
+                   WHERE contracts_fts MATCH $explicitMatch
+                  """
+                : string.Empty;
+            var candidateRowsCte = $"""
+                candidate_rows AS (
+                    {indexedContractSource}
+                    UNION
+                    {unindexedContractSource}
+                    {explicitContractUnion}
+                )
                 """;
-            if (candidateMatch.Length > 0)
-            {
-                count.Parameters.AddWithValue("$candidateMatch", candidateMatch);
-            }
-            if (itemMatch.Length > 0)
-            {
-                count.Parameters.AddWithValue("$itemMatch", itemMatch);
-            }
-            if (explicitMatch.Length > 0)
-            {
-                count.Parameters.AddWithValue("$explicitMatch", explicitMatch);
-            }
+            var itemFtsJoin = itemMatch.Length > 0
+                ? "JOIN items_fts ON items_fts.rowid = i.rowid"
+                : string.Empty;
+            var itemWhere = itemMatch.Length > 0
+                ? "WHERE items_fts MATCH $itemMatch"
+                : string.Empty;
 
-            AddFilterParameters(count, filters);
-            candidateContracts = Convert.ToInt64(
-                await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
-                CultureInfo.InvariantCulture);
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        long cachedMatchingItems = 0;
-        long cachedItemsWithPrices = 0;
-        await using (var cacheLease = await _connections.WorkCoordinator
-                         .EnterReaderAsync(priority, cancellationToken)
-                         .ConfigureAwait(false))
-        await using (var connection = await OpenAsync(cancellationToken).ConfigureAwait(false))
-        await using (var cached = connection.CreateCommand())
-        {
-            cached.CommandText = $"""
-                WITH {candidateRowsCte},
-                candidate_contracts AS (
-                    SELECT c.pncp_id
+            long candidateContracts;
+            await using (var candidateLease = await _connections.WorkCoordinator
+                             .EnterReaderAsync(priority, cancellationToken)
+                             .ConfigureAwait(false))
+            await using (var connection = await OpenAsync(cancellationToken).ConfigureAwait(false))
+            using (var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken))
+            await using (var count = connection.CreateCommand())
+            {
+                count.CommandText = $"""
+                    WITH {candidateRowsCte}
+                    SELECT COUNT(*)
                       FROM candidate_rows candidate
                       JOIN contracts c ON c.rowid = candidate.rowid
-                      {candidateWhere}
-                )
-                SELECT i.description, i.unit,
-                       CASE WHEN i.hydration_status = $complete
-                                  AND EXISTS(
-                                      SELECT 1
-                                        FROM item_results r
-                                       WHERE r.contract_id = i.contract_id
-                                         AND r.item_number = i.item_number
-                                         AND r.result_status_id = 1
-                                         AND r.unit_value_scaled > 0)
-                            THEN 1 ELSE 0 END AS has_active_price
-                  FROM items i
-                  JOIN candidate_contracts cc ON cc.pncp_id = i.contract_id
-                  {itemFtsJoin}
-                  {itemWhere};
-                """;
-            if (candidateMatch.Length > 0)
-            {
-                cached.Parameters.AddWithValue("$candidateMatch", candidateMatch);
-            }
-
-            if (itemMatch.Length > 0)
-            {
-                cached.Parameters.AddWithValue("$itemMatch", itemMatch);
-            }
-            if (explicitMatch.Length > 0)
-            {
-                cached.Parameters.AddWithValue("$explicitMatch", explicitMatch);
-            }
-
-            cached.Parameters.AddWithValue("$complete", (int)ItemHydrationStatus.Complete);
-            AddFilterParameters(cached, filters);
-            await using var reader = await cached.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                if (!expression.MatchesItem(reader.GetString(0), reader.GetString(1)))
+                      {candidateWhere};
+                    """;
+                if (candidateMatch.Length > 0)
                 {
-                    continue;
+                    count.Parameters.AddWithValue("$candidateMatch", candidateMatch);
+                }
+                if (itemMatch.Length > 0)
+                {
+                    count.Parameters.AddWithValue("$itemMatch", itemMatch);
+                }
+                if (explicitMatch.Length > 0)
+                {
+                    count.Parameters.AddWithValue("$explicitMatch", explicitMatch);
                 }
 
-                cachedMatchingItems++;
-                if (reader.GetInt32(2) == 1)
+                AddFilterParameters(count, filters);
+                candidateContracts = Convert.ToInt64(
+                    await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                    CultureInfo.InvariantCulture);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            long cachedMatchingItems = 0;
+            long cachedItemsWithPrices = 0;
+            await using (var cacheLease = await _connections.WorkCoordinator
+                             .EnterReaderAsync(priority, cancellationToken)
+                             .ConfigureAwait(false))
+            await using (var connection = await OpenAsync(cancellationToken).ConfigureAwait(false))
+            using (var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken))
+            await using (var cached = connection.CreateCommand())
+            {
+                cached.CommandText = $"""
+                    WITH {candidateRowsCte},
+                    candidate_contracts AS (
+                        SELECT c.pncp_id
+                          FROM candidate_rows candidate
+                          JOIN contracts c ON c.rowid = candidate.rowid
+                          {candidateWhere}
+                    )
+                    SELECT i.description, i.unit,
+                           CASE WHEN i.hydration_status = $complete
+                                      AND EXISTS(
+                                          SELECT 1
+                                            FROM item_results r
+                                           WHERE r.contract_id = i.contract_id
+                                             AND r.item_number = i.item_number
+                                             AND r.result_status_id = 1
+                                             AND r.unit_value_scaled > 0)
+                                THEN 1 ELSE 0 END AS has_active_price
+                      FROM items i
+                      JOIN candidate_contracts cc ON cc.pncp_id = i.contract_id
+                      {itemFtsJoin}
+                      {itemWhere};
+                    """;
+                if (candidateMatch.Length > 0)
                 {
-                    cachedItemsWithPrices++;
+                    cached.Parameters.AddWithValue("$candidateMatch", candidateMatch);
+                }
+
+                if (itemMatch.Length > 0)
+                {
+                    cached.Parameters.AddWithValue("$itemMatch", itemMatch);
+                }
+                if (explicitMatch.Length > 0)
+                {
+                    cached.Parameters.AddWithValue("$explicitMatch", explicitMatch);
+                }
+
+                cached.Parameters.AddWithValue("$complete", (int)ItemHydrationStatus.Complete);
+                AddFilterParameters(cached, filters);
+                await using var reader = await cached.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    if (!expression.MatchesItem(reader.GetString(0), reader.GetString(1)))
+                    {
+                        continue;
+                    }
+
+                    cachedMatchingItems++;
+                    if (reader.GetInt32(2) == 1)
+                    {
+                        cachedItemsWithPrices++;
+                    }
                 }
             }
+
+            return new ItemSearchLocalSummary(
+                candidateContracts,
+                cachedMatchingItems,
+                cachedItemsWithPrices);
         }
-
-        return new ItemSearchLocalSummary(
-            candidateContracts,
-            cachedMatchingItems,
-            cachedItemsWithPrices);
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
+        }
     }
 
     public async Task<ContractRecord?> GetContractAsync(string pncpId, CancellationToken cancellationToken = default)
@@ -2146,164 +2212,179 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
         bool forceRefresh,
         CancellationToken cancellationToken = default)
     {
-        await using var writer = await _connections.WorkCoordinator
-            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
-            .ConfigureAwait(false);
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-
-        // GetItemsAsync only returns after every page has arrived. Keeping the incoming
-        // keys in a temporary table lets the complete list and its proof-of-completeness
-        // become visible in one transaction, including the valid empty-list case.
-        await using (var createIncoming = connection.CreateCommand())
+        try
         {
-            createIncoming.Transaction = (SqliteTransaction)transaction;
-            createIncoming.CommandText = """
-                CREATE TEMP TABLE IF NOT EXISTS incoming_item_numbers(
-                    item_number INTEGER PRIMARY KEY
-                ) WITHOUT ROWID;
-                DELETE FROM incoming_item_numbers;
+            await using var writer = await _connections.WorkCoordinator
+                .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+                .ConfigureAwait(false);
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+            // GetItemsAsync only returns after every page has arrived. Keeping the incoming
+            // keys in a temporary table lets the complete list and its proof-of-completeness
+            // become visible in one transaction, including the valid empty-list case.
+            await using (var createIncoming = connection.CreateCommand())
+            {
+                createIncoming.Transaction = (SqliteTransaction)transaction;
+                createIncoming.CommandText = """
+                    CREATE TEMP TABLE IF NOT EXISTS incoming_item_numbers(
+                        item_number INTEGER PRIMARY KEY
+                    ) WITHOUT ROWID;
+                    DELETE FROM incoming_item_numbers;
+                    """;
+                await createIncoming.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using var incoming = connection.CreateCommand();
+            incoming.Transaction = (SqliteTransaction)transaction;
+            incoming.CommandText = "INSERT OR IGNORE INTO incoming_item_numbers(item_number) VALUES($itemNumber);";
+            incoming.Parameters.Add("$itemNumber", SqliteType.Integer);
+
+            await using var command = connection.CreateCommand();
+            command.Transaction = (SqliteTransaction)transaction;
+            command.CommandText = """
+                INSERT INTO items(
+                    contract_id, item_number, description, unit, requested_quantity_scaled,
+                    additional_information, item_category, ncm_nbs_code, ncm_nbs_description,
+                    catalog_code, catalog_name, catalog_category, status, has_result,
+                    source_updated_at, hydration_status, last_error, cache_updated_at, search_text)
+                VALUES($contractId, $itemNumber, $description, $unit, $requestedQuantity,
+                       $additionalInformation, $itemCategory, $ncmNbsCode, $ncmNbsDescription,
+                       $catalogCode, $catalogName, $catalogCategory, $status, $hasResult,
+                       $sourceUpdatedAt, $hydrationStatus, NULL, $cacheUpdatedAt, $searchText)
+                ON CONFLICT(contract_id, item_number) DO UPDATE SET
+                    description = excluded.description,
+                    unit = excluded.unit,
+                    requested_quantity_scaled = excluded.requested_quantity_scaled,
+                    additional_information = excluded.additional_information,
+                    item_category = excluded.item_category,
+                    ncm_nbs_code = excluded.ncm_nbs_code,
+                    ncm_nbs_description = excluded.ncm_nbs_description,
+                    catalog_code = excluded.catalog_code,
+                    catalog_name = excluded.catalog_name,
+                    catalog_category = excluded.catalog_category,
+                    status = excluded.status,
+                    has_result = excluded.has_result,
+                    source_updated_at = excluded.source_updated_at,
+                    search_text = excluded.search_text,
+                    hydration_status = CASE
+                        WHEN $forceRefresh = 1 THEN excluded.hydration_status
+                        WHEN items.hydration_status = 2 THEN items.hydration_status
+                        WHEN items.hydration_status = 4 AND excluded.has_result = 1 THEN 4
+                        ELSE excluded.hydration_status
+                    END,
+                    last_error = CASE WHEN $forceRefresh = 1 THEN NULL ELSE items.last_error END,
+                    cache_updated_at = excluded.cache_updated_at;
                 """;
-            await createIncoming.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            command.Parameters.Add("$contractId", SqliteType.Text);
+            command.Parameters.Add("$itemNumber", SqliteType.Integer);
+            command.Parameters.Add("$description", SqliteType.Text);
+            command.Parameters.Add("$unit", SqliteType.Text);
+            command.Parameters.Add("$requestedQuantity", SqliteType.Integer);
+            command.Parameters.Add("$additionalInformation", SqliteType.Text);
+            command.Parameters.Add("$itemCategory", SqliteType.Text);
+            command.Parameters.Add("$ncmNbsCode", SqliteType.Text);
+            command.Parameters.Add("$ncmNbsDescription", SqliteType.Text);
+            command.Parameters.Add("$catalogCode", SqliteType.Text);
+            command.Parameters.Add("$catalogName", SqliteType.Text);
+            command.Parameters.Add("$catalogCategory", SqliteType.Text);
+            command.Parameters.Add("$status", SqliteType.Text);
+            command.Parameters.Add("$hasResult", SqliteType.Integer);
+            command.Parameters.Add("$sourceUpdatedAt", SqliteType.Text);
+            command.Parameters.Add("$hydrationStatus", SqliteType.Integer);
+            command.Parameters.Add("$cacheUpdatedAt", SqliteType.Text);
+            command.Parameters.Add("$searchText", SqliteType.Text);
+            command.Parameters.AddWithValue("$forceRefresh", forceRefresh ? 1 : 0);
+
+            var now = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+            foreach (var item in items)
+            {
+                var description = SearchText.Sanitize(item.Description);
+                incoming.Parameters["$itemNumber"].Value = item.ItemNumber;
+                await incoming.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+                command.Parameters["$contractId"].Value = contractId;
+                command.Parameters["$itemNumber"].Value = item.ItemNumber;
+                command.Parameters["$description"].Value = description;
+                command.Parameters["$unit"].Value = SearchText.Sanitize(item.Unit);
+                command.Parameters["$requestedQuantity"].Value = DbValue(item.RequestedQuantityScaled);
+                command.Parameters["$additionalInformation"].Value = SearchText.Sanitize(item.AdditionalInformation);
+                command.Parameters["$itemCategory"].Value = SearchText.Sanitize(item.Category);
+                command.Parameters["$ncmNbsCode"].Value = SearchText.Sanitize(item.NcmNbsCode);
+                command.Parameters["$ncmNbsDescription"].Value = SearchText.Sanitize(item.NcmNbsDescription);
+                command.Parameters["$catalogCode"].Value = SearchText.Sanitize(item.CatalogCode);
+                command.Parameters["$catalogName"].Value = SearchText.Sanitize(item.CatalogName);
+                command.Parameters["$catalogCategory"].Value = SearchText.Sanitize(item.CatalogCategory);
+                command.Parameters["$status"].Value = SearchText.Sanitize(item.Status);
+                command.Parameters["$hasResult"].Value = item.HasResult ? 1 : 0;
+                command.Parameters["$sourceUpdatedAt"].Value = DbValue(item.UpdatedAt);
+                command.Parameters["$hydrationStatus"].Value = (int)item.HydrationStatus;
+                command.Parameters["$cacheUpdatedAt"].Value = now;
+                command.Parameters["$searchText"].Value = SearchText.Normalize(description);
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using (var reconcile = connection.CreateCommand())
+            {
+                reconcile.Transaction = (SqliteTransaction)transaction;
+                reconcile.CommandText = """
+                    DELETE FROM items
+                     WHERE contract_id = $contractId
+                       AND item_number NOT IN (SELECT item_number FROM incoming_item_numbers);
+                    """;
+                reconcile.Parameters.AddWithValue("$contractId", contractId);
+                await reconcile.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using (var removeImpossibleResults = connection.CreateCommand())
+            {
+                removeImpossibleResults.Transaction = (SqliteTransaction)transaction;
+                removeImpossibleResults.CommandText = """
+                    DELETE FROM item_results
+                     WHERE contract_id = $contractId
+                       AND item_number IN (
+                           SELECT item_number FROM items
+                            WHERE contract_id = $contractId AND has_result = 0
+                       );
+                    """;
+                removeImpossibleResults.Parameters.AddWithValue("$contractId", contractId);
+                await removeImpossibleResults.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using (var snapshot = connection.CreateCommand())
+            {
+                snapshot.Transaction = (SqliteTransaction)transaction;
+                snapshot.CommandText = """
+                    INSERT INTO contract_item_snapshots(
+                        contract_id, fetched_at, item_count, source_global_updated_at)
+                    SELECT c.pncp_id, $fetchedAt, $itemCount, c.global_updated_at
+                      FROM contracts c
+                     WHERE c.pncp_id = $contractId
+                    ON CONFLICT(contract_id) DO UPDATE SET
+                        fetched_at = excluded.fetched_at,
+                        item_count = excluded.item_count,
+                        source_global_updated_at = excluded.source_global_updated_at;
+                    """;
+                snapshot.Parameters.AddWithValue("$fetchedAt", now);
+                snapshot.Parameters.AddWithValue("$itemCount", items.Count);
+                snapshot.Parameters.AddWithValue("$contractId", contractId);
+                await snapshot.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using (var resolved = connection.CreateCommand())
+            {
+                resolved.Transaction = (SqliteTransaction)transaction;
+                resolved.CommandText = "DELETE FROM official_conflicts WHERE kind=2 AND key1=$id";
+                resolved.Parameters.AddWithValue("$id", contractId);
+                await resolved.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
-
-        await using var incoming = connection.CreateCommand();
-        incoming.Transaction = (SqliteTransaction)transaction;
-        incoming.CommandText = "INSERT OR IGNORE INTO incoming_item_numbers(item_number) VALUES($itemNumber);";
-        incoming.Parameters.Add("$itemNumber", SqliteType.Integer);
-
-        await using var command = connection.CreateCommand();
-        command.Transaction = (SqliteTransaction)transaction;
-        command.CommandText = """
-            INSERT INTO items(
-                contract_id, item_number, description, unit, requested_quantity_scaled,
-                additional_information, item_category, ncm_nbs_code, ncm_nbs_description,
-                catalog_code, catalog_name, catalog_category, status, has_result,
-                source_updated_at, hydration_status, last_error, cache_updated_at, search_text)
-            VALUES($contractId, $itemNumber, $description, $unit, $requestedQuantity,
-                   $additionalInformation, $itemCategory, $ncmNbsCode, $ncmNbsDescription,
-                   $catalogCode, $catalogName, $catalogCategory, $status, $hasResult,
-                   $sourceUpdatedAt, $hydrationStatus, NULL, $cacheUpdatedAt, $searchText)
-            ON CONFLICT(contract_id, item_number) DO UPDATE SET
-                description = excluded.description,
-                unit = excluded.unit,
-                requested_quantity_scaled = excluded.requested_quantity_scaled,
-                additional_information = excluded.additional_information,
-                item_category = excluded.item_category,
-                ncm_nbs_code = excluded.ncm_nbs_code,
-                ncm_nbs_description = excluded.ncm_nbs_description,
-                catalog_code = excluded.catalog_code,
-                catalog_name = excluded.catalog_name,
-                catalog_category = excluded.catalog_category,
-                status = excluded.status,
-                has_result = excluded.has_result,
-                source_updated_at = excluded.source_updated_at,
-                search_text = excluded.search_text,
-                hydration_status = CASE
-                    WHEN $forceRefresh = 1 THEN excluded.hydration_status
-                    WHEN items.hydration_status = 2 THEN items.hydration_status
-                    WHEN items.hydration_status = 4 AND excluded.has_result = 1 THEN 4
-                    ELSE excluded.hydration_status
-                END,
-                last_error = CASE WHEN $forceRefresh = 1 THEN NULL ELSE items.last_error END,
-                cache_updated_at = excluded.cache_updated_at;
-            """;
-        command.Parameters.Add("$contractId", SqliteType.Text);
-        command.Parameters.Add("$itemNumber", SqliteType.Integer);
-        command.Parameters.Add("$description", SqliteType.Text);
-        command.Parameters.Add("$unit", SqliteType.Text);
-        command.Parameters.Add("$requestedQuantity", SqliteType.Integer);
-        command.Parameters.Add("$additionalInformation", SqliteType.Text);
-        command.Parameters.Add("$itemCategory", SqliteType.Text);
-        command.Parameters.Add("$ncmNbsCode", SqliteType.Text);
-        command.Parameters.Add("$ncmNbsDescription", SqliteType.Text);
-        command.Parameters.Add("$catalogCode", SqliteType.Text);
-        command.Parameters.Add("$catalogName", SqliteType.Text);
-        command.Parameters.Add("$catalogCategory", SqliteType.Text);
-        command.Parameters.Add("$status", SqliteType.Text);
-        command.Parameters.Add("$hasResult", SqliteType.Integer);
-        command.Parameters.Add("$sourceUpdatedAt", SqliteType.Text);
-        command.Parameters.Add("$hydrationStatus", SqliteType.Integer);
-        command.Parameters.Add("$cacheUpdatedAt", SqliteType.Text);
-        command.Parameters.Add("$searchText", SqliteType.Text);
-        command.Parameters.AddWithValue("$forceRefresh", forceRefresh ? 1 : 0);
-
-        var now = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
-        foreach (var item in items)
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
         {
-            var description = SearchText.Sanitize(item.Description);
-            incoming.Parameters["$itemNumber"].Value = item.ItemNumber;
-            await incoming.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-
-            command.Parameters["$contractId"].Value = contractId;
-            command.Parameters["$itemNumber"].Value = item.ItemNumber;
-            command.Parameters["$description"].Value = description;
-            command.Parameters["$unit"].Value = SearchText.Sanitize(item.Unit);
-            command.Parameters["$requestedQuantity"].Value = DbValue(item.RequestedQuantityScaled);
-            command.Parameters["$additionalInformation"].Value = SearchText.Sanitize(item.AdditionalInformation);
-            command.Parameters["$itemCategory"].Value = SearchText.Sanitize(item.Category);
-            command.Parameters["$ncmNbsCode"].Value = SearchText.Sanitize(item.NcmNbsCode);
-            command.Parameters["$ncmNbsDescription"].Value = SearchText.Sanitize(item.NcmNbsDescription);
-            command.Parameters["$catalogCode"].Value = SearchText.Sanitize(item.CatalogCode);
-            command.Parameters["$catalogName"].Value = SearchText.Sanitize(item.CatalogName);
-            command.Parameters["$catalogCategory"].Value = SearchText.Sanitize(item.CatalogCategory);
-            command.Parameters["$status"].Value = SearchText.Sanitize(item.Status);
-            command.Parameters["$hasResult"].Value = item.HasResult ? 1 : 0;
-            command.Parameters["$sourceUpdatedAt"].Value = DbValue(item.UpdatedAt);
-            command.Parameters["$hydrationStatus"].Value = (int)item.HydrationStatus;
-            command.Parameters["$cacheUpdatedAt"].Value = now;
-            command.Parameters["$searchText"].Value = SearchText.Normalize(description);
-            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
         }
-
-        await using (var reconcile = connection.CreateCommand())
-        {
-            reconcile.Transaction = (SqliteTransaction)transaction;
-            reconcile.CommandText = """
-                DELETE FROM items
-                 WHERE contract_id = $contractId
-                   AND item_number NOT IN (SELECT item_number FROM incoming_item_numbers);
-                """;
-            reconcile.Parameters.AddWithValue("$contractId", contractId);
-            await reconcile.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        await using (var removeImpossibleResults = connection.CreateCommand())
-        {
-            removeImpossibleResults.Transaction = (SqliteTransaction)transaction;
-            removeImpossibleResults.CommandText = """
-                DELETE FROM item_results
-                 WHERE contract_id = $contractId
-                   AND item_number IN (
-                       SELECT item_number FROM items
-                        WHERE contract_id = $contractId AND has_result = 0
-                   );
-                """;
-            removeImpossibleResults.Parameters.AddWithValue("$contractId", contractId);
-            await removeImpossibleResults.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        await using (var snapshot = connection.CreateCommand())
-        {
-            snapshot.Transaction = (SqliteTransaction)transaction;
-            snapshot.CommandText = """
-                INSERT INTO contract_item_snapshots(
-                    contract_id, fetched_at, item_count, source_global_updated_at)
-                SELECT c.pncp_id, $fetchedAt, $itemCount, c.global_updated_at
-                  FROM contracts c
-                 WHERE c.pncp_id = $contractId
-                ON CONFLICT(contract_id) DO UPDATE SET
-                    fetched_at = excluded.fetched_at,
-                    item_count = excluded.item_count,
-                    source_global_updated_at = excluded.source_global_updated_at;
-                """;
-            snapshot.Parameters.AddWithValue("$fetchedAt", now);
-            snapshot.Parameters.AddWithValue("$itemCount", items.Count);
-            snapshot.Parameters.AddWithValue("$contractId", contractId);
-            await snapshot.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<ContractItemSnapshot?> GetItemSnapshotAsync(
@@ -2732,186 +2813,133 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
         bool pinContract,
         CancellationToken cancellationToken)
     {
-        await using var writer = await _connections.WorkCoordinator
-            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
-            .ConfigureAwait(false);
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        await using (var delete = connection.CreateCommand())
+        try
         {
-            delete.Transaction = (SqliteTransaction)transaction;
-            delete.CommandText = "DELETE FROM item_results WHERE contract_id = $contractId AND item_number = $itemNumber;";
-            delete.Parameters.AddWithValue("$contractId", contractId);
-            delete.Parameters.AddWithValue("$itemNumber", itemNumber);
-            await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        await using (var insert = connection.CreateCommand())
-        {
-            insert.Transaction = (SqliteTransaction)transaction;
-            insert.CommandText = """
-                INSERT INTO item_results(
-                    contract_id, item_number, result_sequence, supplier_tax_id, supplier_name,
-                    supplier_type, supplier_municipality, supplier_uf,
-                    quantity_scaled, unit_value_scaled, total_value_scaled, result_date,
-                    result_status_id, result_status_name)
-                VALUES($contractId, $itemNumber, $sequence, $taxId, $supplier,
-                       $supplierType, $supplierMunicipality, $supplierUf, $quantity,
-                       $unitValue, $totalValue, $resultDate, $statusId, $statusName);
-                """;
-            insert.Parameters.Add("$contractId", SqliteType.Text);
-            insert.Parameters.Add("$itemNumber", SqliteType.Integer);
-            insert.Parameters.Add("$sequence", SqliteType.Integer);
-            insert.Parameters.Add("$taxId", SqliteType.Text);
-            insert.Parameters.Add("$supplier", SqliteType.Text);
-            insert.Parameters.Add("$supplierType", SqliteType.Text);
-            insert.Parameters.Add("$supplierMunicipality", SqliteType.Text);
-            insert.Parameters.Add("$supplierUf", SqliteType.Text);
-            insert.Parameters.Add("$quantity", SqliteType.Integer);
-            insert.Parameters.Add("$unitValue", SqliteType.Integer);
-            insert.Parameters.Add("$totalValue", SqliteType.Integer);
-            insert.Parameters.Add("$resultDate", SqliteType.Text);
-            insert.Parameters.Add("$statusId", SqliteType.Integer);
-            insert.Parameters.Add("$statusName", SqliteType.Text);
-
-            foreach (var result in results)
+            await using var writer = await _connections.WorkCoordinator
+                .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+                .ConfigureAwait(false);
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using (var delete = connection.CreateCommand())
             {
-                insert.Parameters["$contractId"].Value = contractId;
-                insert.Parameters["$itemNumber"].Value = itemNumber;
-                insert.Parameters["$sequence"].Value = result.ResultSequence;
-                insert.Parameters["$taxId"].Value = SearchText.Sanitize(result.SupplierTaxId);
-                insert.Parameters["$supplier"].Value = SearchText.Sanitize(result.SupplierName);
-                insert.Parameters["$supplierType"].Value = SearchText.Sanitize(result.SupplierType);
-                insert.Parameters["$supplierMunicipality"].Value = SearchText.Sanitize(result.SupplierMunicipality);
-                insert.Parameters["$supplierUf"].Value = SearchText.Sanitize(result.SupplierUf);
-                insert.Parameters["$quantity"].Value = DbValue(result.HomologatedQuantityScaled);
-                insert.Parameters["$unitValue"].Value = DbValue(result.HomologatedUnitValueScaled);
-                insert.Parameters["$totalValue"].Value = DbValue(result.HomologatedTotalValueScaled);
-                insert.Parameters["$resultDate"].Value = DbValue(
-                    result.ResultDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
-                insert.Parameters["$statusId"].Value = result.ResultStatusId;
-                insert.Parameters["$statusName"].Value = SearchText.Sanitize(result.ResultStatusName);
-                await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                delete.Transaction = (SqliteTransaction)transaction;
+                delete.CommandText = "DELETE FROM item_results WHERE contract_id = $contractId AND item_number = $itemNumber;";
+                delete.Parameters.AddWithValue("$contractId", contractId);
+                delete.Parameters.AddWithValue("$itemNumber", itemNumber);
+                await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
-        }
 
-        await using (var update = connection.CreateCommand())
+            await using (var insert = connection.CreateCommand())
+            {
+                insert.Transaction = (SqliteTransaction)transaction;
+                insert.CommandText = """
+                    INSERT INTO item_results(
+                        contract_id, item_number, result_sequence, supplier_tax_id, supplier_name,
+                        supplier_type, supplier_municipality, supplier_uf,
+                        quantity_scaled, unit_value_scaled, total_value_scaled, result_date,
+                        result_status_id, result_status_name)
+                    VALUES($contractId, $itemNumber, $sequence, $taxId, $supplier,
+                           $supplierType, $supplierMunicipality, $supplierUf, $quantity,
+                           $unitValue, $totalValue, $resultDate, $statusId, $statusName);
+                    """;
+                insert.Parameters.Add("$contractId", SqliteType.Text);
+                insert.Parameters.Add("$itemNumber", SqliteType.Integer);
+                insert.Parameters.Add("$sequence", SqliteType.Integer);
+                insert.Parameters.Add("$taxId", SqliteType.Text);
+                insert.Parameters.Add("$supplier", SqliteType.Text);
+                insert.Parameters.Add("$supplierType", SqliteType.Text);
+                insert.Parameters.Add("$supplierMunicipality", SqliteType.Text);
+                insert.Parameters.Add("$supplierUf", SqliteType.Text);
+                insert.Parameters.Add("$quantity", SqliteType.Integer);
+                insert.Parameters.Add("$unitValue", SqliteType.Integer);
+                insert.Parameters.Add("$totalValue", SqliteType.Integer);
+                insert.Parameters.Add("$resultDate", SqliteType.Text);
+                insert.Parameters.Add("$statusId", SqliteType.Integer);
+                insert.Parameters.Add("$statusName", SqliteType.Text);
+
+                foreach (var result in results)
+                {
+                    insert.Parameters["$contractId"].Value = contractId;
+                    insert.Parameters["$itemNumber"].Value = itemNumber;
+                    insert.Parameters["$sequence"].Value = result.ResultSequence;
+                    insert.Parameters["$taxId"].Value = SearchText.Sanitize(result.SupplierTaxId);
+                    insert.Parameters["$supplier"].Value = SearchText.Sanitize(result.SupplierName);
+                    insert.Parameters["$supplierType"].Value = SearchText.Sanitize(result.SupplierType);
+                    insert.Parameters["$supplierMunicipality"].Value = SearchText.Sanitize(result.SupplierMunicipality);
+                    insert.Parameters["$supplierUf"].Value = SearchText.Sanitize(result.SupplierUf);
+                    insert.Parameters["$quantity"].Value = DbValue(result.HomologatedQuantityScaled);
+                    insert.Parameters["$unitValue"].Value = DbValue(result.HomologatedUnitValueScaled);
+                    insert.Parameters["$totalValue"].Value = DbValue(result.HomologatedTotalValueScaled);
+                    insert.Parameters["$resultDate"].Value = DbValue(
+                        result.ResultDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+                    insert.Parameters["$statusId"].Value = result.ResultStatusId;
+                    insert.Parameters["$statusName"].Value = SearchText.Sanitize(result.ResultStatusName);
+                    await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            await using (var update = connection.CreateCommand())
+            {
+                update.Transaction = (SqliteTransaction)transaction;
+                update.CommandText = """
+                    UPDATE items SET hydration_status = $status, last_error = NULL, cache_updated_at = $updatedAt
+                     WHERE contract_id = $contractId AND item_number = $itemNumber;
+                    """;
+                update.Parameters.AddWithValue("$status", (int)ItemHydrationStatus.Complete);
+                update.Parameters.AddWithValue("$updatedAt", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+                update.Parameters.AddWithValue("$contractId", contractId);
+                update.Parameters.AddWithValue("$itemNumber", itemNumber);
+                await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            if (pinContract)
+            {
+                await using var pin = connection.CreateCommand();
+                pin.Transaction = (SqliteTransaction)transaction;
+                pin.CommandText = """
+                    INSERT INTO price_cache_contracts(
+                        contract_id, publication_date, source_global_updated_at, status, item_count,
+                        active_result_count, cancelled_result_count, background_owned,
+                        user_pinned, completed_at, updated_at)
+                    SELECT c.pncp_id, COALESCE(c.publication_date, ''), c.global_updated_at, 2,
+                           COALESCE(s.item_count, 0),
+                           (SELECT COUNT(*) FROM item_results r
+                             WHERE r.contract_id = c.pncp_id AND r.result_status_id = 1),
+                           (SELECT COUNT(*) FROM item_results r
+                             WHERE r.contract_id = c.pncp_id AND r.result_status_id <> 1),
+                           0, 1, $updatedAt, $updatedAt
+                      FROM contracts c
+                      LEFT JOIN contract_item_snapshots s ON s.contract_id = c.pncp_id
+                     WHERE c.pncp_id = $contractId
+                    ON CONFLICT(contract_id) DO UPDATE SET
+                        publication_date = excluded.publication_date,
+                        source_global_updated_at = excluded.source_global_updated_at,
+                        status = excluded.status,
+                        item_count = excluded.item_count,
+                        active_result_count = excluded.active_result_count,
+                        cancelled_result_count = excluded.cancelled_result_count,
+                        background_owned = 0,
+                        user_pinned = 1,
+                        completed_at = excluded.completed_at,
+                        updated_at = excluded.updated_at;
+                    """;
+                pin.Parameters.AddWithValue("$contractId", contractId);
+                pin.Parameters.AddWithValue("$updatedAt", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+                await pin.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await RefreshOfficialPriceIndexAsync(connection, (SqliteTransaction)transaction,
+                contractId, cancellationToken).ConfigureAwait(false);
+
+            await RecordOfficialResultsAsync(connection, (SqliteTransaction)transaction,
+                contractId, itemNumber, cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
         {
-            update.Transaction = (SqliteTransaction)transaction;
-            update.CommandText = """
-                UPDATE items SET hydration_status = $status, last_error = NULL, cache_updated_at = $updatedAt
-                 WHERE contract_id = $contractId AND item_number = $itemNumber;
-                """;
-            update.Parameters.AddWithValue("$status", (int)ItemHydrationStatus.Complete);
-            update.Parameters.AddWithValue("$updatedAt", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
-            update.Parameters.AddWithValue("$contractId", contractId);
-            update.Parameters.AddWithValue("$itemNumber", itemNumber);
-            await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
         }
-
-        if (pinContract)
-        {
-            await using var pin = connection.CreateCommand();
-            pin.Transaction = (SqliteTransaction)transaction;
-            pin.CommandText = """
-                INSERT INTO price_cache_contracts(
-                    contract_id, publication_date, source_global_updated_at, status, item_count,
-                    active_result_count, cancelled_result_count, background_owned,
-                    user_pinned, completed_at, updated_at)
-                SELECT c.pncp_id, COALESCE(c.publication_date, ''), c.global_updated_at, 2,
-                       COALESCE(s.item_count, 0),
-                       (SELECT COUNT(*) FROM item_results r
-                         WHERE r.contract_id = c.pncp_id AND r.result_status_id = 1),
-                       (SELECT COUNT(*) FROM item_results r
-                         WHERE r.contract_id = c.pncp_id AND r.result_status_id <> 1),
-                       0, 1, $updatedAt, $updatedAt
-                  FROM contracts c
-                  LEFT JOIN contract_item_snapshots s ON s.contract_id = c.pncp_id
-                 WHERE c.pncp_id = $contractId
-                ON CONFLICT(contract_id) DO UPDATE SET
-                    publication_date = excluded.publication_date,
-                    source_global_updated_at = excluded.source_global_updated_at,
-                    status = excluded.status,
-                    item_count = excluded.item_count,
-                    active_result_count = excluded.active_result_count,
-                    cancelled_result_count = excluded.cancelled_result_count,
-                    background_owned = 0,
-                    user_pinned = 1,
-                    completed_at = excluded.completed_at,
-                    updated_at = excluded.updated_at;
-                """;
-            pin.Parameters.AddWithValue("$contractId", contractId);
-            pin.Parameters.AddWithValue("$updatedAt", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
-            await pin.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        await using (var refreshPriceIndex = connection.CreateCommand())
-        {
-            refreshPriceIndex.Transaction = (SqliteTransaction)transaction;
-            refreshPriceIndex.CommandText = """
-                UPDATE price_cache_contracts
-                   SET price_index_eligible_item_count =
-                           (SELECT COUNT(*) FROM items
-                             WHERE contract_id = $contractId AND has_result = 1),
-                       price_index_completed_item_count =
-                           (SELECT COUNT(*) FROM items
-                             WHERE contract_id = $contractId AND has_result = 1
-                               AND hydration_status = $complete),
-                       price_index_priced_item_count =
-                           (SELECT COUNT(*) FROM items i
-                             WHERE i.contract_id = $contractId AND i.has_result = 1
-                               AND i.hydration_status = $complete
-                               AND EXISTS(
-                                   SELECT 1 FROM item_results r
-                                    WHERE r.contract_id = i.contract_id
-                                      AND r.item_number = i.item_number
-                                      AND r.result_status_id = 1
-                                      AND r.unit_value_scaled > 0)),
-                       price_index_result_count =
-                           (SELECT COUNT(*) FROM item_results
-                             WHERE contract_id = $contractId
-                               AND result_status_id = 1 AND unit_value_scaled > 0),
-                       price_index_status = CASE
-                           WHEN NOT EXISTS(
-                               SELECT 1 FROM items
-                                WHERE contract_id = $contractId AND has_result = 1
-                                  AND hydration_status <> $complete)
-                           THEN $checkpointComplete
-                           WHEN price_index_status = $downloading THEN $downloading
-                           ELSE $pending END,
-                       price_index_last_error = CASE
-                           WHEN NOT EXISTS(
-                               SELECT 1 FROM items
-                                WHERE contract_id = $contractId AND has_result = 1
-                                  AND hydration_status <> $complete)
-                           THEN '' ELSE price_index_last_error END,
-                       price_index_next_retry_at = CASE
-                           WHEN NOT EXISTS(
-                               SELECT 1 FROM items
-                                WHERE contract_id = $contractId AND has_result = 1
-                                  AND hydration_status <> $complete)
-                           THEN NULL ELSE price_index_next_retry_at END,
-                       price_index_completed_at = CASE
-                           WHEN NOT EXISTS(
-                               SELECT 1 FROM items
-                                WHERE contract_id = $contractId AND has_result = 1
-                                  AND hydration_status <> $complete)
-                           THEN $updatedAt ELSE price_index_completed_at END,
-                       updated_at = $updatedAt
-                 WHERE contract_id = $contractId;
-                """;
-            refreshPriceIndex.Parameters.AddWithValue("$contractId", contractId);
-            refreshPriceIndex.Parameters.AddWithValue("$complete", (int)ItemHydrationStatus.Complete);
-            refreshPriceIndex.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
-            refreshPriceIndex.Parameters.AddWithValue("$downloading", (int)PriceCacheContractStatus.Downloading);
-            refreshPriceIndex.Parameters.AddWithValue("$checkpointComplete", (int)PriceCacheContractStatus.Complete);
-            refreshPriceIndex.Parameters.AddWithValue(
-                "$updatedAt",
-                DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
-            await refreshPriceIndex.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task SetItemHydrationStatusAsync(
@@ -3023,97 +3051,122 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
         CancellationToken cancellationToken = default)
     {
         if (startDate > endDate)
-        {
             throw new ArgumentException("A data inicial deve ser anterior ou igual à data final.");
-        }
-
-        var normalizedUf = NormalizeCoverageUf(uf);
-        var modalities = activeModalityIds.Distinct().Order().ToArray();
-        await using var writer = await _connections.WorkCoordinator
-            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
-            .ConfigureAwait(false);
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        await using (var setup = connection.CreateCommand())
+        for (var first = startDate; first <= endDate;)
         {
-            setup.Transaction = (SqliteTransaction)transaction;
-            setup.CommandText = """
-                CREATE TEMP TABLE IF NOT EXISTS active_coverage_modalities(
-                    modality_id INTEGER PRIMARY KEY
-                ) WITHOUT ROWID;
-                DELETE FROM active_coverage_modalities;
-                """;
-            await setup.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            var last = DateOnly.FromDayNumber(Math.Min(endDate.DayNumber, first.DayNumber + 6));
+            await EnsureCoverageSliceAsync(first, last, activeModalityIds, uf, cancellationToken).ConfigureAwait(false);
+            if (last == endDate) break;
+            first = last.AddDays(1);
         }
+    }
 
-        await using (var addModality = connection.CreateCommand())
+    private async Task EnsureCoverageSliceAsync(
+        DateOnly startDate, DateOnly endDate, IReadOnlyList<long> activeModalityIds,
+        string uf, CancellationToken cancellationToken)
+    {
+
+        try
         {
-            addModality.Transaction = (SqliteTransaction)transaction;
-            addModality.CommandText = "INSERT INTO active_coverage_modalities(modality_id) VALUES($id);";
-            addModality.Parameters.Add("$id", SqliteType.Integer);
-            foreach (var modalityId in modalities)
+            if (startDate > endDate)
             {
-                addModality.Parameters["$id"].Value = modalityId;
-                await addModality.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                throw new ArgumentException("A data inicial deve ser anterior ou igual à data final.");
             }
-        }
 
-        await using (var removeInactive = connection.CreateCommand())
-        {
-            removeInactive.Transaction = (SqliteTransaction)transaction;
-            removeInactive.CommandText = """
-                -- A version-one database could prove a complete national
-                -- interval but did not persist the then-active modality list.
-                -- Migration stores that proof once as modality 0. On the first
-                -- reconciliation, expand it to the current active modalities;
-                -- deleting the sentinel ensures modalities discovered later
-                -- are correctly introduced as Missing.
+            var normalizedUf = NormalizeCoverageUf(uf);
+            var modalities = activeModalityIds.Distinct().Order().ToArray();
+            await using var writer = await _connections.WorkCoordinator
+                .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+                .ConfigureAwait(false);
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using (var setup = connection.CreateCommand())
+            {
+                setup.Transaction = (SqliteTransaction)transaction;
+                setup.CommandText = """
+                    CREATE TEMP TABLE IF NOT EXISTS active_coverage_modalities(
+                        modality_id INTEGER PRIMARY KEY
+                    ) WITHOUT ROWID;
+                    DELETE FROM active_coverage_modalities;
+                    """;
+                await setup.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using (var addModality = connection.CreateCommand())
+            {
+                addModality.Transaction = (SqliteTransaction)transaction;
+                addModality.CommandText = "INSERT INTO active_coverage_modalities(modality_id) VALUES($id);";
+                addModality.Parameters.Add("$id", SqliteType.Integer);
+                foreach (var modalityId in modalities)
+                {
+                    addModality.Parameters["$id"].Value = modalityId;
+                    await addModality.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            await using (var removeInactive = connection.CreateCommand())
+            {
+                removeInactive.Transaction = (SqliteTransaction)transaction;
+                removeInactive.CommandText = """
+                    -- A version-one database could prove a complete national
+                    -- interval but did not persist the then-active modality list.
+                    -- Migration stores that proof once as modality 0. On the first
+                    -- reconciliation, expand it to the current active modalities;
+                    -- deleting the sentinel ensures modalities discovered later
+                    -- are correctly introduced as Missing.
+                    INSERT OR IGNORE INTO coverage_day_modalities(
+                        coverage_date, modality_id, uf, status, records_count, updated_at, last_error)
+                    SELECT legacy.coverage_date, active.modality_id, legacy.uf,
+                           $assumedComplete, legacy.records_count, legacy.updated_at, NULL
+                      FROM coverage_day_modalities legacy
+                      CROSS JOIN active_coverage_modalities active
+                     WHERE legacy.coverage_date BETWEEN $start AND $end
+                       AND legacy.uf = $uf
+                       AND legacy.modality_id = 0
+                       AND legacy.status = $assumedComplete;
+
+                    DELETE FROM coverage_day_modalities
+                     WHERE coverage_date BETWEEN $start AND $end
+                       AND uf = $uf
+                       AND modality_id NOT IN (SELECT modality_id FROM active_coverage_modalities);
+                    """;
+                removeInactive.Parameters.AddWithValue("$start", FormatDate(startDate));
+                removeInactive.Parameters.AddWithValue("$end", FormatDate(endDate));
+                removeInactive.Parameters.AddWithValue("$uf", normalizedUf);
+                removeInactive.Parameters.AddWithValue("$assumedComplete", (int)CoverageStatus.AssumedComplete);
+                await removeInactive.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using var insert = connection.CreateCommand();
+            insert.Transaction = (SqliteTransaction)transaction;
+            insert.CommandText = """
                 INSERT OR IGNORE INTO coverage_day_modalities(
                     coverage_date, modality_id, uf, status, records_count, updated_at, last_error)
-                SELECT legacy.coverage_date, active.modality_id, legacy.uf,
-                       $assumedComplete, legacy.records_count, legacy.updated_at, NULL
-                  FROM coverage_day_modalities legacy
-                  CROSS JOIN active_coverage_modalities active
-                 WHERE legacy.coverage_date BETWEEN $start AND $end
-                   AND legacy.uf = $uf
-                   AND legacy.modality_id = 0
-                   AND legacy.status = $assumedComplete;
-
-                DELETE FROM coverage_day_modalities
-                 WHERE coverage_date BETWEEN $start AND $end
-                   AND uf = $uf
-                   AND modality_id NOT IN (SELECT modality_id FROM active_coverage_modalities);
+                VALUES($date, $modalityId, $uf, $status, NULL, $updatedAt, NULL);
                 """;
-            removeInactive.Parameters.AddWithValue("$start", FormatDate(startDate));
-            removeInactive.Parameters.AddWithValue("$end", FormatDate(endDate));
-            removeInactive.Parameters.AddWithValue("$uf", normalizedUf);
-            removeInactive.Parameters.AddWithValue("$assumedComplete", (int)CoverageStatus.AssumedComplete);
-            await removeInactive.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        await using var insert = connection.CreateCommand();
-        insert.Transaction = (SqliteTransaction)transaction;
-        insert.CommandText = """
-            INSERT OR IGNORE INTO coverage_day_modalities(
-                coverage_date, modality_id, uf, status, records_count, updated_at, last_error)
-            VALUES($date, $modalityId, $uf, $status, NULL, $updatedAt, NULL);
-            """;
-        insert.Parameters.Add("$date", SqliteType.Text);
-        insert.Parameters.Add("$modalityId", SqliteType.Integer);
-        insert.Parameters.AddWithValue("$uf", normalizedUf);
-        insert.Parameters.AddWithValue("$status", (int)CoverageStatus.Missing);
-        insert.Parameters.AddWithValue("$updatedAt", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
-        for (var date = startDate; date <= endDate; date = date.AddDays(1))
-        {
-            insert.Parameters["$date"].Value = FormatDate(date);
-            foreach (var modalityId in modalities)
+            insert.Parameters.Add("$date", SqliteType.Text);
+            insert.Parameters.Add("$modalityId", SqliteType.Integer);
+            insert.Parameters.AddWithValue("$uf", normalizedUf);
+            insert.Parameters.AddWithValue("$status", (int)CoverageStatus.Missing);
+            insert.Parameters.AddWithValue("$updatedAt", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            for (var date = startDate; date <= endDate; date = date.AddDays(1))
             {
-                insert.Parameters["$modalityId"].Value = modalityId;
-                await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                insert.Parameters["$date"].Value = FormatDate(date);
+                foreach (var modalityId in modalities)
+                {
+                    insert.Parameters["$modalityId"].Value = modalityId;
+                    await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
             }
-        }
 
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
+        }
     }
 
     public async Task SetCoverageStatusAsync(
@@ -3400,13 +3453,22 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
     public async Task PruneContractsBeforeAsync(DateOnly cutoff, CancellationToken cancellationToken = default)
     {
-        await using var writer = await _connections.WorkCoordinator
-            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
-            .ConfigureAwait(false);
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        await PruneExpiredDataAsync(connection, transaction, cutoff, cancellationToken).ConfigureAwait(false);
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await using var writer = await _connections.WorkCoordinator
+                .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+                .ConfigureAwait(false);
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await PruneExpiredDataAsync(connection, transaction, cutoff, cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
+        }
     }
 
     public async Task<long> GetCacheSizeBytesAsync(CancellationToken cancellationToken = default)
@@ -3677,23 +3739,32 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
     public async Task MaintainWalAsync(CancellationToken cancellationToken = default)
     {
-        const long truncateThreshold = 128L * 1024 * 1024;
-        var walPath = DatabasePath + "-wal";
-        var walBytes = File.Exists(walPath) ? new FileInfo(walPath).Length : 0;
-        var truncate = walBytes >= truncateThreshold && _connections.WorkCoordinator.IsIdle;
-        using var span = _performance.Begin(
-            "maintenance",
-            truncate ? "wal-checkpoint-truncate" : "wal-checkpoint-passive");
-        await using var writer = await _connections.WorkCoordinator
-            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
-            .ConfigureAwait(false);
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = truncate
-            ? "PRAGMA busy_timeout=0; PRAGMA wal_checkpoint(TRUNCATE);"
-            : "PRAGMA wal_checkpoint(PASSIVE);";
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        span.Complete(bytes: walBytes);
+
+        try
+        {
+            const long truncateThreshold = 128L * 1024 * 1024;
+            var walPath = DatabasePath + "-wal";
+            var walBytes = File.Exists(walPath) ? new FileInfo(walPath).Length : 0;
+            var truncate = walBytes >= truncateThreshold && _connections.WorkCoordinator.IsIdle;
+            using var span = _performance.Begin(
+                "maintenance",
+                truncate ? "wal-checkpoint-truncate" : "wal-checkpoint-passive");
+            await using var writer = await _connections.WorkCoordinator
+                .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+                .ConfigureAwait(false);
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = truncate
+                ? "PRAGMA busy_timeout=0; PRAGMA wal_checkpoint(TRUNCATE);"
+                : "PRAGMA wal_checkpoint(PASSIVE);";
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            span.Complete(bytes: walBytes);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
+        }
     }
 
     public async Task MarkOptimizePendingAsync(CancellationToken cancellationToken = default)
@@ -3709,35 +3780,44 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
     public async Task OptimizeAsync(CancellationToken cancellationToken = default)
     {
-        using var span = _performance.Begin("maintenance", "sqlite-optimize");
-        await using var writer = await _connections.WorkCoordinator
-            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
-            .ConfigureAwait(false);
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        var today = DateOnly.FromDateTime(DateTime.Today).ToString("O");
-        await using (var check = connection.CreateCommand())
-        {
-            check.CommandText = "SELECT last_optimize_date FROM maintenance_state WHERE id = 1;";
-            if (string.Equals(
-                    Convert.ToString(
-                        await check.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
-                        CultureInfo.InvariantCulture),
-                    today,
-                    StringComparison.Ordinal))
-            {
-                span.Complete();
-                return;
-            }
-        }
 
-        await using var command = connection.CreateCommand();
-        command.CommandText = "PRAGMA optimize; PRAGMA wal_checkpoint(PASSIVE);";
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        await using var completed = connection.CreateCommand();
-        completed.CommandText = "UPDATE maintenance_state SET last_optimize_date = $today WHERE id = 1;";
-        completed.Parameters.AddWithValue("$today", today);
-        await completed.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        span.Complete();
+        try
+        {
+            using var span = _performance.Begin("maintenance", "sqlite-optimize");
+            await using var writer = await _connections.WorkCoordinator
+                .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+                .ConfigureAwait(false);
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            var today = DateOnly.FromDateTime(DateTime.Today).ToString("O");
+            await using (var check = connection.CreateCommand())
+            {
+                check.CommandText = "SELECT last_optimize_date FROM maintenance_state WHERE id = 1;";
+                if (string.Equals(
+                        Convert.ToString(
+                            await check.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                            CultureInfo.InvariantCulture),
+                        today,
+                        StringComparison.Ordinal))
+                {
+                    span.Complete();
+                    return;
+                }
+            }
+
+            await using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA optimize;";
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await using var completed = connection.CreateCommand();
+            completed.CommandText = "UPDATE maintenance_state SET last_optimize_date = $today WHERE id = 1;";
+            completed.Parameters.AddWithValue("$today", today);
+            await completed.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            span.Complete();
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
+        }
     }
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken)
@@ -3922,8 +4002,14 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
         var hasCutoff = DateOnly.TryParseExact(cutoffText, "yyyy-MM-dd", CultureInfo.InvariantCulture,
             DateTimeStyles.None, out var cutoff);
         var receivedExpired = false;
+        await using var resolved = connection.CreateCommand();
+        resolved.Transaction = transaction;
+        resolved.CommandText = "DELETE FROM official_conflicts WHERE kind=1 AND key1=$id";
+        resolved.Parameters.Add("$id", SqliteType.Text);
         foreach (var contract in contracts)
         {
+            resolved.Parameters["$id"].Value = contract.PncpId;
+            await resolved.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             receivedExpired |= hasCutoff && contract.PublicationDate is { } published &&
                 DateOnly.FromDateTime(published.DateTime) < cutoff;
             SetContractParameters(insert, contract);

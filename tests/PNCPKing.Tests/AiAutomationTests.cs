@@ -826,7 +826,7 @@ public sealed class AiAutomationTests
             PurchaseYear = 2026,
             PurchaseSequence = 1,
             Object = title,
-            PublicationDate = DateTimeOffset.UtcNow,
+            PublicationDate = DateTimeOffset.Now,
             GlobalUpdatedAt = DateTimeOffset.UtcNow
         };
 

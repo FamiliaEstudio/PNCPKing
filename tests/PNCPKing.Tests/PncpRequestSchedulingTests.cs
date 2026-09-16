@@ -697,6 +697,48 @@ public sealed class PncpRequestSchedulingTests
     }
 
     [Fact]
+    public async Task AggressiveCoverageLiftsMaintenanceLimitAndRestoresItAfterStopping()
+    {
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 3);
+        using var first = await scheduler.AcquireAsync(PncpRequestPriority.IndexMaintenance);
+        using var second = await scheduler.AcquireAsync(PncpRequestPriority.IndexMaintenance);
+        var third = scheduler.AcquireAsync(PncpRequestPriority.IndexMaintenance);
+        Assert.False(third.IsCompleted);
+
+        using (scheduler.EnableAggressiveBackgroundRequests())
+        {
+            using var granted = await third.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(3, scheduler.GetSnapshot().ActiveRequests);
+        }
+
+        var fourth = scheduler.AcquireAsync(PncpRequestPriority.IndexMaintenance);
+        Assert.False(fourth.IsCompleted);
+        first.Dispose();
+        using var restored = await fourth.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(2, scheduler.GetSnapshot().ActiveRequests);
+    }
+
+    [Fact]
+    public void AggressiveCoverageUsesAdaptiveGrowthAndBacksOffOnPncpErrors()
+    {
+        var clock = new ManualTimeProvider();
+        var scheduler = new PncpRequestScheduler(48, clock, initialConcurrency: 16);
+        using var aggressive = scheduler.EnableAggressiveBackgroundRequests();
+        for (var index = 0; index < 32; index++)
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(50));
+            scheduler.ReportOutcome(PncpRequestCategory.Contracts, HttpStatusCode.OK, TimeSpan.FromSeconds(1));
+        }
+        Assert.Equal(24, scheduler.GetSnapshot().EffectiveConcurrency);
+
+        scheduler.ReportOutcome(PncpRequestCategory.Contracts, HttpStatusCode.ServiceUnavailable, TimeSpan.FromSeconds(1));
+        Assert.Equal(16, scheduler.GetSnapshot().EffectiveConcurrency);
+        scheduler.ReportOutcome(PncpRequestCategory.Contracts, HttpStatusCode.TooManyRequests, TimeSpan.FromSeconds(1));
+        Assert.Equal(1, scheduler.GetSnapshot().EffectiveConcurrency);
+        Assert.Equal("HTTP 429", scheduler.GetSnapshot().LastReductionReason);
+    }
+
+    [Fact]
     public async Task Scheduler_NeverGrantsMoreThanFortyEightConcurrentRequests()
     {
         var scheduler = new PncpRequestScheduler(

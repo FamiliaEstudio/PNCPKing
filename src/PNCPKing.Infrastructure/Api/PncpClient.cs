@@ -397,11 +397,12 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
                 if (response.StatusCode == HttpStatusCode.UnprocessableEntity)
                 {
                     var validationBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-                    var isDateRangeRejection = validationBody.Contains("Data Inicial", StringComparison.OrdinalIgnoreCase) &&
-                                               validationBody.Contains("Data Final", StringComparison.OrdinalIgnoreCase);
-                    if (isDateRangeRejection && attempt < 3)
+                    var isDateRangeRejection = IsDateRangeRejection(validationBody) && HasValidDateRange(uri);
+                    if (isDateRangeRejection && attempt < Math.Min(3, maximumAttempts))
                     {
-                        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+                        var validationRetryDelay = GetRetryDelay(response, attempt);
+                        response.Dispose();
+                        await Task.Delay(validationRetryDelay, cancellationToken).ConfigureAwait(false);
                         continue;
                     }
 
@@ -534,15 +535,40 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
     private static string Trim(string value, int maximumLength) =>
         value.Length <= maximumLength ? value : value[..maximumLength];
 
+    internal static bool IsDateRangeRejection(string message) =>
+        (message.Contains("Data Inicial", StringComparison.OrdinalIgnoreCase) &&
+         message.Contains("Data Final", StringComparison.OrdinalIgnoreCase)) ||
+        message.Contains("inicial e final maior que 365 dias", StringComparison.OrdinalIgnoreCase);
+
+    private static bool HasValidDateRange(Uri uri) =>
+        DateOnly.TryParseExact(GetQueryValue(uri, "dataInicial"), "yyyyMMdd",
+            CultureInfo.InvariantCulture, DateTimeStyles.None, out var start) &&
+        DateOnly.TryParseExact(GetQueryValue(uri, "dataFinal"), "yyyyMMdd",
+            CultureInfo.InvariantCulture, DateTimeStyles.None, out var end) &&
+        end >= start && end.DayNumber - start.DayNumber <= 365;
+
     private static HttpRequestException CreateResponseException(
         HttpResponseMessage response,
         string body,
-        Uri uri) => new(
-        $"PNCP respondeu {(int)response.StatusCode} ({response.ReasonPhrase}). " +
-        $"Intervalo solicitado: {GetQueryValue(uri, "dataInicial") ?? "?"} a " +
-        $"{GetQueryValue(uri, "dataFinal") ?? "?"}. {Trim(SearchText.Sanitize(body), 300)}",
-        null,
-        response.StatusCode);
+        Uri uri)
+    {
+        var explanation = response.StatusCode == HttpStatusCode.UnprocessableEntity &&
+                          IsDateRangeRejection(body) && HasValidDateRange(uri)
+            ? "O PNCP rejeitou um intervalo válido de datas. A consulta não foi concluída; tente atualizar novamente em alguns minutos. "
+            : response.StatusCode == HttpStatusCode.InternalServerError &&
+              body.Contains("Failed to obtain JDBC Connection", StringComparison.OrdinalIgnoreCase)
+            ? "O servidor do PNCP não conseguiu acessar o próprio banco de dados. A consulta não foi concluída; tente novamente mais tarde. "
+            : string.Empty;
+        var reason = string.IsNullOrWhiteSpace(response.ReasonPhrase)
+            ? response.StatusCode.ToString()
+            : response.ReasonPhrase;
+        return new HttpRequestException(
+            explanation + $"PNCP respondeu {(int)response.StatusCode} ({reason}). " +
+            $"Intervalo solicitado: {GetQueryValue(uri, "dataInicial") ?? "?"} a " +
+            $"{GetQueryValue(uri, "dataFinal") ?? "?"}. {Trim(SearchText.Sanitize(body), 300)}",
+            null,
+            response.StatusCode);
+    }
 
     private static string? GetQueryValue(Uri uri, string name)
     {

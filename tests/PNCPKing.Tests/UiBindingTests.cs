@@ -187,19 +187,13 @@ public sealed class UiBindingTests
     }
 
     [Fact]
-    public void MainWindow_CatalogRefreshSelector_IsInsideMaintenancePanel()
+    public void MainWindow_ManualCatalogUpdate_IsInsideMaintenancePanel()
     {
         var document = LoadView("MainWindow.xaml");
         XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
         var selector = Assert.Single(
-            document.Descendants(presentation + "ComboBox"),
-            element => element.Attribute("ItemsSource")?.Value.Contains(
-                "CatalogRefreshOptions",
-                StringComparison.Ordinal) == true);
-
-        Assert.Contains(
-            "SelectedCatalogRefreshOption",
-            Assert.IsType<XAttribute>(selector.Attribute("SelectedItem")).Value);
+            document.Descendants(presentation + "TextBlock"),
+            element => element.Attribute("Text")?.Value == "Atualização manual");
         Assert.Contains(selector.Ancestors(presentation + "Border"), border =>
             border.Attribute("Visibility")?.Value.Contains(
                 "IsMaintenancePanelOpen",
@@ -212,49 +206,20 @@ public sealed class UiBindingTests
     }
 
     [Fact]
-    public void MainWindow_ExposesSessionOnlyAggressiveItemIndexToggle()
+    public void MainWindowUsesOneManualUpdateAndKeepsFullBackup()
     {
         var document = LoadView("MainWindow.xaml");
-        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
-        var toggle = Assert.Single(
-            document.Descendants(presentation + "ToggleButton"),
-            element => element.Attribute("Command")?.Value.Contains(
-                "ToggleAggressivePriceCacheCommand",
-                StringComparison.Ordinal) == true);
-
-        Assert.Contains(
-            "ToggleAggressivePriceCacheCommand",
-            Assert.IsType<XAttribute>(toggle.Attribute("Command")).Value);
-        Assert.Contains(
-            "IsAggressivePriceCacheMode",
-            Assert.IsType<XAttribute>(toggle.Attribute("IsChecked")).Value);
-        Assert.Contains(
-            "Mode=OneWay",
-            Assert.IsType<XAttribute>(toggle.Attribute("IsChecked")).Value.Replace(" ", string.Empty));
+        var bindings = document.Descendants().Select(e => e.Attribute("Command")?.Value).Where(s => s is not null).ToArray();
+        Assert.Contains("{Binding StartSyncCommand}", bindings);
+        Assert.Contains("{Binding ExportBackupCommand}", bindings);
+        Assert.Contains("{Binding ExportUpdatesCommand}", bindings);
+        Assert.Contains("{Binding ImportUpdatesCommand}", bindings);
+        Assert.DoesNotContain("{Binding ToggleAggressiveNationalPriceIndexCommand}", bindings);
+        Assert.DoesNotContain("{Binding ToggleAggressivePriceCacheCommand}", bindings);
     }
 
     [Fact]
-    public void MainWindow_ExposesIndependentSessionOnlyAggressiveNationalPriceToggle()
-    {
-        var document = LoadView("MainWindow.xaml");
-        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
-        var toggle = Assert.Single(
-            document.Descendants(presentation + "ToggleButton"),
-            element => element.Attribute("Command")?.Value.Contains(
-                "ToggleAggressiveNationalPriceIndexCommand",
-                StringComparison.Ordinal) == true);
-
-        Assert.Equal("Download agressivo", toggle.Attribute("Content")?.Value);
-        Assert.Contains(
-            "IsAggressiveNationalPriceMode",
-            Assert.IsType<XAttribute>(toggle.Attribute("IsChecked")).Value);
-        Assert.Contains(
-            "Mode=OneWay",
-            Assert.IsType<XAttribute>(toggle.Attribute("IsChecked")).Value.Replace(" ", string.Empty));
-    }
-
-    [Fact]
-    public void AppSettings_CatalogRefreshDefaultsToWeeklyAndNormalizesInvalidValues()
+    public void AppSettings_CatalogRefreshIsManualIncludingOldAuthorizations()
     {
         var legacy = JsonSerializer.Deserialize<AppSettings>("""
             {
@@ -265,12 +230,12 @@ public sealed class UiBindingTests
             """);
 
         Assert.NotNull(legacy);
-        Assert.Equal(7, legacy.EffectiveCatalogRefreshIntervalDays);
-        Assert.Equal(7, AppSettings.NormalizeCatalogRefreshIntervalDays(-1));
-        Assert.Equal(7, AppSettings.NormalizeCatalogRefreshIntervalDays(30));
+        Assert.Equal(0, legacy.EffectiveCatalogRefreshIntervalDays);
+        Assert.Equal(0, AppSettings.NormalizeCatalogRefreshIntervalDays(-1));
+        Assert.Equal(0, AppSettings.NormalizeCatalogRefreshIntervalDays(30));
         Assert.Equal(0, AppSettings.NormalizeCatalogRefreshIntervalDays(0));
-        Assert.Equal(2, AppSettings.NormalizeCatalogRefreshIntervalDays(2));
-        Assert.Equal(15, AppSettings.NormalizeCatalogRefreshIntervalDays(15));
+        Assert.Equal(0, AppSettings.NormalizeCatalogRefreshIntervalDays(2));
+        Assert.Equal(0, AppSettings.NormalizeCatalogRefreshIntervalDays(15));
     }
 
     [Fact]
@@ -354,13 +319,16 @@ public sealed class UiBindingTests
         var expectedGroups = new Dictionary<string, string[]>
         {
             ["_Arquivo"] = [
+                "{Binding ExportUpdatesCommand}", "{Binding ImportUpdatesCommand}",
+                "{Binding NewUpdateBaseCommand}", "{Binding ImportNewUpdateBaseCommand}", "{Binding CompactDatabaseCommand}",
                 "{Binding ExportBackupCommand}",
                 "{Binding ImportBackupCommand}"
             ],
             ["_Diagnóstico"] = [
                 "{Binding OpenDiagnosticLogsCommand}",
                 "{Binding ExportPerformanceReportCommand}",
-                "{Binding ComparePerformanceReportCommand}"
+                "{Binding ComparePerformanceReportCommand}",
+                "{Binding EvaluatePcCommand}"
             ],
             ["_Limpeza"] = [
                 "{Binding ClearCacheCommand}",

@@ -20,6 +20,9 @@ public sealed class NationalPriceIndexService(
             nameof(requestTimeout),
             "O limite de espera deve ser maior que zero.");
     private readonly IPerformanceTelemetry _performance = performance ?? NullPerformanceTelemetry.Instance;
+    private readonly AsyncPauseGate _manualPause = new();
+    public void Pause() => _manualPause.Pause();
+    public void Resume() => _manualPause.Resume();
 
     public async Task SynchronizeAggressivelyAsync(
         int maximumParallelContracts,
@@ -72,6 +75,7 @@ public sealed class NationalPriceIndexService(
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                await _manualPause.WaitAsync(cancellationToken).ConfigureAwait(false);
                 policy = await cache.GetNationalPriceIndexPolicyAsync(cancellationToken).ConfigureAwait(false);
                 if (!policy.Authorized || !policy.Enabled || policy.Paused)
                 {
@@ -110,6 +114,7 @@ public sealed class NationalPriceIndexService(
                 while (active.Count < maximumParallelContracts)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                await _manualPause.WaitAsync(cancellationToken).ConfigureAwait(false);
                     var work = await cache.GetNextNationalPriceWorkAsync(
                             DateTimeOffset.UtcNow,
                             cancellationToken)
@@ -222,6 +227,7 @@ public sealed class NationalPriceIndexService(
             foreach (var item in pending)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                await _manualPause.WaitAsync(cancellationToken).ConfigureAwait(false);
                 try
                 {
                     await contracts.SetItemHydrationStatusAsync(

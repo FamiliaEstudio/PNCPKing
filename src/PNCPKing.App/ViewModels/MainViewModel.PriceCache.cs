@@ -479,7 +479,8 @@ public sealed partial class MainViewModel
             }
 
             IsPriceCacheBusy = false;
-            await RefreshPriceCacheProgressAsync().ConfigureAwait(true);
+            if (!cancellationToken.IsCancellationRequested)
+                await RefreshPriceCacheProgressAsync().ConfigureAwait(true);
             _priceCacheCycleCancellation?.Dispose();
             _priceCacheCycleCancellation = null;
             _priceCacheCycleTask = null;

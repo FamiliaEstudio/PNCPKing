@@ -100,78 +100,87 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         string generation,
         CancellationToken cancellationToken = default)
     {
-        using var span = _performance.Begin("catalog", "stage-page");
-        ArgumentNullException.ThrowIfNull(page);
-        ArgumentException.ThrowIfNullOrWhiteSpace(generation);
-        using var queueSpan = _performance.Begin("catalog", "sqlite-queue");
-        await using var writer = await _connections.WorkCoordinator
-            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
-            .ConfigureAwait(false);
-        queueSpan.Complete();
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        await using var insert = connection.CreateCommand();
-        insert.Transaction = (SqliteTransaction)transaction;
-        insert.CommandText = """
-            INSERT INTO catalog_entries_stage(
-                generation, catalog_kind, code, description,
-                level1_code, level1_name, level2_code, level2_name,
-                level3_code, level3_name, level4_code, level4_name,
-                level5_code, level5_name, ncm_code, sustainable,
-                exclusive_central, remote_updated_at, search_text)
-            VALUES($generation, $kind, $code, $description,
-                   $level1Code, $level1Name, $level2Code, $level2Name,
-                   $level3Code, $level3Name, $level4Code, $level4Name,
-                   $level5Code, $level5Name, $ncm, $sustainable,
-                   $exclusive, $updated, $searchText)
-            ON CONFLICT(generation, catalog_kind, code) DO UPDATE SET
-                description = excluded.description,
-                level1_code = excluded.level1_code, level1_name = excluded.level1_name,
-                level2_code = excluded.level2_code, level2_name = excluded.level2_name,
-                level3_code = excluded.level3_code, level3_name = excluded.level3_name,
-                level4_code = excluded.level4_code, level4_name = excluded.level4_name,
-                level5_code = excluded.level5_code, level5_name = excluded.level5_name,
-                ncm_code = excluded.ncm_code, sustainable = excluded.sustainable,
-                exclusive_central = excluded.exclusive_central,
-                remote_updated_at = excluded.remote_updated_at,
-                search_text = excluded.search_text;
-            """;
-        AddEntryParameters(insert);
-        foreach (var entry in page.Entries)
-        {
-            insert.Parameters["$generation"].Value = generation;
-            BindEntry(insert, entry);
-            await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
 
-        await using var state = connection.CreateCommand();
-        state.Transaction = (SqliteTransaction)transaction;
-        state.CommandText = """
-            UPDATE catalog_sync_state
-               SET status = $status, next_page = $nextPage,
-                   total_pages = $totalPages, total_records = $totalRecords,
-                   staged_records = MIN($totalRecords, staged_records + $pageRecords),
-                   last_error = ''
-             WHERE catalog_kind = $kind AND generation = $generation;
-            """;
-        state.Parameters.AddWithValue("$status", (int)CatalogSyncStatus.Downloading);
-        state.Parameters.AddWithValue("$nextPage", page.Page + 1);
-        state.Parameters.AddWithValue("$totalPages", page.TotalPages);
-        state.Parameters.AddWithValue("$totalRecords", page.TotalRecords);
-        state.Parameters.AddWithValue("$pageRecords", page.Entries.Count);
-        state.Parameters.AddWithValue("$generation", generation);
-        state.Parameters.AddWithValue("$kind", (int)page.Kind);
-        if (await state.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+        try
         {
-            throw new InvalidOperationException("O checkpoint do catálogo pertence a outra geração.");
-        }
+            using var span = _performance.Begin("catalog", "stage-page");
+            ArgumentNullException.ThrowIfNull(page);
+            ArgumentException.ThrowIfNullOrWhiteSpace(generation);
+            using var queueSpan = _performance.Begin("catalog", "sqlite-queue");
+            await using var writer = await _connections.WorkCoordinator
+                .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+                .ConfigureAwait(false);
+            queueSpan.Complete();
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var insert = connection.CreateCommand();
+            insert.Transaction = (SqliteTransaction)transaction;
+            insert.CommandText = """
+                INSERT INTO catalog_entries_stage(
+                    generation, catalog_kind, code, description,
+                    level1_code, level1_name, level2_code, level2_name,
+                    level3_code, level3_name, level4_code, level4_name,
+                    level5_code, level5_name, ncm_code, sustainable,
+                    exclusive_central, remote_updated_at, search_text)
+                VALUES($generation, $kind, $code, $description,
+                       $level1Code, $level1Name, $level2Code, $level2Name,
+                       $level3Code, $level3Name, $level4Code, $level4Name,
+                       $level5Code, $level5Name, $ncm, $sustainable,
+                       $exclusive, $updated, $searchText)
+                ON CONFLICT(generation, catalog_kind, code) DO UPDATE SET
+                    description = excluded.description,
+                    level1_code = excluded.level1_code, level1_name = excluded.level1_name,
+                    level2_code = excluded.level2_code, level2_name = excluded.level2_name,
+                    level3_code = excluded.level3_code, level3_name = excluded.level3_name,
+                    level4_code = excluded.level4_code, level4_name = excluded.level4_name,
+                    level5_code = excluded.level5_code, level5_name = excluded.level5_name,
+                    ncm_code = excluded.ncm_code, sustainable = excluded.sustainable,
+                    exclusive_central = excluded.exclusive_central,
+                    remote_updated_at = excluded.remote_updated_at,
+                    search_text = excluded.search_text;
+                """;
+            AddEntryParameters(insert);
+            foreach (var entry in page.Entries)
+            {
+                insert.Parameters["$generation"].Value = generation;
+                BindEntry(insert, entry);
+                await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
 
-        using (var commitSpan = _performance.Begin("catalog", "commit"))
-        {
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            commitSpan.Complete(page.Entries.Count);
+            await using var state = connection.CreateCommand();
+            state.Transaction = (SqliteTransaction)transaction;
+            state.CommandText = """
+                UPDATE catalog_sync_state
+                   SET status = $status, next_page = $nextPage,
+                       total_pages = $totalPages, total_records = $totalRecords,
+                       staged_records = MIN($totalRecords, staged_records + $pageRecords),
+                       last_error = ''
+                 WHERE catalog_kind = $kind AND generation = $generation;
+                """;
+            state.Parameters.AddWithValue("$status", (int)CatalogSyncStatus.Downloading);
+            state.Parameters.AddWithValue("$nextPage", page.Page + 1);
+            state.Parameters.AddWithValue("$totalPages", page.TotalPages);
+            state.Parameters.AddWithValue("$totalRecords", page.TotalRecords);
+            state.Parameters.AddWithValue("$pageRecords", page.Entries.Count);
+            state.Parameters.AddWithValue("$generation", generation);
+            state.Parameters.AddWithValue("$kind", (int)page.Kind);
+            if (await state.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+            {
+                throw new InvalidOperationException("O checkpoint do catálogo pertence a outra geração.");
+            }
+
+            using (var commitSpan = _performance.Begin("catalog", "commit"))
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                commitSpan.Complete(page.Entries.Count);
+            }
+            span.Complete(page.Entries.Count);
         }
-        span.Complete(page.Entries.Count);
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
+        }
     }
 
     public async Task PublishAsync(
@@ -220,7 +229,12 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         await using (var deactivate = connection.CreateCommand())
         {
             deactivate.Transaction = (SqliteTransaction)transaction;
-            deactivate.CommandText = "UPDATE catalog_entries SET active = 0 WHERE catalog_kind = $kind AND active = 1;";
+            deactivate.CommandText = """
+                UPDATE catalog_entries SET active = 0 WHERE catalog_kind = $kind AND active = 1
+                    AND NOT EXISTS(SELECT 1 FROM catalog_entries_stage s WHERE s.generation=$generation
+                        AND s.catalog_kind=catalog_entries.catalog_kind AND s.code=catalog_entries.code);
+                """;
+            deactivate.Parameters.AddWithValue("$generation", generation);
             deactivate.Parameters.AddWithValue("$kind", (int)kind);
             await deactivate.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -299,7 +313,14 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
 
         using (var commitSpan = _performance.Begin("catalog", "commit"))
         {
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            await using (var resolved = connection.CreateCommand())
+        {
+            resolved.Transaction = (SqliteTransaction)transaction;
+            resolved.CommandText = "DELETE FROM official_conflicts WHERE kind=4 AND key1=CAST($kind AS TEXT)";
+            resolved.Parameters.AddWithValue("$kind", (int)kind);
+            await resolved.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             commitSpan.Complete(staged);
         }
         span.Complete(staged);
@@ -393,83 +414,92 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
         int batchSize = 2000,
         CancellationToken cancellationToken = default)
     {
-        batchSize = Math.Clamp(batchSize, 1, 10_000);
-        await using var writer = await _connections.WorkCoordinator
-            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
-            .ConfigureAwait(false);
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        long indexed;
-        long target;
-        await using (var state = connection.CreateCommand())
+
+        try
         {
-            state.Transaction = (SqliteTransaction)transaction;
-            state.CommandText = "SELECT indexed_rowid, target_rowid FROM catalog_description_index_state WHERE id = 1;";
-            await using var reader = await state.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            batchSize = Math.Clamp(batchSize, 1, 10_000);
+            await using var writer = await _connections.WorkCoordinator
+                .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+                .ConfigureAwait(false);
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            long indexed;
+            long target;
+            await using (var state = connection.CreateCommand())
             {
-                return new CatalogDescriptionIndexProgress(0, 0, true);
+                state.Transaction = (SqliteTransaction)transaction;
+                state.CommandText = "SELECT indexed_rowid, target_rowid FROM catalog_description_index_state WHERE id = 1;";
+                await using var reader = await state.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    return new CatalogDescriptionIndexProgress(0, 0, true);
+                }
+
+                indexed = reader.GetInt64(0);
+                target = reader.GetInt64(1);
             }
 
-            indexed = reader.GetInt64(0);
-            target = reader.GetInt64(1);
-        }
+            long batchEnd;
+            await using (var findEnd = connection.CreateCommand())
+            {
+                findEnd.Transaction = (SqliteTransaction)transaction;
+                findEnd.CommandText = """
+                    SELECT COALESCE(MAX(rowid), $indexed)
+                      FROM (SELECT rowid FROM catalog_entries
+                             WHERE rowid > $indexed AND rowid <= $target
+                             ORDER BY rowid LIMIT $limit);
+                    """;
+                findEnd.Parameters.AddWithValue("$indexed", indexed);
+                findEnd.Parameters.AddWithValue("$target", target);
+                findEnd.Parameters.AddWithValue("$limit", batchSize);
+                batchEnd = Convert.ToInt64(
+                    await findEnd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                    CultureInfo.InvariantCulture);
+            }
 
-        long batchEnd;
-        await using (var findEnd = connection.CreateCommand())
+            if (batchEnd == indexed && indexed < target)
+            {
+                batchEnd = target;
+            }
+
+            if (batchEnd > indexed)
+            {
+                await using var insert = connection.CreateCommand();
+                insert.Transaction = (SqliteTransaction)transaction;
+                insert.CommandText = """
+                    INSERT INTO catalog_description_fts(rowid, description)
+                    SELECT rowid, description FROM catalog_entries
+                     WHERE rowid > $indexed AND rowid <= $batchEnd
+                     ORDER BY rowid;
+                    """;
+                insert.Parameters.AddWithValue("$indexed", indexed);
+                insert.Parameters.AddWithValue("$batchEnd", batchEnd);
+                await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            var completed = batchEnd >= target;
+            await using (var update = connection.CreateCommand())
+            {
+                update.Transaction = (SqliteTransaction)transaction;
+                update.CommandText = """
+                    UPDATE catalog_description_index_state
+                       SET indexed_rowid = $indexed, completed = $completed,
+                           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     WHERE id = 1;
+                    """;
+                update.Parameters.AddWithValue("$indexed", batchEnd);
+                update.Parameters.AddWithValue("$completed", completed ? 1 : 0);
+                await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new CatalogDescriptionIndexProgress(batchEnd, target, completed);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
         {
-            findEnd.Transaction = (SqliteTransaction)transaction;
-            findEnd.CommandText = """
-                SELECT COALESCE(MAX(rowid), $indexed)
-                  FROM (SELECT rowid FROM catalog_entries
-                         WHERE rowid > $indexed AND rowid <= $target
-                         ORDER BY rowid LIMIT $limit);
-                """;
-            findEnd.Parameters.AddWithValue("$indexed", indexed);
-            findEnd.Parameters.AddWithValue("$target", target);
-            findEnd.Parameters.AddWithValue("$limit", batchSize);
-            batchEnd = Convert.ToInt64(
-                await findEnd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
-                CultureInfo.InvariantCulture);
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
         }
-
-        if (batchEnd == indexed && indexed < target)
-        {
-            batchEnd = target;
-        }
-
-        if (batchEnd > indexed)
-        {
-            await using var insert = connection.CreateCommand();
-            insert.Transaction = (SqliteTransaction)transaction;
-            insert.CommandText = """
-                INSERT INTO catalog_description_fts(rowid, description)
-                SELECT rowid, description FROM catalog_entries
-                 WHERE rowid > $indexed AND rowid <= $batchEnd
-                 ORDER BY rowid;
-                """;
-            insert.Parameters.AddWithValue("$indexed", indexed);
-            insert.Parameters.AddWithValue("$batchEnd", batchEnd);
-            await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        var completed = batchEnd >= target;
-        await using (var update = connection.CreateCommand())
-        {
-            update.Transaction = (SqliteTransaction)transaction;
-            update.CommandText = """
-                UPDATE catalog_description_index_state
-                   SET indexed_rowid = $indexed, completed = $completed,
-                       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                 WHERE id = 1;
-                """;
-            update.Parameters.AddWithValue("$indexed", batchEnd);
-            update.Parameters.AddWithValue("$completed", completed ? 1 : 0);
-            await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new CatalogDescriptionIndexProgress(batchEnd, target, completed);
     }
 
     public async Task<CatalogEntry?> GetEntryAsync(

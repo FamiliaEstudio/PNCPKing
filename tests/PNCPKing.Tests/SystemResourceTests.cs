@@ -6,6 +6,15 @@ namespace PNCPKing.Tests;
 
 public sealed class SystemResourceTests
 {
+    [Fact]
+    public async Task SliceDeadlineCoversAllPhasesWithoutAChildTimer()
+    {
+        var coordinator = new AdaptiveMaintenanceCoordinator(new FixedProbe(
+            SystemResourceProbe.CreateSnapshot(8 * Gibibyte, 2 * Gibibyte, 75, 4)));
+        await using var slice = coordinator.BeginSlice(duration: TimeSpan.FromMilliseconds(30));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Task.Delay(TimeSpan.FromSeconds(2), slice.Token));
+        Assert.True(slice.Token.IsCancellationRequested);
+    }
     private const long Gibibyte = 1024L * 1024 * 1024;
 
     [Theory]
@@ -87,9 +96,7 @@ public sealed class SystemResourceTests
 
         Assert.True(coordinator.NotifyVisibleActivity());
 
-        Assert.True(SpinWait.SpinUntil(
-            () => slice.Token.IsCancellationRequested,
-            TimeSpan.FromSeconds(1)));
+        Assert.True(slice.Token.IsCancellationRequested);
         var immediate = coordinator.GetDecision();
         Assert.False(immediate.CanRun);
         Assert.InRange(immediate.RetryDelay, TimeSpan.FromSeconds(29), TimeSpan.FromSeconds(30));
@@ -145,6 +152,10 @@ public sealed class SystemResourceTests
         var factory = new SqliteConnectionFactory(path, resourceProbe: new FixedProbe(resources));
 
         Assert.Equal(profile, factory.ProfileName);
+        Assert.Equal(profile == "Restrito", factory.SearchTuning.OrderedItemBatches);
+        Assert.Equal(profile == "Amplo" ? 64 : 32, factory.SearchTuning.CacheMiB);
+        var calibrated = new SqliteConnectionFactory(path, resourceProbe: new FixedProbe(resources), tuning: new(64, true));
+        Assert.Equal(profile == "Restrito", calibrated.SearchTuning.OrderedItemBatches);
         Assert.Equal(migrationCacheMibibytes * 1024, factory.MigrationCacheKib);
         Assert.Equal(mmapMibibytes * 1024L * 1024, factory.MmapBytes);
         Assert.Equal(threads, factory.WorkerThreads);

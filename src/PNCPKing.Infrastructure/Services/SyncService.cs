@@ -1,7 +1,7 @@
 using System.Globalization;
-using System.Threading.Channels;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
+using PNCPKing.Infrastructure.Api;
 
 namespace PNCPKing.Infrastructure.Services;
 
@@ -48,6 +48,7 @@ public sealed class SyncService(
     {
         using var span = _performance.Begin("sync", "total");
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentOutOfRangeException.ThrowIfLessThan(options.MaximumConcurrency, 1);
         if (queryStartDate > endDate)
         {
             throw new ArgumentOutOfRangeException(
@@ -112,48 +113,53 @@ public sealed class SyncService(
         }
 
             var partitions = BuildPartitions(queryStartDate, endDate, scope, modalities, mode);
+            if (options.CheckpointScope is { } checkpointScope)
+                partitions = partitions.Select(p => p with { Key = p.Key + ":cycle:" + checkpointScope }).ToArray();
             var completedPartitions = 0;
+            var progressGate = new object();
+            var partitionConcurrency = Math.Min(partitions.Count, Math.Max(1, options.MaximumConcurrency / 2));
+            var pageConcurrency = Math.Max(1, options.MaximumConcurrency / Math.Max(1, partitionConcurrency));
 
-            foreach (var partition in partitions)
+            void ReportProgress(long saved, string message, bool complete = false)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                await _pauseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                lock (progressGate)
+                {
+                    contractsSaved += saved;
+                    if (complete) completedPartitions++;
+                    progress?.Report(new SyncProgress(contractsSaved, completedPartitions, partitions.Count, message));
+                }
+            }
 
-                var savedPage = await repository.GetPartitionNextPageAsync(partition.Key, cancellationToken).ConfigureAwait(false);
+            await Parallel.ForEachAsync(partitions, new ParallelOptions
+            {
+                MaxDegreeOfParallelism = Math.Max(1, partitionConcurrency),
+                CancellationToken = cancellationToken
+            }, async (partition, partitionToken) =>
+            {
+                await _pauseGate.WaitAsync(partitionToken).ConfigureAwait(false);
+                var savedPage = await repository.GetPartitionNextPageAsync(partition.Key, partitionToken).ConfigureAwait(false);
                 if (savedPage == 0)
                 {
                     await SetCoverageStatusAsync(
                         coverageRepository,
                         partition,
                         CoverageStatus.Complete,
-                        cancellationToken: cancellationToken).ConfigureAwait(false);
-                    completedPartitions++;
-                    progress?.Report(new SyncProgress(
-                        contractsSaved,
-                        completedPartitions,
-                        partitions.Count,
-                        $"Partição já concluída: {partition.Description}"));
-                    continue;
+                        cancellationToken: partitionToken).ConfigureAwait(false);
+                    ReportProgress(0, $"Partição já concluída: {partition.Description}", complete: true);
+                    return;
                 }
 
-                contractsSaved += await DownloadPartitionWithCoverageAsync(
+                await DownloadPartitionWithCoverageAsync(
                     partition,
                     savedPage ?? 1,
                     mode,
                     coverageRepository,
-                    contractsSaved,
-                    completedPartitions,
-                    partitions.Count,
-                    progress,
-                    cancellationToken).ConfigureAwait(false);
+                    pageConcurrency,
+                    (saved, message) => ReportProgress(saved, message),
+                    partitionToken).ConfigureAwait(false);
 
-                completedPartitions++;
-                progress?.Report(new SyncProgress(
-                    contractsSaved,
-                    completedPartitions,
-                    partitions.Count,
-                    $"Concluída: {partition.Description}"));
-            }
+                ReportProgress(0, $"Concluída: {partition.Description}", complete: true);
+            }).ConfigureAwait(false);
 
             if (options.FinalizeDataset)
             {
@@ -197,10 +203,8 @@ public sealed class SyncService(
         int firstPage,
         SyncMode mode,
         ICoverageRepository? coverageRepository,
-        long contractsPreviouslySaved,
-        int completedPartitions,
-        int totalPartitions,
-        IProgress<SyncProgress>? progress,
+        int pageConcurrency,
+        Action<long, string> reportProgress,
         CancellationToken cancellationToken)
     {
         var existingCheckpoint = await repository.GetPartitionCheckpointAsync(
@@ -225,10 +229,8 @@ public sealed class SyncService(
                 partition,
                 firstPage,
                 mode,
-                contractsPreviouslySaved,
-                completedPartitions,
-                totalPartitions,
-                progress,
+                pageConcurrency,
+                reportProgress,
                 cancellationToken).ConfigureAwait(false);
             long? recordsCount = partition.StartDate == partition.EndDate && firstPage == 1
                 ? saved
@@ -244,11 +246,8 @@ public sealed class SyncService(
         catch (HttpRequestException exception) when (IsPncpDateRangeRejection(exception) &&
                                                        partition.StartDate < partition.EndDate)
         {
-            progress?.Report(new SyncProgress(
-                contractsPreviouslySaved,
-                completedPartitions,
-                totalPartitions,
-                $"O PNCP rejeitou a semana {partition.StartDate:dd/MM/yyyy}–{partition.EndDate:dd/MM/yyyy}; tentando dia a dia"));
+            reportProgress(0,
+                $"O PNCP rejeitou a semana {partition.StartDate:dd/MM/yyyy}–{partition.EndDate:dd/MM/yyyy}; tentando dia a dia");
 
             // The weekly request proved nothing about an individual day. Reset
             // the temporary Downloading state before tracking each day.
@@ -280,10 +279,8 @@ public sealed class SyncService(
                     dailySavedPage ?? 1,
                     mode,
                     coverageRepository,
-                    contractsPreviouslySaved + saved,
-                    completedPartitions,
-                    totalPartitions,
-                    progress,
+                    pageConcurrency,
+                    reportProgress,
                     cancellationToken).ConfigureAwait(false);
             }
 
@@ -362,19 +359,13 @@ public sealed class SyncService(
         SyncPartition partition,
         int firstPage,
         SyncMode mode,
-        long contractsPreviouslySaved,
-        int completedPartitions,
-        int totalPartitions,
-        IProgress<SyncProgress>? progress,
+        int pageConcurrency,
+        Action<long, string> reportProgress,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         await _pauseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        progress?.Report(new SyncProgress(
-            contractsPreviouslySaved,
-            completedPartitions,
-            totalPartitions,
-            $"{partition.Description} — página {firstPage}"));
+        reportProgress(0, $"{partition.Description} — página {firstPage}");
         var first = await client.GetContractsPageAsync(
             partition.StartDate,
             partition.EndDate,
@@ -396,55 +387,41 @@ public sealed class SyncService(
                 first.TotalPages),
             cancellationToken).ConfigureAwait(false);
         long savedInPartition = first.Contracts.Count;
+        reportProgress(first.Contracts.Count, $"{partition.Description} — página {firstPage}");
         if (firstIsComplete)
         {
             return savedInPartition;
         }
 
-        var channel = Channel.CreateBounded<ContractPage>(new BoundedChannelOptions(2)
-        {
-            FullMode = BoundedChannelFullMode.Wait,
-            SingleReader = true,
-            SingleWriter = false
-        });
-        var nextPage = firstPage;
-        var producerTasks = Enumerable.Range(0, 2).Select(async _ =>
-        {
-            while (true)
-            {
-                var pageNumber = Interlocked.Increment(ref nextPage);
-                if (pageNumber > first.TotalPages)
-                {
-                    return;
-                }
+        using var pendingCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var pendingPages = new Queue<Task<ContractPage>>();
+        var nextPage = firstPage + 1;
 
-                cancellationToken.ThrowIfCancellationRequested();
-                await _pauseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                var page = await client.GetContractsPageAsync(
-                    partition.StartDate,
-                    partition.EndDate,
-                    partition.ModalityId,
-                    partition.Uf,
-                    pageNumber,
-                    50,
-                    mode,
-                    cancellationToken).ConfigureAwait(false);
-                await channel.Writer.WriteAsync(page, cancellationToken).ConfigureAwait(false);
-            }
-        }).ToArray();
-        var producerCompletion = Task.WhenAll(producerTasks).ContinueWith(
-            task => channel.Writer.TryComplete(task.Exception?.GetBaseException()),
-            CancellationToken.None,
-            TaskContinuationOptions.ExecuteSynchronously,
-            TaskScheduler.Default);
+        async Task<ContractPage> LoadPageAsync(int pageNumber)
+        {
+            await _pauseGate.WaitAsync(pendingCancellation.Token).ConfigureAwait(false);
+            return await client.GetContractsPageAsync(
+                partition.StartDate,
+                partition.EndDate,
+                partition.ModalityId,
+                partition.Uf,
+                pageNumber,
+                50,
+                mode,
+                pendingCancellation.Token).ConfigureAwait(false);
+        }
 
-        var pendingPages = new SortedDictionary<int, ContractPage>();
         var expectedPage = firstPage + 1;
-        await foreach (var page in channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+        try
         {
-            pendingPages[page.Page] = page;
-            while (pendingPages.Remove(expectedPage, out var orderedPage))
+            // Bound both outstanding requests and downloaded pages awaiting a
+            // slower predecessor. Checkpoints advance only in request order.
+            while (nextPage <= first.TotalPages && pendingPages.Count < pageConcurrency)
+                pendingPages.Enqueue(LoadPageAsync(nextPage++));
+
+            while (pendingPages.TryDequeue(out var pendingPage))
             {
+                var orderedPage = await pendingPage.ConfigureAwait(false);
                 var complete = orderedPage.Contracts.Count == 0 ||
                                expectedPage >= first.TotalPages;
                 await repository.CommitSyncPageAsync(
@@ -456,24 +433,25 @@ public sealed class SyncService(
                         first.TotalPages),
                     cancellationToken).ConfigureAwait(false);
                 savedInPartition += orderedPage.Contracts.Count;
-                progress?.Report(new SyncProgress(
-                    contractsPreviouslySaved + savedInPartition,
-                    completedPartitions,
-                    totalPartitions,
-                    $"{partition.Description} — página {expectedPage}"));
+                reportProgress(orderedPage.Contracts.Count, $"{partition.Description} — página {expectedPage}");
                 expectedPage++;
+                if (complete) break;
+                if (nextPage <= first.TotalPages)
+                    pendingPages.Enqueue(LoadPageAsync(nextPage++));
             }
         }
-
-        await producerCompletion.ConfigureAwait(false);
-        await Task.WhenAll(producerTasks).ConfigureAwait(false);
+        finally
+        {
+            await pendingCancellation.CancelAsync().ConfigureAwait(false);
+            try { await Task.WhenAll(pendingPages).ConfigureAwait(false); }
+            catch (Exception) { /* Preserve the original failure after draining pending calls. */ }
+        }
         return savedInPartition;
     }
 
     private static bool IsPncpDateRangeRejection(HttpRequestException exception) =>
         (int?)exception.StatusCode == 422 &&
-        exception.Message.Contains("Data Inicial", StringComparison.OrdinalIgnoreCase) &&
-        exception.Message.Contains("Data Final", StringComparison.OrdinalIgnoreCase);
+        PncpClient.IsDateRangeRejection(exception.Message);
 
     private static IReadOnlyList<SyncPartition> BuildPartitions(
         DateOnly startDate,
@@ -556,7 +534,8 @@ public sealed class SyncService(
                 $"{mode}:{day:yyyyMMdd}:{day:yyyyMMdd}:m{ModalityId}:uf{Uf ?? "ALL"}");
             return this with
             {
-                Key = key,
+                Key = Key.Contains(":cycle:", StringComparison.Ordinal)
+                    ? key + Key[Key.IndexOf(":cycle:", StringComparison.Ordinal)..] : key,
                 StartDate = day,
                 EndDate = day,
                 Description = $"{ModalityName}, {Uf ?? "Brasil"}, {day:dd/MM/yyyy}"

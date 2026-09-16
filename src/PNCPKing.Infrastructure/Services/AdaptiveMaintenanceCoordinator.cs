@@ -108,11 +108,14 @@ public sealed class AdaptiveMaintenanceCoordinator
         return _gate.Wait(0) ? new Lease(_gate) : null;
     }
 
-    public MaintenanceSlice BeginSlice(CancellationToken cancellationToken = default)
+    public MaintenanceSlice BeginSlice(CancellationToken cancellationToken = default, TimeSpan? duration = null)
     {
         var source = cancellationToken.CanBeCanceled
             ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
             : new CancellationTokenSource();
+        var budget = duration ?? GetDecision().SliceDuration;
+        if (budget <= TimeSpan.Zero) source.Cancel();
+        else source.CancelAfter(budget);
         lock (_activityGate)
         {
             _activeSlice?.Cancel();
@@ -151,20 +154,16 @@ public sealed class AdaptiveMaintenanceCoordinator
             return;
         }
 
-        ThreadPool.QueueUserWorkItem(
-            static state =>
-            {
-                try
-                {
-                    ((CancellationTokenSource)state!).Cancel();
-                }
-                catch (ObjectDisposedException)
-                {
-                    // A fatia terminou antes de o pedido assíncrono chegar.
-                }
-            },
-            source,
-            preferLocal: false);
+        try
+        {
+            // Signal the token immediately, even when worker threads are occupied.
+            // Cancellation callbacks still run asynchronously, keeping the UI free.
+            _ = source.CancelAsync();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The slice finished between the activity notification and cancellation.
+        }
     }
 
     public sealed class MaintenanceSlice : IAsyncDisposable

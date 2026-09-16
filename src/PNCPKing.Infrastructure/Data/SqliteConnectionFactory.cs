@@ -30,6 +30,7 @@ public interface ISqliteConnectionFactory
     long MmapBytes { get; }
     int WorkerThreads { get; }
     string ProfileName { get; }
+    SqliteSearchTuning SearchTuning => new(ProfileName == "Amplo" ? 64 : 32, ProfileName == "Restrito");
     Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken = default);
 }
 
@@ -37,16 +38,24 @@ public sealed class SqliteConnectionFactory : ISqliteConnectionFactory
 {
     private readonly string _connectionString;
     private readonly int _cacheKib;
+    private readonly ISystemResourceProbe _resourceProbe;
+    private SqliteSearchTuning? _tuning;
+    private readonly bool _readOnly;
 
     public SqliteConnectionFactory(
         string databasePath,
         ISqliteWorkCoordinator? workCoordinator = null,
-        ISystemResourceProbe? resourceProbe = null)
+        ISystemResourceProbe? resourceProbe = null,
+        SqliteSearchTuning? tuning = null,
+        bool readOnly = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         DatabasePath = Path.GetFullPath(databasePath);
         WorkCoordinator = workCoordinator ?? new SqliteWorkCoordinator();
-        var resources = (resourceProbe ?? new SystemResourceProbe()).GetSnapshot();
+        _resourceProbe = resourceProbe ?? new SystemResourceProbe();
+        _tuning = tuning is { IsValid: true } ? tuning : null;
+        _readOnly = readOnly;
+        var resources = _resourceProbe.GetSnapshot();
         var spacious = resources.Pressure == SystemResourcePressure.Normal &&
                        resources.LogicalProcessors >= 8 &&
                        resources.TotalPhysicalMemoryBytes >= 16L * 1024 * 1024 * 1024;
@@ -78,10 +87,10 @@ public sealed class SqliteConnectionFactory : ISqliteConnectionFactory
         _connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = DatabasePath,
-            Mode = SqliteOpenMode.ReadWriteCreate,
+            Mode = readOnly ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Private,
             ForeignKeys = true,
-            Pooling = true
+            Pooling = !readOnly
         }.ToString();
     }
 
@@ -91,18 +100,86 @@ public sealed class SqliteConnectionFactory : ISqliteConnectionFactory
     public long MmapBytes { get; }
     public int WorkerThreads { get; }
     public string ProfileName { get; }
+    public SqliteSearchTuning SearchTuning
+    {
+        get
+        {
+            var tuning = _tuning;
+            return tuning is null ? new(_cacheKib / 1024, ProfileName == "Restrito")
+                : new(tuning.FitsMemory(_resourceProbe.GetSnapshot()) ? tuning.CacheMiB : 32,
+                    ProfileName == "Restrito" && tuning.OrderedItemBatches);
+        }
+    }
+    public void ResetCalibration() => _tuning = null;
+
+    internal SqliteConnectionFactory ReadOnlyProfile(SqliteSearchTuning tuning, ISystemResourceProbe resourceProbe) =>
+        new(this, tuning, resourceProbe);
+
+    private SqliteConnectionFactory(SqliteConnectionFactory source, SqliteSearchTuning tuning, ISystemResourceProbe resourceProbe)
+    {
+        DatabasePath = source.DatabasePath;
+        WorkCoordinator = source.WorkCoordinator;
+        ProfileName = source.ProfileName;
+        MigrationCacheKib = source.MigrationCacheKib;
+        MmapBytes = source.MmapBytes;
+        WorkerThreads = source.WorkerThreads;
+        _cacheKib = source._cacheKib;
+        _tuning = tuning;
+        _resourceProbe = resourceProbe;
+        _readOnly = true;
+        _connectionString = new SqliteConnectionStringBuilder(source._connectionString)
+        { Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString();
+    }
+
+    // Dispose this registration before returning the connection to the pool.
+    // ADO.NET cancellation alone does not interrupt a running sqlite3_step.
+    internal static IDisposable InterruptOnCancellation(
+        SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!cancellationToken.CanBeCanceled) return default(CancellationTokenRegistration);
+        return new QueryCancellation(connection, cancellationToken);
+    }
+
+    private sealed class QueryCancellation : IDisposable
+    {
+        private readonly SqliteConnection _connection;
+        private readonly CancellationTokenRegistration _registration;
+        public QueryCancellation(SqliteConnection connection, CancellationToken token)
+        {
+            _connection = connection;
+            // The progress callback also closes the race where cancellation arrives
+            // just before sqlite3_step starts (interrupt alone is then a no-op).
+            SQLitePCL.raw.sqlite3_progress_handler(connection.Handle, 1000,
+                _ => token.IsCancellationRequested ? 1 : 0, null);
+            _registration = token.Register(() => SQLitePCL.raw.sqlite3_interrupt(connection.Handle));
+        }
+        public void Dispose()
+        {
+            _registration.Dispose();
+            SQLitePCL.raw.sqlite3_progress_handler(_connection.Handle, 0, null, null);
+        }
+    }
 
     public async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken = default)
     {
         var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText =
-            $"PRAGMA busy_timeout=30000; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL; " +
-            $"PRAGMA cache_size=-{_cacheKib}; PRAGMA temp_store=FILE; PRAGMA mmap_size={MmapBytes}; " +
-            $"PRAGMA threads={WorkerThreads};";
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        return connection;
+        try
+        {
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.CommandText = (_readOnly ? "PRAGMA query_only=ON; " : "") +
+                $"PRAGMA busy_timeout=30000; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL; " +
+                $"PRAGMA cache_size=-{SearchTuning.CacheMiB * 1024}; PRAGMA temp_store=FILE; PRAGMA mmap_size={MmapBytes}; " +
+                $"PRAGMA threads={WorkerThreads};";
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            return connection;
+        }
+        catch
+        {
+            await connection.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 }
 

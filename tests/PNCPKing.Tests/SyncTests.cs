@@ -71,11 +71,13 @@ public sealed class SyncTests
         Assert.Equal("kept", results.Results[0].PncpId);
     }
 
-    [Fact]
-    public async Task Synchronization_FallsBackToDailyPartitionsAfterPncpDateRejection()
+    [Theory]
+    [InlineData("Data Inicial deve ser anterior ou igual à Data Final")]
+    [InlineData("Período inicial e final maior que 365 dias")]
+    public async Task Synchronization_FallsBackToDailyPartitionsAfterPncpDateRejection(string error)
     {
         await using var database = await TestDatabase.CreateAsync();
-        var client = new DateRejectingClient();
+        var client = new DateRejectingClient(error);
         var service = new SyncService(client, database.Repository);
         var start = new DateOnly(2026, 6, 1);
         var end = new DateOnly(2026, 6, 2);
@@ -171,7 +173,7 @@ public sealed class SyncTests
         public Task<IReadOnlyList<HomologationResult>> GetItemResultsAsync(ContractRecord contract, long itemNumber, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<HomologationResult>>([]);
     }
 
-    private sealed class DateRejectingClient : IPncpClient
+    private sealed class DateRejectingClient(string error) : IPncpClient
     {
         public List<(DateOnly Start, DateOnly End)> Requests { get; } = [];
 
@@ -184,7 +186,7 @@ public sealed class SyncTests
             if (startDate != endDate)
             {
                 throw new HttpRequestException(
-                    "Data Inicial deve ser anterior ou igual à Data Final",
+                    error,
                     null,
                     HttpStatusCode.UnprocessableEntity);
             }

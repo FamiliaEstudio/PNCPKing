@@ -14,7 +14,6 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
     private const long PostFilteredFtsCandidateLimit = 5_000;
     private const long MaximumFtsCandidateLimit = 2_000_000_000;
     private const int FtsCandidateExpansionFactor = 4;
-    private const int HighCardinalityFtsThreshold = 20_000;
     private const long MinimumBytesPerContract = 14_000;
     private const long MaximumBytesPerContract = 28_000;
     private const long MinimumSafetyReserve = 2L * 1024 * 1024 * 1024;
@@ -22,7 +21,6 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
     private readonly string _databasePath;
     private readonly IPerformanceTelemetry _performance;
     private readonly long _initialFtsCandidateLimit;
-    private readonly int _highCardinalityFtsThreshold;
     private readonly bool _useAdaptiveFtsCandidateLimit;
 
     public SqlitePriceCacheRepository(
@@ -39,7 +37,6 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
             connections,
             performance,
             SimpleFtsCandidateLimit,
-            HighCardinalityFtsThreshold,
             useAdaptiveFtsCandidateLimit: true)
     {
     }
@@ -47,13 +44,11 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
     internal SqlitePriceCacheRepository(
         ISqliteConnectionFactory connections,
         IPerformanceTelemetry? performance,
-        long initialFtsCandidateLimit,
-        int highCardinalityFtsThreshold)
+        long initialFtsCandidateLimit)
         : this(
             connections,
             performance,
             initialFtsCandidateLimit,
-            highCardinalityFtsThreshold,
             useAdaptiveFtsCandidateLimit: false)
     {
     }
@@ -62,7 +57,6 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         ISqliteConnectionFactory connections,
         IPerformanceTelemetry? performance,
         long initialFtsCandidateLimit,
-        int highCardinalityFtsThreshold,
         bool useAdaptiveFtsCandidateLimit)
     {
         _connections = connections ?? throw new ArgumentNullException(nameof(connections));
@@ -70,14 +64,9 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         {
             throw new ArgumentOutOfRangeException(nameof(initialFtsCandidateLimit));
         }
-        if (highCardinalityFtsThreshold < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(highCardinalityFtsThreshold));
-        }
         _databasePath = connections.DatabasePath;
         _performance = performance ?? NullPerformanceTelemetry.Instance;
         _initialFtsCandidateLimit = initialFtsCandidateLimit;
-        _highCardinalityFtsThreshold = highCardinalityFtsThreshold;
         _useAdaptiveFtsCandidateLimit = useAdaptiveFtsCandidateLimit;
     }
 
@@ -305,244 +294,253 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         DateOnly endDate,
         CancellationToken cancellationToken = default)
     {
-        await using var writer = await _connections.WorkCoordinator
-            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
-            .ConfigureAwait(false);
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        var now = FormatDateTime(DateTimeOffset.UtcNow);
-        var prepared = false;
-        await using (var state = connection.CreateCommand())
-        {
-            state.Transaction = (SqliteTransaction)transaction;
-            state.CommandText = """
-                SELECT prepared_window_start, prepared_window_end
-                  FROM price_cache_control
-                 WHERE id = 1;
-                """;
-            await using var reader = await state.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            prepared = await reader.ReadAsync(cancellationToken).ConfigureAwait(false) &&
-                       ParseDate(reader, 0) == startDate &&
-                       ParseDate(reader, 1) == endDate;
-        }
 
-        await using (var control = connection.CreateCommand())
+        try
         {
-            control.Transaction = (SqliteTransaction)transaction;
-            control.CommandText = """
-                UPDATE price_cache_control
-                   SET window_start = $start,
-                       window_end = $end,
-                       statistics_suspended = $suspended,
-                       updated_at = $now
-                 WHERE id = 1;
-                """;
-            control.Parameters.AddWithValue("$start", FormatDate(startDate));
-            control.Parameters.AddWithValue("$end", FormatDate(endDate));
-            control.Parameters.AddWithValue("$suspended", prepared ? 0 : 1);
-            control.Parameters.AddWithValue("$now", now);
-            await control.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
+            await using var writer = await _connections.WorkCoordinator
+                .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+                .ConfigureAwait(false);
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            var now = FormatDateTime(DateTimeOffset.UtcNow);
+            var prepared = false;
+            await using (var state = connection.CreateCommand())
+            {
+                state.Transaction = (SqliteTransaction)transaction;
+                state.CommandText = """
+                    SELECT prepared_window_start, prepared_window_end
+                      FROM price_cache_control
+                     WHERE id = 1;
+                    """;
+                await using var reader = await state.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                prepared = await reader.ReadAsync(cancellationToken).ConfigureAwait(false) &&
+                           ParseDate(reader, 0) == startDate &&
+                           ParseDate(reader, 1) == endDate;
+            }
 
-        await using (var recovery = connection.CreateCommand())
-        {
-            recovery.Transaction = (SqliteTransaction)transaction;
-            recovery.CommandText = """
-                UPDATE price_cache_contracts
-                   SET status = $pending,
-                       last_error = '',
-                       next_retry_at = NULL,
-                       updated_at = $now
-                 WHERE status = $downloading;
+            await using (var control = connection.CreateCommand())
+            {
+                control.Transaction = (SqliteTransaction)transaction;
+                control.CommandText = """
+                    UPDATE price_cache_control
+                       SET window_start = $start,
+                           window_end = $end,
+                           statistics_suspended = $suspended,
+                           updated_at = $now
+                     WHERE id = 1;
+                    """;
+                control.Parameters.AddWithValue("$start", FormatDate(startDate));
+                control.Parameters.AddWithValue("$end", FormatDate(endDate));
+                control.Parameters.AddWithValue("$suspended", prepared ? 0 : 1);
+                control.Parameters.AddWithValue("$now", now);
+                await control.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
 
-                UPDATE price_cache_contracts
-                   SET next_retry_at = NULL,
-                       updated_at = $now
-                 WHERE status = $failed
-                   AND next_retry_at IS NOT NULL
-                   AND last_error LIKE 'PNCP respondeu 404 (%';
-                """;
-            recovery.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
-            recovery.Parameters.AddWithValue("$downloading", (int)PriceCacheContractStatus.Downloading);
-            recovery.Parameters.AddWithValue("$failed", (int)PriceCacheContractStatus.Failed);
-            recovery.Parameters.AddWithValue("$now", now);
-            await recovery.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
+            await using (var recovery = connection.CreateCommand())
+            {
+                recovery.Transaction = (SqliteTransaction)transaction;
+                recovery.CommandText = """
+                    UPDATE price_cache_contracts
+                       SET status = $pending,
+                           last_error = '',
+                           next_retry_at = NULL,
+                           updated_at = $now
+                     WHERE status = $downloading;
 
-        if (prepared)
-        {
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return;
-        }
+                    UPDATE price_cache_contracts
+                       SET next_retry_at = NULL,
+                           updated_at = $now
+                     WHERE status = $failed
+                       AND next_retry_at IS NOT NULL
+                       AND last_error LIKE 'PNCP respondeu 404 (%';
+                    """;
+                recovery.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
+                recovery.Parameters.AddWithValue("$downloading", (int)PriceCacheContractStatus.Downloading);
+                recovery.Parameters.AddWithValue("$failed", (int)PriceCacheContractStatus.Failed);
+                recovery.Parameters.AddWithValue("$now", now);
+                await recovery.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
 
-        await using (var upsert = connection.CreateCommand())
-        {
-            upsert.Transaction = (SqliteTransaction)transaction;
-            upsert.CommandText = """
-                UPDATE price_cache_contracts
-                   SET publication_date = COALESCE((
-                           SELECT c.publication_date
+            if (prepared)
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            await using (var upsert = connection.CreateCommand())
+            {
+                upsert.Transaction = (SqliteTransaction)transaction;
+                upsert.CommandText = """
+                    UPDATE price_cache_contracts
+                       SET publication_date = COALESCE((
+                               SELECT c.publication_date
+                                 FROM contracts c
+                                WHERE c.pncp_id = price_cache_contracts.contract_id), ''),
+                           updated_at = $now
+                     WHERE publication_date IS NOT COALESCE((
+                               SELECT c.publication_date
+                                 FROM contracts c
+                                WHERE c.pncp_id = price_cache_contracts.contract_id), '');
+
+                    UPDATE price_cache_contracts
+                       SET status = $pending,
+                           last_error = '',
+                           next_retry_at = NULL,
+                           updated_at = $now
+                     WHERE status = $complete
+                       AND EXISTS(
+                           SELECT 1
                              FROM contracts c
-                            WHERE c.pncp_id = price_cache_contracts.contract_id), ''),
-                       updated_at = $now
-                 WHERE publication_date IS NOT COALESCE((
-                           SELECT c.publication_date
-                             FROM contracts c
-                            WHERE c.pncp_id = price_cache_contracts.contract_id), '');
+                            WHERE c.pncp_id = price_cache_contracts.contract_id
+                              AND c.publication_date >= $start
+                              AND c.publication_date < $endExclusive
+                              AND COALESCE(price_cache_contracts.source_global_updated_at, '') <>
+                                  COALESCE(c.global_updated_at, ''));
 
-                UPDATE price_cache_contracts
-                   SET status = $pending,
-                       last_error = '',
-                       next_retry_at = NULL,
-                       updated_at = $now
-                 WHERE status = $complete
-                   AND EXISTS(
-                       SELECT 1
-                         FROM contracts c
-                        WHERE c.pncp_id = price_cache_contracts.contract_id
-                          AND c.publication_date >= $start
-                          AND c.publication_date < $endExclusive
-                          AND COALESCE(price_cache_contracts.source_global_updated_at, '') <>
-                              COALESCE(c.global_updated_at, ''));
-
-                UPDATE price_cache_contracts
-                   SET source_global_updated_at = (
-                           SELECT s.source_global_updated_at
-                             FROM contract_item_snapshots s
-                            WHERE s.contract_id = price_cache_contracts.contract_id),
-                       status = $complete,
-                       item_count = COALESCE((
-                           SELECT s.item_count
-                             FROM contract_item_snapshots s
-                            WHERE s.contract_id = price_cache_contracts.contract_id), 0),
-                       last_error = '',
-                       next_retry_at = NULL,
-                       completed_at = COALESCE(completed_at, $now),
-                       updated_at = $now
-                 WHERE EXISTS(
-                       SELECT 1
-                         FROM contracts c
-                         JOIN contract_item_snapshots s ON s.contract_id = c.pncp_id
-                        WHERE c.pncp_id = price_cache_contracts.contract_id
-                          AND c.publication_date >= $start
-                          AND c.publication_date < $endExclusive
-                          AND COALESCE(s.source_global_updated_at, '') =
-                              COALESCE(c.global_updated_at, ''))
-                   AND (status <> $complete
-                        OR COALESCE(source_global_updated_at, '') <> COALESCE((
+                    UPDATE price_cache_contracts
+                       SET source_global_updated_at = (
                                SELECT s.source_global_updated_at
                                  FROM contract_item_snapshots s
-                                WHERE s.contract_id = price_cache_contracts.contract_id), '')
-                        OR item_count <> COALESCE((
+                                WHERE s.contract_id = price_cache_contracts.contract_id),
+                           status = $complete,
+                           item_count = COALESCE((
                                SELECT s.item_count
                                  FROM contract_item_snapshots s
-                                WHERE s.contract_id = price_cache_contracts.contract_id), 0));
+                                WHERE s.contract_id = price_cache_contracts.contract_id), 0),
+                           last_error = '',
+                           next_retry_at = NULL,
+                           completed_at = COALESCE(completed_at, $now),
+                           updated_at = $now
+                     WHERE EXISTS(
+                           SELECT 1
+                             FROM contracts c
+                             JOIN contract_item_snapshots s ON s.contract_id = c.pncp_id
+                            WHERE c.pncp_id = price_cache_contracts.contract_id
+                              AND c.publication_date >= $start
+                              AND c.publication_date < $endExclusive
+                              AND COALESCE(s.source_global_updated_at, '') =
+                                  COALESCE(c.global_updated_at, ''))
+                       AND (status <> $complete
+                            OR COALESCE(source_global_updated_at, '') <> COALESCE((
+                                   SELECT s.source_global_updated_at
+                                     FROM contract_item_snapshots s
+                                    WHERE s.contract_id = price_cache_contracts.contract_id), '')
+                            OR item_count <> COALESCE((
+                                   SELECT s.item_count
+                                     FROM contract_item_snapshots s
+                                    WHERE s.contract_id = price_cache_contracts.contract_id), 0));
 
-                INSERT INTO price_cache_contracts(
-                    contract_id, publication_date, source_global_updated_at, status, item_count,
-                    active_result_count, cancelled_result_count, background_owned,
-                    user_pinned, completed_at, updated_at)
-                SELECT c.pncp_id,
-                       COALESCE(c.publication_date, ''),
-                       s.source_global_updated_at,
-                       CASE WHEN s.contract_id IS NOT NULL
-                                      AND COALESCE(s.source_global_updated_at, '') = COALESCE(c.global_updated_at, '')
-                            THEN $complete ELSE $pending END,
-                       COALESCE(s.item_count, 0),
-                       (SELECT COUNT(*) FROM item_results r
-                         WHERE r.contract_id = c.pncp_id AND r.result_status_id = 1),
-                       (SELECT COUNT(*) FROM item_results r
-                         WHERE r.contract_id = c.pncp_id AND r.result_status_id <> 1),
-                       0,
-                       CASE WHEN s.contract_id IS NULL THEN 0 ELSE 1 END,
-                       CASE WHEN s.contract_id IS NULL THEN NULL ELSE s.fetched_at END,
-                       $now
-                  FROM contracts c
-                  LEFT JOIN contract_item_snapshots s ON s.contract_id = c.pncp_id
-                 WHERE c.publication_date >= $start
-                   AND c.publication_date < $endExclusive
-                   AND NOT EXISTS(
-                       SELECT 1 FROM price_cache_contracts pc
-                        WHERE pc.contract_id = c.pncp_id);
-                """;
-            upsert.Parameters.AddWithValue("$complete", (int)PriceCacheContractStatus.Complete);
-            upsert.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
-            upsert.Parameters.AddWithValue("$start", FormatDate(startDate));
-            upsert.Parameters.AddWithValue("$endExclusive", FormatDate(endDate.AddDays(1)));
-            upsert.Parameters.AddWithValue("$now", now);
-            await upsert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                    INSERT INTO price_cache_contracts(
+                        contract_id, publication_date, source_global_updated_at, status, item_count,
+                        active_result_count, cancelled_result_count, background_owned,
+                        user_pinned, completed_at, updated_at)
+                    SELECT c.pncp_id,
+                           COALESCE(c.publication_date, ''),
+                           s.source_global_updated_at,
+                           CASE WHEN s.contract_id IS NOT NULL
+                                          AND COALESCE(s.source_global_updated_at, '') = COALESCE(c.global_updated_at, '')
+                                THEN $complete ELSE $pending END,
+                           COALESCE(s.item_count, 0),
+                           (SELECT COUNT(*) FROM item_results r
+                             WHERE r.contract_id = c.pncp_id AND r.result_status_id = 1),
+                           (SELECT COUNT(*) FROM item_results r
+                             WHERE r.contract_id = c.pncp_id AND r.result_status_id <> 1),
+                           0,
+                           CASE WHEN s.contract_id IS NULL THEN 0 ELSE 1 END,
+                           CASE WHEN s.contract_id IS NULL THEN NULL ELSE s.fetched_at END,
+                           $now
+                      FROM contracts c
+                      LEFT JOIN contract_item_snapshots s ON s.contract_id = c.pncp_id
+                     WHERE c.publication_date >= $start
+                       AND c.publication_date < $endExclusive
+                       AND NOT EXISTS(
+                           SELECT 1 FROM price_cache_contracts pc
+                            WHERE pc.contract_id = c.pncp_id);
+                    """;
+                upsert.Parameters.AddWithValue("$complete", (int)PriceCacheContractStatus.Complete);
+                upsert.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
+                upsert.Parameters.AddWithValue("$start", FormatDate(startDate));
+                upsert.Parameters.AddWithValue("$endExclusive", FormatDate(endDate.AddDays(1)));
+                upsert.Parameters.AddWithValue("$now", now);
+                await upsert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using (var prune = connection.CreateCommand())
+            {
+                prune.Transaction = (SqliteTransaction)transaction;
+                prune.CommandText = """
+                    CREATE TEMP TABLE IF NOT EXISTS price_cache_prune_ids(
+                        contract_id TEXT PRIMARY KEY
+                    ) WITHOUT ROWID;
+                    DELETE FROM price_cache_prune_ids;
+                    INSERT INTO price_cache_prune_ids(contract_id)
+                    SELECT pc.contract_id
+                      FROM price_cache_contracts pc
+                     WHERE (pc.publication_date < $start OR pc.publication_date >= $endExclusive)
+                       AND pc.background_owned = 1
+                       AND pc.user_pinned = 0
+                       AND NOT EXISTS(
+                           SELECT 1 FROM quotation_references qr
+                            WHERE qr.contract_id = pc.contract_id);
+
+                    DELETE FROM items
+                     WHERE contract_id IN (SELECT contract_id FROM price_cache_prune_ids);
+                    DELETE FROM price_cache_contracts
+                     WHERE publication_date < $start OR publication_date >= $endExclusive;
+                    """;
+                prune.Parameters.AddWithValue("$start", FormatDate(startDate));
+                prune.Parameters.AddWithValue("$endExclusive", FormatDate(endDate.AddDays(1)));
+                await prune.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using (var statistics = connection.CreateCommand())
+            {
+                statistics.Transaction = (SqliteTransaction)transaction;
+                statistics.CommandText = """
+                    WITH totals AS (
+                        SELECT COUNT(*) AS contracts,
+                               SUM(CASE WHEN status = $complete THEN 1 ELSE 0 END) AS complete,
+                               SUM(CASE WHEN status IN ($pending, $downloading) THEN 1 ELSE 0 END) AS pending,
+                               SUM(CASE WHEN status = $failed THEN 1 ELSE 0 END) AS failed,
+                               COALESCE(SUM(item_count), 0) AS items,
+                               COALESCE(SUM(active_result_count), 0) AS active,
+                               COALESCE(SUM(cancelled_result_count), 0) AS cancelled
+                          FROM price_cache_contracts
+                         WHERE publication_date >= $start
+                           AND publication_date < $endExclusive
+                    )
+                    UPDATE price_cache_control
+                       SET prepared_window_start = $start,
+                           prepared_window_end = $end,
+                           indexed_contract_count = (SELECT contracts FROM totals),
+                           indexed_complete_count = COALESCE((SELECT complete FROM totals), 0),
+                           indexed_pending_count = COALESCE((SELECT pending FROM totals), 0),
+                           indexed_failed_count = COALESCE((SELECT failed FROM totals), 0),
+                           indexed_item_count = (SELECT items FROM totals),
+                           indexed_active_result_count = (SELECT active FROM totals),
+                           indexed_cancelled_result_count = (SELECT cancelled FROM totals),
+                           statistics_suspended = 0,
+                           updated_at = $now
+                     WHERE id = 1;
+                    """;
+                statistics.Parameters.AddWithValue("$complete", (int)PriceCacheContractStatus.Complete);
+                statistics.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
+                statistics.Parameters.AddWithValue("$downloading", (int)PriceCacheContractStatus.Downloading);
+                statistics.Parameters.AddWithValue("$failed", (int)PriceCacheContractStatus.Failed);
+                statistics.Parameters.AddWithValue("$start", FormatDate(startDate));
+                statistics.Parameters.AddWithValue("$end", FormatDate(endDate));
+                statistics.Parameters.AddWithValue("$endExclusive", FormatDate(endDate.AddDays(1)));
+                statistics.Parameters.AddWithValue("$now", now);
+                await statistics.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
-
-        await using (var prune = connection.CreateCommand())
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
         {
-            prune.Transaction = (SqliteTransaction)transaction;
-            prune.CommandText = """
-                CREATE TEMP TABLE IF NOT EXISTS price_cache_prune_ids(
-                    contract_id TEXT PRIMARY KEY
-                ) WITHOUT ROWID;
-                DELETE FROM price_cache_prune_ids;
-                INSERT INTO price_cache_prune_ids(contract_id)
-                SELECT pc.contract_id
-                  FROM price_cache_contracts pc
-                 WHERE (pc.publication_date < $start OR pc.publication_date >= $endExclusive)
-                   AND pc.background_owned = 1
-                   AND pc.user_pinned = 0
-                   AND NOT EXISTS(
-                       SELECT 1 FROM quotation_references qr
-                        WHERE qr.contract_id = pc.contract_id);
-
-                DELETE FROM items
-                 WHERE contract_id IN (SELECT contract_id FROM price_cache_prune_ids);
-                DELETE FROM price_cache_contracts
-                 WHERE publication_date < $start OR publication_date >= $endExclusive;
-                """;
-            prune.Parameters.AddWithValue("$start", FormatDate(startDate));
-            prune.Parameters.AddWithValue("$endExclusive", FormatDate(endDate.AddDays(1)));
-            await prune.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
         }
-
-        await using (var statistics = connection.CreateCommand())
-        {
-            statistics.Transaction = (SqliteTransaction)transaction;
-            statistics.CommandText = """
-                WITH totals AS (
-                    SELECT COUNT(*) AS contracts,
-                           SUM(CASE WHEN status = $complete THEN 1 ELSE 0 END) AS complete,
-                           SUM(CASE WHEN status IN ($pending, $downloading) THEN 1 ELSE 0 END) AS pending,
-                           SUM(CASE WHEN status = $failed THEN 1 ELSE 0 END) AS failed,
-                           COALESCE(SUM(item_count), 0) AS items,
-                           COALESCE(SUM(active_result_count), 0) AS active,
-                           COALESCE(SUM(cancelled_result_count), 0) AS cancelled
-                      FROM price_cache_contracts
-                     WHERE publication_date >= $start
-                       AND publication_date < $endExclusive
-                )
-                UPDATE price_cache_control
-                   SET prepared_window_start = $start,
-                       prepared_window_end = $end,
-                       indexed_contract_count = (SELECT contracts FROM totals),
-                       indexed_complete_count = COALESCE((SELECT complete FROM totals), 0),
-                       indexed_pending_count = COALESCE((SELECT pending FROM totals), 0),
-                       indexed_failed_count = COALESCE((SELECT failed FROM totals), 0),
-                       indexed_item_count = (SELECT items FROM totals),
-                       indexed_active_result_count = (SELECT active FROM totals),
-                       indexed_cancelled_result_count = (SELECT cancelled FROM totals),
-                       statistics_suspended = 0,
-                       updated_at = $now
-                 WHERE id = 1;
-                """;
-            statistics.Parameters.AddWithValue("$complete", (int)PriceCacheContractStatus.Complete);
-            statistics.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
-            statistics.Parameters.AddWithValue("$downloading", (int)PriceCacheContractStatus.Downloading);
-            statistics.Parameters.AddWithValue("$failed", (int)PriceCacheContractStatus.Failed);
-            statistics.Parameters.AddWithValue("$start", FormatDate(startDate));
-            statistics.Parameters.AddWithValue("$end", FormatDate(endDate));
-            statistics.Parameters.AddWithValue("$endExclusive", FormatDate(endDate.AddDays(1)));
-            statistics.Parameters.AddWithValue("$now", now);
-            await statistics.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<PriceCacheWorkItem?> GetNextWorkAsync(
@@ -1023,6 +1021,12 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
                 span.Complete(result.Rows?.Count ?? 0);
                 return result;
             }
+            catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
+            {
+                var cancelled = new OperationCanceledException("Pesquisa cancelada.", exception, cancellationToken);
+                sqlSpan.Fail(cancelled);
+                throw cancelled;
+            }
             catch (Exception exception)
             {
                 sqlSpan.Fail(exception);
@@ -1071,12 +1075,17 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
                     return optimized;
                 }
             }
-            else if (filters.Sort != SearchSort.Relevance && itemMatch.Length > 0 &&
-                     (expression.AcceptedUnits.Count > 0 ||
-                      expression.PositiveGroups.Any(group => group.ApproximateNumbers is { Count: > 0 }) ||
-                      (_highCardinalityFtsThreshold != 0 &&
-                       !await ShouldUseContractChunksAsync(itemMatch, cancellationToken).ConfigureAwait(false))))
+            else if (filters.Sort != SearchSort.Relevance && itemMatch.Length > 0)
             {
+                // The raw FTS count does not predict the cost of finding valid prices.
+                // Keep textual searches on matching items regardless of their count.
+                if (_connections.SearchTuning.OrderedItemBatches)
+                {
+                    return await SearchLocalByItemIndexBatchesAsync(
+                            filters, expression, minimumUnitPrice, maximumUnitPrice,
+                            cursor, page, pageSize, detailConditions, progress, cancellationToken)
+                        .ConfigureAwait(false);
+                }
                 return await SearchLocalByItemIndexAsync(
                         filters, expression, minimumUnitPrice, maximumUnitPrice,
                         cursor, page, pageSize, detailConditions, cancellationToken)
@@ -1124,6 +1133,7 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         var scanLimit = Math.Min(10_000, Math.Max(pageSize * 4, pageSize + 1));
 
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = $"""
             WITH ranked_items AS (
@@ -1172,7 +1182,9 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         IReadOnlyList<string> detailConditions,
         CancellationToken cancellationToken)
     {
+        using var span = _performance.Begin("price-search", "local-item-index");
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
         connection.CreateFunction<string?, string?, bool>(
             "pncp_item_matches",
             (description, unit) =>
@@ -1242,6 +1254,255 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         }
     }
 
+    private async Task<PriceCacheLocalPage> SearchLocalByItemIndexBatchesAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice,
+        PriceCacheLocalCursor? cursor,
+        int page,
+        int pageSize,
+        IReadOnlyList<string> detailConditions,
+        IProgress<PriceCacheLocalProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        using var span = _performance.Begin("price-search", "local-item-index-batches");
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+        connection.CreateFunction<string?, string?, bool>(
+            "pncp_item_matches", (description, unit) => expression.MatchesItem(description, unit),
+            isDeterministic: true);
+        var (primaryRank, secondaryRank) = filters.Sort == SearchSort.Nearest
+            ? ("CAST(COALESCE(c.geo_layer, 1) AS REAL)",
+                "CAST(COALESCE(c.municipality_distance_rank, 999999) AS REAL)")
+            : ("0.0", "0.0");
+        var matches = new List<(ItemSearchHit Hit, ItemSearchRow Row, PriceCacheLocalCursor Cursor)>(pageSize + 1);
+        var examined = 0L;
+        var delivered = 0;
+        // Bound price expansion to one item instead of joining every matching item.
+        // Reuse the statement, and deliver valid rows before seeking the next item.
+        await using var details = connection.CreateCommand();
+        details.CommandText = $"""
+            WITH ranked_prices AS (
+                SELECT {BuildLocalSearchColumns("0", primaryRank, secondaryRank)}
+                  FROM items i
+                  CROSS JOIN contracts c ON c.pncp_id = i.contract_id
+                  CROSS JOIN contract_item_snapshots s ON s.contract_id = i.contract_id
+                  CROSS JOIN item_results r ON r.contract_id = i.contract_id AND r.item_number = i.item_number
+                 WHERE i.rowid = $itemRowid
+                   AND pncp_item_matches(i.description, i.unit) = 1
+                   AND {string.Join(" AND ", detailConditions)}
+            )
+            SELECT * FROM ranked_prices
+            {BuildLocalCursorWhere(cursor)}
+             ORDER BY result_sequence
+             LIMIT $scanLimit;
+            """;
+        AddLocalSearchParameters(details, filters, string.Empty, string.Empty,
+            minimumUnitPrice, maximumUnitPrice, cursor, pageSize + 1);
+        details.Parameters.Add("$itemRowid", SqliteType.Integer);
+        await foreach (var rowid in ReadOrderedItemKeysAsync(connection, filters, expression, cursor,
+                           cancellationToken).ConfigureAwait(false))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            examined++;
+            details.Parameters["$itemRowid"].Value = rowid;
+            var remaining = pageSize - matches.Count;
+            details.Parameters["$scanLimit"].Value = remaining + 1;
+            var scan = await ReadLocalSearchScanAsync(details, expression, cursor, page, remaining,
+                includesCandidateMetadata: false, cancellationToken, onMatch: (row, rowCursor) =>
+                {
+                    delivered++;
+                    progress?.Report(new PriceCacheLocalProgress([row], rowCursor, 0,
+                        delivered, HasMore: true, Completed: false));
+                }).ConfigureAwait(false);
+            matches.AddRange(scan.Matches);
+            if (matches.Count > pageSize) break;
+        }
+        var result = BuildLocalSearchPage(new LocalSearchScan(matches, 0,
+            matches.LastOrDefault().Cursor ?? cursor, null, null, false), cursor, page, pageSize, int.MaxValue);
+        progress?.Report(new PriceCacheLocalProgress([], result.Cursor, 0,
+            result.Rows?.Count ?? 0, result.HasMore, Completed: true));
+        span.Complete(examined);
+        return result;
+    }
+
+    private async IAsyncEnumerable<long> ReadOrderedItemKeysAsync(
+        SqliteConnection connection, SearchQuery filters, SearchExpression expression,
+        PriceCacheLocalCursor? cursor,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var contractConditions = BuildLocalDetailConditions(filters, null, null)
+            .Where(value => value.StartsWith("c.", StringComparison.Ordinal)).ToArray();
+        if (await ShouldFilterItemsBeforeOrderingAsync(connection, expression, cancellationToken).ConfigureAwait(false))
+        {
+            // Selective post-filters must run before visiting contract details.
+            // Materialize only matching item keys; prices remain point lookups.
+            await using var filteredKeys = connection.CreateCommand();
+            var primary = filters.Sort == SearchSort.Nearest ? "CAST(COALESCE(c.geo_layer, 1) AS REAL)" : "0.0";
+            var secondary = filters.Sort == SearchSort.Nearest ? "CAST(COALESCE(c.municipality_distance_rank, 999999) AS REAL)" : "0.0";
+            filteredKeys.CommandText = $"""
+                WITH matched_items AS MATERIALIZED (
+                    SELECT i.rowid AS item_rowid, i.contract_id, i.item_number
+                      FROM items_fts
+                      CROSS JOIN items i ON i.rowid = items_fts.rowid
+                     WHERE items_fts MATCH $itemMatch
+                       AND i.hydration_status = $complete
+                       AND pncp_item_matches(i.description, i.unit) = 1
+                ), ordered_items AS (
+                    SELECT i.item_rowid, c.pncp_id, i.item_number,
+                           COALESCE(c.publication_date, '') AS publication_date,
+                           0 AS sort_priority, {primary} AS primary_rank,
+                           {secondary} AS secondary_rank, 9223372036854775807 AS result_sequence
+                      FROM matched_items i
+                      CROSS JOIN contracts c ON c.pncp_id = i.contract_id
+                     WHERE {string.Join(" AND ", contractConditions.DefaultIfEmpty("1 = 1"))}
+                )
+                SELECT item_rowid FROM ordered_items
+                {BuildLocalCursorWhere(cursor)}
+                 ORDER BY sort_priority, primary_rank, secondary_rank,
+                          publication_date DESC, pncp_id, item_number;
+                """;
+            AddLocalSearchParameters(filteredKeys, filters, expression.ItemMatchQuery, string.Empty,
+                null, null, cursor, 0);
+            var started = Stopwatch.GetTimestamp();
+            await using var reader = await filteredKeys.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            _performance.Record("price-search", "item-index-order", Stopwatch.GetElapsedTime(started));
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                yield return reader.GetInt64(0);
+            yield break;
+        }
+        var contractIndex = filters.EffectiveGeoFilter.Kind == SearchGeoFilterKind.State
+            ? "idx_contracts_uf_publication_id" : "idx_contracts_publication_id";
+        await foreach (var (primary, secondary) in ReadLocalOrderGroupsAsync(connection, filters, cursor,
+                           cancellationToken).ConfigureAwait(false))
+        {
+            // Missing dates share the same cursor value. Handle them together after
+            // dated contracts, retaining their existing contract/item tie breakers.
+            foreach (var missingDate in new[] { false, true })
+            {
+                if (missingDate && filters.StartDate is not null) continue;
+                var sameCursorGroup = cursor is not null &&
+                                      cursor.PrimaryRank == primary && cursor.SecondaryRank == secondary;
+                if (!missingDate && sameCursorGroup && cursor!.PublicationDate.Length == 0) continue;
+                cancellationToken.ThrowIfCancellationRequested();
+                await using var keys = connection.CreateCommand();
+                var geography = filters.Sort == SearchSort.Nearest ? """
+                    AND c.pncp_id IN (
+                        SELECT g.pncp_id FROM contracts g INDEXED BY idx_contracts_geographic_sample
+                         WHERE g.geo_layer = $groupPrimary
+                           AND COALESCE(g.municipality_distance_rank, 999999) = $groupSecondary)
+                    """ : string.Empty;
+                keys.CommandText = $"""
+                    WITH ordered_items AS (
+                        SELECT i.rowid AS item_rowid, c.pncp_id, i.item_number,
+                               c.publication_date AS raw_publication,
+                               COALESCE(c.publication_date, '') AS publication_date,
+                               0 AS sort_priority, $groupPrimary AS primary_rank,
+                               $groupSecondary AS secondary_rank, 9223372036854775807 AS result_sequence
+                          FROM contracts c INDEXED BY {contractIndex}
+                          CROSS JOIN items i INDEXED BY sqlite_autoindex_items_1 ON i.contract_id = c.pncp_id
+                         WHERE {(missingDate ? "(c.publication_date IS NULL OR c.publication_date = '')" : "c.publication_date > ''")}
+                           {(!missingDate && sameCursorGroup ? "AND c.publication_date <= $cursorPublication" : "")}
+                           AND {string.Join(" AND ", contractConditions.DefaultIfEmpty("1 = 1"))}
+                           AND c.pncp_id IN (SELECT contract_id FROM contract_item_snapshots)
+                           AND i.rowid IN (SELECT rowid FROM items_fts WHERE items_fts MATCH $itemMatch)
+                           AND EXISTS (SELECT 1 FROM item_results r
+                                        WHERE r.contract_id = i.contract_id AND r.item_number = i.item_number
+                                          AND r.result_status_id = 1 AND r.unit_value_scaled > 0)
+                           {geography}
+                    )
+                    SELECT item_rowid FROM ordered_items
+                    {BuildLocalCursorWhere(cursor)}
+                     ORDER BY {(missingDate ? "" : "raw_publication DESC, ")}pncp_id, item_number;
+                    """;
+                AddLocalSearchParameters(keys, filters, expression.ItemMatchQuery, string.Empty,
+                    null, null, cursor, 0);
+                keys.Parameters.AddWithValue("$groupPrimary", primary);
+                keys.Parameters.AddWithValue("$groupSecondary", secondary);
+                var started = Stopwatch.GetTimestamp();
+                await using var reader = await keys.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                _performance.Record("price-search", "item-index-order", Stopwatch.GetElapsedTime(started));
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                    yield return reader.GetInt64(0);
+            }
+        }
+    }
+
+    private async Task<bool> ShouldFilterItemsBeforeOrderingAsync(
+        SqliteConnection connection, SearchExpression expression, CancellationToken cancellationToken)
+    {
+        if (expression.AcceptedUnits.Count == 0 &&
+            !expression.PositiveGroups.Any(group => group.ApproximateNumbers is { Count: > 0 })) return false;
+
+        // Unit count does not predict selectivity. Inspect a bounded sample before
+        // choosing where to apply the post-filter; both routes preserve the same order.
+        using var span = _performance.Begin("price-search", "item-index-filter-sample");
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT pncp_item_matches(i.description, i.unit)
+              FROM items_fts CROSS JOIN items i ON i.rowid = items_fts.rowid
+             WHERE items_fts MATCH $itemMatch
+             LIMIT 128;
+            """;
+        command.Parameters.AddWithValue("$itemMatch", expression.ItemMatchQuery);
+        var examined = 0;
+        var accepted = 0;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            examined++;
+            if (reader.GetBoolean(0)) accepted++;
+        }
+        span.Complete(examined);
+        return examined > 0 && accepted * 4 <= examined;
+    }
+
+    private static async IAsyncEnumerable<(double Primary, double Secondary)> ReadLocalOrderGroupsAsync(
+        SqliteConnection connection, SearchQuery filters, PriceCacheLocalCursor? cursor,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        if (filters.Sort != SearchSort.Nearest)
+        {
+            yield return (0, 0);
+            yield break;
+        }
+        double? previousLayer = null;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await using var layerCommand = connection.CreateCommand();
+            layerCommand.CommandText = $"""
+                SELECT geo_layer FROM contracts INDEXED BY idx_contracts_geographic_sample
+                 WHERE geo_layer >= $minimumLayer
+                   {(previousLayer is null ? "" : "AND geo_layer > $previousLayer")}
+                   {(filters.EffectiveGeoFilter.Kind == SearchGeoFilterKind.NearRibeirao ? "AND geo_layer = 0" : "")}
+                 ORDER BY geo_layer LIMIT 1;
+                """;
+            layerCommand.Parameters.AddWithValue("$minimumLayer", cursor?.PrimaryRank ?? double.MinValue);
+            if (previousLayer is { } previous) layerCommand.Parameters.AddWithValue("$previousLayer", previous);
+            var value = await layerCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            if (value is null or DBNull) yield break;
+            var layer = Convert.ToDouble(value, CultureInfo.InvariantCulture);
+            previousLayer = layer;
+            // Read one geographic layer at a time. Do not sort the whole country's
+            // geography before the nearest local group can deliver its first price.
+            await using var ranks = connection.CreateCommand();
+            ranks.CommandText = """
+                SELECT DISTINCT COALESCE(municipality_distance_rank, 999999)
+                  FROM contracts INDEXED BY idx_contracts_geographic_sample
+                 WHERE geo_layer = $layer
+                   AND COALESCE(municipality_distance_rank, 999999) >= $minimumRank
+                 ORDER BY 1;
+                """;
+            ranks.Parameters.AddWithValue("$layer", layer);
+            ranks.Parameters.AddWithValue("$minimumRank", cursor?.PrimaryRank == layer ? cursor.SecondaryRank : double.MinValue);
+            await using var reader = await ranks.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                yield return (layer, reader.GetDouble(0));
+        }
+    }
+
     private async Task<PriceCacheLocalPage?> SearchLocalByFtsCandidatesAsync(
         SearchQuery filters,
         SearchExpression expression,
@@ -1271,6 +1532,7 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
             try
             {
                 await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+                using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
                 await using var command = connection.CreateCommand();
                 command.CommandText = BuildFtsCandidateSearchSql(detailConditions, cursorWhere);
                 AddLocalSearchParameters(
@@ -1532,7 +1794,8 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         int page,
         int pageSize,
         bool includesCandidateMetadata,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<ItemSearchRow, PriceCacheLocalCursor>? onMatch = null)
     {
         var matches = new List<(ItemSearchHit Hit, ItemSearchRow Row, PriceCacheLocalCursor Cursor)>(
             pageSize + 1);
@@ -1595,6 +1858,7 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
                     "Preço homologado do cache local",
                     false),
                 rowCursor));
+            if (matches.Count <= pageSize) onMatch?.Invoke(matches[^1].Row, rowCursor);
             if (matches.Count > pageSize)
             {
                 break;
@@ -1663,44 +1927,6 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         return (Math.Min(candidateLimit, windowCount), windowCount <= candidateLimit);
     }
 
-    private async Task<bool> ShouldUseContractChunksAsync(
-        string itemMatch,
-        CancellationToken cancellationToken)
-    {
-        if (itemMatch.Length == 0)
-        {
-            return true;
-        }
-
-        using var span = _performance.Begin("price-search", "fts-cardinality");
-        try
-        {
-            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-            await using var command = connection.CreateCommand();
-            command.CommandText = """
-                SELECT COUNT(*)
-                  FROM (
-                      SELECT rowid
-                        FROM items_fts
-                       WHERE items_fts MATCH $itemMatch
-                       LIMIT $limit
-                  );
-                """;
-            command.Parameters.AddWithValue("$itemMatch", itemMatch);
-            command.Parameters.AddWithValue("$limit", _highCardinalityFtsThreshold + 1);
-            var occurrences = Convert.ToInt32(
-                await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
-                CultureInfo.InvariantCulture);
-            span.Complete(occurrences);
-            return occurrences > _highCardinalityFtsThreshold;
-        }
-        catch (Exception exception)
-        {
-            span.Fail(exception);
-            throw;
-        }
-    }
-
     private async Task<PriceCacheLocalPage> SearchLocalByContractChunksAsync(
         SearchQuery filters,
         SearchExpression expression,
@@ -1730,6 +1956,7 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
             cancellationToken.ThrowIfCancellationRequested();
             var chunkStarted = Stopwatch.GetTimestamp();
             await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
             connection.CreateFunction<string?, string?, bool>(
                 "pncp_item_matches",
                 (description, unit) => expression.MatchesItem(description, unit),

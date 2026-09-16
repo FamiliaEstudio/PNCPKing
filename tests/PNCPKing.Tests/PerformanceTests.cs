@@ -731,8 +731,7 @@ public sealed class PerformanceTests(ITestOutputHelper output)
             var warmupRepository = new SqlitePriceCacheRepository(
                 connections,
                 performance: null,
-                initialFtsCandidateLimit: 5_000,
-                highCardinalityFtsThreshold: 0);
+                initialFtsCandidateLimit: 5_000);
             var expected = await ReadOptimizedFtsPageAsync(
                 warmupRepository,
                 scenario.Query,
@@ -749,8 +748,7 @@ public sealed class PerformanceTests(ITestOutputHelper output)
                     var repository = new SqlitePriceCacheRepository(
                         connections,
                         performance: null,
-                        initialFtsCandidateLimit: limit,
-                        highCardinalityFtsThreshold: 0);
+                        initialFtsCandidateLimit: limit);
                     using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
                     try
                     {
@@ -873,8 +871,7 @@ public sealed class PerformanceTests(ITestOutputHelper output)
             var rankRepository = new SqlitePriceCacheRepository(
                 connections,
                 performance: null,
-                initialFtsCandidateLimit: rankLimit,
-                highCardinalityFtsThreshold: 0);
+                initialFtsCandidateLimit: rankLimit);
             var expected = await ReadOptimizedFtsPageAsync(
                 rankRepository,
                 scenario.Query,
@@ -1020,8 +1017,7 @@ public sealed class PerformanceTests(ITestOutputHelper output)
             var rankRepository = new SqlitePriceCacheRepository(
                 connections,
                 performance: null,
-                initialFtsCandidateLimit: rankLimit,
-                highCardinalityFtsThreshold: 0);
+                initialFtsCandidateLimit: rankLimit);
             var expected = await ReadOptimizedFtsPageAsync(
                 rankRepository,
                 scenario.Query,

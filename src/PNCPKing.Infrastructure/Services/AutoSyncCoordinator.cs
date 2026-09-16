@@ -36,8 +36,11 @@ public sealed class AutoSyncCoordinator
 
     public async Task<AutoSyncResult> SynchronizeAsync(
         IProgress<SyncProgress>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        int maximumConcurrency = 2)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(maximumConcurrency, 1);
+        var previousState = await _repository.GetDatasetStateAsync(cancellationToken).ConfigureAwait(false);
         var endDate = DateOnly.FromDateTime(_timeProvider.GetLocalNow().DateTime);
         var startDate = DataWindow.Start(endDate);
         var modalities = (await _client.GetModalitiesAsync(cancellationToken).ConfigureAwait(false))
@@ -117,6 +120,7 @@ public sealed class AutoSyncCoordinator
                 {
                     KnownModalities = modalities,
                     ModalityIds = modalityIds,
+                    MaximumConcurrency = maximumConcurrency,
                     FinalizeDataset = false
                 },
                 progress,
@@ -128,11 +132,16 @@ public sealed class AutoSyncCoordinator
             0,
             coverageBatches,
             coverageBatches,
-            "Cobertura dos 11 meses completa; atualizando as últimas 48 horas"));
+            "Cobertura completa; verificando alterações desde a última atualização"));
 
         // Date-only PNCP endpoints are inclusive. Starting two dates before
         // today conservatively covers every instant in the preceding 48 hours.
-        var globalUpdateStart = endDate.AddDays(-2);
+        var globalUpdateStart = previousState.LastSuccessfulSync is { } lastSync
+            ? DateOnly.FromDateTime(lastSync.LocalDateTime).AddDays(-2) : startDate;
+        if (_repository is PNCPKing.Infrastructure.Data.SqliteContractRepository sqlite &&
+            await sqlite.HasOfficialContractConflictsAsync(cancellationToken).ConfigureAwait(false)) globalUpdateStart = startDate;
+        if (globalUpdateStart < startDate) globalUpdateStart = startDate;
+        if (globalUpdateStart > endDate) globalUpdateStart = startDate;
         await _syncService.SynchronizeAsync(
             globalUpdateStart,
             endDate,
@@ -141,6 +150,8 @@ public sealed class AutoSyncCoordinator
             new SyncExecutionOptions
             {
                 KnownModalities = modalities,
+                MaximumConcurrency = maximumConcurrency,
+                CheckpointScope = previousState.LastSuccessfulSync?.UtcTicks.ToString() ?? "initial",
                 FinalizeDataset = false
             },
             progress,
@@ -149,11 +160,13 @@ public sealed class AutoSyncCoordinator
         // Finalize network coverage only after gap filling and global updates
         // succeed. Local retention also runs independently at startup/day rollover.
         await _repository.PruneContractsBeforeAsync(startDate, cancellationToken).ConfigureAwait(false);
+        var completedAt = _timeProvider.GetUtcNow();
+        if (previousState.LastSuccessfulSync is { } previous && completedAt <= previous) completedAt = previous.AddTicks(1);
         await _repository.SetDatasetStateAsync(
             startDate,
             endDate,
             GeoScope.All,
-            _timeProvider.GetUtcNow(),
+            completedAt,
             cancellationToken).ConfigureAwait(false);
 
         return new AutoSyncResult(startDate, endDate, coverageBatches, GlobalUpdateCompleted: true);

@@ -204,7 +204,7 @@ public sealed class CoverageSyncTests
         Assert.Equal(new[] { today, olderGap }, publicationDates);
         Assert.Contains(client.Requests, request =>
             request.Mode == SyncMode.GlobalUpdate &&
-            request.StartDate == today.AddDays(-2) &&
+            request.StartDate == start &&
             request.EndDate <= today);
 
         Assert.True(await coverage.IsCoverageCompleteAsync(start, today));
@@ -243,7 +243,8 @@ public sealed class CoverageSyncTests
         var state = await database.Repository.GetDatasetStateAsync();
         Assert.Null(state.LastSuccessfulSync);
         Assert.Equal(1, (await database.Repository.GetCountsAsync()).Contracts);
-        var globalKey = $"GlobalUpdate:{today.AddDays(-2):yyyyMMdd}:{today.AddDays(-1):yyyyMMdd}:m6:ufALL";
+        var firstEnd = start.AddDays(((int)DayOfWeek.Sunday - (int)start.DayOfWeek + 7) % 7);
+        var globalKey = $"GlobalUpdate:{start:yyyyMMdd}:{firstEnd:yyyyMMdd}:m6:ufALL:cycle:initial";
         var checkpoint = await database.Repository.GetPartitionCheckpointAsync(globalKey);
         Assert.NotNull(checkpoint);
         Assert.Equal(SyncMode.GlobalUpdate, checkpoint.Mode);
@@ -280,6 +281,26 @@ public sealed class CoverageSyncTests
         Assert.Equal(1, (await database.Repository.GetCountsAsync()).Contracts);
         Assert.Null((await database.Repository.GetDatasetStateAsync()).LastSuccessfulSync);
         Assert.Equal(CoverageStatus.Failed, Assert.Single(await coverage.GetCoverageDaysAsync(today, today)).Status);
+    }
+
+    [Fact]
+    public async Task ManualUpdatesCatchUpAfterWeeksAndRecheckEveryClick()
+    {
+        await using var database=await TestDatabase.CreateAsync();
+        var today=new DateOnly(2026,7,20);var start=DataWindow.Start(today);
+        await SeedCompleteCoverageAsync(database.Repository,start,today,[6]);
+        var previous=new DateTimeOffset(2026,7,1,12,0,0,TimeSpan.Zero);
+        await database.Repository.SetDatasetStateAsync(start,today,GeoScope.All,previous);
+        var client=new RecordingEmptyClient(new Modality(6,"Pregão"));
+        var service=new SyncService(client,database.Repository);
+        var coordinator=new AutoSyncCoordinator(client,database.Repository,service,
+            new FixedTimeProvider(new DateTimeOffset(2026,7,20,15,0,0,TimeSpan.Zero)));
+        await coordinator.SynchronizeAsync();
+        Assert.Equal(new DateOnly(2026,6,29),client.Requests.First(r=>r.Mode==SyncMode.GlobalUpdate).StartDate);
+        var count=client.Requests.Count;
+        await coordinator.SynchronizeAsync();Assert.True(client.Requests.Count>count);
+        count=client.Requests.Count;
+        await coordinator.SynchronizeAsync();Assert.True(client.Requests.Count>count);
     }
 
     private static async Task SeedCompleteCoverageAsync(

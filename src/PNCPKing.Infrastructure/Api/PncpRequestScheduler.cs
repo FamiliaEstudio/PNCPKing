@@ -226,13 +226,18 @@ public sealed class PncpRequestScheduler
         TimeSpan? retryAfter = null,
         bool transportFailure = false)
     {
-        if (category is not (PncpRequestCategory.ItemLists or PncpRequestCategory.ItemResults))
+        if (category is not (PncpRequestCategory.ItemLists or PncpRequestCategory.ItemResults or PncpRequestCategory.Contracts))
         {
             return;
         }
 
         lock (_gate)
         {
+            if (category == PncpRequestCategory.Contracts && _aggressiveBackgroundModes == 0)
+            {
+                return;
+            }
+
             var now = _timeProvider.GetUtcNow();
             if (transportFailure ||
                 statusCode == System.Net.HttpStatusCode.RequestTimeout ||
@@ -497,6 +502,7 @@ public sealed class PncpRequestScheduler
             }
 
             if (priority == PncpRequestPriority.IndexMaintenance &&
+                _aggressiveBackgroundModes == 0 &&
                 _activeByPriority[(int)priority] >= 2)
             {
                 continue;

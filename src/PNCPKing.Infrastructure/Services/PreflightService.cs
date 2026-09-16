@@ -5,6 +5,15 @@ namespace PNCPKing.Infrastructure.Services;
 
 public sealed class PreflightService(IPncpClient client)
 {
+    public async Task<bool> RequiresInitialEstimateAsync(
+        IContractRepository repository,
+        CancellationToken cancellationToken = default)
+    {
+        var state = await repository.GetDatasetStateAsync(cancellationToken).ConfigureAwait(false);
+        return state.ContractCount == 0 && state.LastSuccessfulSync is null &&
+               await repository.GetLatestIncompleteSyncAsync(cancellationToken).ConfigureAwait(false) is null;
+    }
+
     public async Task<PreflightEstimate> CalculateAsync(
         DateOnly startDate,
         DateOnly endDate,
@@ -13,37 +22,46 @@ public sealed class PreflightService(IPncpClient client)
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        if (startDate > endDate)
+            throw new ArgumentOutOfRangeException(nameof(startDate), "A data inicial não pode ser posterior à data final.");
+
         var modalities = await client.GetModalitiesAsync(cancellationToken).ConfigureAwait(false);
         long totalContracts = 0;
         long estimatedTransferBytes = 0;
         long estimatedRequests = 0;
         var measuredDurations = new List<TimeSpan>();
         var completed = 0;
-        var totalQueries = modalities.Count * scope.ApiUfFilters.Count;
+        var totalQueries = modalities.Count * scope.ApiUfFilters.Count * ((endDate.DayNumber - startDate.DayNumber) / 7 + 1);
 
         foreach (var uf in scope.ApiUfFilters)
         {
             foreach (var modality in modalities)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                progress?.Report($"Contando {modality.Name} — {uf ?? "Brasil"} ({++completed}/{totalQueries})");
-                var page = await client.GetContractsPageAsync(
-                    startDate,
-                    endDate,
-                    modality.Id,
-                    uf,
-                    1,
-                    10,
-                    SyncMode.Publication,
-                    cancellationToken).ConfigureAwait(false);
+                for (var current = startDate; ;)
+                {
+                    var queryEnd = DateOnly.FromDayNumber(Math.Min(current.DayNumber + 6, endDate.DayNumber));
+                    cancellationToken.ThrowIfCancellationRequested();
+                    progress?.Report($"Contando {modality.Name} — {uf ?? "Brasil"}, {current:dd/MM/yyyy} a {queryEnd:dd/MM/yyyy} ({++completed}/{totalQueries})");
+                    var page = await client.GetContractsPageAsync(
+                        current,
+                        queryEnd,
+                        modality.Id,
+                        uf,
+                        1,
+                        10,
+                        SyncMode.Publication,
+                        cancellationToken).ConfigureAwait(false);
 
-                totalContracts += page.TotalRecords;
-                var sampleBytes = page.Contracts.Count == 0
-                    ? 1_800d
-                    : Math.Max(500d, page.PayloadBytes / (double)page.Contracts.Count);
-                estimatedTransferBytes += checked((long)Math.Ceiling(page.TotalRecords * sampleBytes));
-                estimatedRequests += (long)Math.Ceiling(page.TotalRecords / 50d);
-                measuredDurations.Add(page.Elapsed);
+                    totalContracts += page.TotalRecords;
+                    var sampleBytes = page.Contracts.Count == 0
+                        ? 1_800d
+                        : Math.Max(500d, page.PayloadBytes / (double)page.Contracts.Count);
+                    estimatedTransferBytes += checked((long)Math.Ceiling(page.TotalRecords * sampleBytes));
+                    estimatedRequests += (long)Math.Ceiling(page.TotalRecords / 50d);
+                    measuredDurations.Add(page.Elapsed);
+                    if (queryEnd == endDate) break;
+                    current = queryEnd.AddDays(1);
+                }
             }
         }
 

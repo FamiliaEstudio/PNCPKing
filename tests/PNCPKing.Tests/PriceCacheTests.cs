@@ -67,7 +67,7 @@ public sealed class PriceCacheTests
         Assert.False(policy.Authorized);
         Assert.Equal(1, progress.TotalContracts);
         Assert.Equal(1, progress.CompletedContracts);
-        Assert.Equal(27, SqliteContractRepository.CurrentSchemaVersion);
+        Assert.Equal(28, SqliteContractRepository.CurrentSchemaVersion);
         Assert.Equal((1L, 1L, 1L), await database.Repository.GetCountsAsync());
     }
 
@@ -256,7 +256,7 @@ public sealed class PriceCacheTests
     }
 
     [Fact]
-    public async Task NewestSearch_WithUnitUsesItemIndexAboveCardinalityThreshold()
+    public async Task NewestSearch_UsesItemIndexWithAndWithoutUnitAboveFormerThreshold()
     {
         await using var database = await TestDatabase.CreateAsync();
         var today = DateOnly.FromDateTime(DateTime.Today);
@@ -281,13 +281,74 @@ public sealed class PriceCacheTests
         Assert.Equal(first.Rows!.Select(RowKey), progress.SelectMany(value => value.Rows).Select(RowKey));
         Assert.Equal(CursorKey(first.Cursor), CursorKey(progress[^1].Cursor));
 
-        // Broad expressions without post-filters can fill a page from recent contracts;
-        // preserve that path instead of loading every matching item in the entire archive.
+        // Removing the unit restriction must not switch to scanning contract contents.
         const string broadText = "cafe comum -torrado";
         var broad = await cache.SearchLocalAfterAsync(query with { Text = broadText },
             SearchText.Parse(broadText), 20m, 30m, null, 25);
         Assert.Equal(first.Rows!.Select(RowKey), broad.Rows!.Select(RowKey));
-        Assert.Contains(telemetry.Measurements, value => value.Phase == "local-contract-chunks");
+        Assert.DoesNotContain(telemetry.Measurements, value =>
+            value.Phase is "fts-cardinality" or "local-contract-chunks");
+    }
+
+    [Theory]
+    [InlineData(19_000, SearchSort.Newest)]
+    [InlineData(20_000, SearchSort.Newest)]
+    [InlineData(20_001, SearchSort.Newest)]
+    [InlineData(19_000, SearchSort.Nearest)]
+    [InlineData(20_000, SearchSort.Nearest)]
+    [InlineData(20_001, SearchSort.Nearest)]
+    public async Task BroadSearch_PreservesPagingAcrossFormerThreshold(int candidateCount, SearchSort sort)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var contract = RecentContract("threshold", today, 1);
+        await database.Repository.UpsertContractsAsync([contract]);
+        await SeedHighCardinalityItemsAsync(database.Repository.DatabasePath, contract.PncpId, candidateCount);
+        await using (var connection = new SqliteConnection($"Data Source={database.Repository.DatabasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                UPDATE item_results
+                   SET result_status_id = CASE WHEN item_number >= $last - 2 THEN 1 ELSE 0 END,
+                       unit_value_scaled = $price;
+                INSERT INTO item_results(contract_id, item_number, result_sequence,
+                                         unit_value_scaled, result_status_id)
+                VALUES($contract, $last, 2, $price, 1);
+                """;
+            command.Parameters.AddWithValue("$last", candidateCount);
+            command.Parameters.AddWithValue("$price", DecimalScale.ToScaled(25m)!.Value);
+            command.Parameters.AddWithValue("$contract", contract.PncpId);
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var telemetry = new RecordingSearchTelemetry();
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath, telemetry);
+        const string text = "cafe comum";
+        var query = new SearchQuery(text, GeoScope.All, today.AddDays(-1), today, Sort: sort);
+        var expression = SearchText.Parse(text);
+        var progress = new List<PriceCacheLocalProgress>();
+        var first = await cache.SearchLocalAfterAsync(query, expression, 20m, 30m, null, 3,
+            new InlineProgress<PriceCacheLocalProgress>(progress.Add));
+        var second = await cache.SearchLocalAfterAsync(query, expression, 20m, 30m, first.Cursor, 3);
+
+        // Valid prices at the end of the FTS set must not disappear above 20,000;
+        // two results of the same item must remain distinct across pagination.
+        Assert.Equal(new[]
+        {
+            (contract.PncpId, (long)candidateCount - 2, 1L),
+            (contract.PncpId, (long)candidateCount - 1, 1L),
+            (contract.PncpId, (long)candidateCount, 1L),
+            (contract.PncpId, (long)candidateCount, 2L)
+        }, first.Rows!.Concat(second.Rows!).Select(row =>
+            (row.Contract.PncpId, row.Item.ItemNumber, row.Result!.ResultSequence)));
+        Assert.True(first.HasMore);
+        Assert.False(second.HasMore);
+        Assert.DoesNotContain(telemetry.Measurements, value =>
+            value.Phase is "fts-cardinality" or "local-contract-chunks");
+        Assert.True(progress[^1].Completed);
+        Assert.Equal(first.Rows!.Select(RowKey), progress.SelectMany(value => value.Rows).Select(RowKey));
+        Assert.Equal(CursorKey(first.Cursor), CursorKey(progress[^1].Cursor));
     }
 
     [Fact]
@@ -878,7 +939,7 @@ public sealed class PriceCacheTests
         Assert.Null(await database.Repository.GetCachedItemResultsAsync(pinned.PncpId, 1));
     }
 
-    private static async Task SeedHighCardinalityItemsAsync(string path, string contractId)
+    private static async Task SeedHighCardinalityItemsAsync(string path, string contractId, int count = 30_001)
     {
         SqliteConnection.ClearAllPools();
         await using var connection = new SqliteConnection($"Data Source={path}");
@@ -890,7 +951,7 @@ public sealed class PriceCacheTests
             WITH RECURSIVE numbers(value) AS (
                 VALUES(1)
                 UNION ALL
-                SELECT value + 1 FROM numbers WHERE value < 30001
+                SELECT value + 1 FROM numbers WHERE value < $count
             )
             INSERT INTO items(
                 contract_id, item_number, description, unit, status, has_result,
@@ -906,7 +967,7 @@ public sealed class PriceCacheTests
             WITH RECURSIVE numbers(value) AS (
                 VALUES(1)
                 UNION ALL
-                SELECT value + 1 FROM numbers WHERE value < 30001
+                SELECT value + 1 FROM numbers WHERE value < $count
             )
             INSERT INTO item_results(
                 contract_id, item_number, result_sequence, supplier_name,
@@ -918,11 +979,12 @@ public sealed class PriceCacheTests
 
             INSERT INTO contract_item_snapshots(
                 contract_id, fetched_at, item_count, source_global_updated_at)
-            SELECT pncp_id, $now, 30001, global_updated_at
+            SELECT pncp_id, $now, $count, global_updated_at
               FROM contracts
              WHERE pncp_id = $contract;
             """;
         command.Parameters.AddWithValue("$contract", contractId);
+        command.Parameters.AddWithValue("$count", count);
         command.Parameters.AddWithValue("$complete", (int)ItemHydrationStatus.Complete);
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
         command.Parameters.AddWithValue("$includedPrice", DecimalScale.ToScaled(25m)!.Value);

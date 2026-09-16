@@ -238,158 +238,167 @@ public sealed partial class SqlitePriceCacheRepository
         DateOnly endDate,
         CancellationToken cancellationToken = default)
     {
-        await using var writer = await _connections.WorkCoordinator
-            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
-            .ConfigureAwait(false);
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        var now = FormatDateTime(DateTimeOffset.UtcNow);
-        var prepared = false;
-        await using (var state = connection.CreateCommand())
-        {
-            state.Transaction = (SqliteTransaction)transaction;
-            state.CommandText = """
-                SELECT prepared_window_start, prepared_window_end
-                  FROM national_price_index_control WHERE id = 1;
-                """;
-            await using var reader = await state.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            prepared = await reader.ReadAsync(cancellationToken).ConfigureAwait(false) &&
-                       ParseDate(reader, 0) == startDate && ParseDate(reader, 1) == endDate;
-        }
 
-        await using (var control = connection.CreateCommand())
+        try
         {
-            control.Transaction = (SqliteTransaction)transaction;
-            control.CommandText = """
-                UPDATE national_price_index_control
-                   SET window_start = $start, window_end = $end,
-                       statistics_suspended = $suspended, updated_at = $now
-                 WHERE id = 1;
-                """;
-            control.Parameters.AddWithValue("$start", FormatDate(startDate));
-            control.Parameters.AddWithValue("$end", FormatDate(endDate));
-            control.Parameters.AddWithValue("$suspended", prepared ? 0 : 1);
-            control.Parameters.AddWithValue("$now", now);
-            await control.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
+            await using var writer = await _connections.WorkCoordinator
+                .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken)
+                .ConfigureAwait(false);
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            var now = FormatDateTime(DateTimeOffset.UtcNow);
+            var prepared = false;
+            await using (var state = connection.CreateCommand())
+            {
+                state.Transaction = (SqliteTransaction)transaction;
+                state.CommandText = """
+                    SELECT prepared_window_start, prepared_window_end
+                      FROM national_price_index_control WHERE id = 1;
+                    """;
+                await using var reader = await state.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                prepared = await reader.ReadAsync(cancellationToken).ConfigureAwait(false) &&
+                           ParseDate(reader, 0) == startDate && ParseDate(reader, 1) == endDate;
+            }
 
-        await using (var recovery = connection.CreateCommand())
-        {
-            recovery.Transaction = (SqliteTransaction)transaction;
-            recovery.CommandText = """
-                UPDATE items SET hydration_status = $notLoaded,
-                                 last_error = 'Consulta interrompida; item pendente para retomada.'
-                 WHERE hydration_status = $loading AND has_result = 1;
-                UPDATE price_cache_contracts
-                   SET price_index_status = $pending,
-                       price_index_last_error = '',
-                       price_index_next_retry_at = NULL,
-                       updated_at = $now
-                 WHERE price_index_status = $downloading;
-                """;
-            recovery.Parameters.AddWithValue("$notLoaded", (int)ItemHydrationStatus.NotLoaded);
-            recovery.Parameters.AddWithValue("$loading", (int)ItemHydrationStatus.Loading);
-            recovery.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
-            recovery.Parameters.AddWithValue("$downloading", (int)PriceCacheContractStatus.Downloading);
-            recovery.Parameters.AddWithValue("$now", now);
-            await recovery.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
+            await using (var control = connection.CreateCommand())
+            {
+                control.Transaction = (SqliteTransaction)transaction;
+                control.CommandText = """
+                    UPDATE national_price_index_control
+                       SET window_start = $start, window_end = $end,
+                           statistics_suspended = $suspended, updated_at = $now
+                     WHERE id = 1;
+                    """;
+                control.Parameters.AddWithValue("$start", FormatDate(startDate));
+                control.Parameters.AddWithValue("$end", FormatDate(endDate));
+                control.Parameters.AddWithValue("$suspended", prepared ? 0 : 1);
+                control.Parameters.AddWithValue("$now", now);
+                await control.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
 
-        if (prepared)
-        {
+            await using (var recovery = connection.CreateCommand())
+            {
+                recovery.Transaction = (SqliteTransaction)transaction;
+                recovery.CommandText = """
+                    UPDATE items SET hydration_status = $notLoaded,
+                                     last_error = 'Consulta interrompida; item pendente para retomada.'
+                     WHERE hydration_status = $loading AND has_result = 1;
+                    UPDATE price_cache_contracts
+                       SET price_index_status = $pending,
+                           price_index_last_error = '',
+                           price_index_next_retry_at = NULL,
+                           updated_at = $now
+                     WHERE price_index_status = $downloading;
+                    """;
+                recovery.Parameters.AddWithValue("$notLoaded", (int)ItemHydrationStatus.NotLoaded);
+                recovery.Parameters.AddWithValue("$loading", (int)ItemHydrationStatus.Loading);
+                recovery.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
+                recovery.Parameters.AddWithValue("$downloading", (int)PriceCacheContractStatus.Downloading);
+                recovery.Parameters.AddWithValue("$now", now);
+                await recovery.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            if (prepared)
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            await using (var checkpoints = connection.CreateCommand())
+            {
+                checkpoints.Transaction = (SqliteTransaction)transaction;
+                checkpoints.CommandText = """
+                    UPDATE price_cache_contracts
+                       SET price_index_eligible_item_count =
+                               (SELECT COUNT(*) FROM items
+                                 WHERE contract_id = price_cache_contracts.contract_id AND has_result = 1),
+                           price_index_completed_item_count =
+                               (SELECT COUNT(*) FROM items
+                                 WHERE contract_id = price_cache_contracts.contract_id AND has_result = 1
+                                   AND hydration_status = $itemComplete),
+                           price_index_priced_item_count =
+                               (SELECT COUNT(*) FROM items i
+                                 WHERE i.contract_id = price_cache_contracts.contract_id
+                                   AND i.has_result = 1 AND i.hydration_status = $itemComplete
+                                   AND EXISTS(
+                                       SELECT 1 FROM item_results r
+                                        WHERE r.contract_id = i.contract_id
+                                          AND r.item_number = i.item_number
+                                          AND r.result_status_id = 1 AND r.unit_value_scaled > 0)),
+                           price_index_result_count =
+                               (SELECT COUNT(*) FROM item_results
+                                 WHERE contract_id = price_cache_contracts.contract_id
+                                   AND result_status_id = 1 AND unit_value_scaled > 0),
+                           price_index_status = CASE WHEN EXISTS(
+                               SELECT 1 FROM items
+                                WHERE contract_id = price_cache_contracts.contract_id
+                                  AND has_result = 1 AND hydration_status <> $itemComplete)
+                               THEN $pending ELSE $complete END,
+                           price_index_attempts = 0,
+                           price_index_last_error = '',
+                           price_index_next_retry_at = NULL,
+                           price_index_started_at = NULL,
+                           price_index_completed_at = CASE WHEN EXISTS(
+                               SELECT 1 FROM items
+                                WHERE contract_id = price_cache_contracts.contract_id
+                                  AND has_result = 1 AND hydration_status <> $itemComplete)
+                               THEN NULL ELSE COALESCE(price_index_completed_at, $now) END,
+                           updated_at = $now
+                     WHERE publication_date >= $start AND publication_date < $endExclusive;
+                    """;
+                checkpoints.Parameters.AddWithValue("$itemComplete", (int)ItemHydrationStatus.Complete);
+                checkpoints.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
+                checkpoints.Parameters.AddWithValue("$complete", (int)PriceCacheContractStatus.Complete);
+                checkpoints.Parameters.AddWithValue("$start", FormatDate(startDate));
+                checkpoints.Parameters.AddWithValue("$endExclusive", FormatDate(endDate.AddDays(1)));
+                checkpoints.Parameters.AddWithValue("$now", now);
+                await checkpoints.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using (var statistics = connection.CreateCommand())
+            {
+                statistics.Transaction = (SqliteTransaction)transaction;
+                statistics.CommandText = """
+                    WITH totals AS (
+                        SELECT COALESCE(SUM(price_index_eligible_item_count), 0) AS eligible,
+                               COALESCE(SUM(price_index_completed_item_count), 0) AS completed,
+                               COALESCE(SUM(price_index_priced_item_count), 0) AS priced,
+                               COALESCE(SUM(price_index_result_count), 0) AS results,
+                               SUM(CASE WHEN price_index_status IN ($pending, $downloading) THEN 1 ELSE 0 END) AS pending,
+                               SUM(CASE WHEN price_index_status = $failed THEN 1 ELSE 0 END) AS failed
+                          FROM price_cache_contracts
+                         WHERE publication_date >= $start AND publication_date < $endExclusive
+                    )
+                    UPDATE national_price_index_control
+                       SET prepared_window_start = $start,
+                           prepared_window_end = $end,
+                           eligible_item_count = (SELECT eligible FROM totals),
+                           completed_item_count = (SELECT completed FROM totals),
+                           priced_item_count = (SELECT priced FROM totals),
+                           result_row_count = (SELECT results FROM totals),
+                           pending_contract_count = COALESCE((SELECT pending FROM totals), 0),
+                           failed_contract_count = COALESCE((SELECT failed FROM totals), 0),
+                           statistics_suspended = 0,
+                           updated_at = $now
+                     WHERE id = 1;
+                    """;
+                statistics.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
+                statistics.Parameters.AddWithValue("$downloading", (int)PriceCacheContractStatus.Downloading);
+                statistics.Parameters.AddWithValue("$failed", (int)PriceCacheContractStatus.Failed);
+                statistics.Parameters.AddWithValue("$start", FormatDate(startDate));
+                statistics.Parameters.AddWithValue("$end", FormatDate(endDate));
+                statistics.Parameters.AddWithValue("$endExclusive", FormatDate(endDate.AddDays(1)));
+                statistics.Parameters.AddWithValue("$now", now);
+                await statistics.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return;
         }
-
-        await using (var checkpoints = connection.CreateCommand())
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
         {
-            checkpoints.Transaction = (SqliteTransaction)transaction;
-            checkpoints.CommandText = """
-                UPDATE price_cache_contracts
-                   SET price_index_eligible_item_count =
-                           (SELECT COUNT(*) FROM items
-                             WHERE contract_id = price_cache_contracts.contract_id AND has_result = 1),
-                       price_index_completed_item_count =
-                           (SELECT COUNT(*) FROM items
-                             WHERE contract_id = price_cache_contracts.contract_id AND has_result = 1
-                               AND hydration_status = $itemComplete),
-                       price_index_priced_item_count =
-                           (SELECT COUNT(*) FROM items i
-                             WHERE i.contract_id = price_cache_contracts.contract_id
-                               AND i.has_result = 1 AND i.hydration_status = $itemComplete
-                               AND EXISTS(
-                                   SELECT 1 FROM item_results r
-                                    WHERE r.contract_id = i.contract_id
-                                      AND r.item_number = i.item_number
-                                      AND r.result_status_id = 1 AND r.unit_value_scaled > 0)),
-                       price_index_result_count =
-                           (SELECT COUNT(*) FROM item_results
-                             WHERE contract_id = price_cache_contracts.contract_id
-                               AND result_status_id = 1 AND unit_value_scaled > 0),
-                       price_index_status = CASE WHEN EXISTS(
-                           SELECT 1 FROM items
-                            WHERE contract_id = price_cache_contracts.contract_id
-                              AND has_result = 1 AND hydration_status <> $itemComplete)
-                           THEN $pending ELSE $complete END,
-                       price_index_attempts = 0,
-                       price_index_last_error = '',
-                       price_index_next_retry_at = NULL,
-                       price_index_started_at = NULL,
-                       price_index_completed_at = CASE WHEN EXISTS(
-                           SELECT 1 FROM items
-                            WHERE contract_id = price_cache_contracts.contract_id
-                              AND has_result = 1 AND hydration_status <> $itemComplete)
-                           THEN NULL ELSE COALESCE(price_index_completed_at, $now) END,
-                       updated_at = $now
-                 WHERE publication_date >= $start AND publication_date < $endExclusive;
-                """;
-            checkpoints.Parameters.AddWithValue("$itemComplete", (int)ItemHydrationStatus.Complete);
-            checkpoints.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
-            checkpoints.Parameters.AddWithValue("$complete", (int)PriceCacheContractStatus.Complete);
-            checkpoints.Parameters.AddWithValue("$start", FormatDate(startDate));
-            checkpoints.Parameters.AddWithValue("$endExclusive", FormatDate(endDate.AddDays(1)));
-            checkpoints.Parameters.AddWithValue("$now", now);
-            await checkpoints.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            throw new OperationCanceledException("Operação SQLite cancelada.", exception, cancellationToken);
         }
-
-        await using (var statistics = connection.CreateCommand())
-        {
-            statistics.Transaction = (SqliteTransaction)transaction;
-            statistics.CommandText = """
-                WITH totals AS (
-                    SELECT COALESCE(SUM(price_index_eligible_item_count), 0) AS eligible,
-                           COALESCE(SUM(price_index_completed_item_count), 0) AS completed,
-                           COALESCE(SUM(price_index_priced_item_count), 0) AS priced,
-                           COALESCE(SUM(price_index_result_count), 0) AS results,
-                           SUM(CASE WHEN price_index_status IN ($pending, $downloading) THEN 1 ELSE 0 END) AS pending,
-                           SUM(CASE WHEN price_index_status = $failed THEN 1 ELSE 0 END) AS failed
-                      FROM price_cache_contracts
-                     WHERE publication_date >= $start AND publication_date < $endExclusive
-                )
-                UPDATE national_price_index_control
-                   SET prepared_window_start = $start,
-                       prepared_window_end = $end,
-                       eligible_item_count = (SELECT eligible FROM totals),
-                       completed_item_count = (SELECT completed FROM totals),
-                       priced_item_count = (SELECT priced FROM totals),
-                       result_row_count = (SELECT results FROM totals),
-                       pending_contract_count = COALESCE((SELECT pending FROM totals), 0),
-                       failed_contract_count = COALESCE((SELECT failed FROM totals), 0),
-                       statistics_suspended = 0,
-                       updated_at = $now
-                 WHERE id = 1;
-                """;
-            statistics.Parameters.AddWithValue("$pending", (int)PriceCacheContractStatus.Pending);
-            statistics.Parameters.AddWithValue("$downloading", (int)PriceCacheContractStatus.Downloading);
-            statistics.Parameters.AddWithValue("$failed", (int)PriceCacheContractStatus.Failed);
-            statistics.Parameters.AddWithValue("$start", FormatDate(startDate));
-            statistics.Parameters.AddWithValue("$end", FormatDate(endDate));
-            statistics.Parameters.AddWithValue("$endExclusive", FormatDate(endDate.AddDays(1)));
-            statistics.Parameters.AddWithValue("$now", now);
-            await statistics.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     internal const string NationalPriceWorkSelectionSql = """

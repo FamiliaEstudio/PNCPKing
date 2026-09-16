@@ -50,6 +50,10 @@ public sealed record SyncExecutionOptions
     public IReadOnlySet<long>? ModalityIds { get; init; }
 
     public bool FinalizeDataset { get; init; } = true;
+
+    public string? CheckpointScope { get; init; }
+
+    public int MaximumConcurrency { get; init; } = 2;
 }
 
 public enum SyncPartitionStatus
@@ -181,7 +185,9 @@ public enum BackupImportStage
     InstallingEvidence = 5,
     PreservingCurrentDatabase = 6,
     InstallingDatabase = 7,
-    Completed = 8
+    Completed = 8,
+    CheckingEvidence = 9,
+    ApplyingRetention = 10
 }
 
 public sealed record BackupImportProgress(

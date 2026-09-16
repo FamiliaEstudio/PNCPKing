@@ -17,13 +17,17 @@ public sealed record DataRetentionResult(
 
 public sealed partial class SqliteContractRepository
 {
-    public Task<DataRetentionResult> MaintainRetentionAsync(
+    public async Task<DataRetentionResult> MaintainRetentionAsync(
         DateOnly today,
         bool compact = false,
         bool force = false,
         CancellationToken cancellationToken = default,
-        IProgress<string>? progress = null) =>
-        MaintainRetentionCoreAsync(today, compact, force, cancellationToken, progress);
+        IProgress<string>? progress = null)
+    {
+        try { return await MaintainRetentionCoreAsync(today, compact, force, cancellationToken, progress).ConfigureAwait(false); }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
+        { throw new OperationCanceledException("Retenção cancelada; transação revertida.", exception, cancellationToken); }
+    }
 
     internal async Task<DataRetentionResult> MaintainRetentionCoreAsync(
         DateOnly today, bool compact, bool force, CancellationToken cancellationToken,
@@ -35,50 +39,46 @@ public sealed partial class SqliteContractRepository
         bool applied;
         bool compactionPending;
         await using (var writer = await _connections.WorkCoordinator.EnterWriterAsync(
-                         SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false))
+                         SqliteWorkPriority.Background, cancellationToken).ConfigureAwait(false))
         await using (var connection = await OpenAsync(cancellationToken).ConfigureAwait(false))
         {
+            using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+            using var validation = _performance.Begin("maintenance", "retention-validation");
             await using (var state = connection.CreateCommand())
             {
-                state.CommandText = "SELECT last_retention_date, retention_compaction_completed FROM maintenance_state WHERE id = 1;";
+                state.CommandText = "SELECT last_retention_date, retention_compaction_completed, retention_cutoff FROM maintenance_state WHERE id = 1;";
                 await using var reader = await state.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
                 await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-                applied = !force && reader.GetString(0) == FormatDate(today);
-                compactionPending = reader.GetInt32(1) == 0;
+                applied = !force && reader.GetString(0) == FormatDate(today) && reader.GetString(2) == FormatDate(cutoff);
+                compactionPending = force && compact || reader.GetInt32(1) == 0;
             }
+            // Even a same-day imported marker is checked against actual expired data.
+            // EXISTS stops at the first match; the large contract population uses its date index.
+            var expired = await HasExpiredRetentionDataAsync(connection, cutoff, cancellationToken).ConfigureAwait(false);
+            validation.Complete();
             if (compact && compactionPending)
                 await ExecuteRetentionSqlAsync(connection, null, "PRAGMA wal_checkpoint(TRUNCATE);", cancellationToken).ConfigureAwait(false);
-            if (!applied)
+            if (!applied || expired)
             {
-                progress?.Report("Removendo preços anteriores à janela de 11 meses…");
+                progress?.Report(expired ? "Removendo dados vencidos…" : "Nenhuma remoção necessária; atualizando o corte da retenção…");
+                using var removal = _performance.Begin("maintenance", "retention-removal");
                 await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-                result = await PruneExpiredDataAsync(connection, transaction, cutoff, cancellationToken).ConfigureAwait(false);
+                if (expired)
+                    result = await PruneExpiredDataAsync(connection, transaction, cutoff, cancellationToken).ConfigureAwait(false);
                 await NormalizeRetentionWindowsAsync(connection, transaction, cutoff, today, cancellationToken).ConfigureAwait(false);
+                await using var complete = connection.CreateCommand();
+                complete.Transaction = transaction;
+                complete.CommandText = "UPDATE maintenance_state SET last_retention_date = $today WHERE id = 1;";
+                complete.Parameters.AddWithValue("$today", FormatDate(today));
+                await complete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                removal.Complete(result.RemovedContracts + result.RemovedReferences);
             }
         }
+        // Cascades and existing per-contract triggers maintain affected index records.
+        // Retention is complete independently of downloading/preparing national indexes.
 
-        // Reuse the index reconciliation, without changing either authorization.
-        // The completion date is saved only after both reconciliations succeed.
-        if (!applied)
-        {
-            var cache = new SqlitePriceCacheRepository(_connections, _performance);
-            var itemControl = await cache.GetPolicyAsync(cancellationToken).ConfigureAwait(false);
-            if (itemControl.Authorized)
-                await cache.PrepareWindowAsync(cutoff, today, cancellationToken).ConfigureAwait(false);
-            var priceControl = await cache.GetNationalPriceIndexPolicyAsync(cancellationToken).ConfigureAwait(false);
-            if (priceControl.Authorized)
-                await cache.PrepareNationalPriceIndexAsync(cutoff, today, cancellationToken).ConfigureAwait(false);
-            await using var writer = await _connections.WorkCoordinator.EnterWriterAsync(
-                SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
-            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-            await using var complete = connection.CreateCommand();
-            complete.CommandText = "UPDATE maintenance_state SET last_retention_date = $today WHERE id = 1;";
-            complete.Parameters.AddWithValue("$today", FormatDate(today));
-            await complete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        result = result with { Message = $"Janela de 11 meses: {result.RemovedContracts:N0} contratações e " +
+        result = result with { Message = (!result.Applied ? "Nenhuma remoção necessária. " : "") + $"Janela de 11 meses: {result.RemovedContracts:N0} contratações e " +
             $"{result.RemovedReferences:N0} referências removidas; {result.AffectedLines:N0} itens para reconfirmar." };
         if (compact && compactionPending)
         {
@@ -110,6 +110,27 @@ public sealed partial class SqliteContractRepository
         }
         span.Complete(result.RemovedContracts + result.RemovedReferences);
         return result;
+    }
+
+    private static async Task<bool> HasExpiredRetentionDataAsync(SqliteConnection connection,
+        DateOnly cutoff, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT EXISTS(SELECT 1 FROM contracts WHERE publication_date < $cutoff)
+                OR EXISTS(SELECT 1 FROM quotation_references qr
+                    LEFT JOIN contracts c ON c.pncp_id = qr.contract_id
+                    LEFT JOIN quotation_internet_price_evidence e ON e.line_id = qr.line_id AND e.reference_id = qr.id
+                    WHERE CASE WHEN qr.source_kind = 1
+                        THEN COALESCE(qr.result_date, substr(e.captured_at, 1, 10), qr.publication_date)
+                        ELSE COALESCE(c.publication_date, qr.publication_date) END < $cutoff)
+                OR EXISTS(SELECT 1 FROM quotation_internet_price_drafts WHERE captured_at < $cutoff)
+                OR EXISTS(SELECT 1 FROM coverage_day_modalities WHERE coverage_date < $cutoff)
+                OR EXISTS(SELECT 1 FROM sync_partitions WHERE end_date < $cutoff)
+                OR EXISTS(SELECT 1 FROM sync_runs WHERE end_date < $cutoff);
+            """;
+        command.Parameters.AddWithValue("$cutoff", FormatDate(cutoff));
+        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)) != 0;
     }
 
     internal static async Task<DataRetentionResult> PruneExpiredDataAsync(
@@ -181,6 +202,7 @@ public sealed partial class SqliteContractRepository
              WHERE (line_id, prompt_slot) IN (SELECT line_id, prompt_slot FROM retention_affected_workspaces);
             DELETE FROM contracts WHERE pncp_id IN (SELECT id FROM expired_contracts);
             DELETE FROM coverage_day_modalities WHERE coverage_date < $cutoff;
+            DELETE FROM official_changes WHERE kind=5 AND key1 < $cutoff;
             DELETE FROM sync_partitions WHERE end_date < $cutoff;
             DELETE FROM sync_runs WHERE end_date < $cutoff;
             DELETE FROM quotation_internet_price_drafts WHERE captured_at < $cutoff;
@@ -206,6 +228,18 @@ public sealed partial class SqliteContractRepository
         command.CommandText = """
             UPDATE maintenance_state SET retention_cutoff = $cutoff WHERE id = 1;
             UPDATE dataset SET start_date = $cutoff, end_date = $today WHERE start_date IS NOT NULL;
+            -- Completed preparations survive a normal rolling-window shift. If previously
+            -- unaccounted data already occupies the entering dates, preparation stays pending.
+            UPDATE price_cache_control SET prepared_window_start=$cutoff,prepared_window_end=$today
+             WHERE prepared_window_start IS NOT NULL AND prepared_window_end IS NOT NULL
+               AND $cutoff >= prepared_window_start AND $today >= prepared_window_end
+               AND NOT EXISTS(SELECT 1 FROM contracts WHERE publication_date >= date(prepared_window_end,'+1 day')
+                    AND publication_date < date($today,'+1 day'));
+            UPDATE national_price_index_control SET prepared_window_start=$cutoff,prepared_window_end=$today
+             WHERE prepared_window_start IS NOT NULL AND prepared_window_end IS NOT NULL
+               AND $cutoff >= prepared_window_start AND $today >= prepared_window_end
+               AND NOT EXISTS(SELECT 1 FROM contracts WHERE publication_date >= date(prepared_window_end,'+1 day')
+                    AND publication_date < date($today,'+1 day'));
             UPDATE price_cache_control SET window_start = $cutoff, window_end = $today;
             UPDATE national_price_index_control SET window_start = $cutoff, window_end = $today;
             UPDATE quotation_item_search_workspaces SET

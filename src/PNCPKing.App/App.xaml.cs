@@ -144,7 +144,11 @@ public partial class App : Application
                 $"tamanho={(File.Exists(databasePath) ? new FileInfo(databasePath).Length : 0)} bytes.");
             var sqliteConnections = new SqliteConnectionFactory(
                 databasePath,
-                resourceProbe: resourceProbe);
+                resourceProbe: resourceProbe,
+                tuning: settings.SqliteCalibration is { } calibration && File.Exists(databasePath) &&
+                    calibration.AppliesTo(databasePath, File.GetCreationTimeUtc(databasePath),
+                        SqliteContractRepository.CurrentSchemaVersion, resourceProbe.GetSnapshot())
+                    ? calibration.Tuning : null);
             _performanceTelemetry.SetSqliteProfile(sqliteConnections.ProfileName);
             var repository = new SqliteContractRepository(sqliteConnections, _performanceTelemetry);
             var quotationRepository = new SqliteQuotationRepository(sqliteConnections);
@@ -343,7 +347,8 @@ public partial class App : Application
                 settings.DataFolder,
                 _diagnosticLog,
                 _performanceTelemetry,
-                maintenanceCoordinator);
+                maintenanceCoordinator,
+                new SqliteCalibrationService(sqliteConnections, resourceProbe));
             _mainViewModel = viewModel;
             var mainWindow = new MainWindow(
                 viewModel,
@@ -390,7 +395,8 @@ public partial class App : Application
                 $"esquema_atual={initialization.CurrentVersion}; " +
                 $"migracoes={string.Join(',', initialization.AppliedMigrations)}; " +
                 $"duracao_ms={initialization.Duration.TotalMilliseconds:N1}; " +
-                $"perfil_sqlite={sqliteConnections.ProfileName}.");
+                $"perfil_sqlite={sqliteConnections.ProfileName}; " +
+                $"configuracao_sqlite={sqliteConnections.SearchTuning.Description}.");
             viewModel.SetStartupPhase("Carregando configurações essenciais…");
             await viewModel.InitializeAsync(viewModel.StartupCancellationToken).ConfigureAwait(true);
             using (var readyRenderSpan = _performanceTelemetry.Begin("ui", "startup-ready-render"))

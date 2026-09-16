@@ -512,6 +512,8 @@ public sealed class GuardMasterService
             {
                 markImportedResultsComplete.Parameters["$item"].Value = itemNumber;
                 await markImportedResultsComplete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                await SqliteContractRepository.RecordOfficialResultsAsync(connection, transaction,
+                    snapshot.Contract.PncpId, itemNumber, cancellationToken).ConfigureAwait(false);
             }
         }
 

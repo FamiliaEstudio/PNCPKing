@@ -22,6 +22,7 @@ public sealed partial class MainViewModel
     private long _publishedCatalogRecords;
     private CatalogRefreshOption _selectedCatalogRefreshOption = null!;
     private CatalogDictionaryWindow? _catalogDictionaryWindow;
+    private bool _preferWalMaintenance;
 
     public RangeObservableCollection<CatalogSyncDisplay> CatalogCoverage { get; } = [];
     public IReadOnlyList<CatalogRefreshOption> CatalogRefreshOptions { get; private set; } = [];
@@ -107,9 +108,6 @@ public sealed partial class MainViewModel
         _catalogSearchService = searchService;
         CatalogRefreshOptions =
         [
-            new CatalogRefreshOption("A cada 2 dias", 2),
-            new CatalogRefreshOption("Uma semana", 7),
-            new CatalogRefreshOption("A cada 15 dias", 15),
             new CatalogRefreshOption("Manualmente", 0)
         ];
         var normalizedInterval = AppSettings.NormalizeCatalogRefreshIntervalDays(refreshIntervalDays);
@@ -203,7 +201,7 @@ public sealed partial class MainViewModel
             return;
         }
 
-        if (IsPriceBusy || IsForegroundBusy || IsFileBusy || IsDocumentBusy || _disposed)
+        if (IsIndexBusy || IsCatalogBusy || IsPriceBusy || IsForegroundBusy || IsFileBusy || IsDocumentBusy || _disposed)
         {
             MaintenanceActivityText = "Manutenção: aguardando atividade visível terminar";
             ScheduleNextMaintenance(decision.RetryDelay);
@@ -211,32 +209,15 @@ public sealed partial class MainViewModel
         }
 
         using var span = _performanceTelemetry.Begin("maintenance", "adaptive-slice");
-        await using var slice = _maintenanceCoordinator.BeginSlice(_startupCancellation.Token);
+        await using var slice = _maintenanceCoordinator.BeginSlice(_startupCancellation.Token, decision.SliceDuration);
         try
         {
-            if (await TryRunAutomaticMaintenanceAsync(decision.SliceDuration, slice.Token).ConfigureAwait(true))
+            var checkpointTurn = _preferWalMaintenance;
+            _preferWalMaintenance = !checkpointTurn;
+            if (checkpointTurn)
             {
-                slice.Token.ThrowIfCancellationRequested();
-                MaintenanceActivityText = "Manutenção: fatia da cobertura PNCP concluída";
-            }
-            else if (_preferPriceCacheMaintenance &&
-                     await TryRunPriceCacheMaintenanceAsync(decision.SliceDuration, slice.Token).ConfigureAwait(true))
-            {
-                slice.Token.ThrowIfCancellationRequested();
-                _preferPriceCacheMaintenance = false;
-                MaintenanceActivityText = "Manutenção: fatia do índice de itens concluída";
-            }
-            else if (await TryRunCatalogMaintenanceAsync(decision.SliceDuration, slice.Token).ConfigureAwait(true))
-            {
-                slice.Token.ThrowIfCancellationRequested();
-                _preferPriceCacheMaintenance = true;
-                MaintenanceActivityText = "Manutenção: fatia do catálogo concluída";
-            }
-            else if (await TryRunPriceCacheMaintenanceAsync(decision.SliceDuration, slice.Token).ConfigureAwait(true))
-            {
-                slice.Token.ThrowIfCancellationRequested();
-                _preferPriceCacheMaintenance = false;
-                MaintenanceActivityText = "Manutenção: fatia do índice de itens concluída";
+                MaintenanceActivityText = "Manutenção: verificando o WAL em ociosidade";
+                await Task.Run(() => _repository.MaintainWalAsync(slice.Token), slice.Token).ConfigureAwait(true);
             }
             else if (_lastOptimizeDate != DateOnly.FromDateTime(DateTime.Today))
             {
@@ -246,20 +227,19 @@ public sealed partial class MainViewModel
             }
             else
             {
-                MaintenanceActivityText = "Manutenção: banco atualizado; aguardando próximo ciclo";
+                _preferWalMaintenance = false;
+                MaintenanceActivityText = "Manutenção: verificando o WAL em ociosidade";
+                await Task.Run(() => _repository.MaintainWalAsync(slice.Token), slice.Token).ConfigureAwait(true);
             }
-
-            await Task.Run(
-                    () => _repository.MaintainWalAsync(slice.Token),
-                    slice.Token)
-                .ConfigureAwait(true);
             span.Complete();
         }
-        catch (OperationCanceledException) when (_disposed || slice.Token.IsCancellationRequested)
+        catch (Exception exception) when (slice.Token.IsCancellationRequested &&
+            (exception is OperationCanceledException ||
+             exception is Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: 9 }))
         {
             MaintenanceActivityText = _disposed
                 ? "Manutenção: encerrada com o aplicativo"
-                : "Manutenção: pausada para priorizar sua atividade; retomada após 30 s";
+                : "Manutenção: fatia encerrada; retomada quando o aplicativo estiver ocioso";
             _performanceTelemetry.Record("maintenance", "user-yield", TimeSpan.Zero);
         }
         catch (Exception exception)
@@ -434,7 +414,8 @@ public sealed partial class MainViewModel
             CatalogProgressText = _publishedCatalogRecords > 0
                 ? $"{value.Message} · catálogo publicado continua disponível"
                 : value.Message;
-            if (value.CompletedPages == value.TotalPages || value.CompletedPages % 10 == 0)
+            if (_catalogCancellation is { IsCancellationRequested: false } &&
+                (value.CompletedPages == value.TotalPages || value.CompletedPages % 10 == 0))
             {
                 _ = RefreshCatalogCoverageAsync();
             }
@@ -494,11 +475,12 @@ public sealed partial class MainViewModel
         }
         finally
         {
+            var cancelled = _catalogCancellation.IsCancellationRequested;
             _catalogCancellation.Dispose();
             _catalogCancellation = null;
             IsCatalogBusy = false;
             IsCatalogPaused = false;
-            await RefreshCatalogCoverageAsync().ConfigureAwait(true);
+            if (!cancelled) await RefreshCatalogCoverageAsync().ConfigureAwait(true);
         }
     }
 

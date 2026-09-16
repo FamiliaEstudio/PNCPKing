@@ -10,11 +10,24 @@ namespace PNCPKing.Tests;
 public sealed class PriceCacheItemIndexTests
 {
     [Theory]
-    [InlineData(SearchSort.Newest, false)]
-    [InlineData(SearchSort.Newest, true)]
-    [InlineData(SearchSort.Nearest, false)]
-    [InlineData(SearchSort.Nearest, true)]
-    public async Task IndexedSearch_PreservesFiltersResultTiesAndCompleteCursorPages(SearchSort sort, bool stateOnly)
+    [InlineData(SearchSort.Newest, false, false, true)]
+    [InlineData(SearchSort.Newest, true, false, true)]
+    [InlineData(SearchSort.Nearest, false, false, true)]
+    [InlineData(SearchSort.Nearest, true, false, true)]
+    [InlineData(SearchSort.Newest, false, true, true)]
+    [InlineData(SearchSort.Newest, true, true, true)]
+    [InlineData(SearchSort.Nearest, false, true, true)]
+    [InlineData(SearchSort.Nearest, true, true, true)]
+    [InlineData(SearchSort.Newest, false, false, false)]
+    [InlineData(SearchSort.Newest, true, false, false)]
+    [InlineData(SearchSort.Nearest, false, false, false)]
+    [InlineData(SearchSort.Nearest, true, false, false)]
+    [InlineData(SearchSort.Newest, false, true, false)]
+    [InlineData(SearchSort.Newest, true, true, false)]
+    [InlineData(SearchSort.Nearest, false, true, false)]
+    [InlineData(SearchSort.Nearest, true, true, false)]
+    public async Task IndexedSearch_PreservesFiltersResultTiesAndCompleteCursorPages(
+        SearchSort sort, bool stateOnly, bool batches, bool filterUnit)
     {
         await using var database = await TestDatabase.CreateAsync();
         var today = DateOnly.FromDateTime(DateTime.Today);
@@ -68,11 +81,12 @@ public sealed class PriceCacheItemIndexTests
             await command.ExecuteNonQueryAsync();
         }
 
-        const string text = "Serviço limpeza -odontológico \"diária";
+        var text = "Serviço limpeza -odontológico" + (filterUnit ? " \"diária" : "");
         var query = new SearchQuery(text, stateOnly ? SearchGeoFilter.State("SP") : SearchGeoFilter.All,
             today.AddDays(-30), today, Sort: sort);
         var telemetry = new SearchTelemetry();
-        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath, telemetry);
+        var cache = new SqlitePriceCacheRepository(new SqliteConnectionFactory(database.Repository.DatabasePath,
+            resourceProbe: new SqliteCalibrationTests.Probe(), tuning: new(32, batches)), telemetry);
         var expression = SearchText.Parse(text);
         var actual = new List<string>();
         PriceCacheLocalCursor? cursor = null;
@@ -93,15 +107,18 @@ public sealed class PriceCacheItemIndexTests
             .ThenBy(c => sort == SearchSort.Nearest ? c.PncpId switch { "clean-a" => 3, "clean-b" => 1, _ => 0 } : 0)
             .ThenByDescending(c => c.PublicationDate)
             .ThenBy(c => c.PncpId, StringComparer.Ordinal)
-            .SelectMany(c => new[] { $"{c.PncpId}|1|1", $"{c.PncpId}|1|2", $"{c.PncpId}|5|1" });
+            .SelectMany(c => (filterUnit ? new[] { "1|1", "1|2", "5|1" } : new[] { "1|1", "1|2", "3|1", "5|1" })
+                .Select(suffix => $"{c.PncpId}|{suffix}"));
         Assert.Equal(expected, actual);
         Assert.Equal(actual.Count, actual.Distinct().Count());
         Assert.DoesNotContain("local-contract-chunks", telemetry.Phases);
         Assert.DoesNotContain("fts-cardinality", telemetry.Phases);
     }
 
-    [Fact]
-    public async Task IndexedSearch_HandlesMissingPublicationAndAppliesApproximationBeforeLimit()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task IndexedSearch_HandlesMissingPublicationAndAppliesApproximationBeforeLimit(bool batches)
     {
         await using var database = await TestDatabase.CreateAsync();
         var today = DateOnly.FromDateTime(DateTime.Today);
@@ -123,7 +140,8 @@ public sealed class PriceCacheItemIndexTests
         }
         const string text = "limpeza ~8 \"diária \"hora";
         var query = new SearchQuery(text, GeoScope.All, Sort: SearchSort.Newest);
-        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
+        var cache = new SqlitePriceCacheRepository(new SqliteConnectionFactory(database.Repository.DatabasePath,
+            resourceProbe: new SqliteCalibrationTests.Probe(), tuning: new(32, batches)));
         var first = await cache.SearchLocalAfterAsync(query, SearchText.Parse(text), null, null, null, 2);
         var second = await cache.SearchLocalAfterAsync(query, SearchText.Parse(text), null, null, first.Cursor, 2);
         Assert.Equal(new[] { "dated|11|1", "dated|12|1" }, first.Rows!.Select(Key));
@@ -131,6 +149,108 @@ public sealed class PriceCacheItemIndexTests
         Assert.Equal(new[] { "undated|11|1", "undated|12|1" }, second.Rows!.Select(Key));
         Assert.False(second.HasMore);
     }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BatchesRevealStablePrefixesBeforePageCompletesAndResumeAfterCancellation(bool multipleResults)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var contract = RecentContract("progressive", today, 1);
+        await database.Repository.UpsertContractsAsync([contract]);
+        var items = Enumerable.Range(1, multipleResults ? 1 : 100).Select(n => Item(contract, n) with
+        { Description = "café torrado", Unit = "PACOTE", HydrationStatus = ItemHydrationStatus.Complete }).ToArray();
+        await database.Repository.UpsertItemsAsync(contract.PncpId, items, false);
+        foreach (var item in items)
+            await database.Repository.ReplaceItemResultsAsync(contract.PncpId, item.ItemNumber,
+                Enumerable.Range(1, multipleResults ? 100 : 1)
+                    .Select(sequence => Result(contract, item.ItemNumber, sequence, true)).ToArray());
+        var connections = new SqliteConnectionFactory(database.Repository.DatabasePath,
+            resourceProbe: new SqliteCalibrationTests.Probe(), tuning: new(32, true));
+        var cache = new SqlitePriceCacheRepository(connections);
+        var query = new SearchQuery("café", GeoScope.All, Sort: SearchSort.Newest);
+        var expression = SearchText.Parse(query.Text);
+        var observed = new List<PriceCacheLocalProgress>();
+        var page = await cache.SearchLocalAfterAsync(query, expression, null, null, null, 50,
+            new InlineProgress(observed.Add));
+        Assert.True(observed.Count(value => value.Rows.Count > 0 && !value.Completed) >= 2);
+        Assert.Equal(page.Rows!.Select(Key), observed.SelectMany(value => value.Rows).Select(Key));
+        Assert.True(observed[^1].Completed);
+        Assert.Equal(page.Cursor, observed[^1].Cursor);
+        Assert.Equal(page.HasMore, observed[^1].HasMore);
+
+        using var cancellation = new CancellationTokenSource();
+        PriceCacheLocalProgress? prefix = null;
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cache.SearchLocalAfterAsync(query, expression,
+            null, null, null, 50, new InlineProgress(value =>
+            {
+                if (value.Rows.Count > 0) { prefix = value; cancellation.Cancel(); }
+            }), cancellation.Token));
+        Assert.NotNull(prefix);
+        Assert.Single(prefix.Rows);
+        var resumed = await cache.SearchLocalAfterAsync(query, expression, null, null, prefix.Cursor, 50);
+        var keys = prefix.Rows.Concat(resumed.Rows!).Select(Key).ToArray();
+        Assert.Equal(keys.Length, keys.Distinct().Count());
+        Assert.Equal(Enumerable.Range(1, keys.Length).Select(n => multipleResults ? $"progressive|1|{n}" : $"progressive|{n}|1"), keys);
+    }
+
+    [Theory]
+    [InlineData(SearchSort.Newest)]
+    [InlineData(SearchSort.Nearest)]
+    public async Task StreamingPreservesMissingDatesAndGeographicGroupsAcrossCursors(SearchSort sort)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var contracts = new[]
+        {
+            RecentContract("dated", today, 1),
+            RecentContract("null-a", today, 2) with { PublicationDate = null },
+            RecentContract("empty-b", today, 3) with { PublicationDate = null },
+            RecentContract("null-c", today, 4) with { PublicationDate = null },
+            RecentContract("distant", today, 5) with { Uf = "RJ" }
+        };
+        await database.Repository.UpsertContractsAsync(contracts);
+        foreach (var contract in contracts)
+        {
+            await database.Repository.UpsertItemsAsync(contract.PncpId,
+                [Item(contract, 1) with { Description = "café", HydrationStatus = ItemHydrationStatus.Complete }], false);
+            await database.Repository.ReplaceItemResultsAsync(contract.PncpId, 1,
+                [Result(contract, 1, 1, true), Result(contract, 1, 2, true)]);
+        }
+        var factory = new SqliteConnectionFactory(database.Repository.DatabasePath,
+            resourceProbe: new SqliteCalibrationTests.Probe(), tuning: new(32, true));
+        await using (var connection = await factory.OpenAsync())
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                UPDATE contracts SET publication_date = '' WHERE pncp_id = 'empty-b';
+                UPDATE contracts SET geo_layer = CASE WHEN pncp_id = 'distant' THEN 1 ELSE 0 END,
+                    municipality_distance_rank = CASE WHEN pncp_id = 'distant' THEN NULL ELSE 3 END;
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+        var query = new SearchQuery("café", GeoScope.All, Sort: sort);
+        var expression = SearchText.Parse(query.Text);
+        var reference = new SqlitePriceCacheRepository(new SqliteConnectionFactory(database.Repository.DatabasePath,
+            resourceProbe: new SqliteCalibrationTests.Probe(), tuning: new(32, false)));
+        var expected = await reference.SearchLocalAfterAsync(query, expression, null, null, null, 50);
+        var streaming = new SqlitePriceCacheRepository(factory);
+        var actual = new List<string>();
+        PriceCacheLocalCursor? cursor = null;
+        for (var pageNumber = 0; pageNumber < 20; pageNumber++)
+        {
+            var page = await streaming.SearchLocalAfterAsync(query, expression, null, null, cursor, 1);
+            actual.AddRange(page.Rows!.Select(Key));
+            if (!page.HasMore) break;
+            cursor = page.Cursor;
+        }
+        Assert.Equal(expected.Rows!.Select(Key), actual);
+        Assert.Equal(10, actual.Count);
+    }
+
+    private sealed class InlineProgress(Action<PriceCacheLocalProgress> action) : IProgress<PriceCacheLocalProgress>
+    { public void Report(PriceCacheLocalProgress value) => action(value); }
 
     private static string Key(ItemSearchRow row) => $"{row.Contract.PncpId}|{row.Item.ItemNumber}|{row.Result!.ResultSequence}";
 

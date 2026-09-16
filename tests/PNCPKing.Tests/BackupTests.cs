@@ -11,17 +11,21 @@ namespace PNCPKing.Tests;
 
 public sealed class BackupTests
 {
-    [Fact]
-    public async Task Import_PrunesExpiredContractsAndPreservesTheOriginalArchive()
+    [Theory]
+    [InlineData(BackupProfile.Full)]
+    [InlineData(BackupProfile.Compact)]
+    public async Task Import_PrunesExpiredContractsWithoutCompactingAndPreservesTheOriginalArchive(BackupProfile profile)
     {
         await using var database = await TestDatabase.CreateAsync();
         var today = DateOnly.FromDateTime(DateTime.Today);
         var old = PriceCacheTests.RecentContract("expired-backup", DataWindow.Start(today).AddDays(-1), 1);
         var recent = PriceCacheTests.RecentContract("recent-backup", today, 2);
         await database.Repository.UpsertContractsAsync([old, recent]);
+        await DataRetentionTests.DowngradeTo26Async(database.Repository.DatabasePath);
+        await database.Repository.InitializeAsync();
         var service = new BackupService(database.Repository);
         var path = Path.Combine(database.Directory, "old-window.pncpking");
-        await service.ExportAsync(path);
+        await service.ExportAsync(path, profile);
         var beforeHash = SHA256.HashData(await File.ReadAllBytesAsync(path));
         var progress = new RecordingProgress<BackupImportProgress>();
         var recovery = await service.ImportAsync(path, progress);
@@ -31,6 +35,47 @@ public sealed class BackupTests
         Assert.Equal(beforeHash, SHA256.HashData(await File.ReadAllBytesAsync(path)));
         Assert.Contains(progress.Values, item => item.Stage == BackupImportStage.Completed && item.Message.Contains("11 meses"));
         Assert.Equal(1, (await database.Repository.GetCountsAsync()).Contracts);
+
+        // A migrated snapshot has compaction pending. Import must prune expired data
+        // without VACUUM or the full integrity checks coupled to compaction.
+        await using var connection = new SqliteConnection(
+            $"Data Source={database.Repository.DatabasePath};Pooling=False");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT retention_compaction_completed FROM maintenance_state WHERE id = 1;";
+        Assert.Equal(0L, await command.ExecuteScalarAsync());
+        Assert.Contains(progress.Values, item =>
+            item.Stage == BackupImportStage.ApplyingRetention && item.IsIndeterminate && item.CanCancel);
+        Assert.DoesNotContain(progress.Values, item => item.Message.Contains("Compactação concluída"));
+        Assert.Equal(progress.Values.Select(item => item.Percentage).Order(),
+            progress.Values.Select(item => item.Percentage));
+    }
+
+    [Theory]
+    [InlineData(BackupImportStage.CheckingEvidence)]
+    [InlineData(BackupImportStage.ApplyingRetention)]
+    public async Task Import_CancellationBeforeRetentionPreservesCurrentDatabase(BackupImportStage stage)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var service = new BackupService(database.Repository);
+        var path = Path.Combine(database.Directory, "cancel-before-retention.pncpking");
+        await service.ExportAsync(path);
+        await database.Repository.UpsertContractsAsync([
+            PriceCacheTests.RecentContract("preserved", DateOnly.FromDateTime(DateTime.Today), 1)
+        ]);
+        using var cancellation = new CancellationTokenSource();
+        var progress = new CallbackProgress<BackupImportProgress>(item =>
+        {
+            if (item.Stage == stage)
+                cancellation.Cancel();
+        });
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            service.ImportAsync(path, progress, cancellation.Token));
+
+        Assert.NotNull(await database.Repository.GetContractAsync("preserved"));
+        Assert.Empty(service.GetRecoveryBackups());
+        Assert.Empty(System.IO.Directory.GetDirectories(database.Directory, ".pncpking-import-*"));
     }
 
     [Fact]

@@ -18,6 +18,9 @@ public sealed class PriceCacheService(
     private static readonly TimeSpan MaximumRetryDelay = TimeSpan.FromHours(6);
     private readonly TimeSpan? _requestTimeout = ValidateRequestTimeout(requestTimeout);
     private readonly IPerformanceTelemetry _performance = performance ?? NullPerformanceTelemetry.Instance;
+    private readonly AsyncPauseGate _manualPause = new();
+    public void Pause() => _manualPause.Pause();
+    public void Resume() => _manualPause.Resume();
     private readonly AsyncPauseGate _visibleActivityPause = new();
 
     public bool IsPausedForVisibleActivity => _visibleActivityPause.IsPaused;
@@ -111,6 +114,7 @@ public sealed class PriceCacheService(
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                await _manualPause.WaitAsync(cancellationToken).ConfigureAwait(false);
                 if (!ignoreVisibleActivity)
                 {
                     await _visibleActivityPause.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -149,6 +153,7 @@ public sealed class PriceCacheService(
                 while (active.Count < maximumParallelContracts)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                await _manualPause.WaitAsync(cancellationToken).ConfigureAwait(false);
                     var work = await cache.GetNextWorkAsync(DateTimeOffset.UtcNow, cancellationToken)
                         .ConfigureAwait(false);
                     if (work is null)

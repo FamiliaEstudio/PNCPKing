@@ -1,8 +1,10 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
+using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
 using PNCPKing.Infrastructure.Api;
+using PNCPKing.Infrastructure.Services;
 
 namespace PNCPKing.Tests;
 
@@ -138,6 +140,28 @@ public sealed class PncpClientTests
     }
 
     [Fact]
+    public async Task Client_ExplainsPncpDatabaseOutageAndKeepsTheHttpFailure()
+    {
+        var handler = new SequenceHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)
+        {
+            Content = new StringContent("""
+                {"timestamp":"2026-09-16T01:23:20.830+00:00","status":500,"error":"Internal Server Error","message":"Failed to obtain JDBC Connection; nested exception is java.sql.SQLTransientConnectionException: HikariPool-1 - Connection is not available, request timed out after 30000ms.","path":"/pncp-consulta/v1/contratacoes/publicacao"}
+                """)
+        });
+        var client = CreateClient(handler, _ => TimeSpan.Zero);
+        var date = new DateOnly(2026, 9, 15);
+
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetContractsPageAsync(
+            date, date, 6, null, 1, 50, SyncMode.Publication));
+
+        Assert.Equal(HttpStatusCode.InternalServerError, error.StatusCode);
+        Assert.Contains("servidor do PNCP não conseguiu acessar o próprio banco", error.Message);
+        Assert.Contains("20260915 a 20260915", error.Message);
+        Assert.Contains("JDBC Connection", error.Message);
+        Assert.Equal(7, handler.Calls);
+    }
+
+    [Fact]
     public async Task Client_RejectsAnInvertedDateRangeBeforeCallingPncp()
     {
         var handler = new SequenceHandler(_ => Json("{}"));
@@ -153,6 +177,120 @@ public sealed class PncpClientTests
             SyncMode.Publication));
 
         Assert.Equal(0, handler.Calls);
+    }
+
+    [Theory]
+    [InlineData(SyncMode.Publication, "Período inicial e final maior que 365 dias")]
+    [InlineData(SyncMode.GlobalUpdate, "Período inicial e final maior que 365 dias")]
+    [InlineData(SyncMode.Publication, "Data Inicial deve ser anterior ou igual à Data Final")]
+    public async Task Client_RetriesContradictoryDateRejectionWithoutChangingTheQuery(SyncMode mode, string error)
+    {
+        var handler = new SequenceHandler(
+            _ => DateRejection(error),
+            _ => Json("""{"data":[],"totalRegistros":0,"totalPaginas":0,"numeroPagina":2}"""));
+        var client = CreateClient(handler, _ => TimeSpan.Zero);
+        var date = new DateOnly(2026, 9, 15);
+
+        var result = await client.GetContractsPageAsync(date, date, 6, "SP", 2, 50, mode);
+
+        Assert.Equal(2, handler.Calls);
+        Assert.Equal(2, result.Page);
+        var endpoint = mode == SyncMode.Publication ? "publicacao" : "atualizacao";
+        Assert.All(handler.RequestUris, uri => Assert.Equal(
+            $"https://example.test/consulta/v1/contratacoes/{endpoint}?dataInicial=20260915&dataFinal=20260915&codigoModalidadeContratacao=6&pagina=2&tamanhoPagina=50&uf=SP",
+            uri));
+    }
+
+    [Fact]
+    public async Task Client_PersistentDateRejectionPreservesFailedCoverageAndCanResume()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var recovered = false;
+        var handler = new SequenceHandler(_ => recovered
+            ? new HttpResponseMessage(HttpStatusCode.NoContent)
+            : DateRejection());
+        var service = new SyncService(CreateClient(handler, _ => TimeSpan.Zero), database.Repository);
+        var date = new DateOnly(2026, 9, 15);
+        var options = new SyncExecutionOptions { KnownModalities = [new Modality(6, "Pregão")] };
+
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(() => service.SynchronizeAsync(
+            date, date, GeoScope.All, SyncMode.Publication, options));
+
+        Assert.Equal(3, handler.Calls);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, exception.StatusCode);
+        Assert.Contains("intervalo válido", exception.Message);
+        Assert.Contains("20260915 a 20260915", exception.Message);
+        Assert.Contains("Período inicial e final maior que 365 dias", exception.Message);
+        var coverage = (ICoverageRepository)database.Repository;
+        Assert.Equal(CoverageStatus.Failed, Assert.Single(await coverage.GetCoverageDaysAsync(date, date)).Status);
+        var key = "Publication:20260915:20260915:m6:ufALL";
+        var checkpoint = await database.Repository.GetPartitionCheckpointAsync(key);
+        Assert.NotNull(checkpoint);
+        Assert.Equal(SyncPartitionStatus.Failed, checkpoint.Status);
+        Assert.Equal(1, checkpoint.NextPage);
+        Assert.NotNull(checkpoint.NextRetryAt);
+        Assert.Null((await database.Repository.GetDatasetStateAsync()).LastSuccessfulSync);
+
+        recovered = true;
+        await service.SynchronizeAsync(date, date, GeoScope.All, SyncMode.Publication, options);
+
+        Assert.Equal(4, handler.Calls);
+        Assert.Equal(CoverageStatus.Complete, Assert.Single(await coverage.GetCoverageDaysAsync(date, date)).Status);
+        Assert.Equal(0, (await database.Repository.GetPartitionCheckpointAsync(key))!.NextPage);
+        Assert.NotNull((await database.Repository.GetDatasetStateAsync()).LastSuccessfulSync);
+    }
+
+    [Theory]
+    [InlineData(366, "Período inicial e final maior que 365 dias")]
+    [InlineData(0, "Modalidade inválida")]
+    public async Task Client_DoesNotRetryOtherValidationErrorsOrOversizedDateRanges(int days, string error)
+    {
+        var handler = new SequenceHandler(_ => DateRejection(error));
+        var client = CreateClient(handler, _ => TimeSpan.Zero);
+        var date = new DateOnly(2025, 9, 14);
+
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetContractsPageAsync(
+            date, date.AddDays(days), 6, null, 1, 50, SyncMode.Publication));
+
+        Assert.Equal(1, handler.Calls);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, exception.StatusCode);
+        Assert.DoesNotContain("intervalo válido", exception.Message);
+    }
+
+    [Fact]
+    public async Task Client_DateRejectionRespectsBackgroundAttemptLimit()
+    {
+        var handler = new SequenceHandler(_ => DateRejection());
+        var client = CreateClient(handler, _ => TimeSpan.Zero);
+        using var scope = PncpRequestOptions.BeginScope(PncpRequestPriority.BackgroundPriceCache);
+        var date = new DateOnly(2026, 9, 15);
+
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetContractsPageAsync(
+            date, date, 6, null, 1, 50, SyncMode.Publication));
+
+        Assert.Equal(1, handler.Calls);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, exception.StatusCode);
+    }
+
+    [Fact]
+    public async Task Client_DateRejectionReleasesResponseBeforeWaitingAndAllowsCancellation()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var response = DateRejection();
+        var content = response.Content;
+        var handler = new SequenceHandler(_ => response);
+        var client = CreateClient(handler, _ =>
+        {
+            cancellation.Cancel();
+            return TimeSpan.FromSeconds(30);
+        });
+        var date = new DateOnly(2026, 9, 15);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.GetContractsPageAsync(
+            date, date, 6, null, 1, 50, SyncMode.Publication, cancellation.Token));
+
+        Assert.Equal(1, handler.Calls);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -329,6 +467,14 @@ public sealed class PncpClientTests
     {
         Content = new StringContent(json, Encoding.UTF8, "application/json")
     };
+
+    private static HttpResponseMessage DateRejection(string message = "Período inicial e final maior que 365 dias") =>
+        new(HttpStatusCode.UnprocessableEntity)
+        {
+            Content = new StringContent(
+                $$"""{"path":"/pncp-consulta/v1/contratacoes/publicacao","message":"{{message}}","error":"422 UNPROCESSABLE_ENTITY","timestamp":"2026-09-15T10:06:14.209-03:00","status":422}""",
+                Encoding.UTF8, "application/json")
+        };
 
     private static string ItemsJson(int first, int count) =>
         "[" + string.Join(

@@ -17,12 +17,12 @@ public sealed partial class MainViewModel
         var today = DateOnly.FromDateTime(DateTime.Today);
         var progress = new Progress<string>(message =>
         {
-            if (compact) SetStartupPhase(message);
+            if (IsInitializing) SetStartupPhase(message);
             else FileOperationProgressText = message;
         });
         var result = await Task.Run(() => repository.MaintainRetentionAsync(
             today, compact, cancellationToken: cancellationToken, progress: progress), cancellationToken).ConfigureAwait(true);
-        if (compact && result.Applied)
+        if (result.Applied)
         {
             await _itemSearchService.InvalidateAsync(cancellationToken).ConfigureAwait(true);
             await _transientItemSearchService.InvalidateAsync(cancellationToken).ConfigureAwait(true);

@@ -653,6 +653,12 @@ public sealed class BackupService(
                 Report(progress, BackupImportStage.CheckingIntegrity, 58, "Integridade local confirmada.");
             }
 
+            Report(
+                progress,
+                BackupImportStage.CheckingEvidence,
+                59,
+                "Conferindo as evidências referenciadas pelo banco…",
+                isIndeterminate: true);
             var databaseAssets = await ReadReferencedEvidenceAssetsAsync(
                 importedDatabase,
                 cancellationToken).ConfigureAwait(false);
@@ -705,11 +711,33 @@ public sealed class BackupService(
                 await DisableImportedCompactCacheAsync(importedDatabase, cancellationToken).ConfigureAwait(false);
             }
 
+            Report(
+                progress,
+                BackupImportStage.ApplyingRetention,
+                74,
+                "Validando a retenção da janela de 11 meses…",
+                isIndeterminate: true);
             var retainedRepository = new SqliteContractRepository(importedDatabase, _performance);
+            // Import prunes expired data only. Compaction would rewrite the whole
+            // database and repeat the full integrity checks already done at export.
             var retention = await retainedRepository.MaintainRetentionAsync(
-                DateOnly.FromDateTime(DateTime.Today), compact: true, force: true,
+                DateOnly.FromDateTime(DateTime.Today), compact: false, force: false,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-            Report(progress, BackupImportStage.Migrating, 78, retention.Message);
+            Report(progress, BackupImportStage.ApplyingRetention, 78, retention.Message);
+            // A restored/cloned database retains its common base, but receives a new local origin.
+            await using (var restored = new SqliteConnection($"Data Source={importedDatabase};Pooling=False"))
+            {
+                await restored.OpenAsync(cancellationToken).ConfigureAwait(false);
+                await using var identity = restored.CreateCommand();
+                identity.CommandText = "UPDATE official_transfer_state SET origin=lower(hex(randomblob(16))),journal_suspended=0 WHERE id=1;";
+                await identity.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            Report(
+                progress,
+                BackupImportStage.CheckingEvidence,
+                79,
+                "Atualizando as evidências após a limpeza da janela de 11 meses…",
+                isIndeterminate: true);
             databaseAssets = await ReadReferencedEvidenceAssetsAsync(importedDatabase, cancellationToken).ConfigureAwait(false);
             manifestHashes = databaseAssets.Select(asset => asset.Sha256).ToHashSet(StringComparer.OrdinalIgnoreCase);
             SqliteConnection.ClearAllPools();

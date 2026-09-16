@@ -63,6 +63,12 @@
                 <Button.ContextMenu>
                     <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
                         <MenuItem Header="_Arquivo">
+                            <MenuItem Header="Exportar atualizações PNCP…" Command="{Binding ExportUpdatesCommand}" />
+                            <MenuItem Header="Importar atualizações PNCP…" Command="{Binding ImportUpdatesCommand}" />
+                            <MenuItem Header="Iniciar nova base de transferência…" Command="{Binding NewUpdateBaseCommand}" />
+                            <MenuItem Header="Importar nova base de transferência…" Command="{Binding ImportNewUpdateBaseCommand}" />
+                            <Separator />
+                            <MenuItem Header="Compactar banco…" Command="{Binding CompactDatabaseCommand}" />
                             <MenuItem Header="Exportar backup" Command="{Binding ExportBackupCommand}" />
                             <MenuItem Header="Importar backup" Command="{Binding ImportBackupCommand}" />
                         </MenuItem>
@@ -70,6 +76,7 @@
                             <MenuItem Header="Logs de diagnóstico" Command="{Binding OpenDiagnosticLogsCommand}" />
                             <MenuItem Header="Relatório de desempenho" Command="{Binding ExportPerformanceReportCommand}" />
                             <MenuItem Header="Comparar desempenho" Command="{Binding ComparePerformanceReportCommand}" />
+                            <MenuItem Header="Avaliar desempenho deste PC…" Command="{Binding EvaluatePcCommand}" />
                         </MenuItem>
                         <MenuItem Header="_Limpeza">
                             <MenuItem Header="Limpar cache permanente" Command="{Binding ClearCacheCommand}" />
@@ -99,9 +106,9 @@
                 <StackPanel>
                     <WrapPanel Margin="3,0,3,5">
                         <Button Content="Calcular tamanho" Command="{Binding CalculatePreflightCommand}" />
-                        <Button Content="Baixar/atualizar dados" Command="{Binding StartSyncCommand}" />
+                        <Button Content="Atualizar" Command="{Binding StartSyncCommand}" />
                         <Button Content="{Binding PauseIndexButtonText}" Command="{Binding PauseSyncCommand}" />
-                        <Button Content="Cancelar índice" Command="{Binding CancelIndexCommand}" />
+                        <Button Content="Cancelar" Command="{Binding CancelIndexCommand}" />
                     </WrapPanel>
 
         <Border Background="#FFF7E5" BorderBrush="#E6B85C"
@@ -215,14 +222,6 @@
                                        Foreground="#5F6871" />
                         </StackPanel>
                         <WrapPanel DockPanel.Dock="Right">
-                            <Button Content="Estimar e ativar" Command="{Binding EstimateAndActivatePriceCacheCommand}" />
-                            <ToggleButton Content="Download agressivo"
-                                          Command="{Binding ToggleAggressivePriceCacheCommand}"
-                                          IsChecked="{Binding IsAggressivePriceCacheMode, Mode=OneWay}"
-                                          ToolTip="Enquanto ativado, usa continuamente a concorrência adaptativa disponível e bloqueia novas consultas visíveis ao PNCP." />
-                            <Button Content="{Binding PausePriceCacheButtonText, Mode=OneWay}" Command="{Binding PausePriceCacheCommand}" />
-                            <Button Content="Cancelar ciclo" Command="{Binding CancelPriceCacheCommand}" />
-                            <Button Content="Desativar" Command="{Binding DisablePriceCacheCommand}" />
                             <Button Content="Remover cache" Command="{Binding RemovePriceCacheCommand}" />
                         </WrapPanel>
                     </DockPanel>
@@ -273,14 +272,6 @@
                                        Foreground="#5F6871" />
                         </StackPanel>
                         <WrapPanel DockPanel.Dock="Right">
-                            <Button Content="Estimar e ativar" Command="{Binding EstimateAndActivateNationalPriceIndexCommand}" />
-                            <ToggleButton Content="Download agressivo"
-                                          Command="{Binding ToggleAggressiveNationalPriceIndexCommand}"
-                                          IsChecked="{Binding IsAggressiveNationalPriceMode, Mode=OneWay}"
-                                          ToolTip="Único modo que consulta resultados em massa; bloqueia novas consultas visíveis ao PNCP até ser desligado." />
-                            <Button Content="{Binding PauseNationalPriceIndexButtonText, Mode=OneWay}" Command="{Binding PauseNationalPriceIndexCommand}" />
-                            <Button Content="Cancelar ciclo" Command="{Binding CancelNationalPriceIndexCommand}" />
-                            <Button Content="Desativar" Command="{Binding DisableNationalPriceIndexCommand}" />
                             <Button Content="Remover preços" Command="{Binding RemoveNationalPriceIndexCommand}" />
                         </WrapPanel>
                     </DockPanel>
@@ -306,12 +297,7 @@
                                        VerticalAlignment="Center" Foreground="#5F6871" />
                         </StackPanel>
                         <WrapPanel DockPanel.Dock="Right">
-                            <TextBlock Text="Atualização automática:" VerticalAlignment="Center"
-                                       Margin="6,0,2,0" />
-                            <ComboBox Width="140"
-                                      ItemsSource="{Binding CatalogRefreshOptions}"
-                                      SelectedItem="{Binding SelectedCatalogRefreshOption, Mode=TwoWay}"
-                                      ToolTip="Define quando a manutenção verificará novos snapshots completos; Atualizar agora sempre força CATMAT e CATSER." />
+                            <TextBlock Text="Atualização manual" VerticalAlignment="Center" Margin="6,0,8,0" />
                             <Button Content="Atualizar agora" Command="{Binding UpdateCatalogCommand}" />
                             <Button Content="{Binding PauseCatalogButtonText}" Command="{Binding PauseCatalogCommand}" />
                             <Button Content="Cancelar" Command="{Binding CancelCatalogCommand}" />
