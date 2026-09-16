@@ -1,0 +1,41 @@
+# Recuperação rápida do ciclo agressivo
+
+O botão **Atualizar** continua sendo o início explícito da sequência contratações → listas de itens → preços. A abertura do programa não inicia downloads. A política de repetição acompanha somente esse ciclo e é herdada pelas consultas internas de itens e resultados; pesquisas e automações conservam seus limites de tentativas.
+
+Durante o modo agressivo, um `429`, timeout ou falha de servidor reduz a concorrência progressivamente. Respostas de erro separadas por menos de 500 ms compartilham a mesma redução. Respostas atrasadas de chamadas iniciadas antes de uma redução não derrubam novamente o nível atual: é preciso observar chamadas iniciadas nesse nível. Erros persistentes ainda podem reduzir até uma chamada. Sem prazo do servidor, o bloqueio de crescimento dura 250 ms, e oito respostas rápidas bem-sucedidas permitem subir um nível, respeitando o máximo do perfil de recursos. A detecção de latência alta permanece ativa.
+
+Cada consulta tem até três tentativas, com intervalos de 250–349 ms e 500–599 ms. O pequeno intervalo aleatório evita repetir todas as chamadas simultaneamente. Um `Retry-After` explícito usa o prazo do servidor, inclusive acima de cinco minutos. A resposta é liberada antes da espera, deixando a vaga disponível para outras chamadas. Não há pausa fixa entre consultas bem-sucedidas.
+
+Depois de três falhas transitórias (`408`, `429`, `5xx`, transporte ou timeout), a pendência volta ao serviço. Na etapa de contratações, partições já em andamento podem terminar, mas novas partições não são abertas após a primeira falha persistente. Os checkpoints incompletos e a data da última sincronização bem-sucedida são preservados. O ciclo avança para as listas dos contratos disponíveis, mesmo com cobertura incompleta, e depois para os preços dos itens obtidos. As falhas de itens/preços ficam elegíveis para um ciclo posterior, sem voltar à mesma fila durante a execução atual. O encerramento informa pendências e permite retomar com **Atualizar**; não declara a janela nacional concluída.
+
+O prazo de rede começa depois da saída da fila: até 90 segundos por chamada de contratações, 45 segundos por chamada de itens/preços no aplicativo e seis minutos para demais chamadas, preservando o limite anterior de documentos. Esses limites interrompem chamadas sem resposta; não são esperas entre buscas. O `HttpClient` compartilhado não cancela mais uma chamada por ela ter passado seis minutos na fila. Pausa, cancelamento, erros definitivos e falta de espaço continuam interrompendo o trabalho conforme seus controles. Não se transformam falhas em listas vazias nem em cobertura concluída. Não se alteram esquema, índices ou dependências.
+
+Se três contratações consecutivas falharem na etapa de itens ou preços, o ciclo termina as chamadas já iniciadas e deixa o restante pendente. Dentro de uma contratação, três itens consecutivos com falha também adiam os demais. Isso permite avançar de etapa durante indisponibilidade persistente sem percorrer milhões de registros que falhariam da mesma forma. Uma resposta bem-sucedida reinicia a contagem de falhas consecutivas.
+
+Uma página de contratações rejeitada com HTTP 400 também fica pendente para retomada, permitindo continuar os itens e preços disponíveis. O HTTP 400 não recebe novas tentativas automáticas na mesma consulta. Erros 401/403 e cancelamento do usuário continuam interrompendo o ciclo.
+
+## Validação
+
+Os testes usam respostas HTTP simuladas e bancos temporários. Cobrem erros atrasados após redução de concorrência, recuperação, três falhas persistentes, transporte, prazo explícito, escopos internos, erros definitivos, pausa, cancelamento e prazo de rede iniciado somente após a fila. O teste da sequência completa usa duas respostas `429` antes do sucesso. Outro teste mantém falhas em contratações, listas e resultados, verifica preços salvos de contratos saudáveis e pendências preservadas, e retoma até completar sem baixar novamente os itens/preços já concluídos.
+
+O relatório de 16/09/2026 às 06:44 mostrou 60 chamadas de contratações (52 falhas), mediana de 301,4 s na fila e 36,8 s na rede, concorrência efetiva de uma chamada e ciclo ativo havia 27 min 25 s. São evidências de falhas nas chamadas amplificadas pela fila e pelas repetições ilimitadas do aplicativo; não demonstram que toda a demora é exclusiva do PNCP.
+
+Resultados de compilação, testes e publicação ficam em `artifacts/aggressive-retry-validation/`. Os tempos de recuperação do agendador são verificados com relógio simulado; não representam uma medição de velocidade da API real nem garantem concluir a carga nacional em um prazo específico.
+
+Validação desta correção em 16/09/2026: compilação Release sem avisos ou erros; suíte final com 677 testes aprovados, nenhum reprovado (`aggressive-progress-full-final.trx`). Uma execução anterior apresentou uma falha no teste de remoção do cache de documentos, que usa cliente simulado e código não alterado nesta correção; esse teste passou na repetição direcionada e na suíte final.
+
+## Acompanhamento real em 16/09/2026
+
+A execução iniciada às 07:06:26 terminou às 07:18:07, após 11 min 41 s, com 100 contratações gravadas. O relatório exportado às 07:16:16 (`live-performance-20260916-071616.json`) registrou 24 chamadas de contratações, sendo duas bem-sucedidas e 22 falhas; concorrência efetiva 1, fila de três chamadas, mediana de rede 62,2 s e espera máxima em fila de 350,9 s. Os checkpoints preservaram falhas 429, 500 e 504. Um HTTP 400 com a mensagem `For input string: ""` encerrou o ciclo antes das etapas de itens e preços, revelando a necessidade do tratamento adicional acima.
+
+As leituras da janela e dos pequenos registros de controle ficaram em `live-cycle-20260916.jsonl` e `live-database-20260916.jsonl`. O banco selecionado foi aberto pelo monitor somente em modo de leitura com SQLite nativo do Windows, sem consultas às tabelas completas de itens ou alterações nos dados. O teste de persistência/retomada foi estendido para HTTP 400, verificando uma única tentativa, a continuação com itens/preços disponíveis e a preservação das pendências.
+
+A correção adicional do HTTP 400 compilou em Release sem avisos/erros e passou em todos os 678 testes (`aggressive-http400-full.trx`). Foi publicada às 07:38:32 no caminho canônico, com um único executável e sem PDBs; o manifesto e o hash foram conferidos (`aggressive-http400-publication.json`).
+
+Na atualização iniciada pelo usuário às 07:39:36, a etapa de contratações terminou às 07:42:59, após 3 min 24 s, com 100 registros gravados. Oito partições preservaram seus checkpoints com falhas HTTP 500, 502 e 503, e o ciclo avançou para as listas disponíveis. Essa execução confirma a continuação diante de falhas de servidor; o caso HTTP 400 permanece coberto pelo teste simulado, pois não reapareceu nesse acompanhamento.
+
+A etapa de listas terminou às 07:48:46, após 5 min 46 s. Todas as 1.297.049 contratações disponíveis ficaram com listas processadas, sem falhas nem pendências nessa etapa. O total de itens passou de 13.504.449 para 13.656.886, aumento de 152.437. Isso não significa cobertura nacional de contratações concluída: as oito partições anteriores continuam pendentes.
+
+A etapa de preços começou às 07:48:46 e seguia ativa às 07:50:01. Entre duas leituras do controle do banco, às 07:49:08 e 07:50:01, os resultados passaram de 6.988.219 para 6.991.083 (+2.864 em aproximadamente 53 s), e as contratações pendentes de preços caíram de 8.318 para 7.298, sem falhas registradas. O relatório das 07:49:35 confirmou 48 chamadas ativas, concorrência efetiva 48, nenhuma chamada na fila e mediana de rede de 942 ms em 1.959 chamadas de resultados. O avanço pelas três etapas e a persistência de novos preços foram observados; o ciclo completo ainda não havia terminado.
+
+As evidências desta execução estão em `live-cycle-http400-20260916.jsonl`, `live-database-http400-20260916.jsonl` e nos relatórios `live-performance-http400-20260916-074610` e `live-performance-http400-20260916-074935` (JSON/TXT), sob `artifacts/aggressive-retry-validation/`. As leituras do banco continuaram restritas aos pequenos registros de controle, com SQLite nativo do Windows em modo somente leitura.

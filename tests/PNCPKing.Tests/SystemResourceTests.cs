@@ -18,6 +18,55 @@ public sealed class SystemResourceTests
     private const long Gibibyte = 1024L * 1024 * 1024;
 
     [Theory]
+    [InlineData(ResourceUsageProfile.Restricted, 32, 16, "Restrito", 32, 64, 128, 1)]
+    [InlineData(ResourceUsageProfile.Medium, 32, 16, "Médio", 32, 128, 64, 2)]
+    [InlineData(ResourceUsageProfile.Broad, 8, 4, "Amplo", 64, 256, 128, 2)]
+    public async Task ManualProfileOverridesHardwareDefaultAndConfiguresNewConnections(
+        ResourceUsageProfile selected, int memoryGib, int processors, string name,
+        int cacheMib, int migrationMib, int mmapMib, int threads)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var resources = SystemResourceProbe.CreateSnapshot(memoryGib * Gibibyte, 4 * Gibibyte, 50, processors);
+        var factory = new SqliteConnectionFactory(database.Repository.DatabasePath,
+            resourceProbe: new FixedProbe(resources), resourceProfile: selected);
+        Assert.Equal(selected, factory.SelectedResourceProfile);
+        Assert.Equal(name, factory.ProfileName);
+        Assert.Equal(migrationMib * 1024, factory.MigrationCacheKib);
+        await using var connection = await factory.OpenAsync();
+        await using var command = connection.CreateCommand();
+        foreach (var (pragma, expected) in new[]
+        {
+            ("cache_size", -cacheMib * 1024L), ("mmap_size", mmapMib * 1024L * 1024), ("threads", (long)threads)
+        })
+        {
+            command.CommandText = $"PRAGMA {pragma};";
+            Assert.Equal(expected, Convert.ToInt64(await command.ExecuteScalarAsync()));
+        }
+        var calibration = factory.ReadOnlyProfile(new(64), new FixedProbe(resources));
+        Assert.Equal(selected, calibration.SelectedResourceProfile);
+        Assert.Equal(name, calibration.ProfileName);
+    }
+
+    [Fact]
+    public void ManualBroadProfileKeepsMemoryProtectionAtStartupAndWhenMemoryDrops()
+    {
+        var probe = new SqliteCalibrationTests.Probe
+        {
+            Snapshot = SystemResourceProbe.CreateSnapshot(32 * Gibibyte, 16 * Gibibyte, 50, 16)
+        };
+        var factory = new SqliteConnectionFactory("unused-profile.db", resourceProbe: probe,
+            resourceProfile: ResourceUsageProfile.Broad);
+        Assert.Equal(64, factory.SearchTuning.CacheMiB);
+        probe.Snapshot = SystemResourceProbe.CreateSnapshot(32 * Gibibyte, 400 * 1024 * 1024, 99, 16);
+        Assert.Equal(32, factory.SearchTuning.CacheMiB);
+        var lowMemoryStartup = new SqliteConnectionFactory("unused-profile.db", resourceProbe: probe,
+            resourceProfile: ResourceUsageProfile.Broad);
+        Assert.Equal("Restrito", lowMemoryStartup.ProfileName);
+        Assert.Equal(64 * 1024, lowMemoryStartup.MigrationCacheKib);
+        Assert.Equal(1, lowMemoryStartup.WorkerThreads);
+    }
+
+    [Theory]
     [InlineData(16, 0.49, 8, SystemResourcePressure.Critical)]
     [InlineData(16, 1.00, 8, SystemResourcePressure.Constrained)]
     [InlineData(8, 4.00, 8, SystemResourcePressure.Constrained)]

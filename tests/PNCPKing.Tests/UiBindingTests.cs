@@ -7,6 +7,18 @@ namespace PNCPKing.Tests;
 public sealed class UiBindingTests
 {
     [Fact]
+    public void GitHubUpdateIsSeparateFromPncpSynchronization()
+    {
+        var document = LoadView("MainWindow.xaml");
+        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        var buttons = document.Descendants(presentation + "Button").ToArray();
+        var update = Assert.Single(buttons, b => b.Attribute("Content")?.Value == "Atualizar pelo GitHub");
+        Assert.Equal("{Binding GitHubUpdateCommand}", update.Attribute("Command")?.Value);
+        Assert.Contains(update.Parent!.Elements(presentation + "Button"), b => b.Attribute("Content")?.Value == "Opções ▾");
+        Assert.Contains(buttons, b => b.Attribute("Content")?.Value == "Atualizar" && b.Attribute("Command")?.Value == "{Binding StartSyncCommand}");
+    }
+
+    [Fact]
     public void MainSearch_ExposesHealthExhaustionAndPersistentPriceGestures()
     {
         var document = LoadView("MainWindow.xaml");
@@ -499,6 +511,24 @@ public sealed class UiBindingTests
         Assert.Contains(buttons, element =>
             element.Attribute("Content")?.Value == "Restaurar padrão" &&
             element.Attribute("Click")?.Value == "Reset_Click");
+    }
+
+    [Fact]
+    public void PriceSortingIsLocalAndRequestedSortBelongsToContractsPanel()
+    {
+        var document = LoadView("MainWindow.xaml");
+        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var selector = Assert.Single(document.Descendants(presentation + "ComboBox"), element =>
+            element.Attribute("SelectedItem")?.Value == "{Binding SelectedSortOption}");
+        Assert.Contains(selector.Ancestors(presentation + "Border"), border =>
+            border.Attribute("Visibility")?.Value.Contains("IsContractsPanelOpen", StringComparison.Ordinal) == true);
+        var grid = Assert.Single(document.Descendants(presentation + "DataGrid"), element =>
+            element.Attribute(x + "Name")?.Value == "ItemResultsGrid");
+        Assert.Null(grid.Attribute("Sorting"));
+        Assert.Equal("True", grid.Attribute("EnableRowVirtualization")?.Value);
+        Assert.Contains(document.Descendants(presentation + "TextBlock"), element =>
+            element.Attribute("Text")?.Value == "Clique nas colunas para ordenar os resultados carregados.");
     }
 
     private static XDocument LoadView(string fileName) =>

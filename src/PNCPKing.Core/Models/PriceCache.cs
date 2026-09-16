@@ -163,6 +163,12 @@ public sealed record NationalPriceIndexProgress
         : Math.Clamp(CompletedItems * 100d / EligibleItems, 0d, 100d);
 }
 
+public enum PriceCacheLocalReadOrder
+{
+    RequestedSort,
+    Discovery
+}
+
 public sealed record PriceCacheLocalPage(
     IReadOnlyList<ItemSearchHit> Hits,
     int Page,
@@ -188,7 +194,8 @@ public sealed record PriceCacheLocalCursor(
     string PublicationDate,
     string ContractId,
     long ItemNumber,
-    long ResultSequence = 0);
+    long ResultSequence = 0,
+    long? ItemRowId = null);
 
 public enum BackupProfile
 {

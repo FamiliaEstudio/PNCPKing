@@ -13,6 +13,9 @@ namespace PNCPKing.Infrastructure.Services;
 public sealed record OfficialUpdateManifest(int Format, int Schema, string BaseId, string Origin,
     long Revision, bool InitialBase, string PackageId, string Sha256, long Units);
 public sealed record OfficialUpdateResult(long Applied, long Skipped, long Conflicts);
+public sealed record OfficialImportReceipt(string Checksum, bool InitialBase, bool Completed);
+public sealed record OfficialTransferStatus(string Origin, string? BaseId, bool BaseReady,
+    IReadOnlyDictionary<string, OfficialImportReceipt> Imports);
 
 /// <summary>Logical, cumulative transfer. Only fixed official tables are accepted;
 /// user data and operational settings never enter the package.</summary>
@@ -39,6 +42,46 @@ public sealed class OfficialUpdateService
 
     public OfficialUpdateService(ISqliteConnectionFactory connections) => _connections = connections;
     public OfficialUpdateService(string databasePath) : this(new SqliteConnectionFactory(databasePath)) { }
+
+    public static async Task<(OfficialUpdateManifest Manifest, long ExpandedSize)> ReadManifestAsync(
+        string path, CancellationToken cancellationToken = default)
+    {
+        using var zip = ZipFile.OpenRead(path);
+        if (zip.Entries.Count != 2 || zip.Entries.Count(e => e.FullName == "manifest.json") != 1 ||
+            zip.Entries.Count(e => e.FullName == "updates.db") != 1)
+            throw new InvalidDataException("Conteúdo do pacote inválido.");
+        var metadata = zip.GetEntry("manifest.json")!;
+        if (metadata.Length > 65536) throw new InvalidDataException("Manifesto inválido.");
+        await using var input = metadata.Open();
+        var manifest = await JsonSerializer.DeserializeAsync<OfficialUpdateManifest>(input, Json, cancellationToken)
+            ?? throw new InvalidDataException("Manifesto ausente.");
+        return (manifest, zip.GetEntry("updates.db")!.Length);
+    }
+
+    public async Task<OfficialTransferStatus> GetTransferStatusAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var tx = connection.BeginTransaction(deferred: true);
+        await using var command = connection.CreateCommand();
+        command.Transaction = tx;
+        command.CommandText = "SELECT origin,base_id,base_ready FROM official_transfer_state WHERE id=1";
+        string origin;
+        string? baseId;
+        bool ready;
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            if (!await reader.ReadAsync(cancellationToken)) throw new InvalidDataException("Identidade do banco ausente.");
+            origin = reader.GetString(0);
+            baseId = reader.IsDBNull(1) ? null : reader.GetString(1);
+            ready = reader.GetInt64(2) != 0;
+        }
+        command.CommandText = "SELECT package_id,checksum,initial_base,completed FROM official_imports";
+        var imports = new Dictionary<string, OfficialImportReceipt>(StringComparer.Ordinal);
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            while (await reader.ReadAsync(cancellationToken))
+                imports.Add(reader.GetString(0), new(reader.GetString(1), reader.GetInt64(2) != 0, reader.GetInt64(3) != 0));
+        return new(origin, baseId, ready, imports);
+    }
 
     public async Task<OfficialUpdateManifest> ExportAsync(string path, bool newBase = false,
         IProgress<string>? progress = null, CancellationToken cancellationToken = default)

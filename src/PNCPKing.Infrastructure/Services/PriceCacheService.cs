@@ -70,7 +70,8 @@ public sealed class PriceCacheService(
             return;
         }
 
-        if (!await coverage.IsCoverageCompleteAsync(start, today, cancellationToken).ConfigureAwait(false))
+        var coverageComplete = await coverage.IsCoverageCompleteAsync(start, today, cancellationToken).ConfigureAwait(false);
+        if (!coverageComplete && !ignoreVisibleActivity)
         {
             await cache.SetStatusAsync(
                     PriceCacheStatus.Idle,
@@ -85,8 +86,11 @@ public sealed class PriceCacheService(
         await cache.SetStatusAsync(PriceCacheStatus.Downloading, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
         var stopwatch = Stopwatch.StartNew();
+        var retryCutoff = DateTimeOffset.UtcNow;
         var lastProgressReport = Stopwatch.GetTimestamp();
         long completedThisRun = 0;
+        var consecutiveFailures = 0;
+        var deferRemainingWork = false;
         long nextSpaceCheckAt = 0;
         var active = new Dictionary<string, Task<bool>>(StringComparer.Ordinal);
         var activitySnapshot = await cache.GetProgressAsync(cancellationToken).ConfigureAwait(false);
@@ -149,12 +153,12 @@ public sealed class PriceCacheService(
                     nextSpaceCheckAt = completedThisRun + 25;
                 }
 
-                var noAvailableWork = false;
-                while (active.Count < maximumParallelContracts)
+                var noAvailableWork = deferRemainingWork;
+                while (!noAvailableWork && active.Count < maximumParallelContracts)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                 await _manualPause.WaitAsync(cancellationToken).ConfigureAwait(false);
-                    var work = await cache.GetNextWorkAsync(DateTimeOffset.UtcNow, cancellationToken)
+                    var work = await cache.GetNextWorkAsync(ignoreVisibleActivity ? retryCutoff : DateTimeOffset.UtcNow, cancellationToken)
                         .ConfigureAwait(false);
                     if (work is null)
                     {
@@ -184,7 +188,7 @@ public sealed class PriceCacheService(
                 if (active.Count == 0 && noAvailableWork)
                 {
                     var snapshot = await cache.GetProgressAsync(cancellationToken).ConfigureAwait(false);
-                    if (snapshot.PendingContracts == 0 && snapshot.FailedContracts == 0)
+                    if (coverageComplete && snapshot.PendingContracts == 0 && snapshot.FailedContracts == 0)
                     {
                         await cache.SetStatusAsync(
                                 PriceCacheStatus.Complete,
@@ -196,13 +200,15 @@ public sealed class PriceCacheService(
                     {
                         await cache.SetStatusAsync(
                                 PriceCacheStatus.Failed,
-                                "Há contratações aguardando a próxima tentativa automática.",
+                                "Há contratações pendentes. Use Atualizar para retomar.",
                                 cancellationToken)
                             .ConfigureAwait(false);
                     }
                     else
                     {
-                        await cache.SetStatusAsync(PriceCacheStatus.Idle, cancellationToken: cancellationToken)
+                        await cache.SetStatusAsync(PriceCacheStatus.Idle,
+                                coverageComplete ? null : "Itens disponíveis processados; a cobertura de contratações ainda está incompleta.",
+                                cancellationToken)
                             .ConfigureAwait(false);
                     }
 
@@ -228,7 +234,10 @@ public sealed class PriceCacheService(
                     if (await CompleteOneAsync(active, cancellationToken).ConfigureAwait(false))
                     {
                         completedThisRun++;
+                        consecutiveFailures = 0;
                     }
+                    else if (ignoreVisibleActivity && ++consecutiveFailures >= 3)
+                        deferRemainingWork = true;
                 }
 
                 if (ShouldReportProgress())

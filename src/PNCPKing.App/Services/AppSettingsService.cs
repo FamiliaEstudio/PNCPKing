@@ -33,7 +33,8 @@ public sealed record AppSettings(
     decimal AiSafetyMarginPercent = 10m,
     int? CatalogRefreshIntervalDays = null,
     bool? DesktopShortcutEnabled = null,
-    SavedSqliteCalibration? SqliteCalibration = null)
+    SavedSqliteCalibration? SqliteCalibration = null,
+    ResourceUsageProfile ResourceProfile = ResourceUsageProfile.Automatic)
 {
     public const int CurrentVersion = 5;
     public const int DefaultCatalogRefreshIntervalDays = 0;
@@ -42,6 +43,9 @@ public sealed record AppSettings(
         NormalizeCatalogRefreshIntervalDays(CatalogRefreshIntervalDays);
 
     public bool EffectiveDesktopShortcutEnabled => DesktopShortcutEnabled ?? true;
+
+    public ResourceUsageProfile EffectiveResourceProfile => Enum.IsDefined(ResourceProfile)
+        ? ResourceProfile : ResourceUsageProfile.Automatic;
 
     public static int NormalizeCatalogRefreshIntervalDays(int? value) =>
         0;
@@ -73,6 +77,7 @@ public sealed class AppSettingsService
                     {
                         SettingsVersion = Math.Max(AppSettings.CurrentVersion, settings.SettingsVersion),
                         CatalogRefreshIntervalDays = settings.EffectiveCatalogRefreshIntervalDays,
+                        ResourceProfile = settings.EffectiveResourceProfile,
                         DesktopShortcutEnabled = settings.EffectiveDesktopShortcutEnabled
                     };
                 }

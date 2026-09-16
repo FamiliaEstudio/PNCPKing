@@ -8,8 +8,11 @@
     <RootNamespace>PNCPKing.App</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\Branding\PNCPKing.ico</ApplicationIcon>
+    <Version>1.1.0</Version>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="Services/InstallGitHubUpdate.ps1"
+                      LogicalName="PNCPKing.App.InstallGitHubUpdate.ps1" />
     <ProjectReference Include="../PNCPKing.Infrastructure/PNCPKing.Infrastructure.csproj"
                       SkipGetTargetFrameworkProperties="true" />
     <PackageReference Include="Tesseract" />

@@ -18,6 +18,7 @@ public sealed partial class MainViewModel
 
     private void InitializeUpdates()
     {
+        GitHubUpdateCommand = new AsyncRelayCommand(() => _gitHubUpdateTask = UpdateFromGitHubAsync(), () => CanEvaluatePc);
         ExportUpdatesCommand = new AsyncRelayCommand(() => ExportOfficialUpdatesAsync(false), () => CanEvaluatePc);
         NewUpdateBaseCommand = new AsyncRelayCommand(() => ExportOfficialUpdatesAsync(true), () => CanEvaluatePc);
         ImportUpdatesCommand = new AsyncRelayCommand(() => ImportOfficialUpdatesAsync(false), () => CanEvaluatePc);
@@ -26,6 +27,8 @@ public sealed partial class MainViewModel
         {
             await RunFileOperationAsync(async ct =>
             {
+                // VACUUM can renumber rowids, including after retention has committed.
+                InvalidateLocalPriceCursor();
                 var repository = new SqliteContractRepository(_calibrationService.Connections);
                 var progress = new Progress<string>(s => FileOperationProgressText = s);
                 var result = await Task.Run(() => repository.MaintainRetentionAsync(DateOnly.FromDateTime(DateTime.Today),
@@ -84,21 +87,26 @@ public sealed partial class MainViewModel
             }
             finally
             {
-                _calibrationService.Connections.ResetCalibration();
-                _calibrationWindow?.Close();
-                await SaveCalibrationAsync(null);
-                await _itemSearchService.InvalidateAsync();
-                await _transientItemSearchService.InvalidateAsync();
-                await RefreshDatasetSummaryAsync();
-                await RefreshCoverageAsync();
-                await RefreshPriceCacheProgressAsync();
-                await RefreshNationalPriceIndexProgressAsync();
-                await RefreshCatalogCoverageAsync();
-                _restartPriceSessionOnNextExpansion = true;
-                var message = StatusText;
-                await SearchAsync(resetSession: true, restartPriceSession: true, revalidateStalePrices: false);
-                StatusText = message;
+                await RefreshAfterOfficialImportAsync();
             }
         });
+    }
+
+    private async Task RefreshAfterOfficialImportAsync()
+    {
+        _calibrationService.Connections.ResetCalibration();
+        _calibrationWindow?.Close();
+        await SaveCalibrationAsync(null);
+        await _itemSearchService.InvalidateAsync();
+        await _transientItemSearchService.InvalidateAsync();
+        await RefreshDatasetSummaryAsync();
+        await RefreshCoverageAsync();
+        await RefreshPriceCacheProgressAsync();
+        await RefreshNationalPriceIndexProgressAsync();
+        await RefreshCatalogCoverageAsync();
+        _restartPriceSessionOnNextExpansion = true;
+        var message = StatusText;
+        await SearchAsync(resetSession: true, restartPriceSession: true, revalidateStalePrices: false);
+        StatusText = message;
     }
 }

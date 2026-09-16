@@ -8,6 +8,32 @@ namespace PNCPKing.Tests;
 public sealed class PncpRequestSchedulingTests
 {
     [Theory]
+    [InlineData(ResourceUsageProfile.Restricted, SystemResourcePressure.Normal, 16, 8)]
+    [InlineData(ResourceUsageProfile.Medium, SystemResourcePressure.Normal, 32, 12)]
+    [InlineData(ResourceUsageProfile.Broad, SystemResourcePressure.Normal, 48, 16)]
+    [InlineData(ResourceUsageProfile.Restricted, SystemResourcePressure.Critical, 8, 1)]
+    [InlineData(ResourceUsageProfile.Medium, SystemResourcePressure.Critical, 8, 1)]
+    [InlineData(ResourceUsageProfile.Broad, SystemResourcePressure.Critical, 8, 1)]
+    [InlineData(ResourceUsageProfile.Broad, SystemResourcePressure.Constrained, 16, 8)]
+    public void ManualProfileCapsAdaptiveGrowthAndPreservesRateLimitProtection(
+        ResourceUsageProfile selected, SystemResourcePressure pressure, int maximum, int initial)
+    {
+        var limits = PncpRequestScheduler.GetRecommendedConcurrency(pressure, selected);
+        Assert.Equal((maximum, initial), limits);
+        var clock = new ManualTimeProvider();
+        var scheduler = new PncpRequestScheduler(limits.MaximumConcurrency, clock, limits.InitialConcurrency);
+        for (var index = 0; index < 32 * 5; index++)
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(50));
+            scheduler.ReportOutcome(PncpRequestCategory.ItemLists, HttpStatusCode.OK, TimeSpan.FromSeconds(1));
+            Assert.InRange(scheduler.GetSnapshot().EffectiveConcurrency, 1, maximum);
+        }
+        Assert.Equal(maximum, scheduler.GetSnapshot().EffectiveConcurrency);
+        scheduler.ReportOutcome(PncpRequestCategory.ItemLists, HttpStatusCode.TooManyRequests, TimeSpan.FromSeconds(1));
+        Assert.Equal(1, scheduler.GetSnapshot().EffectiveConcurrency);
+    }
+
+    [Theory]
     [InlineData(SystemResourcePressure.Critical, 8, 1)]
     [InlineData(SystemResourcePressure.Constrained, 16, 8)]
     [InlineData(SystemResourcePressure.Normal, 48, 16)]
@@ -646,6 +672,28 @@ public sealed class PncpRequestSchedulingTests
     }
 
     [Fact]
+    public async Task ContractTimeoutStartsAfterQueueAndReleasesTheSlotOnExpiry()
+    {
+        var scheduler = new PncpRequestScheduler(maximumConcurrency: 1);
+        var telemetry = new PncpRequestTelemetry();
+        using var blocker = await scheduler.AcquireAsync(PncpRequestPriority.UserSelectedItem);
+        var inner = new BlockingHandler(expectedInitialCalls: 1);
+        using var http = new HttpClient(new PncpSchedulingHandler(scheduler, telemetry,
+            contractRequestTimeout: TimeSpan.FromMilliseconds(100)) { InnerHandler = inner })
+        { Timeout = Timeout.InfiniteTimeSpan };
+        var operation = http.GetByteArrayAsync("https://example.test/consulta/v1/contratacoes/publicacao");
+        await Task.Delay(200);
+        Assert.False(operation.IsCompleted);
+        Assert.Equal(0, inner.Calls);
+        blocker.Dispose();
+        await inner.WaitForInitialCallsAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(1, telemetry.GetSnapshot()[PncpRequestCategory.Contracts].Failed);
+        Assert.Equal(0, scheduler.GetSnapshot().ActiveRequests);
+        Assert.Equal(0, scheduler.GetSnapshot().TotalQueued);
+    }
+
+    [Fact]
     public async Task BackgroundItemTimeout_ReducesConcurrencyAndReturnsToCheckpointWithoutHttpRetry()
     {
         var inner = new BlockingHandler(expectedInitialCalls: 1);
@@ -724,17 +772,17 @@ public sealed class PncpRequestSchedulingTests
         var clock = new ManualTimeProvider();
         var scheduler = new PncpRequestScheduler(48, clock, initialConcurrency: 16);
         using var aggressive = scheduler.EnableAggressiveBackgroundRequests();
-        for (var index = 0; index < 32; index++)
+        for (var index = 0; index < 8; index++)
         {
             clock.Advance(TimeSpan.FromMilliseconds(50));
             scheduler.ReportOutcome(PncpRequestCategory.Contracts, HttpStatusCode.OK, TimeSpan.FromSeconds(1));
         }
         Assert.Equal(24, scheduler.GetSnapshot().EffectiveConcurrency);
 
+        scheduler.ReportOutcome(PncpRequestCategory.Contracts, HttpStatusCode.TooManyRequests, TimeSpan.FromSeconds(1));
+        Assert.Equal(16, scheduler.GetSnapshot().EffectiveConcurrency);
         scheduler.ReportOutcome(PncpRequestCategory.Contracts, HttpStatusCode.ServiceUnavailable, TimeSpan.FromSeconds(1));
         Assert.Equal(16, scheduler.GetSnapshot().EffectiveConcurrency);
-        scheduler.ReportOutcome(PncpRequestCategory.Contracts, HttpStatusCode.TooManyRequests, TimeSpan.FromSeconds(1));
-        Assert.Equal(1, scheduler.GetSnapshot().EffectiveConcurrency);
         Assert.Equal("HTTP 429", scheduler.GetSnapshot().LastReductionReason);
     }
 

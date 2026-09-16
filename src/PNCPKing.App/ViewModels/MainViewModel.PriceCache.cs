@@ -87,7 +87,9 @@ public sealed partial class MainViewModel
 
     public string PriceCacheActivityText
     {
-        get => _priceCacheActivityText;
+        get => _indexUpdateStage == 1
+            ? "Aguardando a etapa 1/3: contratações"
+            : _priceCacheActivityText;
         private set => SetProperty(ref _priceCacheActivityText, value);
     }
 
@@ -605,10 +607,10 @@ public sealed partial class MainViewModel
                 PriceCacheStatus.Downloading => "Índice de itens de 11 meses: baixando listas em segundo plano",
                 PriceCacheStatus.Paused => "Índice de itens de 11 meses: pausado",
                 PriceCacheStatus.Complete => "Índice de itens de 11 meses: completo",
-                PriceCacheStatus.Failed => "Índice de itens de 11 meses: há falhas aguardando repetição",
+                PriceCacheStatus.Failed => "Índice de itens de 11 meses: há falhas; use Atualizar para tentar novamente",
                 PriceCacheStatus.InsufficientSpace => "Índice de itens de 11 meses: pausado por falta de espaço",
                 PriceCacheStatus.Disabled => "Índice de itens de 11 meses: desativado",
-                _ => "Índice de itens de 11 meses: aguardando cobertura ou próxima tentativa"
+                _ => "Índice de itens de 11 meses: pendente; use Atualizar para continuar"
             };
         }
         if (progress.Status is PriceCacheStatus.Failed or PriceCacheStatus.InsufficientSpace)

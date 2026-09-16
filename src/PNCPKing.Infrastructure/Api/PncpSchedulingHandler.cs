@@ -20,13 +20,26 @@ public static class PncpRequestOptions
 
     public static IDisposable BeginScope(
         PncpRequestPriority priority,
-        PncpRequestCategory? category = null)
+        PncpRequestCategory? category = null,
+        bool retryTransientFailures = false,
+        Func<CancellationToken, Task>? waitForResume = null,
+        IProgress<string>? retryProgress = null)
     {
         var previous = CurrentScope.Value;
-        var current = new ScopeState(priority, category);
+        var current = new ScopeState(priority, category,
+            retryTransientFailures || previous?.RetryTransientFailures == true,
+            waitForResume ?? previous?.WaitForResume,
+            retryProgress ?? previous?.RetryProgress);
         CurrentScope.Value = current;
         return new ScopeLease(previous, current);
     }
+
+    internal static bool RetryTransientFailures => CurrentScope.Value?.RetryTransientFailures == true;
+
+    internal static Task WaitForResumeAsync(CancellationToken cancellationToken) =>
+        CurrentScope.Value?.WaitForResume?.Invoke(cancellationToken) ?? Task.CompletedTask;
+
+    internal static void ReportRetry(string message) => CurrentScope.Value?.RetryProgress?.Report(message);
 
     public static void Set(
         HttpRequestMessage request,
@@ -92,7 +105,10 @@ public static class PncpRequestOptions
 
     private sealed record ScopeState(
         PncpRequestPriority Priority,
-        PncpRequestCategory? Category);
+        PncpRequestCategory? Category,
+        bool RetryTransientFailures,
+        Func<CancellationToken, Task>? WaitForResume,
+        IProgress<string>? RetryProgress);
 
     private sealed class ScopeLease(ScopeState? previous, ScopeState current) : IDisposable
     {
@@ -120,20 +136,27 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
     private readonly PncpRequestTelemetry _telemetry;
     private readonly IPerformanceTelemetry _performance;
     private readonly TimeSpan _itemRequestTimeout;
+    private readonly TimeSpan _contractRequestTimeout;
 
     public PncpSchedulingHandler(
         PncpRequestScheduler scheduler,
         PncpRequestTelemetry telemetry,
         IPerformanceTelemetry? performance = null,
-        TimeSpan? itemRequestTimeout = null)
+        TimeSpan? itemRequestTimeout = null,
+        TimeSpan? contractRequestTimeout = null)
     {
         _scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
         _telemetry = telemetry ?? throw new ArgumentNullException(nameof(telemetry));
         _performance = performance ?? NullPerformanceTelemetry.Instance;
         _itemRequestTimeout = itemRequestTimeout ?? DefaultItemRequestTimeout;
+        _contractRequestTimeout = contractRequestTimeout ?? TimeSpan.FromSeconds(90);
         if (_itemRequestTimeout <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(itemRequestTimeout));
+        }
+        if (_contractRequestTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(contractRequestTimeout));
         }
     }
 
@@ -151,10 +174,12 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
         RequestCompletion? completion = null;
         PerformanceSpan? networkSpan = null;
         CancellationTokenSource? requestTimeout = null;
+        int? concurrencyAtDispatch = null;
 
         try
         {
             lease = await _scheduler.AcquireAsync(metadata.Priority, cancellationToken).ConfigureAwait(false);
+            concurrencyAtDispatch = _scheduler.EffectiveConcurrency;
             _performance.Record(
                 "pncp-request",
                 $"queue-{metadata.Category}",
@@ -162,13 +187,16 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
             measurement.MarkDispatched();
             networkSpan = _performance.Begin("pncp-request", $"network-{metadata.Category}");
             var dispatchedAt = Stopwatch.GetTimestamp();
-            var requestCancellationToken = cancellationToken;
-            if (metadata.Category is PncpRequestCategory.ItemLists or PncpRequestCategory.ItemResults)
+            // Queue time is not network time. Start every request's deadline
+            // only after acquiring its slot, including contracts and documents.
+            requestTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            requestTimeout.CancelAfter(metadata.Category switch
             {
-                requestTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                requestTimeout.CancelAfter(_itemRequestTimeout);
-                requestCancellationToken = requestTimeout.Token;
-            }
+                PncpRequestCategory.ItemLists or PncpRequestCategory.ItemResults => _itemRequestTimeout,
+                PncpRequestCategory.Contracts => _contractRequestTimeout,
+                _ => TimeSpan.FromMinutes(6)
+            });
+            var requestCancellationToken = requestTimeout.Token;
 
             var response = await base.SendAsync(request, requestCancellationToken).ConfigureAwait(false);
             completion = new RequestCompletion(
@@ -181,7 +209,8 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
                 GetRetryAfter(response),
                 dispatchedAt,
                 requestTimeout,
-                cancellationToken);
+                cancellationToken,
+                concurrencyAtDispatch.Value);
             lease = null;
             networkSpan = null;
             requestTimeout = null;
@@ -210,7 +239,8 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
                     metadata.Category,
                     statusCode: requestTimedOut ? HttpStatusCode.RequestTimeout : null,
                     Stopwatch.GetElapsedTime(queuedAt),
-                    transportFailure: !requestTimedOut);
+                    transportFailure: !requestTimedOut,
+                    concurrencyAtDispatch: concurrencyAtDispatch);
             }
             measurement.Complete(
                 operationCanceled && cancellationToken.IsCancellationRequested && !requestTimedOut
@@ -249,7 +279,8 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
         TimeSpan? retryAfter,
         long dispatchedAt,
         CancellationTokenSource? requestTimeout,
-        CancellationToken callerCancellationToken)
+        CancellationToken callerCancellationToken,
+        int concurrencyAtDispatch)
     {
         private IDisposable? _lease = lease;
         private CancellationTokenSource? _requestTimeout = requestTimeout;
@@ -293,7 +324,8 @@ public sealed class PncpSchedulingHandler : DelegatingHandler
                     requestTimedOut ? HttpStatusCode.RequestTimeout : statusCode,
                     Stopwatch.GetElapsedTime(dispatchedAt),
                     retryAfter,
-                    transportFailure: !contentSucceeded && !requestTimedOut);
+                    transportFailure: !contentSucceeded && !requestTimedOut,
+                    concurrencyAtDispatch: concurrencyAtDispatch);
             }
             if (outcome == PncpRequestOutcome.Succeeded)
             {

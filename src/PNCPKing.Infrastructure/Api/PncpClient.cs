@@ -237,6 +237,8 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
         var maximumAttempts = MaximumAttemptsFor(uri);
         for (var attempt = 1; attempt <= maximumAttempts; attempt++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            await PncpRequestOptions.WaitForResumeAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 using var response = await _httpClient.GetAsync(
@@ -280,9 +282,9 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
                         fileName?.Trim('"'));
                 }
 
-                var isTransient = response.StatusCode == HttpStatusCode.TooManyRequests ||
+                var isTransient = response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.RequestTimeout ||
                                   (int)response.StatusCode >= 500;
-                if (!isTransient || attempt == maximumAttempts)
+                if (!isTransient || attempt >= maximumAttempts)
                 {
                     var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
                     throw CreateResponseException(response, body, uri);
@@ -290,7 +292,7 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
 
                 var retryDelay = GetRetryDelay(response, attempt);
                 response.Dispose();
-                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+                await WaitToRetryAsync(retryDelay, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (ShouldRetryTransportFailure(
                                                    exception,
@@ -298,7 +300,7 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
                                                    attempt,
                                                    maximumAttempts))
             {
-                await Task.Delay(_backoffDelay(attempt), cancellationToken).ConfigureAwait(false);
+                await WaitToRetryAsync(_backoffDelay(attempt), cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -359,6 +361,8 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
         var maximumAttempts = MaximumAttemptsFor(uri);
         for (var attempt = 1; attempt <= maximumAttempts; attempt++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            await PncpRequestOptions.WaitForResumeAsync(cancellationToken).ConfigureAwait(false);
             var stopwatch = Stopwatch.StartNew();
             try
             {
@@ -409,9 +413,9 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
                     throw CreateResponseException(response, validationBody, uri);
                 }
 
-                var isTransient = response.StatusCode == HttpStatusCode.TooManyRequests ||
+                var isTransient = response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.RequestTimeout ||
                                   (int)response.StatusCode >= 500;
-                if (!isTransient || attempt == maximumAttempts)
+                if (!isTransient || attempt >= maximumAttempts)
                 {
                     var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
                     throw CreateResponseException(response, body, uri);
@@ -421,7 +425,7 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
                 // Release the shared scheduler slot before waiting for Retry-After.
                 // Disposing twice is safe because the response is also scoped by using.
                 response.Dispose();
-                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+                await WaitToRetryAsync(retryDelay, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (ShouldRetryTransportFailure(
                                                    exception,
@@ -430,7 +434,7 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
                                                    maximumAttempts))
             {
                 stopwatch.Stop();
-                await Task.Delay(_backoffDelay(attempt), cancellationToken).ConfigureAwait(false);
+                await WaitToRetryAsync(_backoffDelay(attempt), cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
             {
@@ -439,16 +443,20 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
                     "A API do PNCP excedeu o limite de espera da chamada; o trabalho será retomado.",
                     exception);
             }
+            catch (IOException exception)
+            {
+                throw new HttpRequestException("Falha de transporte ao consultar o PNCP.", exception);
+            }
         }
 
         throw new InvalidOperationException("Falha inesperada ao consultar o PNCP.");
     }
 
-    private TimeSpan GetRetryDelay(HttpResponseMessage response, int attempt)
+    internal TimeSpan GetRetryDelay(HttpResponseMessage response, int attempt)
     {
         if (response.Headers.RetryAfter?.Delta is { } delta)
         {
-            return delta > TimeSpan.FromMinutes(5) ? TimeSpan.FromMinutes(5) : delta;
+            return delta > TimeSpan.Zero ? delta : TimeSpan.Zero;
         }
 
         if (response.Headers.RetryAfter?.Date is { } retryDate)
@@ -456,11 +464,27 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
             var fromHeader = retryDate - DateTimeOffset.UtcNow;
             if (fromHeader > TimeSpan.Zero)
             {
-                return fromHeader > TimeSpan.FromMinutes(5) ? TimeSpan.FromMinutes(5) : fromHeader;
+                return fromHeader;
             }
         }
 
         return _backoffDelay(attempt);
+    }
+
+    private static async Task WaitToRetryAsync(TimeSpan delay, CancellationToken cancellationToken)
+    {
+        if (PncpRequestOptions.RetryTransientFailures)
+            PncpRequestOptions.ReportRetry(delay.TotalSeconds < 1
+                ? $"Aguardando o PNCP: nova tentativa em {delay.TotalMilliseconds:N0} ms; retomada automática."
+                : $"Aguardando o PNCP: nova tentativa em {delay.TotalSeconds:N1} s; retomada automática.");
+        // Long Retry-After values remain cancelable and do not overflow Task.Delay.
+        while (delay > TimeSpan.Zero)
+        {
+            var slice = delay > TimeSpan.FromMinutes(1) ? TimeSpan.FromMinutes(1) : delay;
+            await Task.Delay(slice, cancellationToken).ConfigureAwait(false);
+            delay -= slice;
+        }
+        cancellationToken.ThrowIfCancellationRequested();
     }
 
     private static bool ShouldRetryTransportFailure(
@@ -472,14 +496,26 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
         !cancellationToken.IsCancellationRequested &&
         (exception is HttpRequestException { StatusCode: null } or IOException or TaskCanceledException);
 
-    private static TimeSpan DefaultBackoffDelay(int attempt)
+    internal static TimeSpan DefaultBackoffDelay(int attempt)
     {
+        if (PncpRequestOptions.RetryTransientFailures)
+        {
+            var milliseconds = Math.Min(2000, 250 * Math.Pow(2, Math.Clamp(attempt - 1, 0, 3)));
+            return TimeSpan.FromMilliseconds(milliseconds + Random.Shared.Next(0, 100));
+        }
         var exponentialSeconds = Math.Min(300, 5 * Math.Pow(2, attempt - 1));
         return TimeSpan.FromMilliseconds(exponentialSeconds * 1000 + Random.Shared.Next(250, 1250));
     }
 
     private static int MaximumAttemptsFor(Uri uri)
     {
+        // Return persistent failures to the service so it can save a pending
+        // checkpoint and let the remaining work and subsequent stages proceed.
+        if (PncpRequestOptions.RetryTransientFailures)
+        {
+            return 3;
+        }
+
         var priority = PncpRequestOptions.ResolveCurrentPriority(uri);
         if (priority == PncpRequestPriority.BackgroundPriceCache)
         {
@@ -488,6 +524,15 @@ public sealed class PncpClient : IPncpClient, IPncpDocumentClient
 
         return priority <= PncpRequestPriority.AdditionalBatches ? 3 : 7;
     }
+
+    internal static bool IsTransientFailure(Exception exception) => exception is
+        HttpRequestException { StatusCode: null or HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests or >= HttpStatusCode.InternalServerError }
+        or TimeoutException;
+
+    // A rejected contract page remains pending, but does not prevent obtaining
+    // items/prices for contracts already saved. This does not retry HTTP 400.
+    internal static bool CanDeferContractFailure(Exception exception) =>
+        IsTransientFailure(exception) || exception is HttpRequestException { StatusCode: HttpStatusCode.BadRequest };
 
     private static int ReadFlexibleInt(JsonElement element)
     {

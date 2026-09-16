@@ -52,8 +52,11 @@ public sealed class NationalPriceIndexService(
             .ConfigureAwait(false);
 
         var stopwatch = Stopwatch.StartNew();
+        var retryCutoff = DateTimeOffset.UtcNow;
         var lastProgressReport = Stopwatch.GetTimestamp();
         long completedThisRun = 0;
+        var consecutiveFailures = 0;
+        var deferRemainingWork = false;
         long nextSpaceCheckAt = 0;
         var active = new Dictionary<string, Task<ContractResult>>(StringComparer.Ordinal);
 
@@ -110,13 +113,13 @@ public sealed class NationalPriceIndexService(
                     nextSpaceCheckAt = completedThisRun + 5_000;
                 }
 
-                var noAvailableWork = false;
-                while (active.Count < maximumParallelContracts)
+                var noAvailableWork = deferRemainingWork;
+                while (!noAvailableWork && active.Count < maximumParallelContracts)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                 await _manualPause.WaitAsync(cancellationToken).ConfigureAwait(false);
                     var work = await cache.GetNextNationalPriceWorkAsync(
-                            DateTimeOffset.UtcNow,
+                            retryCutoff,
                             cancellationToken)
                         .ConfigureAwait(false);
                     if (work is null)
@@ -142,7 +145,7 @@ public sealed class NationalPriceIndexService(
                     {
                         await cache.SetNationalPriceIndexStatusAsync(
                                 PriceCacheStatus.Complete,
-                                "Índice móvel de preços dos últimos 11 meses completamente consultado.",
+                                "Preços dos itens disponíveis dos últimos 11 meses completamente consultados.",
                                 cancellationToken)
                             .ConfigureAwait(false);
                     }
@@ -150,7 +153,7 @@ public sealed class NationalPriceIndexService(
                     {
                         await cache.SetNationalPriceIndexStatusAsync(
                                 PriceCacheStatus.Failed,
-                                "Há itens aguardando a próxima tentativa automática.",
+                                "Há itens pendentes. Use Atualizar para retomar.",
                                 cancellationToken)
                             .ConfigureAwait(false);
                     }
@@ -176,6 +179,8 @@ public sealed class NationalPriceIndexService(
                 {
                     var completed = await CompleteOneAsync(active, cancellationToken).ConfigureAwait(false);
                     completedThisRun += completed.CompletedItems;
+                    consecutiveFailures = completed.Succeeded ? 0 : consecutiveFailures + 1;
+                    if (consecutiveFailures >= 3) deferRemainingWork = true;
                 }
 
                 if (ShouldReportProgress())
@@ -216,6 +221,7 @@ public sealed class NationalPriceIndexService(
     {
         var completed = 0;
         var failed = 0;
+        var consecutiveFailures = 0;
         string? lastError = null;
         try
         {
@@ -254,6 +260,7 @@ public sealed class NationalPriceIndexService(
                             cancellationToken)
                         .ConfigureAwait(false);
                     completed++;
+                    consecutiveFailures = 0;
                 }
                 catch (HttpRequestException exception) when (exception.StatusCode == HttpStatusCode.NotFound)
                 {
@@ -273,6 +280,7 @@ public sealed class NationalPriceIndexService(
                             CancellationToken.None)
                         .ConfigureAwait(false);
                     completed++;
+                    consecutiveFailures = 0;
                 }
                 catch (OperationCanceledException)
                 {
@@ -296,6 +304,7 @@ public sealed class NationalPriceIndexService(
                             exception.Message,
                             CancellationToken.None)
                         .ConfigureAwait(false);
+                    if (++consecutiveFailures >= 3) break;
                 }
             }
 

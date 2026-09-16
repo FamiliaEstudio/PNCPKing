@@ -21,6 +21,8 @@ public sealed class SyncService(
 
     public void Resume() => _pauseGate.Resume();
 
+    public Task WaitWhilePausedAsync(CancellationToken cancellationToken) => _pauseGate.WaitAsync(cancellationToken);
+
     public Task SynchronizeAsync(
         DateOnly queryStartDate,
         DateOnly endDate,
@@ -116,6 +118,7 @@ public sealed class SyncService(
             if (options.CheckpointScope is { } checkpointScope)
                 partitions = partitions.Select(p => p with { Key = p.Key + ":cycle:" + checkpointScope }).ToArray();
             var completedPartitions = 0;
+            Exception? deferredFailure = null;
             var progressGate = new object();
             var partitionConcurrency = Math.Min(partitions.Count, Math.Max(1, options.MaximumConcurrency / 2));
             var pageConcurrency = Math.Max(1, options.MaximumConcurrency / Math.Max(1, partitionConcurrency));
@@ -136,6 +139,9 @@ public sealed class SyncService(
                 CancellationToken = cancellationToken
             }, async (partition, partitionToken) =>
             {
+                // Finish work already in flight, then move on to the available
+                // items/prices instead of opening more partitions during an outage.
+                if (Volatile.Read(ref deferredFailure) is not null) return;
                 await _pauseGate.WaitAsync(partitionToken).ConfigureAwait(false);
                 var savedPage = await repository.GetPartitionNextPageAsync(partition.Key, partitionToken).ConfigureAwait(false);
                 if (savedPage == 0)
@@ -149,17 +155,32 @@ public sealed class SyncService(
                     return;
                 }
 
-                await DownloadPartitionWithCoverageAsync(
-                    partition,
-                    savedPage ?? 1,
-                    mode,
-                    coverageRepository,
-                    pageConcurrency,
-                    (saved, message) => ReportProgress(saved, message),
-                    partitionToken).ConfigureAwait(false);
+                try
+                {
+                    await DownloadPartitionWithCoverageAsync(
+                        partition,
+                        savedPage ?? 1,
+                        mode,
+                        coverageRepository,
+                        pageConcurrency,
+                        (saved, message) => ReportProgress(saved, message),
+                        partitionToken).ConfigureAwait(false);
+                }
+                catch (Exception exception) when (PncpRequestOptions.RetryTransientFailures &&
+                                                   PncpClient.CanDeferContractFailure(exception))
+                {
+                    Interlocked.CompareExchange(ref deferredFailure, exception, null);
+                    ReportProgress(0, $"Pendente para retomar: {partition.Description}. {exception.Message}");
+                    return;
+                }
 
                 ReportProgress(0, $"Concluída: {partition.Description}", complete: true);
             }).ConfigureAwait(false);
+
+            if (deferredFailure is not null)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(deferredFailure).Throw();
+            }
 
             if (options.FinalizeDataset)
             {

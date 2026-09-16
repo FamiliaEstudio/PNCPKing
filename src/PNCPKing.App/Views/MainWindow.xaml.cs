@@ -40,6 +40,8 @@ public partial class MainWindow : Window
         _guardMasterService = guardMasterService;
         InitializeComponent();
         DataContext = viewModel;
+        _viewModel.PropertyChanged += ViewModel_PropertyChanged;
+        Closed += (_, _) => _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
         ClampInitialSizeToWorkArea();
         SourceInitialized += MainWindow_SourceInitialized;
         Deactivated += (_, _) => CancelItemResultHold();
@@ -48,6 +50,13 @@ public partial class MainWindow : Window
         _columnLayouts.Register("quotation-lines", QuotationLinesGrid);
         _columnLayouts.Register("quotation-baskets", QuotationBasketsGrid);
         _columnLayouts.Register("quotation-selected-references", SelectedBasketReferencesGrid);
+    }
+
+    private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(MainViewModel.ItemSearchGeneration)) return;
+        ItemResultsGrid.Items.SortDescriptions.Clear();
+        foreach (var column in ItemResultsGrid.Columns) column.SortDirection = null;
     }
 
     private void ClampInitialSizeToWorkArea()

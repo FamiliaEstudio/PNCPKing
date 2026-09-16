@@ -147,8 +147,9 @@ public partial class App : Application
                 resourceProbe: resourceProbe,
                 tuning: settings.SqliteCalibration is { } calibration && File.Exists(databasePath) &&
                     calibration.AppliesTo(databasePath, File.GetCreationTimeUtc(databasePath),
-                        SqliteContractRepository.CurrentSchemaVersion, resourceProbe.GetSnapshot())
-                    ? calibration.Tuning : null);
+                        SqliteContractRepository.CurrentSchemaVersion, resourceProbe.GetSnapshot(), settings.EffectiveResourceProfile)
+                    ? calibration.Tuning : null,
+                resourceProfile: settings.EffectiveResourceProfile);
             _performanceTelemetry.SetSqliteProfile(sqliteConnections.ProfileName);
             var repository = new SqliteContractRepository(sqliteConnections, _performanceTelemetry);
             var quotationRepository = new SqliteQuotationRepository(sqliteConnections);
@@ -156,7 +157,7 @@ public partial class App : Application
 
             var resourceSnapshot = resourceProbe.GetSnapshot();
             var requestConcurrency = PncpRequestScheduler.GetRecommendedConcurrency(
-                resourceSnapshot.Pressure);
+                resourceSnapshot.Pressure, settings.EffectiveResourceProfile);
             var socketsHandler = new SocketsHttpHandler
             {
                 AutomaticDecompression = DecompressionMethods.All,
@@ -170,7 +171,7 @@ public partial class App : Application
             _performanceTelemetry.SetPncpSchedulerSnapshotProvider(requestScheduler.GetSnapshot);
             _diagnosticLog.Info(
                 "network",
-                $"Concorrência PNCP configurada. pressão={resourceSnapshot.Pressure}; " +
+                $"Concorrência PNCP configurada. perfil={settings.EffectiveResourceProfile}; pressão={resourceSnapshot.Pressure}; " +
                 $"inicial={requestConcurrency.InitialConcurrency}; " +
                 $"máxima={requestConcurrency.MaximumConcurrency}.");
             var requestTelemetry = new PncpRequestTelemetry();
@@ -184,7 +185,8 @@ public partial class App : Application
             };
             var httpClient = new HttpClient(handler)
             {
-                Timeout = TimeSpan.FromMinutes(6)
+                // PncpSchedulingHandler starts the timeout after queueing.
+                Timeout = Timeout.InfiniteTimeSpan
             };
             httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("PNCPKing/1.0 (+https://pncp.gov.br)");
             httpClient.DefaultRequestHeaders.Accept.ParseAdd("application/json");
@@ -413,6 +415,8 @@ public partial class App : Application
             interactiveReadySpan.Complete();
             _diagnosticLog.Info("startup", "Janela principal interativa; carga secundária iniciada.");
             await viewModel.InitializeDeferredAsync(viewModel.StartupCancellationToken).ConfigureAwait(true);
+            if (e.Args is ["--complete-github-update", var updateId])
+                await viewModel.ContinueGitHubUpdateAsync(updateId).ConfigureAwait(true);
             viewModel.StartBackgroundMaintenance();
             startupSpan.Complete();
             _diagnosticLog.Info("startup", "Janela principal inicializada com sucesso.");

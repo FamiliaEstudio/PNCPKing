@@ -87,7 +87,12 @@ public sealed partial class MainViewModel
 
     public string NationalPriceIndexActivityText
     {
-        get => _nationalPriceIndexActivityText;
+        get => _indexUpdateStage switch
+        {
+            1 => "Aguardando as etapas 1/3 e 2/3: contratações e itens",
+            2 => "Aguardando a etapa 2/3: listas de itens",
+            _ => _nationalPriceIndexActivityText
+        };
         private set => SetProperty(ref _nationalPriceIndexActivityText, value);
     }
 
@@ -562,10 +567,10 @@ public sealed partial class MainViewModel
                 PriceCacheStatus.Downloading => "Índice de preços de 11 meses: consultando resultados",
                 PriceCacheStatus.Paused => "Índice de preços de 11 meses: pausado",
                 PriceCacheStatus.Complete => "Índice de preços de 11 meses: completo",
-                PriceCacheStatus.Failed => "Índice de preços: há falhas aguardando repetição",
+                PriceCacheStatus.Failed => "Índice de preços: há falhas; use Atualizar para tentar novamente",
                 PriceCacheStatus.InsufficientSpace => "Índice de preços: pausado por falta de espaço",
                 PriceCacheStatus.Disabled => "Índice de preços de 11 meses: desativado",
-                _ => "Índice de preços: autorizado; ative Download agressivo para continuar"
+                _ => "Índice de preços: pendente; use Atualizar para continuar"
             };
         }
 

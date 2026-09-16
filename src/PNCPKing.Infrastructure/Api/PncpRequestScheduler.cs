@@ -95,6 +95,7 @@ public sealed class PncpRequestScheduler
     private DateTimeOffset? _growthBlockedUntil;
     private string? _lastReductionReason;
     private DateTimeOffset? _lastConcurrencyChangeAt;
+    private DateTimeOffset? _lastAggressiveReductionAt;
 
     public PncpRequestScheduler(
         int maximumConcurrency = 2,
@@ -119,12 +120,23 @@ public sealed class PncpRequestScheduler
     }
 
     internal static (int MaximumConcurrency, int InitialConcurrency) GetRecommendedConcurrency(
-        SystemResourcePressure pressure) => pressure switch
+        SystemResourcePressure pressure,
+        ResourceUsageProfile resourceProfile = ResourceUsageProfile.Automatic)
+    {
+        var available = pressure switch
         {
             SystemResourcePressure.Critical => (8, 1),
             SystemResourcePressure.Constrained => (16, 8),
             _ => (48, 16)
         };
+        var requested = resourceProfile switch
+        {
+            ResourceUsageProfile.Restricted => (16, 8),
+            ResourceUsageProfile.Medium => (32, 12),
+            _ => (48, 16)
+        };
+        return (Math.Min(available.Item1, requested.Item1), Math.Min(available.Item2, requested.Item2));
+    }
 
     public Task<IDisposable> AcquireAsync(
         PncpRequestPriority priority,
@@ -219,12 +231,18 @@ public sealed class PncpRequestScheduler
         }
     }
 
+    internal int EffectiveConcurrency
+    {
+        get { lock (_gate) return _effectiveConcurrency; }
+    }
+
     internal void ReportOutcome(
         PncpRequestCategory category,
         System.Net.HttpStatusCode? statusCode,
         TimeSpan duration,
         TimeSpan? retryAfter = null,
-        bool transportFailure = false)
+        bool transportFailure = false,
+        int? concurrencyAtDispatch = null)
     {
         if (category is not (PncpRequestCategory.ItemLists or PncpRequestCategory.ItemResults or PncpRequestCategory.Contracts))
         {
@@ -239,10 +257,25 @@ public sealed class PncpRequestScheduler
             }
 
             var now = _timeProvider.GetUtcNow();
+            // A slow response from before a reduction cannot establish that
+            // the new, lower concurrency also failed. Honor explicit server
+            // deadlines, but wait for outcomes dispatched at the current level.
+            if (_aggressiveBackgroundModes > 0 && concurrencyAtDispatch > _effectiveConcurrency)
+            {
+                if (retryAfter is { } requested && requested > TimeSpan.Zero)
+                    BlockGrowthUntilLocked(now.Add(requested));
+                return;
+            }
             if (transportFailure ||
                 statusCode == System.Net.HttpStatusCode.RequestTimeout ||
                 statusCode is >= System.Net.HttpStatusCode.InternalServerError)
             {
+                if (_aggressiveBackgroundModes > 0)
+                {
+                    ApplyAggressivePressureLocked(transportFailure ? "falha de transporte"
+                        : $"HTTP {(int)statusCode.GetValueOrDefault()}", now, retryAfter);
+                    return;
+                }
                 ApplyPressureLocked(
                     transportFailure
                         ? "falha de transporte"
@@ -256,6 +289,11 @@ public sealed class PncpRequestScheduler
 
             if (statusCode == System.Net.HttpStatusCode.TooManyRequests)
             {
+                if (_aggressiveBackgroundModes > 0)
+                {
+                    ApplyAggressivePressureLocked("HTTP 429", now, retryAfter);
+                    return;
+                }
                 var cooldown = retryAfter.GetValueOrDefault() > TimeSpan.FromMinutes(2)
                     ? retryAfter.GetValueOrDefault()
                     : TimeSpan.FromMinutes(2);
@@ -308,9 +346,10 @@ public sealed class PncpRequestScheduler
             return;
         }
 
+        var recoverySuccesses = _aggressiveBackgroundModes > 0 ? 8 : OutcomeWindowSize;
         if (_effectiveConcurrency >= _maximumConcurrency ||
-            _consecutiveSuccesses < OutcomeWindowSize ||
-            _successfulOutcomes.Count < OutcomeWindowSize)
+            _consecutiveSuccesses < recoverySuccesses ||
+            _successfulOutcomes.Count < recoverySuccesses)
         {
             return;
         }
@@ -326,6 +365,23 @@ public sealed class PncpRequestScheduler
         _pressureEventsAtNormalFloor = 0;
         ResetSuccessWindowLocked();
         DispatchLocked();
+    }
+
+    private void ApplyAggressivePressureLocked(string reason, DateTimeOffset now, TimeSpan? retryAfter)
+    {
+        var delay = retryAfter is { } requested && requested > TimeSpan.Zero
+            ? requested : TimeSpan.FromMilliseconds(250);
+        // Responses from the same in-flight burst should not each lower a tier.
+        if (_lastAggressiveReductionAt is null || now - _lastAggressiveReductionAt >= TimeSpan.FromMilliseconds(500))
+        {
+            _lastAggressiveReductionAt = now;
+            ApplyPressureLocked(reason, now, now.Add(delay));
+        }
+        else
+        {
+            BlockGrowthUntilLocked(now.Add(delay));
+            ResetSuccessWindowLocked();
+        }
     }
 
     private void ApplyPressureLocked(

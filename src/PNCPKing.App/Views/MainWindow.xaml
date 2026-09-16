@@ -25,11 +25,11 @@
 
         <Grid Grid.Row="0">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="0" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <StackPanel Orientation="Horizontal">
+            <WrapPanel Orientation="Horizontal">
                 <Image Source="/PNCPKing;component/Assets/Branding/PNCPKingLogo.png"
                        Width="54" Height="54" Stretch="Uniform"
                        VerticalAlignment="Center" Margin="4,0,12,0"
@@ -57,8 +57,11 @@
                     <TextBlock Text="{Binding PncpIndicatorText}" Foreground="White"
                                FontSize="11" FontWeight="SemiBold" />
                 </Border>
-            </StackPanel>
-            <Button Grid.Column="2" Content="Opções ▾" VerticalAlignment="Center"
+            </WrapPanel>
+            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+            <Button Content="Atualizar pelo GitHub" Command="{Binding GitHubUpdateCommand}"
+                    ToolTip="Verifica novas versões do programa e pacotes oficiais de preços no GitHub." />
+            <Button Content="Opções ▾" VerticalAlignment="Center"
                     Click="DropdownMenu_Click">
                 <Button.ContextMenu>
                     <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
@@ -71,6 +74,28 @@
                             <MenuItem Header="Compactar banco…" Command="{Binding CompactDatabaseCommand}" />
                             <MenuItem Header="Exportar backup" Command="{Binding ExportBackupCommand}" />
                             <MenuItem Header="Importar backup" Command="{Binding ImportBackupCommand}" />
+                        </MenuItem>
+                        <MenuItem Header="Uso de _recursos"
+                                  ToolTip="A escolha é salva neste PC e aplicada ao reabrir o programa. Controla o banco local e as consultas simultâneas ao PNCP.">
+                            <MenuItem Header="Automático" IsCheckable="True"
+                                      IsChecked="{Binding IsAutomaticResourceProfile, Mode=OneWay}"
+                                      Command="{Binding SelectResourceProfileCommand}" CommandParameter="Automatic"
+                                      ToolTip="Escolhe o perfil conforme os recursos disponíveis no PC." />
+                            <MenuItem Header="Restrito" IsCheckable="True"
+                                      IsChecked="{Binding IsRestrictedResourceProfile, Mode=OneWay}"
+                                      Command="{Binding SelectResourceProfileCommand}" CommandParameter="Restricted"
+                                      ToolTip="Menor uso de recursos e menos consultas simultâneas." />
+                            <MenuItem Header="Médio" IsCheckable="True"
+                                      IsChecked="{Binding IsMediumResourceProfile, Mode=OneWay}"
+                                      Command="{Binding SelectResourceProfileCommand}" CommandParameter="Medium"
+                                      ToolTip="Uso intermediário de recursos e de consultas simultâneas." />
+                            <MenuItem Header="Amplo" IsCheckable="True"
+                                      IsChecked="{Binding IsBroadResourceProfile, Mode=OneWay}"
+                                      Command="{Binding SelectResourceProfileCommand}" CommandParameter="Broad"
+                                      ToolTip="Permite maior uso de recursos e mais consultas simultâneas. As proteções de memória e os limites do PNCP continuam ativos." />
+                            <Separator />
+                            <MenuItem Header="{Binding ResourceProfileSummary}" IsEnabled="False" />
+                            <MenuItem Header="Reabra o programa após mudar o perfil" IsEnabled="False" />
                         </MenuItem>
                         <MenuItem Header="_Diagnóstico">
                             <MenuItem Header="Logs de diagnóstico" Command="{Binding OpenDiagnosticLogsCommand}" />
@@ -95,6 +120,7 @@
                     </ContextMenu>
                 </Button.ContextMenu>
             </Button>
+            </StackPanel>
         </Grid>
 
         <Border Grid.Row="1" BorderBrush="#C9D3DD" BorderThickness="1" CornerRadius="4"
@@ -106,7 +132,8 @@
                 <StackPanel>
                     <WrapPanel Margin="3,0,3,5">
                         <Button Content="Calcular tamanho" Command="{Binding CalculatePreflightCommand}" />
-                        <Button Content="Atualizar" Command="{Binding StartSyncCommand}" />
+                        <Button Content="Atualizar" Command="{Binding StartSyncCommand}"
+                                ToolTip="Atualiza, em sequência, contratações, listas de itens e preços. Retoma pendências do ciclo anterior." />
                         <Button Content="{Binding PauseIndexButtonText}" Command="{Binding PauseSyncCommand}" />
                         <Button Content="Cancelar" Command="{Binding CancelIndexCommand}" />
                     </WrapPanel>
@@ -133,14 +160,17 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
-                <DockPanel Margin="0,0,0,4">
-                    <TextBlock Text="Cobertura do índice - mais antigo à esquerda, mais novo à direita"
-                               FontWeight="SemiBold" />
-                    <TextBlock DockPanel.Dock="Right" Text="{Binding CoverageSummary}"
-                               HorizontalAlignment="Right" />
-                </DockPanel>
+                <StackPanel Margin="0,0,0,6">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Right" Text="{Binding CoverageSummary}"
+                                   HorizontalAlignment="Right" />
+                        <TextBlock Text="Cobertura das publicações" FontWeight="SemiBold" />
+                    </DockPanel>
+                    <TextBlock Text="100% de cobertura não significa atualização concluída: ainda pode haver alterações, itens e preços pendentes."
+                               TextWrapping="Wrap" Foreground="#5F6871" Margin="0,3,0,0" />
+                </StackPanel>
                 <Grid Grid.Row="1" Margin="0,1,0,6"
-                      ToolTip="Índice e preços compartilham no máximo duas chamadas. Preços visíveis têm prioridade, mas o índice continua recebendo oportunidades.">
+                      ToolTip="Atualizar executa, em sequência, contratações, listas de itens e preços. A concorrência segue o perfil de recursos e as respostas do PNCP.">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="18" />
@@ -185,6 +215,7 @@
                     </StackPanel>
                 </Grid>
                 <controls:CoverageTimeline Grid.Row="2" Height="12"
+                                           ToolTip="Publicações mais antigas à esquerda e mais novas à direita."
                                            ItemsSource="{Binding CoverageDays}" />
 
                 <Border Grid.Row="3" BorderBrush="#D6DDE4" BorderThickness="0,1,0,0"
@@ -387,8 +418,6 @@
                           SelectedItem="{Binding SelectedGeoFilter}" />
                 <ComboBox Width="170" ItemsSource="{Binding DateRanges}"
                           SelectedItem="{Binding SelectedDateRange}" />
-                <ComboBox Width="150" ItemsSource="{Binding SortOptions}"
-                          SelectedItem="{Binding SelectedSortOption}" />
                 <DatePicker Width="125" SelectedDate="{Binding CustomStartDate}"
                             IsEnabled="{Binding IsCustomDateRange}" ToolTip="Data inicial" />
                 <DatePicker Width="125" SelectedDate="{Binding CustomEndDate}"
@@ -534,8 +563,11 @@
                             <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
-                        <TextBlock Text="{Binding ItemSearchRows.Count, StringFormat=Linhas visíveis: {0:N0}}"
-                                   VerticalAlignment="Center" />
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="{Binding ItemSearchRows.Count, StringFormat=Linhas visíveis: {0:N0}}" />
+                            <TextBlock Text="Clique nas colunas para ordenar os resultados carregados."
+                                       FontSize="11" Foreground="#526579" />
+                        </StackPanel>
                         <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
                             <Button Content="Escolher colunas" Click="ChooseColumns_Click"
                                     Tag="{Binding ElementName=ItemResultsGrid}"
@@ -567,6 +599,9 @@
                                        FontWeight="SemiBold" VerticalAlignment="Center" />
                             <Button DockPanel.Dock="Right" Content="Voltar aos itens"
                                     Command="{Binding CloseContractsPanelCommand}" />
+                            <ComboBox Width="150" ItemsSource="{Binding SortOptions}"
+                                      SelectedItem="{Binding SelectedSortOption}"
+                                      ToolTip="Ordenação das contratações da pesquisa" />
                         </DockPanel>
                         <TabControl Grid.Row="1" SelectedIndex="{Binding ContractPanelViewIndex}">
                             <TabItem Header="Contratações da pesquisa">

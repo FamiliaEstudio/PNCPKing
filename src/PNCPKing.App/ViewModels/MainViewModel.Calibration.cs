@@ -14,12 +14,63 @@ public sealed partial class MainViewModel
     private CancellationTokenSource? _calibrationCancellation;
     private SqliteCalibrationWindow? _calibrationWindow;
     private Task<SqliteCalibrationResult>? _calibrationTask;
+    private ResourceUsageProfile _selectedResourceProfile;
     public ICommand EvaluatePcCommand { get; }
+    public ICommand SelectResourceProfileCommand { get; }
+
+    public bool IsAutomaticResourceProfile => _selectedResourceProfile == ResourceUsageProfile.Automatic;
+    public bool IsRestrictedResourceProfile => _selectedResourceProfile == ResourceUsageProfile.Restricted;
+    public bool IsMediumResourceProfile => _selectedResourceProfile == ResourceUsageProfile.Medium;
+    public bool IsBroadResourceProfile => _selectedResourceProfile == ResourceUsageProfile.Broad;
+    public string ResourceProfileSummary
+    {
+        get
+        {
+            var connections = _calibrationService.Connections;
+            var active = connections.ProfileName == "Balanceado" ? "Médio" : connections.ProfileName;
+            return $"Em uso: {active}" +
+                (connections.SelectedResourceProfile == ResourceUsageProfile.Automatic ? " (automático)" : "") +
+                (_selectedResourceProfile != connections.SelectedResourceProfile
+                    ? $" · reinicie para aplicar {ResourceProfileName(_selectedResourceProfile)}" : "");
+        }
+    }
+
+    private async Task SelectResourceProfileAsync(string? value)
+    {
+        if (!Enum.TryParse<ResourceUsageProfile>(value, out var profile) || !Enum.IsDefined(profile)) return;
+        try
+        {
+            if (profile == _selectedResourceProfile) return;
+            var settings = await _settingsService.UpdateAsync(settings => settings with
+            {
+                ResourceProfile = profile,
+                SqliteCalibration = null
+            }).ConfigureAwait(true);
+            _selectedResourceProfile = settings.EffectiveResourceProfile;
+            StatusText = $"Perfil {ResourceProfileName(profile)} salvo. Feche e reabra o PNCP King para aplicar.";
+        }
+        finally
+        {
+            OnPropertyChanged(nameof(IsAutomaticResourceProfile));
+            OnPropertyChanged(nameof(IsRestrictedResourceProfile));
+            OnPropertyChanged(nameof(IsMediumResourceProfile));
+            OnPropertyChanged(nameof(IsBroadResourceProfile));
+            OnPropertyChanged(nameof(ResourceProfileSummary));
+        }
+    }
+
+    private static string ResourceProfileName(ResourceUsageProfile profile) => profile switch
+    {
+        ResourceUsageProfile.Restricted => "Restrito",
+        ResourceUsageProfile.Medium => "Médio",
+        ResourceUsageProfile.Broad => "Amplo",
+        _ => "Automático"
+    };
 
     private bool CanEvaluatePc => !IsInitializing && !IsFileBusy && !IsIndexBusy && !IsCatalogBusy &&
         !IsPriceBusy && !IsForegroundBusy && !IsDocumentBusy && !IsPriceCacheBusy &&
         !IsNationalPriceIndexBusy && !_automaticMaintenanceRunning && !IsAnyAggressivePncpMode &&
-        !_isResultPageLoading && !_contractSearchCountPending && !_retentionRunning &&
+        !_isResultPageLoading && !_isLocalPricePageLoading && !_contractSearchCountPending && !_retentionRunning &&
         _quotationAutomationCancellation is null;
 
     private async Task EvaluatePcAsync()
@@ -73,9 +124,11 @@ public sealed partial class MainViewModel
     private async Task SaveCalibrationAsync(SavedSqliteCalibration? calibration)
     {
         var path = _calibrationService.Connections.DatabasePath;
+        if (calibration is not null && _selectedResourceProfile != _calibrationService.Connections.SelectedResourceProfile)
+            throw new InvalidOperationException("O perfil de recursos foi alterado. Reinicie o PNCP King antes de aplicar uma avaliação.");
         if (calibration is not null && (IsFileBusy || !File.Exists(path) ||
             !calibration.AppliesTo(path, File.GetCreationTimeUtc(path), SqliteContractRepository.CurrentSchemaVersion,
-                new SystemResourceProbe().GetSnapshot())))
+                new SystemResourceProbe().GetSnapshot(), _selectedResourceProfile)))
             throw new InvalidOperationException("O banco ou o ambiente mudou. Execute uma nova avaliação.");
         await _settingsService.UpdateAsync(settings => settings with { SqliteCalibration = calibration }).ConfigureAwait(true);
     }

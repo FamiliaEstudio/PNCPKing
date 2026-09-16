@@ -1,5 +1,13 @@
 namespace PNCPKing.Core.Models;
 
+public enum ResourceUsageProfile
+{
+    Automatic = 0,
+    Restricted = 1,
+    Medium = 2,
+    Broad = 3
+}
+
 public enum SystemResourcePressure
 {
     Normal = 0,

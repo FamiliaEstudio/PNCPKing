@@ -942,7 +942,7 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
             progress: null,
             cancellationToken);
 
-    public async Task<PriceCacheLocalPage> SearchLocalAfterAsync(
+    public Task<PriceCacheLocalPage> SearchLocalAfterAsync(
         SearchQuery filters,
         SearchExpression expression,
         decimal? minimumUnitPrice,
@@ -950,6 +950,19 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         PriceCacheLocalCursor? cursor,
         int pageSize,
         IProgress<PriceCacheLocalProgress>? progress,
+        CancellationToken cancellationToken = default) =>
+        SearchLocalAfterAsync(filters, expression, minimumUnitPrice, maximumUnitPrice,
+            cursor, pageSize, PriceCacheLocalReadOrder.RequestedSort, progress, cancellationToken);
+
+    public async Task<PriceCacheLocalPage> SearchLocalAfterAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice,
+        PriceCacheLocalCursor? cursor,
+        int pageSize,
+        PriceCacheLocalReadOrder readOrder,
+        IProgress<PriceCacheLocalProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
         using var span = _performance.Begin("price-search", "local-page");
@@ -957,6 +970,9 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         {
             ArgumentNullException.ThrowIfNull(filters);
             ArgumentNullException.ThrowIfNull(expression);
+            if (!Enum.IsDefined(readOrder) || cursor is not null &&
+                (cursor.ItemRowId is not null) != (readOrder == PriceCacheLocalReadOrder.Discovery))
+                throw new ArgumentException("O cursor não corresponde à ordem de leitura da pesquisa.", nameof(cursor));
             var page = (cursor?.Page ?? 0) + 1;
             pageSize = Math.Clamp(pageSize, 1, 200);
             if (expression.IsEmpty)
@@ -1004,6 +1020,7 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
                         cursor,
                         page,
                         pageSize,
+                        readOrder,
                         trackedProgress,
                         cancellationToken)
                     .ConfigureAwait(false);
@@ -1048,12 +1065,17 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         PriceCacheLocalCursor? cursor,
         int page,
         int pageSize,
+        PriceCacheLocalReadOrder readOrder,
         IProgress<PriceCacheLocalProgress>? progress,
         CancellationToken cancellationToken)
     {
         var itemMatch = expression.ItemMatchQuery;
         var explicitMatch = expression.ExplicitContractMatchQuery;
         var detailConditions = BuildLocalDetailConditions(filters, minimumUnitPrice, maximumUnitPrice);
+
+        if (readOrder == PriceCacheLocalReadOrder.Discovery)
+            return await SearchLocalByDiscoveryAsync(filters, expression, minimumUnitPrice, maximumUnitPrice,
+                cursor, page, pageSize, detailConditions, progress, cancellationToken).ConfigureAwait(false);
 
         if (explicitMatch.Length == 0)
         {
@@ -1169,6 +1191,113 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
                 cancellationToken)
             .ConfigureAwait(false);
         return BuildLocalSearchPage(scan, cursor, page, pageSize, scanLimit);
+    }
+
+    private async Task<PriceCacheLocalPage> SearchLocalByDiscoveryAsync(
+        SearchQuery filters,
+        SearchExpression expression,
+        decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice,
+        PriceCacheLocalCursor? cursor,
+        int page,
+        int pageSize,
+        IReadOnlyList<string> detailConditions,
+        IProgress<PriceCacheLocalProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        const int candidateBatchSize = 250;
+        using var span = _performance.Begin("price-search", "local-discovery");
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+        connection.CreateFunction<string?, string?, bool>("pncp_item_matches",
+            (description, unit) => expression.MatchesItem(description, unit), isDeterministic: true);
+        var itemMatch = expression.ItemMatchQuery;
+        var explicitMatch = expression.ExplicitContractMatchQuery;
+        var matches = new List<(ItemSearchHit Hit, ItemSearchRow Row, PriceCacheLocalCursor Cursor)>(pageSize + 1);
+        var examined = 0L;
+        var delivered = 0;
+
+        // Only the candidate identifiers are buffered. Each item's prices are bounded by
+        // the remaining page plus one; even a single item with many prices stays bounded.
+        await using var details = connection.CreateCommand();
+        details.CommandText = $"""
+            SELECT {BuildLocalSearchColumns("$priority", "0.0", "0.0")}
+              FROM items i
+              CROSS JOIN contracts c ON c.pncp_id = i.contract_id
+              CROSS JOIN contract_item_snapshots s ON s.contract_id = i.contract_id
+              CROSS JOIN item_results r ON r.contract_id = i.contract_id AND r.item_number = i.item_number
+             WHERE i.rowid = $itemRowid
+               AND pncp_item_matches(i.description, i.unit) = 1
+               AND {string.Join(" AND ", detailConditions)}
+               AND ($resume = 0 OR r.result_sequence > $afterResult)
+               {(explicitMatch.Length == 0 ? "" : "AND $priority = CASE WHEN c.rowid IN (SELECT rowid FROM contracts_fts WHERE contracts_fts MATCH $explicitMatch) THEN 0 ELSE 1 END")}
+             ORDER BY r.result_sequence
+             LIMIT $scanLimit;
+            """;
+        AddLocalSearchParameters(details, filters, string.Empty, explicitMatch,
+            minimumUnitPrice, maximumUnitPrice, null, pageSize + 1);
+        details.Parameters.Add("$priority", SqliteType.Integer);
+        details.Parameters.Add("$itemRowid", SqliteType.Integer);
+        details.Parameters.Add("$resume", SqliteType.Integer);
+        details.Parameters.AddWithValue("$afterResult", cursor?.ResultSequence ?? 0);
+
+        for (var priority = cursor?.ExplicitPriority ?? 0;
+             priority <= (explicitMatch.Length == 0 ? 0 : 1) && matches.Count <= pageSize;
+             priority++)
+        {
+            details.Parameters["$priority"].Value = priority;
+            var resumePhase = cursor is not null && cursor.ExplicitPriority == priority;
+            var after = resumePhase ? cursor!.ItemRowId!.Value : long.MinValue;
+            var includeBoundary = resumePhase;
+            while (matches.Count <= pageSize)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var ids = new List<long>(candidateBatchSize);
+                await using (var candidates = connection.CreateCommand())
+                {
+                    candidates.CommandText = $"""
+                        SELECT rowid FROM {(itemMatch.Length > 0 ? "items_fts" : "items")}
+                         WHERE {(itemMatch.Length > 0 ? "items_fts MATCH $itemMatch AND" : "")}
+                               rowid {(includeBoundary ? ">=" : ">")} $after
+                         ORDER BY rowid LIMIT $limit;
+                        """;
+                    candidates.Parameters.AddWithValue("$after", after);
+                    candidates.Parameters.AddWithValue("$limit", candidateBatchSize);
+                    if (itemMatch.Length > 0) candidates.Parameters.AddWithValue("$itemMatch", itemMatch);
+                    await using var reader = await candidates.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                    while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                        ids.Add(reader.GetInt64(0));
+                }
+                foreach (var rowid in ids)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    examined++;
+                    details.Parameters["$itemRowid"].Value = rowid;
+                    details.Parameters["$resume"].Value = resumePhase && rowid == cursor!.ItemRowId ? 1 : 0;
+                    var remaining = pageSize - matches.Count;
+                    details.Parameters["$scanLimit"].Value = remaining + 1;
+                    var scan = await ReadLocalSearchScanAsync(details, expression, cursor, page, remaining,
+                        includesCandidateMetadata: false, cancellationToken, onMatch: (row, rowCursor) =>
+                        {
+                            delivered++;
+                            progress?.Report(new PriceCacheLocalProgress([row], rowCursor, 0,
+                                delivered, HasMore: true, Completed: false));
+                        }, discoveryItemRowId: rowid).ConfigureAwait(false);
+                    matches.AddRange(scan.Matches);
+                    if (matches.Count > pageSize) break;
+                }
+                if (ids.Count < candidateBatchSize) break;
+                after = ids[^1];
+                includeBoundary = false;
+            }
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        var result = BuildLocalSearchPage(new LocalSearchScan(matches, 0,
+            matches.LastOrDefault().Cursor ?? cursor, null, null, false), cursor, page, pageSize, int.MaxValue);
+        progress?.Report(new PriceCacheLocalProgress([], result.Cursor, 0,
+            result.Rows?.Count ?? 0, result.HasMore, Completed: true));
+        span.Complete(examined);
+        return result;
     }
 
     private async Task<PriceCacheLocalPage> SearchLocalByItemIndexAsync(
@@ -1795,7 +1924,8 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         int pageSize,
         bool includesCandidateMetadata,
         CancellationToken cancellationToken,
-        Action<ItemSearchRow, PriceCacheLocalCursor>? onMatch = null)
+        Action<ItemSearchRow, PriceCacheLocalCursor>? onMatch = null,
+        long? discoveryItemRowId = null)
     {
         var matches = new List<(ItemSearchHit Hit, ItemSearchRow Row, PriceCacheLocalCursor Cursor)>(
             pageSize + 1);
@@ -1822,7 +1952,8 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
                 reader.GetString(15),
                 reader.GetString(0),
                 reader.GetInt64(20),
-                reader.GetInt64(39));
+                reader.GetInt64(39),
+                discoveryItemRowId);
             lastScannedCursor = rowCursor;
             if (!expression.MatchesItem(item.Description, item.Unit))
             {

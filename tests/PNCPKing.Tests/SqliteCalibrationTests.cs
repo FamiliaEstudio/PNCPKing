@@ -9,6 +9,32 @@ namespace PNCPKing.Tests;
 
 public sealed class SqliteCalibrationTests
 {
+    [Theory]
+    [InlineData(ResourceUsageProfile.Automatic)]
+    [InlineData(ResourceUsageProfile.Restricted)]
+    [InlineData(ResourceUsageProfile.Medium)]
+    [InlineData(ResourceUsageProfile.Broad)]
+    public void ResourcePreferenceAndCalibrationScopeSurviveSettingsSerialization(ResourceUsageProfile selected)
+    {
+        var oldSettings = JsonSerializer.Deserialize<AppSettings>("{\"DataFolder\":\"data\",\"IsConfigured\":true}")!;
+        Assert.Equal(ResourceUsageProfile.Automatic, oldSettings.EffectiveResourceProfile);
+        Assert.Equal(ResourceUsageProfile.Automatic,
+            (oldSettings with { ResourceProfile = (ResourceUsageProfile)999 }).EffectiveResourceProfile);
+        var path = Path.GetFullPath("profile-calibration.db");
+        var created = DateTime.UtcNow;
+        var resources = new Probe().Snapshot;
+        var calibration = new SavedSqliteCalibration(path, created, 28, resources.TotalPhysicalMemoryBytes,
+            resources.LogicalProcessors, new(64), ResourceProfile: selected);
+        var settings = JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(oldSettings with
+        {
+            ResourceProfile = selected, SqliteCalibration = calibration
+        }))!;
+        Assert.Equal(selected, settings.EffectiveResourceProfile);
+        Assert.True(settings.SqliteCalibration!.AppliesTo(path, created, 28, resources, selected));
+        foreach (var other in Enum.GetValues<ResourceUsageProfile>().Where(value => value != selected))
+            Assert.False(settings.SqliteCalibration.AppliesTo(path, created, 28, resources, other));
+    }
+
     internal sealed class Probe : ISystemResourceProbe
     {
         public SystemResourceSnapshot Snapshot { get; set; } = SystemResourceProbe.CreateSnapshot(
@@ -45,12 +71,15 @@ public sealed class SqliteCalibrationTests
     }
 
     [Fact]
-    public void CandidateBudgetAccountsForFourConnectionsAndDoesNotChangeSpaciousSearchStrategy()
+    public void CandidateBudgetAccountsForFourConnectionsAndDoesNotDuplicateEquivalentDiscoveryStrategies()
     {
         var resources = new Probe().Snapshot with { AvailablePhysicalMemoryBytes = 1200L * 1024 * 1024 };
         var choices = SqliteCalibrationService.BuildCandidates(new(32), resources, true);
-        Assert.Contains(new SqliteSearchTuning(64, true), choices);
+        Assert.Contains(new SqliteSearchTuning(64), choices);
         Assert.DoesNotContain(choices, value => value.CacheMiB == 96);
+        Assert.Equal(choices.Count, choices.Select(value => value.CacheMiB).Distinct().Count());
+        Assert.Equal(new[] { 32, 64, 96 }, SqliteCalibrationService.BuildCandidates(new(32, true), new Probe().Snapshot, true)
+            .Select(value => value.CacheMiB));
         Assert.All(SqliteCalibrationService.BuildCandidates(new(64), new Probe().Snapshot, false),
             value => Assert.False(value.OrderedItemBatches));
     }
@@ -127,6 +156,7 @@ public sealed class SqliteCalibrationTests
         Assert.False(saved.AppliesTo(path + "other", created, 27, resources));
         Assert.False(saved.AppliesTo(path, created, 28, resources));
         Assert.False((saved with { Version = 1 }).AppliesTo(path, created, 27, resources));
+        Assert.False((saved with { Version = 2 }).AppliesTo(path, created, 27, resources));
         Assert.False(saved.AppliesTo(path, created, 27, resources with { LogicalProcessors = 8 }));
         var settings = JsonSerializer.Deserialize<AppSettings>("{\"DataFolder\":\"data\",\"IsConfigured\":true}")!;
         Assert.Null(settings.SqliteCalibration);

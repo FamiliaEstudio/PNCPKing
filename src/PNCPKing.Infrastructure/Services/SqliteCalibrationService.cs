@@ -61,9 +61,9 @@ public sealed class SqliteCalibrationService(
             var today = DateOnly.FromDateTime(DateTime.Today);
             var scenarios = new[]
             {
-                (Name: "cafe-recente", Text: "Café -máquina -cápsula -cafeteira \"pacote \"unidade", Sort: SearchSort.Newest),
-                (Name: "limpeza-diaria-recente", Text: "Serviço limpeza -odontológico \"diária", Sort: SearchSort.Newest),
-                (Name: "limpeza-proximidade", Text: "Serviço limpeza -odontológico", Sort: SearchSort.Nearest)
+                (Name: "cafe-descoberta", Text: "Café -máquina -cápsula -cafeteira \"pacote \"unidade"),
+                (Name: "limpeza-diaria-descoberta", Text: "Serviço limpeza -odontológico \"diária"),
+                (Name: "limpeza-descoberta", Text: "Serviço limpeza -odontológico")
             };
             var order = 0;
             for (var round = 0; round < 2; round++)
@@ -80,7 +80,7 @@ public sealed class SqliteCalibrationService(
                         }
                         progress?.Report($"{candidate.Description}\n{scenario.Name} — rodada {round + 1}/2. " +
                             "Até cinco minutos no total; nenhuma configuração será aplicada automaticamente.");
-                        var query = new SearchQuery(scenario.Text, GeoScope.All, DataWindow.Start(today), today, Sort: scenario.Sort);
+                        var query = new SearchQuery(scenario.Text, GeoScope.All, DataWindow.Start(today), today);
                         var measurement = await MeasureAsync(candidate, initial, scenario.Name, query,
                             round, order++ == 0, deadline.Token).ConfigureAwait(false);
                         measurements.Add(measurement);
@@ -107,7 +107,8 @@ public sealed class SqliteCalibrationService(
         var recommended = SelectRecommendation(current, measurements);
         var saved = recommended is null ? null : new SavedSqliteCalibration(
             Path.GetFullPath(currentConnections.DatabasePath), creation, schema,
-            initial.TotalPhysicalMemoryBytes, initial.LogicalProcessors, recommended);
+            initial.TotalPhysicalMemoryBytes, initial.LogicalProcessors, recommended,
+            ResourceProfile: currentConnections.SelectedResourceProfile);
         return new(current, recommended, measurements,
             recommended is null
                 ? "Não houve ganho consistente suficiente para recomendar uma alteração. Perfil atual preservado."
@@ -116,9 +117,7 @@ public sealed class SqliteCalibrationService(
 
     internal static IReadOnlyList<SqliteSearchTuning> BuildCandidates(
         SqliteSearchTuning current, SystemResourceSnapshot resources, bool constrained) =>
-        new[] { current }.Concat(new[] { 32, 64, 96 }.SelectMany(cache => constrained
-            ? new[] { new SqliteSearchTuning(cache), new SqliteSearchTuning(cache, true) }
-            : new[] { new SqliteSearchTuning(cache) }))
+        new[] { current }.Concat(new[] { 32, 64, 96 }.Select(cache => current with { CacheMiB = cache }))
             .Distinct().Where(candidate => candidate.FitsMemory(resources)).ToArray();
 
     private SqliteConnectionFactory ReadOnly(SqliteSearchTuning tuning, SystemResourceSnapshot profile) =>
@@ -168,7 +167,7 @@ public sealed class SqliteCalibrationService(
                 if (rowCount >= 10) ten ??= watch.Elapsed.TotalMilliseconds;
             });
             var page = await repository.SearchLocalAfterAsync(query, SearchText.Parse(query.Text), null, null,
-                null, 50, progress, queryCancellation.Token).ConfigureAwait(false);
+                null, 50, PriceCacheLocalReadOrder.Discovery, progress, queryCancellation.Token).ConfigureAwait(false);
             pageMs = watch.Elapsed.TotalMilliseconds;
             rows.AddRange(page.Rows ?? []);
             if (page.HasMore)
@@ -176,7 +175,8 @@ public sealed class SqliteCalibrationService(
                 queryCancellation.CancelAfter(QueryTimeout);
                 var nextStart = Stopwatch.GetTimestamp();
                 var next = await repository.SearchLocalAfterAsync(query, SearchText.Parse(query.Text), null, null,
-                    page.Cursor, 50, queryCancellation.Token).ConfigureAwait(false);
+                    page.Cursor, 50, PriceCacheLocalReadOrder.Discovery,
+                    cancellationToken: queryCancellation.Token).ConfigureAwait(false);
                 nextMs = Stopwatch.GetElapsedTime(nextStart).TotalMilliseconds;
                 rows.AddRange(next.Rows ?? []);
             }

@@ -5,7 +5,7 @@ Implementação de setembro de 2026. O executável continua em `artifacts/win-x6
 ## Comportamento
 
 - Abrir, pesquisar, importar bancos e o agendamento ocioso não iniciam downloads. A manutenção ociosa executa somente estatísticas SQLite e checkpoints. As configurações antigas de atualização periódica do catálogo são normalizadas para manual.
-- **Atualizar** usa uma prévia e executa contratações, listas e preços, com concorrência adaptativa. Cada etapa precisa terminar antes da seguinte; falhas, indisponibilidade de disco e cancelamento deixam pendências explícitas. Pressão crítica de RAM interrompe o ciclo e conserva checkpoints.
+- **Atualizar** usa uma prévia e executa contratações, listas e preços, com concorrência adaptativa. Cada etapa precisa terminar antes da seguinte. O ajuste de recuperação rápida descrito em `aggressive-retry-validation.md` mantém tentativas automáticas para falhas temporárias enquanto o ciclo estiver ativo. Erros definitivos, indisponibilidade de disco e cancelamento deixam pendências explícitas. Pressão crítica de RAM interrompe o ciclo e conserva checkpoints.
 - Pausar/Continuar atua nas três etapas. Pesquisar durante a atualização suspende o trabalho remoto e permite retomá-lo após a ociosidade; uma pausa manual continua manual.
 - As lacunas de publicação são preenchidas das mais novas às mais antigas. A atualização global começa dois dias antes da última verificação concluída, limitada à janela. Sem histórico confiável, verifica os 11 meses. O identificador dos checkpoints separa ciclos concluídos; cliques repetidos no mesmo dia consultam novidades novamente.
 - Respostas completas de listas e preços, inclusive vazias, são reutilizadas. CATMAT/CATSER permanece separado.

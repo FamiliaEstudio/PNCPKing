@@ -19,6 +19,9 @@
                       SkipGetTargetFrameworkProperties="true" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="../../scripts/prepare-github-prices.ps1" Link="Scripts/prepare-github-prices.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/PNCPKing.App/Services/InstallGitHubUpdate.ps1" Link="Scripts/InstallGitHubUpdate.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Include="../../src/PNCPKing.App/Services/GitHubAppInstaller.cs" Link="AppLogic/GitHubAppInstaller.cs" />
     <Compile Include="../../src/PNCPKing.App/ViewModels/Commands.cs"
              Link="AppLogic/Commands.cs" />
     <Compile Include="../../src/PNCPKing.App/Services/AppSettingsService.cs"

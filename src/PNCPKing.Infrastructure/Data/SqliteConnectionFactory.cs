@@ -47,7 +47,8 @@ public sealed class SqliteConnectionFactory : ISqliteConnectionFactory
         ISqliteWorkCoordinator? workCoordinator = null,
         ISystemResourceProbe? resourceProbe = null,
         SqliteSearchTuning? tuning = null,
-        bool readOnly = false)
+        bool readOnly = false,
+        ResourceUsageProfile resourceProfile = ResourceUsageProfile.Automatic)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         DatabasePath = Path.GetFullPath(databasePath);
@@ -55,11 +56,16 @@ public sealed class SqliteConnectionFactory : ISqliteConnectionFactory
         _resourceProbe = resourceProbe ?? new SystemResourceProbe();
         _tuning = tuning is { IsValid: true } ? tuning : null;
         _readOnly = readOnly;
+        SelectedResourceProfile = Enum.IsDefined(resourceProfile) ? resourceProfile : ResourceUsageProfile.Automatic;
         var resources = _resourceProbe.GetSnapshot();
         var spacious = resources.Pressure == SystemResourcePressure.Normal &&
                        resources.LogicalProcessors >= 8 &&
                        resources.TotalPhysicalMemoryBytes >= 16L * 1024 * 1024 * 1024;
-        if (resources.Pressure != SystemResourcePressure.Normal)
+        var profile = SelectedResourceProfile == ResourceUsageProfile.Automatic
+            ? resources.Pressure != SystemResourcePressure.Normal ? ResourceUsageProfile.Restricted
+                : spacious ? ResourceUsageProfile.Broad : ResourceUsageProfile.Medium
+            : resources.Pressure == SystemResourcePressure.Critical ? ResourceUsageProfile.Restricted : SelectedResourceProfile;
+        if (profile == ResourceUsageProfile.Restricted)
         {
             ProfileName = "Restrito";
             _cacheKib = 32 * 1024;
@@ -67,7 +73,7 @@ public sealed class SqliteConnectionFactory : ISqliteConnectionFactory
             MmapBytes = 128L * 1024 * 1024;
             WorkerThreads = 1;
         }
-        else if (spacious)
+        else if (profile == ResourceUsageProfile.Broad)
         {
             ProfileName = "Amplo";
             _cacheKib = 64 * 1024;
@@ -77,7 +83,7 @@ public sealed class SqliteConnectionFactory : ISqliteConnectionFactory
         }
         else
         {
-            ProfileName = "Balanceado";
+            ProfileName = SelectedResourceProfile == ResourceUsageProfile.Automatic ? "Balanceado" : "Médio";
             _cacheKib = 32 * 1024;
             MigrationCacheKib = 128 * 1024;
             MmapBytes = 64L * 1024 * 1024;
@@ -100,14 +106,15 @@ public sealed class SqliteConnectionFactory : ISqliteConnectionFactory
     public long MmapBytes { get; }
     public int WorkerThreads { get; }
     public string ProfileName { get; }
+    public ResourceUsageProfile SelectedResourceProfile { get; }
     public SqliteSearchTuning SearchTuning
     {
         get
         {
-            var tuning = _tuning;
-            return tuning is null ? new(_cacheKib / 1024, ProfileName == "Restrito")
-                : new(tuning.FitsMemory(_resourceProbe.GetSnapshot()) ? tuning.CacheMiB : 32,
-                    ProfileName == "Restrito" && tuning.OrderedItemBatches);
+            var tuning = _tuning ?? new(_cacheKib / 1024, ProfileName == "Restrito");
+            var checkMemory = _tuning is not null || SelectedResourceProfile != ResourceUsageProfile.Automatic;
+            return new(!checkMemory || tuning.FitsMemory(_resourceProbe.GetSnapshot()) ? tuning.CacheMiB : 32,
+                ProfileName == "Restrito" && tuning.OrderedItemBatches);
         }
     }
     public void ResetCalibration() => _tuning = null;
@@ -120,6 +127,7 @@ public sealed class SqliteConnectionFactory : ISqliteConnectionFactory
         DatabasePath = source.DatabasePath;
         WorkCoordinator = source.WorkCoordinator;
         ProfileName = source.ProfileName;
+        SelectedResourceProfile = source.SelectedResourceProfile;
         MigrationCacheKib = source.MigrationCacheKib;
         MmapBytes = source.MmapBytes;
         WorkerThreads = source.WorkerThreads;
