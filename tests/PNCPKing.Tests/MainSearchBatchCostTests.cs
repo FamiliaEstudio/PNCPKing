@@ -133,12 +133,12 @@ public sealed class MainSearchBatchCostTests(ITestOutputHelper output)
         }
         for (var round = 0; round < rounds; round++)
         {
-            foreach (var scenario in round % 2 == 0 ? scenarios : scenarios.Reverse().ToArray())
+            foreach (var scenario in round % 2 == 0 ? scenarios : scenarios.AsEnumerable().Reverse().ToArray())
             {
                 var order = round switch
                 {
                     0 => plans,
-                    1 => plans.Reverse().ToArray(),
+                    1 => plans.AsEnumerable().Reverse().ToArray(),
                     _ => plans.Skip(3).Concat(plans.Take(3)).ToArray()
                 };
                 foreach (var plan in order)
