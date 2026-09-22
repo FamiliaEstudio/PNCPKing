@@ -83,12 +83,55 @@ public sealed partial class SqliteContractRepository
         }
     }
 
-    internal async Task<bool> HasOfficialContractConflictsAsync(CancellationToken cancellationToken)
+    private static async Task ApplySchemaV29Async(SqliteConnection connection, SqliteTransaction transaction,
+        CancellationToken cancellationToken)
     {
-        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT EXISTS(SELECT 1 FROM official_conflicts WHERE kind=1);";
-        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)) != 0;
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('official_result_snapshots') WHERE name='result_count'";
+        if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = "ALTER TABLE official_result_snapshots ADD COLUMN result_count INTEGER;";
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        command.CommandText = """
+            DROP TRIGGER IF EXISTS official_coverage_insert;
+            DROP TRIGGER IF EXISTS official_coverage_update;
+            DROP TRIGGER IF EXISTS official_contracts_INSERT;
+            DROP TRIGGER IF EXISTS official_contracts_UPDATE;
+            DROP TRIGGER IF EXISTS official_contract_item_snapshots_INSERT;
+            DROP TRIGGER IF EXISTS official_contract_item_snapshots_UPDATE;
+            DROP TRIGGER IF EXISTS official_official_result_snapshots_INSERT;
+            DROP TRIGGER IF EXISTS official_official_result_snapshots_UPDATE;
+            DROP TRIGGER IF EXISTS official_catalog_entries_INSERT;
+            DROP TRIGGER IF EXISTS official_catalog_entries_UPDATE;
+            DROP TRIGGER IF EXISTS official_contract_delete;
+            DROP TABLE IF EXISTS official_changes;
+            DROP TABLE IF EXISTS official_imports;
+            DROP TABLE IF EXISTS official_conflicts;
+            DROP TABLE IF EXISTS official_transfer_state;
+            CREATE TABLE IF NOT EXISTS official_update_packages(
+                package_id TEXT PRIMARY KEY,
+                manifest_digest TEXT NOT NULL,
+                applied INTEGER NOT NULL DEFAULT 0,
+                skipped INTEGER NOT NULL DEFAULT 0,
+                completed INTEGER NOT NULL DEFAULT 0,
+                imported_at TEXT);
+            CREATE TABLE IF NOT EXISTS official_update_chunks(
+                chunk_key TEXT NOT NULL,
+                content_digest TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                package_id TEXT NOT NULL,
+                applied INTEGER NOT NULL DEFAULT 0,
+                skipped INTEGER NOT NULL DEFAULT 0,
+                completed INTEGER NOT NULL DEFAULT 0,
+                imported_at TEXT,
+                PRIMARY KEY(chunk_key,content_digest)
+            ) WITHOUT ROWID;
+            UPDATE schema_info SET version=29 WHERE id=1;
+            """;
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     internal static async Task RecordOfficialResultsAsync(SqliteConnection connection, SqliteTransaction transaction,
@@ -97,13 +140,15 @@ public sealed partial class SqliteContractRepository
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            DELETE FROM official_conflicts WHERE kind=3 AND key1=$id AND key2=CAST($number AS TEXT);
-            INSERT INTO official_result_snapshots(contract_id,item_number,parent_version,item_version)
-                SELECT i.contract_id,i.item_number,c.global_updated_at,i.source_updated_at
+            INSERT INTO official_result_snapshots(contract_id,item_number,parent_version,item_version,result_count)
+                SELECT i.contract_id,i.item_number,c.global_updated_at,i.source_updated_at,
+                       (SELECT COUNT(*) FROM item_results r
+                         WHERE r.contract_id=i.contract_id AND r.item_number=i.item_number)
                 FROM items i JOIN contracts c ON c.pncp_id=i.contract_id
                 WHERE i.contract_id=$id AND i.item_number=$number
             ON CONFLICT(contract_id,item_number) DO UPDATE SET
-                parent_version=excluded.parent_version,item_version=excluded.item_version;
+                parent_version=excluded.parent_version,item_version=excluded.item_version,
+                result_count=excluded.result_count;
             """;
         command.Parameters.AddWithValue("$id", contractId);
         command.Parameters.AddWithValue("$number", itemNumber);

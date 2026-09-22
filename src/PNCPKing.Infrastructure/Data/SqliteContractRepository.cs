@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed partial class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 28;
+    public const int CurrentSchemaVersion = 29;
 
     private const string GeographicGroupExpression = "CASE WHEN c.geo_layer = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -717,6 +717,14 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
             await ApplySchemaV28Async(connection, transaction, cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             version = 28;
+        }
+
+        if (version < 29)
+        {
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await ApplySchemaV29Async(connection, transaction, cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 29;
         }
 
         stopwatch.Stop();
@@ -2372,13 +2380,6 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
                 await snapshot.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            await using (var resolved = connection.CreateCommand())
-            {
-                resolved.Transaction = (SqliteTransaction)transaction;
-                resolved.CommandText = "DELETE FROM official_conflicts WHERE kind=2 AND key1=$id";
-                resolved.Parameters.AddWithValue("$id", contractId);
-                await resolved.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            }
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
@@ -4002,14 +4003,8 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
         var hasCutoff = DateOnly.TryParseExact(cutoffText, "yyyy-MM-dd", CultureInfo.InvariantCulture,
             DateTimeStyles.None, out var cutoff);
         var receivedExpired = false;
-        await using var resolved = connection.CreateCommand();
-        resolved.Transaction = transaction;
-        resolved.CommandText = "DELETE FROM official_conflicts WHERE kind=1 AND key1=$id";
-        resolved.Parameters.Add("$id", SqliteType.Text);
         foreach (var contract in contracts)
         {
-            resolved.Parameters["$id"].Value = contract.PncpId;
-            await resolved.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             receivedExpired |= hasCutoff && contract.PublicationDate is { } published &&
                 DateOnly.FromDateTime(published.DateTime) < cutoff;
             SetContractParameters(insert, contract);

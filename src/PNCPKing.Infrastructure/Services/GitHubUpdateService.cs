@@ -52,7 +52,7 @@ public sealed class GitHubUpdateService(HttpClient client)
             else if (manifest is PricesUpdateManifest prices)
             {
                 GitHubUpdateValidation.Validate(prices);
-                files = new[] { prices.Base, prices.Cumulative }.OfType<PriceUpdatePackage>().SelectMany(p => p.Download.Parts);
+                files = prices.Update.Download.Parts;
             }
             else throw new InvalidDataException("Tipo de manifesto desconhecido.");
             foreach (var file in files)
@@ -76,87 +76,72 @@ public sealed class GitHubUpdateService(HttpClient client)
     public async Task<string> DownloadAsync(string tag, UpdatePayload payload, string cacheDirectory,
         IProgress<UpdateDownloadProgress>? progress = null, CancellationToken cancellationToken = default)
     {
-        if (!GitHubUpdateValidation.IsHash(payload.Sha256) || payload.Parts is not { Count: > 0 and <= 1000 } ||
-            payload.Size <= 0 || payload.Parts.Sum(p => p.Size) != payload.Size)
+        if (!GitHubUpdateValidation.IsHash(payload.Sha256) || payload.Parts is not { Count: 1 } ||
+            payload.Size <= 0 || payload.Size >= GitHubUpdateValidation.AssetLimit ||
+            payload.Parts[0].Size != payload.Size ||
+            !string.Equals(payload.Parts[0].Sha256, payload.Sha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Descrição do download inválida.");
-        foreach (var part in payload.Parts) GitHubUpdateValidation.ValidateFile(part);
+        var part = payload.Parts[0];
+        GitHubUpdateValidation.ValidateFile(part);
         Directory.CreateDirectory(cacheDirectory);
         var complete = Path.Combine(cacheDirectory, payload.Sha256.ToLowerInvariant() + ".payload");
-        if (await VerifyAsync(complete, payload.Size, payload.Sha256, cancellationToken).ConfigureAwait(false)) return complete;
-        // Reserve space for the parts and reconstructed payload; the importer checks the database volume separately.
-        EnsureSpace(cacheDirectory, checked(payload.Size * 2));
-        long received = 0;
-        foreach (var part in payload.Parts)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var path = PartPath(cacheDirectory, part);
-            if (!await VerifyAsync(path, part.Size, part.Sha256, cancellationToken).ConfigureAwait(false))
-            {
-                var temporary = path + ".partial";
-                try
-                {
-                    using var response = await SendAsync(AssetUrl(tag, part.Name), cancellationToken).ConfigureAwait(false);
-                    CheckResponse(response);
-                    if (response.Content.Headers.ContentLength is { } length && length != part.Size)
-                        throw new InvalidDataException($"Tamanho divergente: {part.Name}.");
-                    await using (var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
-                    await using (var output = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None,
-                        128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
-                    {
-                        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                        var buffer = new byte[128 * 1024];
-                        long count = 0;
-                        var lastReport = Environment.TickCount64;
-                        while (true)
-                        {
-                            timeout.CancelAfter(TimeSpan.FromSeconds(60));
-                            var read = await input.ReadAsync(buffer, timeout.Token).ConfigureAwait(false);
-                            if (read == 0) break;
-                            count += read;
-                            if (count > part.Size) throw new InvalidDataException($"Arquivo maior que o anunciado: {part.Name}.");
-                            await output.WriteAsync(buffer.AsMemory(0, read), timeout.Token).ConfigureAwait(false);
-                            if (Environment.TickCount64 - lastReport >= 100)
-                            {
-                                progress?.Report(new($"Baixando {part.Name}…", received + count, payload.Size));
-                                lastReport = Environment.TickCount64;
-                            }
-                        }
-                    }
-                    if (!await VerifyAsync(temporary, part.Size, part.Sha256, cancellationToken).ConfigureAwait(false))
-                        throw new InvalidDataException($"Arquivo incompleto ou SHA-256 divergente: {part.Name}.");
-                    File.Move(temporary, path, overwrite: true);
-                }
-                finally { File.Delete(temporary); }
-            }
-            received += part.Size;
-            progress?.Report(new($"Validado: {part.Name}.", received, payload.Size));
-        }
-        var assembling = complete + ".partial";
+        var marker = complete + ".verified";
+        if (File.Exists(complete) && new FileInfo(complete).Length == payload.Size && File.Exists(marker) &&
+            string.Equals((await File.ReadAllTextAsync(marker, cancellationToken).ConfigureAwait(false)).Trim(),
+                payload.Sha256, StringComparison.OrdinalIgnoreCase))
+            return complete;
+
+        EnsureSpace(cacheDirectory, payload.Size);
+        var temporary = complete + ".partial";
         try
         {
-            progress?.Report(new("Recompondo e validando o arquivo…", 0, payload.Size));
-            await using (var output = new FileStream(assembling, FileMode.Create, FileAccess.Write, FileShare.None,
-                128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
-                foreach (var part in payload.Parts)
+            using var response = await SendAsync(AssetUrl(tag, part.Name), cancellationToken).ConfigureAwait(false);
+            CheckResponse(response);
+            if (response.Content.Headers.ContentLength is { } length && length != payload.Size)
+                throw new InvalidDataException($"Tamanho divergente: {part.Name}.");
+            await using var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            await using var output = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None,
+                128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var buffer = new byte[128 * 1024];
+            long received = 0;
+            var lastReport = Environment.TickCount64;
+            while (true)
+            {
+                var read = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                if (read == 0) break;
+                received += read;
+                if (received > payload.Size)
+                    throw new InvalidDataException($"Arquivo maior que o anunciado: {part.Name}.");
+                hash.AppendData(buffer, 0, read);
+                await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                if (Environment.TickCount64 - lastReport >= 100)
                 {
-                    await using var input = File.OpenRead(PartPath(cacheDirectory, part));
-                    await input.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
+                    progress?.Report(new($"Baixando {part.Name}…", received, payload.Size));
+                    lastReport = Environment.TickCount64;
                 }
-            if (!await VerifyAsync(assembling, payload.Size, payload.Sha256, cancellationToken).ConfigureAwait(false))
-                throw new InvalidDataException("SHA-256 do arquivo recomposto divergente.");
-            File.Move(assembling, complete, overwrite: true);
-            foreach (var part in payload.Parts) File.Delete(PartPath(cacheDirectory, part));
+            }
+            await output.FlushAsync(cancellationToken).ConfigureAwait(false);
+            var actual = Convert.ToHexString(hash.GetHashAndReset());
+            if (received != payload.Size || !string.Equals(actual, payload.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"Arquivo incompleto ou SHA-256 divergente: {part.Name}.");
+            output.Close();
+            File.Move(temporary, complete, overwrite: true);
+            await File.WriteAllTextAsync(marker, payload.Sha256, cancellationToken).ConfigureAwait(false);
+            progress?.Report(new($"Validado durante o download: {part.Name}.", received, payload.Size));
             return complete;
         }
-        finally { File.Delete(assembling); }
+        finally { File.Delete(temporary); }
     }
 
     public static async Task ValidatePackageAsync(string path, PriceUpdatePackage expected, CancellationToken ct = default)
     {
-        if (!await VerifyAsync(path, expected.Download.Size, expected.Download.Sha256, ct).ConfigureAwait(false))
+        if (!File.Exists(path) || new FileInfo(path).Length != expected.Download.Size)
             throw new InvalidDataException("Arquivo de preços incompleto ou alterado.");
         var actual = await OfficialUpdateService.ReadManifestAsync(path, ct).ConfigureAwait(false);
-        if (actual.Manifest != expected.Manifest || actual.ExpandedSize != expected.ExpandedSize)
+        var actualJson = JsonSerializer.SerializeToUtf8Bytes(actual.Manifest, GitHubUpdateValidation.Json);
+        var expectedJson = JsonSerializer.SerializeToUtf8Bytes(expected.Manifest, GitHubUpdateValidation.Json);
+        if (!actualJson.AsSpan().SequenceEqual(expectedJson) || actual.ExpandedSize != expected.ExpandedSize)
             throw new InvalidDataException("O manifesto interno do pacote diverge da publicação de preços.");
     }
 
@@ -175,14 +160,13 @@ public sealed class GitHubUpdateService(HttpClient client)
             throw new IOException("Espaço insuficiente para baixar, recompor ou validar a atualização.");
     }
 
-    private static string PartPath(string directory, ReleaseFile file) => Path.Combine(directory, file.Sha256.ToLowerInvariant() + ".part");
     private static string AssetUrl(string tag, string name) =>
         $"https://github.com/{Repository}/releases/download/{Uri.EscapeDataString(tag)}/{Uri.EscapeDataString(name)}";
 
     private async Task<HttpResponseMessage> SendAsync(string url, CancellationToken ct)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.UserAgent.ParseAdd("PNCPKing-Updater/1.1");
+        request.Headers.UserAgent.ParseAdd("PNCPKing-Updater/1.2");
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(
             request.RequestUri!.Host == "api.github.com" ? "application/vnd.github+json" : "application/octet-stream"));
         request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");

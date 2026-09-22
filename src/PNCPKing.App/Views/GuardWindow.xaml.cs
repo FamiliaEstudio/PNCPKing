@@ -117,7 +117,7 @@ public partial class GuardWindow : Window
     private IReadOnlyList<GuardWorkerInput> ParseWorkers()
     {
         var workers = new List<GuardWorkerInput>();
-        foreach (var rawLine in WorkersTextBox.Text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        foreach (var rawLine in WorkersTextBox.Text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
         {
             var parts = rawLine.Split('|', StringSplitOptions.TrimEntries);
             if (parts.Length != 2 || parts[0].Length == 0 ||

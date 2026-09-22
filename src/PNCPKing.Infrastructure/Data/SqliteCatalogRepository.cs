@@ -313,14 +313,7 @@ public sealed class SqliteCatalogRepository : ICatalogRepository
 
         using (var commitSpan = _performance.Begin("catalog", "commit"))
         {
-            await using (var resolved = connection.CreateCommand())
-        {
-            resolved.Transaction = (SqliteTransaction)transaction;
-            resolved.CommandText = "DELETE FROM official_conflicts WHERE kind=4 AND key1=CAST($kind AS TEXT)";
-            resolved.Parameters.AddWithValue("$kind", (int)kind);
-            await resolved.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             commitSpan.Complete(staged);
         }
         span.Complete(staged);

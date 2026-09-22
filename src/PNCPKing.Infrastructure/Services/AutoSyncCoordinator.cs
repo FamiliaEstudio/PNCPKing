@@ -138,8 +138,6 @@ public sealed class AutoSyncCoordinator
         // today conservatively covers every instant in the preceding 48 hours.
         var globalUpdateStart = previousState.LastSuccessfulSync is { } lastSync
             ? DateOnly.FromDateTime(lastSync.LocalDateTime).AddDays(-2) : startDate;
-        if (_repository is PNCPKing.Infrastructure.Data.SqliteContractRepository sqlite &&
-            await sqlite.HasOfficialContractConflictsAsync(cancellationToken).ConfigureAwait(false)) globalUpdateStart = startDate;
         if (globalUpdateStart < startDate) globalUpdateStart = startDate;
         if (globalUpdateStart > endDate) globalUpdateStart = startDate;
         await _syncService.SynchronizeAsync(

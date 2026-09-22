@@ -332,7 +332,7 @@ public sealed class UiBindingTests
         {
             ["_Arquivo"] = [
                 "{Binding ExportUpdatesCommand}", "{Binding ImportUpdatesCommand}",
-                "{Binding NewUpdateBaseCommand}", "{Binding ImportNewUpdateBaseCommand}", "{Binding CompactDatabaseCommand}",
+                "{Binding CompactDatabaseCommand}",
                 "{Binding ExportBackupCommand}",
                 "{Binding ImportBackupCommand}"
             ],

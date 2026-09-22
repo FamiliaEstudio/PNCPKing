@@ -202,7 +202,6 @@ public sealed partial class SqliteContractRepository
              WHERE (line_id, prompt_slot) IN (SELECT line_id, prompt_slot FROM retention_affected_workspaces);
             DELETE FROM contracts WHERE pncp_id IN (SELECT id FROM expired_contracts);
             DELETE FROM coverage_day_modalities WHERE coverage_date < $cutoff;
-            DELETE FROM official_changes WHERE kind=5 AND key1 < $cutoff;
             DELETE FROM sync_partitions WHERE end_date < $cutoff;
             DELETE FROM sync_runs WHERE end_date < $cutoff;
             DELETE FROM quotation_internet_price_drafts WHERE captured_at < $cutoff;

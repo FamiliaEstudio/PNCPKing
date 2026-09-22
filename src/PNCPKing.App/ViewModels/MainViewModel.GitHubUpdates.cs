@@ -37,11 +37,11 @@ public sealed partial class MainViewModel
                 ct.ThrowIfCancellationRequested();
                 if (plan.App is not null) GitHubAppInstaller.CheckDestination();
                 var databasePath = _calibrationService.Connections.DatabasePath;
-                if (plan.Packages.Count > 0)
-                    GitHubUpdateService.EnsureSpace(Path.GetDirectoryName(databasePath)!, plan.Packages.Max(p => p.ExpandedSize));
+                if (plan.Package is { } pricePackage)
+                    GitHubUpdateService.EnsureSpace(Path.GetDirectoryName(databasePath)!, pricePackage.ExpandedSize);
                 Directory.CreateDirectory(GitHubAppInstaller.CacheDirectory);
                 GitHubUpdateService.EnsureSpace(GitHubAppInstaller.CacheDirectory, checked(plan.DownloadSize * 2));
-                var downloadedPrices = new List<DownloadedPriceUpdate>();
+                DownloadedPriceUpdate? downloadedPrices = null;
                 var progress = new Progress<UpdateDownloadProgress>(p =>
                 {
                     FileOperationProgressText = p.Message;
@@ -56,15 +56,15 @@ public sealed partial class MainViewModel
                     FileOperationProgressText = "Validando a versão do programa…";
                     await GitHubAppInstaller.ValidateBinaryAsync(executable, app, ct);
                 }
-                foreach (var package in plan.Packages)
+                if (plan.Package is { } package)
                 {
                     var path = await downloads.DownloadAsync(check.Prices!.Tag, package.Download, GitHubAppInstaller.CacheDirectory, progress, ct);
                     FileOperationProgressText = "Conferindo o manifesto do pacote de preços…";
                     await GitHubUpdateService.ValidatePackageAsync(path, package, ct);
-                    downloadedPrices.Add(new(path, package));
+                    downloadedPrices = new(path, package);
                 }
-                var pending = new PendingGitHubUpdate(databasePath, state.Origin, state.BaseId,
-                    plan.App?.Version ?? ApplicationVersion.ToString(3), plan.ReplaceBase, downloadedPrices);
+                var pending = new PendingGitHubUpdate(databasePath,
+                    plan.App?.Version ?? ApplicationVersion.ToString(3), downloadedPrices);
                 if (executable is not null)
                 {
                     FileOperationProgressText = "Preparando instalação e reinício do programa…";
@@ -111,12 +111,10 @@ public sealed partial class MainViewModel
     private async Task ApplyGitHubPricesAsync(PendingGitHubUpdate pending, CancellationToken ct)
     {
         var official = new OfficialUpdateService(_calibrationService.Connections);
-        var state = await official.GetTransferStatusAsync(ct);
         if (!string.Equals(Path.GetFullPath(pending.DatabasePath), Path.GetFullPath(_calibrationService.Connections.DatabasePath),
-                StringComparison.OrdinalIgnoreCase) || state.Origin != pending.DatabaseOrigin || state.BaseId != pending.PreviousBaseId)
-            throw new InvalidDataException("O banco selecionado ou sua base mudou. Consulte novamente as atualizações antes de importar.");
-        // Validate every local payload before importing the first one. Resume never initiates another network request.
-        foreach (var item in pending.Packages)
+                StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("O banco selecionado mudou. Consulte novamente as atualizações antes de importar.");
+        if (pending.PriceUpdate is { } item)
         {
             var expectedPath = Path.Combine(GitHubAppInstaller.CacheDirectory, item.Package.Download.Sha256.ToLowerInvariant() + ".payload");
             if (!string.Equals(Path.GetFullPath(item.Path), expectedPath, StringComparison.OrdinalIgnoreCase) ||
@@ -124,24 +122,16 @@ public sealed partial class MainViewModel
                 throw new InvalidDataException("Pacote pendente incompatível.");
             await GitHubUpdateService.ValidatePackageAsync(item.Path, item.Package, ct);
         }
-        if (pending.Packages.Count == 0) { StatusText = "Programa atualizado com sucesso."; return; }
+        if (pending.PriceUpdate is null) { StatusText = "Programa atualizado com sucesso."; return; }
         IsFileOperationIndeterminate = true;
         var progress = new Progress<string>(s => FileOperationProgressText = s);
-        long conflicts = 0;
         try
         {
-            foreach (var item in pending.Packages)
-            {
-                var result = await Task.Run(() => official.ImportAsync(item.Path, progress, ct,
-                    pending.ReplaceBase && item.Package.Manifest.InitialBase), ct);
-                conflicts += result.Conflicts;
-            }
-            StatusText = $"Atualização concluída. Preços importados; pendências de revalidação: {conflicts:N0}.";
-            if (conflicts > 0)
-                MessageBox.Show("As versões locais foram preservadas nas divergências sem ordem oficial confiável. " +
-                    "Use Atualizar para revalidar os dados PNCP e Atualizar catálogo para CATMAT/CATSER.",
-                    "Revalidação pendente", MessageBoxButton.OK, MessageBoxImage.Information);
-            foreach (var item in pending.Packages) File.Delete(item.Path);
+            var downloaded = pending.PriceUpdate!;
+            var result = await Task.Run(() => official.ImportAsync(downloaded.Path, progress, ct), ct);
+            StatusText = $"Atualização concluída. Registros aplicados: {result.Applied:N0}; preservados: {result.Skipped:N0}.";
+            File.Delete(downloaded.Path);
+            File.Delete(downloaded.Path + ".verified");
         }
         finally { if (!_disposed) await RefreshAfterOfficialImportAsync(); }
     }

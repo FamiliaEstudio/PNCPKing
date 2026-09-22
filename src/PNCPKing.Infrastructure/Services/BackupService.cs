@@ -724,14 +724,6 @@ public sealed class BackupService(
                 DateOnly.FromDateTime(DateTime.Today), compact: false, force: false,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             Report(progress, BackupImportStage.ApplyingRetention, 78, retention.Message);
-            // A restored/cloned database retains its common base, but receives a new local origin.
-            await using (var restored = new SqliteConnection($"Data Source={importedDatabase};Pooling=False"))
-            {
-                await restored.OpenAsync(cancellationToken).ConfigureAwait(false);
-                await using var identity = restored.CreateCommand();
-                identity.CommandText = "UPDATE official_transfer_state SET origin=lower(hex(randomblob(16))),journal_suspended=0 WHERE id=1;";
-                await identity.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            }
             Report(
                 progress,
                 BackupImportStage.CheckingEvidence,
@@ -1012,6 +1004,8 @@ public sealed class BackupService(
                 DELETE FROM items;
                 DELETE FROM contract_item_snapshots;
                 DELETE FROM price_cache_contracts;
+                DELETE FROM official_update_chunks;
+                DELETE FROM official_update_packages;
                 CREATE VIRTUAL TABLE items_fts USING fts5(
                     search_text,
                     content='items',

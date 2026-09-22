@@ -97,17 +97,17 @@ No instante da ativação, o banco atual é renomeado para `nome-do-banco.db.bef
 
 ## Transferência de atualizações entre PCs
 
-O botão **Atualizar pelo GitHub**, ao lado de **Opções**, verifica novas versões do programa e pacotes de preços publicados em `FamiliaEstudio/PNCPKing`. Ele apresenta uma prévia, baixa a base necessária e os incrementos, e reinicia somente quando instala um executável novo. Preços podem ser atualizados independentemente do programa. Preparação das releases, requisitos e retomada: [atualizações pelo GitHub](docs/github-updates.md).
+O botão **Atualizar pelo GitHub**, ao lado de **Opções**, verifica novas versões do programa e o pacote móvel de preços publicado em `FamiliaEstudio/PNCPKing`. Ele apresenta uma prévia e reinicia somente quando instala um executável novo. Preços podem ser atualizados independentemente do programa. Preparação das releases, requisitos e retomada: [atualizações pelo GitHub](docs/github-updates.md).
 
 **Exportar backup** mantém a opção de banco completo `.pncpking`. A transferência `.pncpupdate` é adicional e incorpora apenas dados oficiais, preservando cotações, cestas, evidências particulares e configurações do destino, observada a retenção de 11 meses.
 
-1. No PC de origem, use **Opções → Arquivo → Exportar atualizações PNCP**. O primeiro arquivo contém a base oficial inicial.
-2. No outro PC, use **Importar atualizações PNCP** com esse primeiro arquivo e conclua a importação.
-3. Depois disso, cada exportação contém as mudanças acumuladas desde a base; transporte somente o pacote mais recente. Ambos os PCs podem atualizar pelo PNCP e exportar suas diferenças.
-4. Uma importação cancelada conserva seus lotes. Reimporte o arquivo para continuar. Um cumulativo posterior também completa deltas anteriores; a base inicial precisa ser concluída primeiro.
-5. Conteúdos idênticos são ignorados, versões antigas não substituem novas e divergências sem versão confiável ficam registradas para revalidação pelo botão **Atualizar** (ou pelo catálogo, conforme o dado).
+1. Conclua **Atualizar** no PC de origem; a exportação não consulta o PNCP e recusa dias, listas ou resultados incompletos.
+2. Use **Opções → Arquivo → Exportar atualizações PNCP**. O arquivo contém hoje e os nove dias anteriores, além de contratações antigas oficialmente alteradas nesse período.
+3. No outro PC, inclusive depois de restaurar qualquer backup compatível, use **Importar atualizações PNCP**. Não é necessária uma base inicial nem uma linhagem comum.
+4. Uma importação cancelada conserva os blocos diários já concluídos. Reimporte o arquivo para continuar; blocos idênticos são ignorados sem extração.
+5. Registros ausentes são inseridos. Somente versões oficiais comprovadamente mais novas substituem as locais; versões iguais, ausentes, mais novas no destino ou sem ordem segura são preservadas. A importação não inicia revalidação no PNCP.
 
-Exportar backup comum não altera a linhagem incremental. Para começar outra, use **Iniciar nova base de transferência** na origem e **Importar nova base de transferência** no destino. A troca é explícita e preserva os dados particulares. Detalhes técnicos e medições: [validação da atualização manual](docs/manual-update-validation.md).
+CATMAT/CATSER não faz parte do `.pncpupdate` e continua sendo atualizado separadamente. Detalhes técnicos e medições: [validação da atualização manual](docs/manual-update-validation.md).
 
 ## Uso
 

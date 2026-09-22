@@ -4477,7 +4477,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      OpenPncpCommand, AccessDocumentsCommand, AccessItemDocumentsCommand,
                      ClearDocumentCacheCommand,
                      CancelDocumentOperationCommand,
-                     ExportBackupCommand, ImportBackupCommand, ExportUpdatesCommand, ImportUpdatesCommand, NewUpdateBaseCommand, ImportNewUpdateBaseCommand, CompactDatabaseCommand, CancelFileOperationCommand, GitHubUpdateCommand,
+                     ExportBackupCommand, ImportBackupCommand, ExportUpdatesCommand, ImportUpdatesCommand, CompactDatabaseCommand, CancelFileOperationCommand, GitHubUpdateCommand,
                      ClearBackupRecoveriesCommand, ClearCacheCommand,
                      ToggleDesktopShortcutCommand,
                      ManageSweetCodesCommand, ToggleContractsPanelCommand,

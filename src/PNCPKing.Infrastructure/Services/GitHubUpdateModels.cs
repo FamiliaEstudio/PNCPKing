@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using PNCPKing.Infrastructure.Data;
 
 namespace PNCPKing.Infrastructure.Services;
 
@@ -8,15 +9,15 @@ public sealed record UpdatePayload(long Size, string Sha256, IReadOnlyList<Relea
 public sealed record AppUpdateManifest(int Format, string Version, string Platform, int Schema, ReleaseFile File);
 public sealed record PriceUpdatePackage(OfficialUpdateManifest Manifest, long ExpandedSize, UpdatePayload Download);
 public sealed record PricesUpdateManifest(int Format, DateTimeOffset PublishedAt, string MinimumAppVersion,
-    int Schema, PriceUpdatePackage Base, PriceUpdatePackage? Cumulative);
+    int Schema, PriceUpdatePackage Update);
 public sealed record GitHubUpdateRelease<T>(string Tag, T Manifest);
 public sealed record GitHubUpdateCheck(GitHubUpdateRelease<AppUpdateManifest>? App,
     GitHubUpdateRelease<PricesUpdateManifest>? Prices, string AppStatus, string PricesStatus);
-public sealed record GitHubUpdatePlan(AppUpdateManifest? App, IReadOnlyList<PriceUpdatePackage> Packages,
-    bool ReplaceBase, string AppStatus, string PricesStatus)
+public sealed record GitHubUpdatePlan(AppUpdateManifest? App, PriceUpdatePackage? Package,
+    string AppStatus, string PricesStatus)
 {
-    public bool HasUpdates => App is not null || Packages.Count > 0;
-    public long DownloadSize => checked((App?.File.Size ?? 0) + Packages.Sum(p => p.Download.Size));
+    public bool HasUpdates => App is not null || Package is not null;
+    public long DownloadSize => checked((App?.File.Size ?? 0) + (Package?.Download.Size ?? 0));
 }
 public sealed record UpdateDownloadProgress(string Message, long Received, long Total);
 
@@ -55,38 +56,27 @@ public static class GitHubUpdateValidation
 
     public static void Validate(PricesUpdateManifest manifest)
     {
-        if (manifest is null || manifest.Format != 1 || manifest.Schema < 1 || manifest.PublishedAt == default ||
-            manifest.Base?.Manifest?.InitialBase != true)
+        if (manifest is null || manifest.Format != 2 || manifest.Schema != SqliteContractRepository.CurrentSchemaVersion ||
+            manifest.PublishedAt == default || manifest.Update is null)
             throw new InvalidDataException("Manifesto dos preços inválido.");
         ParseVersion(manifest.MinimumAppVersion);
-        ValidatePackage(manifest.Base, manifest.Schema);
-        if (manifest.Cumulative is { } delta)
-        {
-            ValidatePackage(delta, manifest.Schema);
-            if (delta.Manifest.InitialBase || delta.Manifest.BaseId != manifest.Base.Manifest.BaseId ||
-                delta.Manifest.Origin != manifest.Base.Manifest.Origin ||
-                delta.Manifest.Revision < manifest.Base.Manifest.Revision ||
-                delta.Manifest.PackageId == manifest.Base.Manifest.PackageId)
-                throw new InvalidDataException("Base e cumulativo dos preços são incompatíveis.");
-        }
-        var files = new[] { manifest.Base, manifest.Cumulative }.OfType<PriceUpdatePackage>()
-            .SelectMany(p => p.Download.Parts).ToArray();
-        if (files.Select(f => f.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() != files.Length)
-            throw new InvalidDataException("Nomes de partes repetidos.");
+        ValidatePackage(manifest.Update, manifest.Schema);
     }
 
     private static void ValidatePackage(PriceUpdatePackage package, int schema)
     {
         var m = package.Manifest;
         var download = package.Download;
-        if (m is null || m.Format != 1 || m.Schema != schema ||
-            !Guid.TryParseExact(m.BaseId, "N", out _) || !Guid.TryParseExact(m.Origin, "N", out _) ||
-            !Guid.TryParseExact(m.PackageId, "N", out _) || m.Revision < 0 || m.Units < 0 ||
-            !IsHash(m.Sha256) || package.ExpandedSize <= 0 || download is null || download.Size <= 0 ||
-            !IsHash(download.Sha256) || download.Parts is not { Count: > 0 and <= 1000 })
+        if (m is null || m.Format != OfficialUpdateService.CurrentFormat || m.Schema != schema ||
+            !Guid.TryParseExact(m.PackageId, "N", out _) || m.Chunks is not { Count: >= 10 and <= 11 } ||
+            package.ExpandedSize != m.Chunks.Sum(chunk => chunk.ExpandedSize) || package.ExpandedSize <= 0 ||
+            download is null || download.Size <= 0 || download.Size >= AssetLimit || !IsHash(download.Sha256) ||
+            download.Parts is not { Count: 1 })
             throw new InvalidDataException("Pacote de preços inválido.");
         foreach (var part in download.Parts) ValidateFile(part);
-        if (download.Parts.Sum(p => p.Size) != download.Size)
+        if (download.Parts.Sum(p => p.Size) != download.Size ||
+            download.Parts[0].Size != download.Size ||
+            !string.Equals(download.Parts[0].Sha256, download.Sha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Tamanho das partes divergente.");
     }
 
@@ -98,8 +88,7 @@ public static class GitHubUpdateValidation
         var appStatus = $"Programa instalado: {currentVersion.ToString(3)}. " + (app is null
             ? (check.App is null ? check.AppStatus : $"GitHub: {check.App.Manifest.Version}. Nenhuma versão compatível mais recente.")
             : $"Disponível: {app.Version}. Reinício necessário.");
-        var packages = new List<PriceUpdatePackage>();
-        var replaceBase = false;
+        PriceUpdatePackage? package = null;
         var pricesStatus = check.PricesStatus;
         if (check.Prices?.Manifest is { } prices)
         {
@@ -108,22 +97,16 @@ public static class GitHubUpdateValidation
                 pricesStatus = "Preços indisponíveis: exigem uma versão compatível do programa.";
             else
             {
-                replaceBase = state.BaseId is not null && state.BaseId != prices.Base.Manifest.BaseId;
-                var needsBase = state.BaseId != prices.Base.Manifest.BaseId || !state.BaseReady;
-                if (needsBase) packages.Add(prices.Base);
-                if (prices.Cumulative is { } delta && (needsBase || !Completed(delta))) packages.Add(delta);
-                pricesStatus = packages.Count == 0 ? "Preços já atualizados neste banco." :
-                    $"Preços publicados em {prices.PublishedAt.LocalDateTime:g}. " +
-                    (needsBase ? "Inclui a base inicial necessária." : "Pacote cumulativo disponível.");
+                if (!Completed(prices.Update)) package = prices.Update;
+                pricesStatus = package is null ? "Preços já atualizados neste banco." :
+                    $"Janela móvel de dez dias publicada em {prices.PublishedAt.LocalDateTime:g}. Compatível diretamente com backups.";
             }
         }
-        return new(app, packages, replaceBase, appStatus, pricesStatus);
+        return new(app, package, appStatus, pricesStatus);
 
         bool Completed(PriceUpdatePackage package)
         {
             if (!state.Imports.TryGetValue(package.Manifest.PackageId, out var receipt)) return false;
-            if (!string.Equals(receipt.Checksum, package.Manifest.Sha256, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("Identidade do pacote reutilizada com conteúdo diferente.");
             return receipt.Completed;
         }
     }

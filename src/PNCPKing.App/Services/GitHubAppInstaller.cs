@@ -6,8 +6,7 @@ using PNCPKing.Infrastructure.Services;
 namespace PNCPKing.App.Services;
 
 public sealed record DownloadedPriceUpdate(string Path, PriceUpdatePackage Package);
-public sealed record PendingGitHubUpdate(string DatabasePath, string DatabaseOrigin, string? PreviousBaseId,
-    string AppVersion, bool ReplaceBase, IReadOnlyList<DownloadedPriceUpdate> Packages);
+public sealed record PendingGitHubUpdate(string DatabasePath, string AppVersion, DownloadedPriceUpdate? PriceUpdate);
 public sealed record AppInstallRequest(int ProcessId, long ProcessStartedUtcTicks, string TargetPath,
     string StagedPath, long Size, string Sha256, string Version, string OperationId);
 

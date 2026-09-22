@@ -1,272 +1,277 @@
 using System.IO.Compression;
-using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
 using PNCPKing.Core.Models;
 using PNCPKing.Infrastructure.Services;
-using PNCPKing.Infrastructure.Data;
 
 namespace PNCPKing.Tests;
 
 public sealed class OfficialUpdateTests
 {
-    private static ContractRecord Contract(string id, int day = 0) =>
-        PriceCacheTests.RecentContract(id, DateOnly.FromDateTime(DateTime.Today), 1) with
-        { GlobalUpdatedAt = DateTimeOffset.UtcNow.Date.AddDays(day) };
+    private static readonly DateOnly Today = DateOnly.FromDateTime(DateTime.Today);
+    private static readonly DateOnly Start = Today.AddDays(-9);
 
     [Fact]
-    public async Task InitialThenCumulativePreservesDestinationAndTransfersEmptySnapshots()
+    public async Task V2ExportsFixedWindowAndLateChangesWithoutCatalogAndImportsIntoIndependentDatabase()
     {
-        await using var a = await TestDatabase.CreateAsync();
-        await using var b = await TestDatabase.CreateAsync();
-        var ca = Contract("a");
-        await a.Repository.UpsertContractsAsync([ca]);
-        await a.Repository.UpsertItemsAsync(ca.PncpId, [PriceCacheTests.Item(ca, 1)], false);
-        await a.Repository.ReplaceItemResultsAsync(ca.PncpId, 1, []);
-        await b.Repository.UpsertContractsAsync([Contract("local")]);
-        await SqlAsync(b, "CREATE TABLE user_test(value TEXT); INSERT INTO user_test VALUES('cotação local');");
-        var sa = new OfficialUpdateService(a.Repository.DatabasePath);
-        var sb = new OfficialUpdateService(b.Repository.DatabasePath);
-        var initial = Path.Combine(a.Directory, "initial.pncpupdate");
-        var manifest = await sa.ExportAsync(initial);
-        Assert.True(manifest.InitialBase);
-        Assert.Equal(3, manifest.Units);
-        var imported = await sb.ImportAsync(initial);
-        Assert.Equal(3, imported.Applied);
-        Assert.Equal(0, imported.Conflicts);
-        Assert.NotNull(await b.Repository.GetContractAsync("local"));
-        Assert.NotNull(await b.Repository.GetItemSnapshotAsync(ca.PncpId));
-        Assert.Equal(ItemHydrationStatus.Complete, (await b.Repository.GetItemAsync(ca.PncpId, 1))!.HydrationStatus);
-        Assert.Empty((await b.Repository.GetCachedItemResultsAsync(ca.PncpId, 1))!.Results);
-        Assert.Equal("cotação local", await ScalarAsync(b, "SELECT value FROM user_test"));
-        var noChanges = Path.Combine(a.Directory, "empty.pncpupdate");
-        Assert.Equal(0, (await sa.ExportAsync(noChanges)).Units);
-        var fromB = Path.Combine(b.Directory, "local.pncpupdate");
-        Assert.Equal(1, (await sb.ExportAsync(fromB)).Units); // only destination differences, not the initial base
-        Assert.Equal(1, (await sa.ImportAsync(fromB)).Applied);
-        await a.Repository.UpsertContractsAsync([ca with { Object = "café novo", GlobalUpdatedAt = ca.GlobalUpdatedAt!.Value.AddHours(1) }]);
-        await a.Repository.UpsertItemsAsync(ca.PncpId, [], false);
-        var delta = Path.Combine(a.Directory, "delta.pncpupdate");
-        Assert.False((await sa.ExportAsync(delta)).InitialBase);
-        var result = await sb.ImportAsync(delta);
-        Assert.Equal(0, result.Conflicts);
-        Assert.Equal("café novo", (await b.Repository.GetContractAsync(ca.PncpId))!.Object);
-        Assert.Null(await b.Repository.GetItemAsync(ca.PncpId, 1));
-        Assert.Equal(result, await sb.ImportAsync(delta));
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        await CompleteCoverageAsync(source);
+
+        var current = Contract("current", Today, Today);
+        var corrected = Contract("corrected", Today.AddDays(-40), Today);
+        var unchangedOld = Contract("unchanged-old", Today.AddDays(-40), Today.AddDays(-40));
+        await SaveEmptyListAsync(source, current);
+        await SaveEmptyListAsync(source, corrected);
+        await SaveEmptyListAsync(source, unchangedOld);
+        await SqlAsync(source, "INSERT INTO catalog_entries(catalog_kind,code,description,search_text) VALUES(1,'123','privado','privado')");
+        await SqlAsync(destination, "CREATE TABLE user_test(value TEXT); INSERT INTO user_test VALUES('cotação local')");
+
+        var path = Path.Combine(source.Directory, "window.pncpupdate");
+        var manifest = await new OfficialUpdateService(source.Repository.DatabasePath).ExportAsync(path);
+
+        Assert.Equal(2, manifest.Format);
+        Assert.Equal(Start, manifest.StartDate);
+        Assert.Equal(Today, manifest.EndDate);
+        Assert.Equal(10, manifest.Chunks.Count(chunk => chunk.Kind == "publication-day"));
+        Assert.Single(manifest.Chunks, chunk => chunk.Kind == "late-changes");
+        Assert.DoesNotContain(manifest.Chunks, chunk => chunk.Key.Contains("catalog", StringComparison.OrdinalIgnoreCase));
+
+        var firstPayload = Path.Combine(source.Directory, "payload.db");
+        using (var zip = ZipFile.OpenRead(path))
+            zip.GetEntry(manifest.Chunks[0].Entry)!.ExtractToFile(firstPayload);
+        await using (var payload = new SqliteConnection($"Data Source={firstPayload};Mode=ReadOnly;Pooling=False"))
+        {
+            await payload.OpenAsync();
+            await using var tables = payload.CreateCommand();
+            tables.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%catalog%'";
+            Assert.Equal(0L, Convert.ToInt64(await tables.ExecuteScalarAsync()));
+        }
+
+        var result = await new OfficialUpdateService(destination.Repository.DatabasePath).ImportAsync(path);
+        Assert.True(result.Applied >= 2);
+        Assert.NotNull(await destination.Repository.GetContractAsync("current"));
+        Assert.NotNull(await destination.Repository.GetContractAsync("corrected"));
+        Assert.Null(await destination.Repository.GetContractAsync("unchanged-old"));
+        Assert.Equal("cotação local", await ScalarAsync(destination, "SELECT value FROM user_test"));
+        Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(destination, "SELECT COUNT(*) FROM catalog_entries")));
     }
 
     [Fact]
-    public async Task TwoComputersPreserveNewerVersionsAndRecordUnorderedConflicts()
+    public async Task MissingAndNewerRecordsApplyWhileEqualNewerOrUnorderedLocalVersionsArePreserved()
     {
-        await using var a = await TestDatabase.CreateAsync();
-        await using var b = await TestDatabase.CreateAsync();
-        var contract = Contract("same");
-        await a.Repository.UpsertContractsAsync([contract]);
-        var sa = new OfficialUpdateService(a.Repository.DatabasePath);
-        var sb = new OfficialUpdateService(b.Repository.DatabasePath);
-        var path = Path.Combine(a.Directory, "base.pncpupdate");
-        await sa.ExportAsync(path); await sb.ImportAsync(path);
-        await a.Repository.UpsertContractsAsync([contract with { Object = "origem" }]);
-        path = Path.Combine(a.Directory, "conflict.pncpupdate");
-        await sa.ExportAsync(path);
-        Assert.Equal(1, (await sb.ImportAsync(path)).Conflicts);
-        Assert.Equal(contract.Object, (await b.Repository.GetContractAsync("same"))!.Object);
-        await b.Repository.UpsertContractsAsync([contract with { Object = "mais novo", GlobalUpdatedAt = contract.GlobalUpdatedAt!.Value.AddHours(2) }]);
-        path = Path.Combine(b.Directory, "newer.pncpupdate");
-        await sb.ExportAsync(path);
-        Assert.Equal(1, (await sa.ImportAsync(path)).Applied);
-        Assert.Equal("mais novo", (await a.Repository.GetContractAsync("same"))!.Object);
-        Assert.Equal(0L, await ScalarAsync(a, "SELECT COUNT(*) FROM official_conflicts"));
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        await CompleteCoverageAsync(source);
+        var incoming = Contract("same", Today, Today) with { Object = "recebido" };
+        var missing = Contract("missing", Today, Today) with { Object = "novo" };
+        await SaveEmptyListAsync(source, incoming);
+        await SaveEmptyListAsync(source, missing);
+
+        await SaveEmptyListAsync(destination, incoming with
+        {
+            Object = "local mais novo",
+            GlobalUpdatedAt = incoming.GlobalUpdatedAt!.Value.AddDays(1)
+        });
+        var unordered = Contract("unordered", Today, Today) with { GlobalUpdatedAt = null, Object = "origem" };
+        await SaveEmptyListAsync(source, unordered);
+        await SaveEmptyListAsync(destination, unordered with { Object = "local" });
+
+        var path = Path.Combine(source.Directory, "versions.pncpupdate");
+        await new OfficialUpdateService(source.Repository.DatabasePath).ExportAsync(path);
+        await new OfficialUpdateService(destination.Repository.DatabasePath).ImportAsync(path);
+
+        Assert.Equal("local mais novo", (await destination.Repository.GetContractAsync("same"))!.Object);
+        Assert.Equal("novo", (await destination.Repository.GetContractAsync("missing"))!.Object);
+        Assert.Equal("local", (await destination.Repository.GetContractAsync("unordered"))!.Object);
     }
 
     [Fact]
-    public async Task CancellationResumesCommittedBatchesAndLaterCumulativeContainsEarlierChanges()
+    public async Task ExportRefusesIncompleteCoverageListsAndResults()
     {
-        await using var a = await TestDatabase.CreateAsync();
-        await using var b = await TestDatabase.CreateAsync();
-        var sa = new OfficialUpdateService(a.Repository.DatabasePath);
-        var sb = new OfficialUpdateService(b.Repository.DatabasePath);
-        var path = Path.Combine(a.Directory, "base.pncpupdate");
-        await sa.ExportAsync(path); await sb.ImportAsync(path);
-        await a.Repository.UpsertContractsAsync(Enumerable.Range(0, 100).Select(i => Contract($"c{i:000}")).ToArray());
-        path = Path.Combine(a.Directory, "first.pncpupdate");
-        await sa.ExportAsync(path);
-        using var cancel = new CancellationTokenSource();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => sb.ImportAsync(path,
-            new InlineProgress(s => { if (s.StartsWith("Importação:")) cancel.Cancel(); }), cancel.Token));
-        var count = (await b.Repository.GetCountsAsync()).Contracts;
-        Assert.InRange(count, 1, 32);
-        await a.Repository.UpsertContractsAsync([Contract("last")]);
-        path = Path.Combine(a.Directory, "latest.pncpupdate");
-        Assert.Equal(101, (await sa.ExportAsync(path)).Units);
-        await sb.ImportAsync(path);
-        Assert.Equal(101, (await b.Repository.GetCountsAsync()).Contracts);
-        Assert.Equal(0L, await ScalarAsync(b, "SELECT COUNT(*) FROM official_conflicts"));
+        await using var database = await TestDatabase.CreateAsync();
+        var service = new OfficialUpdateService(database.Repository.DatabasePath);
+        var path = Path.Combine(database.Directory, "invalid.pncpupdate");
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => service.ExportAsync(path));
+        Assert.Contains("Conclua Atualizar", error.Message);
+        Assert.False(File.Exists(path));
+
+        await CompleteCoverageAsync(database);
+        var contract = Contract("missing-list", Today, Today);
+        await database.Repository.UpsertContractsAsync([contract]);
+        error = await Assert.ThrowsAsync<InvalidOperationException>(() => service.ExportAsync(path));
+        Assert.Contains("lista de itens", error.Message);
+
+        var item = PriceCacheTests.Item(contract, 1);
+        await database.Repository.UpsertItemsAsync(contract.PncpId, [item], false);
+        error = await Assert.ThrowsAsync<InvalidOperationException>(() => service.ExportAsync(path));
+        Assert.Contains("resultados incompletos", error.Message);
+        Assert.False(File.Exists(path));
     }
 
     [Fact]
-    public async Task InvalidBaseAndChecksumCannotMutateDestination()
+    public async Task EmptyListsAndEmptyResultsRemainCompleteAtomicSnapshots()
     {
-        await using var a = await TestDatabase.CreateAsync();
-        await using var b = await TestDatabase.CreateAsync();
-        var sa = new OfficialUpdateService(a.Repository.DatabasePath);
-        var sb = new OfficialUpdateService(b.Repository.DatabasePath);
-        var path = Path.Combine(a.Directory, "base.pncpupdate");
-        await sa.ExportAsync(path);
-        var delta = Path.Combine(a.Directory, "delta.pncpupdate");
-        await a.Repository.UpsertContractsAsync([Contract("a")]);
-        await sa.ExportAsync(delta);
-        await Assert.ThrowsAsync<InvalidDataException>(() => sb.ImportAsync(delta));
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        await CompleteCoverageAsync(source);
+        var emptyList = Contract("empty-list", Today, Today);
+        await SaveEmptyListAsync(source, emptyList);
+        var emptyResults = Contract("empty-results", Today, Today);
+        await source.Repository.UpsertContractsAsync([emptyResults]);
+        await source.Repository.UpsertItemsAsync(emptyResults.PncpId, [PriceCacheTests.Item(emptyResults, 1)], false);
+        await source.Repository.ReplaceItemResultsAsync(emptyResults.PncpId, 1, []);
+
+        var path = Path.Combine(source.Directory, "empty.pncpupdate");
+        await new OfficialUpdateService(source.Repository.DatabasePath).ExportAsync(path);
+        await new OfficialUpdateService(destination.Repository.DatabasePath).ImportAsync(path);
+
+        Assert.NotNull(await destination.Repository.GetItemSnapshotAsync(emptyList.PncpId));
+        Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(destination,
+            "SELECT COUNT(*) FROM items WHERE contract_id='empty-list'")));
+        var item = await destination.Repository.GetItemAsync(emptyResults.PncpId, 1);
+        Assert.Equal(ItemHydrationStatus.Complete, item!.HydrationStatus);
+        Assert.Empty((await destination.Repository.GetCachedItemResultsAsync(emptyResults.PncpId, 1))!.Results);
+        Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(destination,
+            "SELECT result_count FROM official_result_snapshots WHERE contract_id='empty-results' AND item_number=1")));
+    }
+
+    [Fact]
+    public async Task ReimportAndOverlappingUnchangedWindowUseReceiptsWithoutExtraction()
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        await CompleteCoverageAsync(source);
+        await SaveEmptyListAsync(source, Contract("one", Today, Today));
+        var exporter = new OfficialUpdateService(source.Repository.DatabasePath);
+        var importer = new OfficialUpdateService(destination.Repository.DatabasePath);
+        var first = Path.Combine(source.Directory, "first.pncpupdate");
+        await exporter.ExportAsync(first);
+        await importer.ImportAsync(first);
+
+        var messages = new List<string>();
+        var repeated = await importer.ImportAsync(first, new InlineProgress(messages.Add));
+        Assert.Equal(0, repeated.Applied);
+        Assert.DoesNotContain(messages, message => message.StartsWith("Lendo ", StringComparison.Ordinal));
+
+        var second = Path.Combine(source.Directory, "second.pncpupdate");
+        await exporter.ExportAsync(second);
+        messages.Clear();
+        var overlap = await importer.ImportAsync(second, new InlineProgress(messages.Add));
+        Assert.Equal(0, overlap.Applied);
+        Assert.DoesNotContain(messages, message => message.StartsWith("Lendo ", StringComparison.Ordinal));
+        Assert.Equal(10L, Convert.ToInt64(await ScalarAsync(destination,
+            "SELECT COUNT(*) FROM official_update_chunks WHERE completed=1")));
+    }
+
+    [Fact]
+    public async Task CompactBackupClearsReceiptsSoTheSamePackageCanRestoreDiscardedOfficialLists()
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        await CompleteCoverageAsync(source);
+        var contract = Contract("backup-item", Today, Today);
+        await source.Repository.UpsertContractsAsync([contract]);
+        await source.Repository.UpsertItemsAsync(contract.PncpId, [PriceCacheTests.Item(contract, 1)], false);
+        await source.Repository.ReplaceItemResultsAsync(contract.PncpId, 1,
+            [PriceCacheTests.Result(contract, 1, 1, true)]);
+        var package = Path.Combine(source.Directory, "backup-source.pncpupdate");
+        await new OfficialUpdateService(source.Repository.DatabasePath).ExportAsync(package);
+        var updates = new OfficialUpdateService(destination.Repository.DatabasePath);
+        await updates.ImportAsync(package);
+
+        var backup = Path.Combine(destination.Directory, "compact.pncpking");
+        var backups = new BackupService(destination.Repository);
+        await backups.ExportAsync(backup, BackupProfile.Compact);
+        await backups.ImportAsync(backup);
+        Assert.Null(await destination.Repository.GetItemAsync(contract.PncpId, 1));
+
+        var progress = new List<string>();
+        await updates.ImportAsync(package, new InlineProgress(progress.Add));
+        Assert.Contains(progress, message => message.StartsWith("Lendo ", StringComparison.Ordinal));
+        Assert.NotNull(await destination.Repository.GetItemAsync(contract.PncpId, 1));
+        Assert.Single((await destination.Repository.GetCachedItemResultsAsync(contract.PncpId, 1))!.Results);
+    }
+
+    [Fact]
+    public async Task TransportCorruptionFailsBeforeCurrentBlockMutationAndV1IsRejectedClearly()
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        await CompleteCoverageAsync(source);
+        await SaveEmptyListAsync(source, Contract("first-day", Start, Start));
+        var service = new OfficialUpdateService(source.Repository.DatabasePath);
+        var path = Path.Combine(source.Directory, "corrupt.pncpupdate");
+        var manifest = await service.ExportAsync(path);
+        var first = manifest.Chunks.Single(chunk => chunk.Date == Start);
         using (var zip = ZipFile.Open(path, ZipArchiveMode.Update))
         {
-            var entry = zip.GetEntry("manifest.json")!;
-            OfficialUpdateManifest manifest;
-            using (var stream = entry.Open()) manifest = JsonSerializer.Deserialize<OfficialUpdateManifest>(stream)!;
+            var entry = zip.GetEntry(first.Entry)!;
+            var length = checked((int)entry.Length);
             entry.Delete();
-            using var output = zip.CreateEntry("manifest.json").Open();
-            JsonSerializer.Serialize(output, manifest with { Sha256 = "bad" });
+            await using var output = zip.CreateEntry(first.Entry, CompressionLevel.NoCompression).Open();
+            await output.WriteAsync(Enumerable.Repeat((byte)0x5a, length).ToArray());
         }
-        await Assert.ThrowsAsync<InvalidDataException>(() => sb.ImportAsync(path));
-        Assert.Equal(0, (await b.Repository.GetCountsAsync()).Contracts);
-        Assert.Null(await ScalarAsync(b, "SELECT base_id FROM official_transfer_state"));
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            new OfficialUpdateService(destination.Repository.DatabasePath).ImportAsync(path));
+        Assert.Contains("Checksum", error.Message);
+        Assert.Null(await destination.Repository.GetContractAsync("first-day"));
+
+        var legacy = Path.Combine(source.Directory, "legacy.pncpupdate");
+        await using (var file = File.Create(legacy))
+        using (var zip = new ZipArchive(file, ZipArchiveMode.Create))
+        {
+            await using (var metadata = new StreamWriter(zip.CreateEntry("manifest.json").Open(), new UTF8Encoding(false)))
+            {
+                await metadata.WriteAsync("{\"format\":1}");
+                await metadata.FlushAsync();
+            }
+            await using var payload = zip.CreateEntry("updates.db").Open();
+            await payload.WriteAsync(new byte[] { 1 });
+        }
+        var legacyError = await Assert.ThrowsAsync<InvalidDataException>(() => OfficialUpdateService.ReadManifestAsync(legacy));
+        Assert.Contains("v1 incompatível", legacyError.Message);
     }
 
-    [Fact]
-    public async Task InvalidEmptyResultUnitIsRejectedBeforeAnyBatchIsApplied()
-    {
-        await using var a = await TestDatabase.CreateAsync();
-        await using var b = await TestDatabase.CreateAsync();
-        var contracts = Enumerable.Range(0, 40).Select(i => Contract($"c{i:000}")).ToArray();
-        await a.Repository.UpsertContractsAsync(contracts);
-        await a.Repository.UpsertItemsAsync(contracts[0].PncpId, [PriceCacheTests.Item(contracts[0], 1)], false);
-        await a.Repository.ReplaceItemResultsAsync(contracts[0].PncpId, 1, []);
-        var path = Path.Combine(a.Directory, "invalid-unit.pncpupdate");
-        var manifest = await new OfficialUpdateService(a.Repository.DatabasePath).ExportAsync(path);
-        var payload = Path.Combine(a.Directory, "payload.db");
-        using (var zip = ZipFile.OpenRead(path)) zip.GetEntry("updates.db")!.ExtractToFile(payload);
-        await using (var connection = new SqliteConnection($"Data Source={payload};Pooling=False"))
+    private static ContractRecord Contract(string id, DateOnly publication, DateOnly updated) =>
+        PriceCacheTests.RecentContract(id, publication, id.Sum(character => character) % 27 + 1) with
         {
-            await connection.OpenAsync();
-            await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT payload FROM units WHERE kind=3";
-            var unit = JsonNode.Parse((string)(await command.ExecuteScalarAsync())!)!;
-            unit["Key2"] = "invalid";
-            var json = unit.ToJsonString();
-            command.CommandText = "UPDATE units SET key2='invalid',payload=$json,hash=$hash WHERE kind=3";
-            command.Parameters.AddWithValue("$json", json);
-            command.Parameters.AddWithValue("$hash", Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))));
-            await command.ExecuteNonQueryAsync();
-        }
-        using (var zip = ZipFile.Open(path, ZipArchiveMode.Update))
-        {
-            zip.GetEntry("updates.db")!.Delete();
-            zip.CreateEntryFromFile(payload, "updates.db");
-            zip.GetEntry("manifest.json")!.Delete();
-            using var output = zip.CreateEntry("manifest.json").Open();
-            JsonSerializer.Serialize(output, manifest with { Sha256 = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(payload))) });
-        }
-        await Assert.ThrowsAsync<InvalidDataException>(() => new OfficialUpdateService(b.Repository.DatabasePath).ImportAsync(path));
-        Assert.Equal(0, (await b.Repository.GetCountsAsync()).Contracts);
-        Assert.Null(await ScalarAsync(b, "SELECT base_id FROM official_transfer_state"));
-    }
-
-    [Fact]
-    public async Task CacheRemovalAndRolledBackWritesDoNotExportOfficialDeletions()
-    {
-        await using var a = await TestDatabase.CreateAsync();
-        var contract = Contract("a");
-        await a.Repository.UpsertContractsAsync([contract]);
-        await a.Repository.UpsertItemsAsync("a", [PriceCacheTests.Item(contract, 1)], false);
-        await a.Repository.ReplaceItemResultsAsync("a", 1, [PriceCacheTests.Result(contract, 1, 1, true)]);
-        var service = new OfficialUpdateService(a.Repository.DatabasePath);
-        await service.ExportAsync(Path.Combine(a.Directory, "base.pncpupdate"));
-        await SqlAsync(a, "BEGIN; UPDATE contracts SET object='rolled back'; ROLLBACK; DELETE FROM items; DELETE FROM contract_item_snapshots;");
-        Assert.Equal(0, (await service.ExportAsync(Path.Combine(a.Directory, "delta.pncpupdate"))).Units);
-        Assert.Equal(0L, await ScalarAsync(a, "SELECT COUNT(*) FROM official_changes"));
-    }
-
-    [Fact]
-    public async Task CompleteCoverageAndPrivateQuotationsSurviveTransfer()
-    {
-        await using var a = await TestDatabase.CreateAsync();
-        await using var b = await TestDatabase.CreateAsync();
-        var today = DateOnly.FromDateTime(DateTime.Today);
-        await a.Repository.EnsureCoverageWindowAsync(today, today, [6]);
-        await a.Repository.SetCoverageStatusAsync(today, today, 6, "ALL", CoverageStatus.Complete, 0);
-        var quotes = new SqliteQuotationRepository(b.Repository.DatabasePath);
-        var project = await quotes.CreateProjectAsync("Particular");
-        var line = Guid.NewGuid();
-        var reference = new QuotationReference
-        {
-            Id = "local",
-            LineId = line,
-            ContractId = "private",
-            ItemNumber = 1,
-            ResultSequence = 1,
-            ItemDescription = "Café",
-            ItemUnit = "KG",
-            SupplierName = "Fornecedor",
-            SupplierTaxId = "11222333000181",
-            UnitPrice = 10,
-            PublicationDate = DateTimeOffset.Now,
-            Source = QuotationReferenceSource.PncpIncisoII,
-            Adequacy = new(50, 20, 10, 15, 5, "Teste")
+            GlobalUpdatedAt = updated.ToDateTime(new TimeOnly(12, 0), DateTimeKind.Utc)
         };
-        await quotes.SaveSampleAsync(project.Id, line, new QuotationLineInput("Café", 1, "KG", null, null), [reference]);
-        var basket = await quotes.SaveManualBasketAsync(line, null, "Minha cesta", ["local"]);
-        var path = Path.Combine(a.Directory, "coverage.pncpupdate");
-        Assert.Equal(1, (await new OfficialUpdateService(a.Repository.DatabasePath).ExportAsync(path)).Units);
-        await new OfficialUpdateService(b.Repository.DatabasePath).ImportAsync(path);
-        Assert.True(await b.Repository.IsCoverageCompleteAsync(today, today));
-        Assert.Equal("Particular", Assert.Single(await quotes.GetProjectsAsync()).Name);
-        Assert.Equal("local", Assert.Single(await quotes.GetReferencesAsync(line)).Id);
-        Assert.Equal(basket.Id, Assert.Single(await quotes.GetManualBasketsAsync(line)).Id);
-    }
 
-    [Fact]
-    public async Task CatalogChangesAndExplicitNewBaseAreSupported()
+    private static async Task CompleteCoverageAsync(TestDatabase database)
     {
-        await using var a = await TestDatabase.CreateAsync();
-        await using var b = await TestDatabase.CreateAsync();
-        await SqlAsync(a, "INSERT INTO catalog_entries(catalog_kind,code,description,search_text,remote_updated_at) VALUES(1,'123','café','cafe','2026-09-01T00:00:00Z');");
-        var sa = new OfficialUpdateService(a.Repository.DatabasePath);
-        var sb = new OfficialUpdateService(b.Repository.DatabasePath);
-        var path = Path.Combine(a.Directory, "base.pncpupdate");
-        await sa.ExportAsync(path); await sb.ImportAsync(path);
-        Assert.Equal("café", await ScalarAsync(b, "SELECT description FROM catalog_entries WHERE code='123'"));
-        await SqlAsync(a, "UPDATE catalog_entries SET description='café novo',search_text='cafe novo',remote_updated_at='2026-09-02T00:00:00Z' WHERE code='123'");
-        var delta = Path.Combine(a.Directory, "delta.pncpupdate");
-        await sa.ExportAsync(delta); Assert.Equal(1, (await sb.ImportAsync(delta)).Applied);
-        await sa.ExportAsync(path, newBase: true);
-        await Assert.ThrowsAsync<InvalidDataException>(() => sb.ImportAsync(path));
-        await b.Repository.UpsertContractsAsync([Contract("preserved")]);
-        await sb.ImportAsync(path, replaceBase: true);
-        Assert.NotNull(await b.Repository.GetContractAsync("preserved"));
-        Assert.Equal("café novo", await ScalarAsync(b, "SELECT description FROM catalog_entries WHERE code='123'"));
+        await database.Repository.EnsureCoverageWindowAsync(Start, Today, [6]);
+        await database.Repository.SetCoverageStatusAsync(Start, Today, 6, "ALL", CoverageStatus.Complete, 0);
     }
 
-    [Fact]
-    public async Task InitialBaseCancellationRequiresResumeBeforeCumulativeImport()
+    private static async Task SaveEmptyListAsync(TestDatabase database, ContractRecord contract)
     {
-        await using var a = await TestDatabase.CreateAsync();
-        await using var b = await TestDatabase.CreateAsync();
-        await a.Repository.UpsertContractsAsync(Enumerable.Range(0, 70).Select(i => Contract($"initial-{i:000}")).ToArray());
-        var sa = new OfficialUpdateService(a.Repository.DatabasePath); var sb = new OfficialUpdateService(b.Repository.DatabasePath);
-        var path = Path.Combine(a.Directory, "base.pncpupdate"); await sa.ExportAsync(path);
-        using var cancel = new CancellationTokenSource();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => sb.ImportAsync(path, new InlineProgress(s => { if (s.StartsWith("Importação:")) cancel.Cancel(); }), cancel.Token));
-        var delta = Path.Combine(a.Directory, "delta.pncpupdate"); await sa.ExportAsync(delta);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => sb.ImportAsync(delta));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => sb.ExportAsync(Path.Combine(b.Directory, "invalid.pncpupdate")));
-        await sb.ImportAsync(path); Assert.Equal(70, (await b.Repository.GetCountsAsync()).Contracts);
-        Assert.Equal(0, (await sb.ExportAsync(Path.Combine(b.Directory, "empty.pncpupdate"))).Units);
+        await database.Repository.UpsertContractsAsync([contract]);
+        await database.Repository.UpsertItemsAsync(contract.PncpId, [], false);
     }
 
-    private sealed class InlineProgress(Action<string> action) : IProgress<string> { public void Report(string value) => action(value); }
-    private static async Task SqlAsync(TestDatabase db, string sql)
-    { await using var c = new SqliteConnection($"Data Source={db.Repository.DatabasePath};Foreign Keys=True;Pooling=False"); await c.OpenAsync(); await using var cmd = c.CreateCommand(); cmd.CommandText = sql; await cmd.ExecuteNonQueryAsync(); }
-    private static async Task<object?> ScalarAsync(TestDatabase db, string sql)
-    { await using var c = new SqliteConnection($"Data Source={db.Repository.DatabasePath};Pooling=False"); await c.OpenAsync(); await using var cmd = c.CreateCommand(); cmd.CommandText = sql; var value = await cmd.ExecuteScalarAsync(); return value is DBNull ? null : value; }
+    private sealed class InlineProgress(Action<string> report) : IProgress<string>
+    {
+        public void Report(string value) => report(value);
+    }
+
+    private static async Task SqlAsync(TestDatabase database, string sql)
+    {
+        await using var connection = new SqliteConnection($"Data Source={database.Repository.DatabasePath};Foreign Keys=True;Pooling=False");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private static async Task<object?> ScalarAsync(TestDatabase database, string sql)
+    {
+        await using var connection = new SqliteConnection($"Data Source={database.Repository.DatabasePath};Pooling=False");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        var value = await command.ExecuteScalarAsync();
+        return value is DBNull ? null : value;
+    }
 }

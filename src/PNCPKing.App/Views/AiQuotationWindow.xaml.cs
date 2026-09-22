@@ -989,7 +989,7 @@ public partial class AiQuotationWindow : Window
     private IReadOnlyList<string> ReadContractPrompts(bool requireExactlyTen)
     {
         var rawPrompts = ContractPromptsTextBox.Text
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
             .Select(value => value.Trim())
             .Where(value => value.Length > 0)
             .ToArray();

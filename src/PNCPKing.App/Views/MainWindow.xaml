@@ -68,8 +68,6 @@
                         <MenuItem Header="_Arquivo">
                             <MenuItem Header="Exportar atualizações PNCP…" Command="{Binding ExportUpdatesCommand}" />
                             <MenuItem Header="Importar atualizações PNCP…" Command="{Binding ImportUpdatesCommand}" />
-                            <MenuItem Header="Iniciar nova base de transferência…" Command="{Binding NewUpdateBaseCommand}" />
-                            <MenuItem Header="Importar nova base de transferência…" Command="{Binding ImportNewUpdateBaseCommand}" />
                             <Separator />
                             <MenuItem Header="Compactar banco…" Command="{Binding CompactDatabaseCommand}" />
                             <MenuItem Header="Exportar backup" Command="{Binding ExportBackupCommand}" />

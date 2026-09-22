@@ -12,17 +12,13 @@ public sealed partial class MainViewModel
 {
     public ICommand ExportUpdatesCommand { get; private set; } = null!;
     public ICommand ImportUpdatesCommand { get; private set; } = null!;
-    public ICommand NewUpdateBaseCommand { get; private set; } = null!;
-    public ICommand ImportNewUpdateBaseCommand { get; private set; } = null!;
     public ICommand CompactDatabaseCommand { get; private set; } = null!;
 
     private void InitializeUpdates()
     {
         GitHubUpdateCommand = new AsyncRelayCommand(() => _gitHubUpdateTask = UpdateFromGitHubAsync(), () => CanEvaluatePc);
-        ExportUpdatesCommand = new AsyncRelayCommand(() => ExportOfficialUpdatesAsync(false), () => CanEvaluatePc);
-        NewUpdateBaseCommand = new AsyncRelayCommand(() => ExportOfficialUpdatesAsync(true), () => CanEvaluatePc);
-        ImportUpdatesCommand = new AsyncRelayCommand(() => ImportOfficialUpdatesAsync(false), () => CanEvaluatePc);
-        ImportNewUpdateBaseCommand = new AsyncRelayCommand(() => ImportOfficialUpdatesAsync(true), () => CanEvaluatePc);
+        ExportUpdatesCommand = new AsyncRelayCommand(ExportOfficialUpdatesAsync, () => CanEvaluatePc);
+        ImportUpdatesCommand = new AsyncRelayCommand(ImportOfficialUpdatesAsync, () => CanEvaluatePc);
         CompactDatabaseCommand = new AsyncRelayCommand(async () =>
         {
             await RunFileOperationAsync(async ct =>
@@ -38,10 +34,8 @@ public sealed partial class MainViewModel
         }, () => CanEvaluatePc);
     }
 
-    private async Task ExportOfficialUpdatesAsync(bool newBase)
+    private async Task ExportOfficialUpdatesAsync()
     {
-        if (newBase && MessageBox.Show("Criar uma nova base oficial completa? Os outros PCs precisarão iniciar uma nova linhagem com essa base. Os pacotes da base anterior continuarão incompatíveis com a nova.",
-            "Nova base de transferência", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
         var dialog = new SaveFileDialog
         {
             Title = "Exportar atualizações PNCP",
@@ -56,15 +50,13 @@ public sealed partial class MainViewModel
             IsFileOperationIndeterminate = true;
             var progress = new Progress<string>(s => FileOperationProgressText = s);
             var service = new OfficialUpdateService(_calibrationService.Connections);
-            var result = await Task.Run(() => service.ExportAsync(dialog.FileName, newBase, progress, ct), ct);
-            StatusText = result.InitialBase ? "Base oficial inicial exportada. Importe este arquivo uma vez no outro PC." : "Atualizações cumulativas exportadas. Basta transportar este pacote mais recente.";
+            var result = await Task.Run(() => service.ExportAsync(dialog.FileName, progress, ct), ct);
+            StatusText = $"Atualização v2 exportada: {result.StartDate:dd/MM/yyyy} a {result.EndDate:dd/MM/yyyy}. Pode ser aplicada diretamente a um backup.";
         });
     }
 
-    private async Task ImportOfficialUpdatesAsync(bool replaceBase)
+    private async Task ImportOfficialUpdatesAsync()
     {
-        if (replaceBase && MessageBox.Show("Trocar a linhagem pela base inicial escolhida? Os dados particulares e as versões oficiais mais novas serão preservados. Os pacotes anteriores deixarão de ser compatíveis.",
-            "Importar nova base", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
         var dialog = new OpenFileDialog { Title = "Importar atualizações PNCP", Filter = "Atualizações PNCP (*.pncpupdate)|*.pncpupdate" };
         if (dialog.ShowDialog() != true) return;
         await RunFileOperationAsync(async ct =>
@@ -75,11 +67,8 @@ public sealed partial class MainViewModel
             var service = new OfficialUpdateService(_calibrationService.Connections);
             try
             {
-                var result = await Task.Run(() => service.ImportAsync(dialog.FileName, progress, ct, replaceBase), ct);
-                StatusText = $"Atualizações importadas: {result.Applied:N0}; preservadas: {result.Skipped:N0}; pendências de revalidação: {result.Conflicts:N0}.";
-                if (result.Conflicts > 0)
-                    MessageBox.Show("As versões do destino foram preservadas onde não havia uma ordem oficial confiável. Use Atualizar para revalidar os dados PNCP; divergências de CATMAT/CATSER são revalidadas em Atualizar catálogo.",
-                        "Revalidação pendente", MessageBoxButton.OK, MessageBoxImage.Information);
+                var result = await Task.Run(() => service.ImportAsync(dialog.FileName, progress, ct), ct);
+                StatusText = $"Atualizações importadas: {result.Applied:N0}; versões locais preservadas: {result.Skipped:N0}.";
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {

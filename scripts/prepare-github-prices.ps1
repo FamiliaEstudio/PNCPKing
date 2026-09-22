@@ -1,109 +1,108 @@
 param(
-    [Parameter(Mandatory = $true)][string]$BasePackage,
-    [string]$CumulativePackage,
+    [Parameter(Mandatory = $true)][string]$UpdatePackage,
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
-    [string]$MinimumAppVersion = '1.1.0'
+    [string]$MinimumAppVersion = '1.2.0'
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+
 if ($MinimumAppVersion -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
     throw 'MinimumAppVersion deve usar X.Y.Z.'
 }
-$output = [IO.Path]::GetFullPath($OutputDirectory)
-[void][IO.Directory]::CreateDirectory($output)
+if ([Version]$MinimumAppVersion -lt [Version]'1.2.0') {
+    throw 'Pacotes v2 exigem MinimumAppVersion 1.2.0 ou posterior.'
+}
 
-function Read-ExportPackage([string]$Path) {
-    $source = (Get-Item -LiteralPath $Path).FullName
-    $zip = [IO.Compression.ZipFile]::OpenRead($source)
-    try {
-        if ($zip.Entries.Count -ne 2 -or @($zip.Entries | Where-Object FullName -eq 'manifest.json').Count -ne 1 -or
-            @($zip.Entries | Where-Object FullName -eq 'updates.db').Count -ne 1) { throw 'Conteudo .pncpupdate invalido.' }
-        $entry = $zip.GetEntry('manifest.json')
-        if ($entry.Length -gt 65536) { throw 'Manifesto do pacote muito grande.' }
-        $reader = New-Object IO.StreamReader($entry.Open())
-        try { $metadata = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
-        if ($metadata.Format -ne 1 -or $metadata.Schema -lt 1 -or $metadata.Revision -lt 0 -or $metadata.Units -lt 0 -or
-            $metadata.Sha256 -notmatch '^[a-fA-F0-9]{64}$' -or $metadata.InitialBase -isnot [bool]) { throw 'Manifesto do pacote invalido.' }
-        foreach ($identity in @($metadata.BaseId, $metadata.Origin, $metadata.PackageId)) { [void][Guid]::ParseExact($identity, 'N') }
-        $data = $zip.GetEntry('updates.db')
-        if ($data.Length -le 0) { throw 'Payload SQLite ausente.' }
-        $stream = $data.Open()
+$source = (Get-Item -LiteralPath $UpdatePackage).FullName
+$sourceSize = (Get-Item -LiteralPath $source).Length
+if ($sourceSize -le 0 -or $sourceSize -ge 2GB) {
+    throw 'O .pncpupdate precisa ser menor que 2 GiB.'
+}
+
+$zip = [IO.Compression.ZipFile]::OpenRead($source)
+try {
+    $manifestEntries = @($zip.Entries | Where-Object FullName -eq 'manifest.json')
+    if ($manifestEntries.Count -ne 1 -or $manifestEntries[0].Length -le 0 -or $manifestEntries[0].Length -gt 1MB) {
+        throw 'Manifesto interno ausente ou invalido.'
+    }
+    $reader = New-Object IO.StreamReader($manifestEntries[0].Open())
+    try { $metadata = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+
+    if ($metadata.Format -ne 2 -or $metadata.Schema -ne 29) { throw 'Somente .pncpupdate v2 com esquema 29 pode ser publicado.' }
+    [void][Guid]::ParseExact($metadata.PackageId, 'N')
+    $start = [DateTime]::ParseExact([string]$metadata.StartDate, 'yyyy-MM-dd',
+        [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None)
+    $end = [DateTime]::ParseExact([string]$metadata.EndDate, 'yyyy-MM-dd',
+        [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None)
+    if (($end - $start).Days -ne 9) { throw 'A janela precisa conter hoje e os nove dias anteriores.' }
+    if (-not $metadata.GeneratedAt -or -not $metadata.IntegrityValidatedAt -or
+        [DateTimeOffset]$metadata.IntegrityValidatedAt -lt [DateTimeOffset]$metadata.GeneratedAt) {
+        throw 'O exportador nao registrou a validacao de integridade.'
+    }
+
+    $chunks = @($metadata.Chunks)
+    $daily = @($chunks | Where-Object Kind -eq 'publication-day')
+    $late = @($chunks | Where-Object Kind -eq 'late-changes')
+    if ($daily.Count -ne 10 -or $late.Count -gt 1 -or $chunks.Count -lt 10 -or $chunks.Count -gt 11) {
+        throw 'O pacote nao possui os dez blocos diarios esperados.'
+    }
+    $expectedDates = @{}
+    for ($i = 0; $i -lt 10; $i++) { $expectedDates[$start.AddDays($i).ToString('yyyy-MM-dd')] = $true }
+    foreach ($chunk in $daily) {
+        if (-not $expectedDates.ContainsKey([string]$chunk.Date)) { throw 'Data diaria duplicada ou fora da janela.' }
+        $expectedDates.Remove([string]$chunk.Date)
+    }
+    if ($expectedDates.Count -ne 0) { throw 'A janela diaria esta incompleta.' }
+
+    $entryNames = @{}
+    [long]$expandedSize = 0
+    foreach ($chunk in $chunks) {
+        if (-not $chunk.Key -or -not $chunk.Entry -or $entryNames.ContainsKey([string]$chunk.Entry) -or
+            $chunk.ExpandedSize -le 0 -or $chunk.ExpandedSize -ge 2GB -or
+            $chunk.Sha256 -notmatch '^[a-fA-F0-9]{64}$' -or $chunk.ContentDigest -notmatch '^[a-fA-F0-9]{64}$') {
+            throw 'Descritor de bloco invalido.'
+        }
+        foreach ($count in @($chunk.Contracts, $chunk.ItemSnapshots, $chunk.Items, $chunk.ResultSnapshots,
+                $chunk.Results, $chunk.CoverageCells)) {
+            if ([long]$count -lt 0) { throw 'Contagem de bloco invalida.' }
+        }
+        $entryNames[[string]$chunk.Entry] = $true
+        $entry = $zip.GetEntry([string]$chunk.Entry)
+        if ($null -eq $entry -or $entry.Length -ne [long]$chunk.ExpandedSize) { throw "Bloco ausente ou truncado: $($chunk.Key)." }
+        $stream = $entry.Open()
         $sha = [Security.Cryptography.SHA256]::Create()
         try { $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
         finally { $sha.Dispose(); $stream.Dispose() }
-        if ($hash -ne $metadata.Sha256) { throw 'SHA-256 interno divergente; pacote nao preparado.' }
-        return [pscustomobject]@{ Source = $source; Manifest = $metadata; ExpandedSize = $data.Length }
-    } finally { $zip.Dispose() }
+        if ($hash -ne ([string]$chunk.Sha256).ToLowerInvariant()) { throw "SHA-256 interno divergente: $($chunk.Key)." }
+        $expandedSize += [long]$chunk.ExpandedSize
+    }
+    if ($zip.Entries.Count -ne $chunks.Count + 1) { throw 'O pacote contem entradas nao declaradas.' }
+} finally {
+    $zip.Dispose()
 }
 
-function Write-PackageAssets($Package) {
-    $size = (Get-Item -LiteralPath $Package.Source).Length
-    $hash = (Get-FileHash -LiteralPath $Package.Source -Algorithm SHA256).Hash.ToLowerInvariant()
-    $prefix = 'precos-' + $Package.Manifest.PackageId
-    $parts = @()
-    if ($size -lt 2GB) {
-        $name = $prefix + '.pncpupdate'
-        $target = Join-Path $output $name
-        [IO.File]::Copy($Package.Source, ($target + '.partial'), $true)
-        Move-Item -LiteralPath ($target + '.partial') -Destination $target -Force
-        $parts += [ordered]@{ name = $name; size = $size; sha256 = $hash }
-    } else {
-        $inputStream = [IO.File]::OpenRead($Package.Source)
-        try {
-            $buffer = New-Object byte[] (1MB)
-            $index = 0
-            while ($inputStream.Position -lt $inputStream.Length) {
-                $index++
-                if ($index -gt 998) { throw 'O pacote excede o numero de anexos permitido por release.' }
-                $name = $prefix + ('.pncpupdate.part{0:D4}' -f $index)
-                $target = Join-Path $output $name
-                $partStream = [IO.File]::Create($target + '.partial')
-                try {
-                    [long]$written = 0
-                    while ($written -lt 1GB) {
-                        $read = $inputStream.Read($buffer, 0, [int][Math]::Min($buffer.Length, (1GB - $written)))
-                        if ($read -eq 0) { break }
-                        $partStream.Write($buffer, 0, $read)
-                        $written += $read
-                    }
-                } finally { $partStream.Dispose() }
-                Move-Item -LiteralPath ($target + '.partial') -Destination $target -Force
-                $parts += [ordered]@{ name = $name; size = $written;
-                    sha256 = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() }
-            }
-        } finally { $inputStream.Dispose() }
-    }
-    # Serialize the existing package identity, including the checksum of updates.db, separately from the transport checksum.
-    $m = $Package.Manifest
-    return [ordered]@{
-        manifest = [ordered]@{ format = $m.Format; schema = $m.Schema; baseId = $m.BaseId; origin = $m.Origin;
-            revision = $m.Revision; initialBase = $m.InitialBase; packageId = $m.PackageId; sha256 = $m.Sha256; units = $m.Units }
-        expandedSize = $Package.ExpandedSize
-        download = [ordered]@{ size = $size; sha256 = $hash; parts = @($parts) }
-    }
+$output = [IO.Path]::GetFullPath($OutputDirectory)
+[void][IO.Directory]::CreateDirectory($output)
+$name = 'precos-' + $metadata.PackageId + '.pncpupdate'
+$target = Join-Path $output $name
+[IO.File]::Copy($source, ($target + '.partial'), $true)
+Move-Item -LiteralPath ($target + '.partial') -Destination $target -Force
+$hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+$file = [ordered]@{ name = $name; size = $sourceSize; sha256 = $hash }
+$package = [ordered]@{
+    manifest = $metadata
+    expandedSize = $expandedSize
+    download = [ordered]@{ size = $sourceSize; sha256 = $hash; parts = @($file) }
 }
-
-$base = Read-ExportPackage $BasePackage
-if (-not $base.Manifest.InitialBase) { throw 'BasePackage precisa ser a exportacao inicial completa.' }
-$delta = $null
-if ($CumulativePackage) {
-    $delta = Read-ExportPackage $CumulativePackage
-    if ($delta.Manifest.InitialBase -or $delta.Manifest.BaseId -ne $base.Manifest.BaseId -or
-        $delta.Manifest.Origin -ne $base.Manifest.Origin -or $delta.Manifest.Schema -ne $base.Manifest.Schema -or
-        $delta.Manifest.Revision -lt $base.Manifest.Revision -or $delta.Manifest.PackageId -eq $base.Manifest.PackageId) {
-        throw 'O cumulativo nao pertence a esta base/origem/esquema.'
-    }
+$manifest = [ordered]@{
+    format = 2
+    publishedAt = [DateTimeOffset]::UtcNow.ToString('o')
+    minimumAppVersion = $MinimumAppVersion
+    schema = 29
+    update = $package
 }
-$baseAssets = Write-PackageAssets $base
-$deltaAssets = if ($delta) { Write-PackageAssets $delta } else { $null }
-$deltaPartCount = if ($deltaAssets) { @($deltaAssets.download.parts).Count } else { 0 }
-if (@($baseAssets.download.parts).Count + $deltaPartCount + 1 -gt 1000) {
-    throw 'Os pacotes excedem o numero de anexos permitido por release.'
-}
-$manifest = [ordered]@{ format = 1; publishedAt = [DateTimeOffset]::UtcNow.ToString('o');
-    minimumAppVersion = $MinimumAppVersion; schema = $base.Manifest.Schema; base = $baseAssets; cumulative = $deltaAssets }
 $manifestPath = Join-Path $output 'prices-update.json'
-[IO.File]::WriteAllText(($manifestPath + '.partial'), ($manifest | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding($false)))
+[IO.File]::WriteAllText(($manifestPath + '.partial'), ($manifest | ConvertTo-Json -Depth 16), (New-Object Text.UTF8Encoding($false)))
 Move-Item -LiteralPath ($manifestPath + '.partial') -Destination $manifestPath -Force
-Write-Host "Precos preparados em $output. Envie e confira todos os anexos antes de substituir prices-update.json na release precos (Latest=false)."
+Write-Host "Pacote movel v2 preparado em $output. Publique o .pncpupdate e prices-update.json na release precos."
