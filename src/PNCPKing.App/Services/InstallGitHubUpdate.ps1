@@ -4,6 +4,17 @@ $request = $null
 $replacementStarted = $false
 $replacementFinished = $false
 $backup = $null
+
+function Get-Sha256Hex([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToUpperInvariant()
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
+}
 try {
     $request = Get-Content -LiteralPath $RequestPath -Raw | ConvertFrom-Json
     if ($request.operationId -notmatch '^[a-f0-9]{32}$') { throw 'Identidade da atualizacao invalida.' }
@@ -14,7 +25,7 @@ try {
     if (-not (Test-Path -LiteralPath $request.targetPath -PathType Leaf)) { throw 'Executavel original ausente.' }
     $backup = $request.targetPath + '.' + $request.operationId + '.bak'
     $staged = Get-Item -LiteralPath $request.stagedPath
-    if ($staged.Length -ne $request.size -or (Get-FileHash -LiteralPath $staged.FullName -Algorithm SHA256).Hash -ne $request.sha256) {
+    if ($staged.Length -ne $request.size -or (Get-Sha256Hex $staged.FullName) -ne $request.sha256) {
         throw 'Executavel incompleto ou SHA-256 divergente.'
     }
     $actualVersion = $staged.VersionInfo
@@ -32,7 +43,7 @@ try {
     if ($parentAlive) { throw 'O PNCP King ainda esta aberto. Feche o processo e tente atualizar novamente.' }
     if (-not (Test-Path -LiteralPath ($RequestPath + '.commit'))) { throw 'A instalacao foi cancelada pelo programa.' }
     if ((Get-Item -LiteralPath $request.stagedPath).Length -ne $request.size -or
-        (Get-FileHash -LiteralPath $request.stagedPath -Algorithm SHA256).Hash -ne $request.sha256) {
+        (Get-Sha256Hex $request.stagedPath) -ne $request.sha256) {
         throw 'O executavel mudou durante o encerramento; instalacao interrompida.'
     }
     # Only replacement failures can restore this backup. Once the new process is launched it may migrate the database.
