@@ -391,6 +391,13 @@ public sealed class BackupService(
                 $"Versões aceitas: 1 a {SqliteContractRepository.CurrentSchemaVersion}.");
         }
 
+        if (manifest.DatabaseIntegrityValidatedAtExport != true)
+        {
+            throw new InvalidDataException(
+                "Este backup não contém prova de verificação integral na origem. " +
+                "Reexporte-o em uma versão atual do PNCP King; o receptor não executa PRAGMA integrity_check.");
+        }
+
         ValidateArchiveFormat(manifest);
 
         if (manifest.DatabaseBytes is { } declaredBytes && declaredBytes != databaseBytes)
@@ -523,6 +530,13 @@ public sealed class BackupService(
                         $"Versões aceitas: 1 a {SqliteContractRepository.CurrentSchemaVersion}.");
                 }
 
+                if (manifest.DatabaseIntegrityValidatedAtExport != true)
+                {
+                    throw new InvalidDataException(
+                        "Este backup não contém prova de verificação integral na origem. " +
+                        "Reexporte-o em uma versão atual do PNCP King; o receptor não executa PRAGMA integrity_check.");
+                }
+
                 ValidateArchiveFormat(manifest);
                 var manifestAssets = manifest.EvidenceAssets ?? [];
                 if (manifestAssets
@@ -616,42 +630,25 @@ public sealed class BackupService(
                 throw new InvalidDataException("O checksum do banco não corresponde ao manifesto.");
             }
 
-            if (manifest.DatabaseIntegrityValidatedAtExport == true)
+            Report(
+                progress,
+                BackupImportStage.CheckingIntegrity,
+                45,
+                "Backup validado integralmente na origem; confirmando a versão interna…");
+            using (var validationSpan = _performance.Begin("backup", "import-origin-validation"))
             {
-                Report(
-                    progress,
-                    BackupImportStage.CheckingIntegrity,
-                    45,
-                    "Backup validado integralmente na origem; confirmando a versão interna…");
-                using var validationSpan = _performance.Begin("backup", "import-origin-validation");
                 await ValidateDatabaseAsync(
                     importedDatabase,
                     manifest.SchemaVersion,
                     checkIntegrity: false,
                     cancellationToken: cancellationToken).ConfigureAwait(false);
                 validationSpan.Complete(bytes: inspection.DatabaseBytes);
-                Report(
-                    progress,
-                    BackupImportStage.CheckingIntegrity,
-                    58,
-                    "Integridade confirmada na origem e protegida pelo checksum SHA-256.");
             }
-            else
-            {
-                Report(
-                    progress,
-                    BackupImportStage.CheckingIntegrity,
-                    45,
-                    "Backup legado; verificando integralmente o SQLite neste computador…");
-                using var integritySpan = _performance.Begin("backup", "import-full-integrity");
-                await ValidateDatabaseAsync(
-                    importedDatabase,
-                    manifest.SchemaVersion,
-                    checkIntegrity: true,
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
-                integritySpan.Complete(bytes: inspection.DatabaseBytes);
-                Report(progress, BackupImportStage.CheckingIntegrity, 58, "Integridade local confirmada.");
-            }
+            Report(
+                progress,
+                BackupImportStage.CheckingIntegrity,
+                58,
+                "Integridade confirmada na origem e protegida pelo checksum SHA-256.");
 
             Report(
                 progress,
@@ -675,8 +672,8 @@ public sealed class BackupService(
             }
 
             // Migrate an older, otherwise valid PNCP King snapshot while it is
-            // still isolated. The live database is not touched until every
-            // migration and integrity check succeeds.
+            // still isolated. Migration is transactional; the receiver confirms
+            // only the resulting schema version and never repeats integrity_check.
             if (manifest.SchemaVersion < SqliteContractRepository.CurrentSchemaVersion)
             {
                 Report(
@@ -694,16 +691,18 @@ public sealed class BackupService(
                 }
                 Report(
                     progress,
-                    BackupImportStage.CheckingIntegrity,
+                    BackupImportStage.Migrating,
                     70,
-                    "Migração concluída; verificando novamente a integridade…");
-                using var integritySpan = _performance.Begin("backup", "import-full-integrity");
-                await ValidateDatabaseAsync(
-                    importedDatabase,
-                    SqliteContractRepository.CurrentSchemaVersion,
-                    checkIntegrity: true,
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
-                integritySpan.Complete(bytes: inspection.DatabaseBytes);
+                    "Migração concluída; confirmando a versão interna…");
+                using (var validationSpan = _performance.Begin("backup", "import-migration-validation"))
+                {
+                    await ValidateDatabaseAsync(
+                        importedDatabase,
+                        SqliteContractRepository.CurrentSchemaVersion,
+                        checkIntegrity: false,
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+                    validationSpan.Complete(bytes: inspection.DatabaseBytes);
+                }
             }
 
             if (manifest.BackupProfile == BackupProfile.Compact)

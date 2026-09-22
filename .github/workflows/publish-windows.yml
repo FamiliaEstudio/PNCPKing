@@ -1,0 +1,39 @@
+name: Build PNCP King Windows
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build, test and publish
+        shell: pwsh
+        run: ./scripts/publish-windows.ps1
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: PNCPKing-win-x64-${{ github.sha }}
+          path: |
+            artifacts/win-x64/PNCPKing.exe
+            artifacts/win-x64/app-update.json
+          if-no-files-found: error
+          retention-days: 14

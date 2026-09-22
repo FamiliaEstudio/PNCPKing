@@ -144,7 +144,7 @@ public sealed class BackupTests
     }
 
     [Fact]
-    public async Task Import_LegacyBackupKeepsFullLocalIntegrityCheck()
+    public async Task Import_RejectsBackupWithoutOriginIntegrityProof()
     {
         await using var database = await TestDatabase.CreateAsync();
         var backupPath = Path.Combine(database.Directory, "legacy.pncpking");
@@ -159,14 +159,16 @@ public sealed class BackupTests
         });
         var telemetry = new RecordingPerformanceTelemetry();
 
-        await new BackupService(database.Repository, telemetry).ImportAsync(backupPath);
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            new BackupService(database.Repository, telemetry).ImportAsync(backupPath));
 
-        Assert.Contains(("backup", "import-full-integrity"), telemetry.Measurements);
+        Assert.Contains("origem", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(("backup", "import-full-integrity"), telemetry.Measurements);
         Assert.DoesNotContain(("backup", "import-origin-validation"), telemetry.Measurements);
     }
 
     [Fact]
-    public async Task Import_ValidatesAgainAfterMigratingOriginValidatedBackup()
+    public async Task Import_MigratesOriginValidatedBackupWithoutReceiverIntegrityScan()
     {
         await using var database = await TestDatabase.CreateAsync();
         var backupPath = Path.Combine(database.Directory, "schema-20.pncpking");
@@ -180,7 +182,8 @@ public sealed class BackupTests
         Assert.Equal(SqliteContractRepository.CurrentSchemaVersion, initialization.CurrentVersion);
         Assert.Contains(("backup", "import-origin-validation"), telemetry.Measurements);
         Assert.Contains(("backup", "import-migration"), telemetry.Measurements);
-        Assert.Contains(("backup", "import-full-integrity"), telemetry.Measurements);
+        Assert.Contains(("backup", "import-migration-validation"), telemetry.Measurements);
+        Assert.DoesNotContain(("backup", "import-full-integrity"), telemetry.Measurements);
     }
 
     [Fact]
