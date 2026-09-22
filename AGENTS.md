@@ -47,6 +47,15 @@ O objetivo é maximizar clareza, confiabilidade, desempenho e facilidade de
 manutenção com a menor complexidade necessária.
 
 
+## Integridade de backups — regra não negociável
+
+- `PRAGMA integrity_check` de arquivos `.pncpking` deve ser executado exclusivamente no computador emissor, durante a exportação.
+- O computador receptor nunca deve executar `PRAGMA integrity_check` sobre um backup importado, inclusive antes da instalação, depois de migração de esquema, após retenção, durante ativação ou durante recuperação.
+- No receptor são permitidas somente verificações de transporte e estrutura que não façam varredura integral: SHA-256/hashes, manifesto, versão interna do esquema e referências/evidências.
+- Migrações de esquema não autorizam nova verificação integral no receptor. O sucesso da transação de migração é a fronteira de recuperação; depois dela, confirme somente a versão interna esperada.
+- Backup legado sem declaração de validação integral na origem deve ser recusado e reexportado por uma versão compatível. Não substitua essa recusa por uma verificação integral local.
+- Não reintroduza verificações integrais no receptor como medida adicional de segurança, robustez ou defesa em profundidade sem alteração explícita desta regra pelo usuário.
+
 ## Distribuição Windows
 
 - Deve existir somente uma distribuição publicada e somente um executável do PNCP King no repositório.
