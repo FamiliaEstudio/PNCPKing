@@ -7,6 +7,17 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
+function Get-Sha256Hex([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
+}
+
 if ($MinimumAppVersion -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
     throw 'MinimumAppVersion deve usar X.Y.Z.'
 }
@@ -88,7 +99,7 @@ $name = 'precos-' + $metadata.PackageId + '.pncpupdate'
 $target = Join-Path $output $name
 [IO.File]::Copy($source, ($target + '.partial'), $true)
 Move-Item -LiteralPath ($target + '.partial') -Destination $target -Force
-$hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+$hash = Get-Sha256Hex $target
 $file = [ordered]@{ name = $name; size = $sourceSize; sha256 = $hash }
 $package = [ordered]@{
     manifest = $metadata
