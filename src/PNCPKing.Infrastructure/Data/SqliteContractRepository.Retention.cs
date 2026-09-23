@@ -10,6 +10,7 @@ public sealed record DataRetentionResult(
     long RemovedReferences = 0,
     long AffectedLines = 0,
     bool Applied = false,
+    bool Pending = false,
     bool Compacted = false,
     long BytesBefore = 0,
     long BytesAfter = 0,
@@ -22,22 +23,65 @@ public sealed partial class SqliteContractRepository
         bool compact = false,
         bool force = false,
         CancellationToken cancellationToken = default,
-        IProgress<string>? progress = null)
+        IProgress<string>? progress = null,
+        int? contractBatchSize = null)
     {
-        try { return await MaintainRetentionCoreAsync(today, compact, force, cancellationToken, progress).ConfigureAwait(false); }
+        if (contractBatchSize is <= 0)
+            throw new ArgumentOutOfRangeException(nameof(contractBatchSize));
+        try
+        {
+            return await MaintainRetentionCoreAsync(today, compact, force, cancellationToken, progress,
+                contractBatchSize: contractBatchSize).ConfigureAwait(false);
+        }
         catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
-        { throw new OperationCanceledException("Retenção cancelada; transação revertida.", exception, cancellationToken); }
+        {
+            throw new OperationCanceledException("Retenção cancelada; transação revertida.", exception, cancellationToken);
+        }
+    }
+
+    public async Task<DateOnly?> PrepareRetentionWindowAsync(
+        DateOnly today,
+        CancellationToken cancellationToken = default)
+    {
+        var cutoff = DataWindow.Start(today);
+        await using var writer = await _connections.WorkCoordinator.EnterWriterAsync(
+            SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+
+        string lastRetentionDate;
+        string retentionCutoff;
+        await using (var state = connection.CreateCommand())
+        {
+            state.CommandText = "SELECT last_retention_date, retention_cutoff FROM maintenance_state WHERE id = 1;";
+            await using var reader = await state.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            lastRetentionDate = reader.GetString(0);
+            retentionCutoff = reader.GetString(1);
+        }
+
+        if (!string.Equals(retentionCutoff, FormatDate(cutoff), StringComparison.Ordinal))
+        {
+            await ExecuteRetentionSqlAsync(connection, null, "PRAGMA temp_store=MEMORY;", cancellationToken).ConfigureAwait(false);
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await NormalizeRetentionWindowsAsync(connection, transaction, cutoff, today, cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        return DateOnly.TryParseExact(lastRetentionDate, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+            DateTimeStyles.None, out var completed) ? completed : null;
     }
 
     internal async Task<DataRetentionResult> MaintainRetentionCoreAsync(
         DateOnly today, bool compact, bool force, CancellationToken cancellationToken,
-        IProgress<string>? progress = null, long? availableFreeBytes = null)
+        IProgress<string>? progress = null, long? availableFreeBytes = null, int? contractBatchSize = null)
     {
         using var span = _performance.Begin("maintenance", "retention");
         var result = new DataRetentionResult();
         var cutoff = DataWindow.Start(today);
         bool applied;
         bool compactionPending;
+        bool expired;
         await using (var writer = await _connections.WorkCoordinator.EnterWriterAsync(
                          SqliteWorkPriority.Background, cancellationToken).ConfigureAwait(false))
         await using (var connection = await OpenAsync(cancellationToken).ConfigureAwait(false))
@@ -52,35 +96,54 @@ public sealed partial class SqliteContractRepository
                 applied = !force && reader.GetString(0) == FormatDate(today) && reader.GetString(2) == FormatDate(cutoff);
                 compactionPending = force && compact || reader.GetInt32(1) == 0;
             }
-            // Even a same-day imported marker is checked against actual expired data.
-            // EXISTS stops at the first match; the large contract population uses its date index.
-            var expired = await HasExpiredRetentionDataAsync(connection, cutoff, cancellationToken).ConfigureAwait(false);
+
+            expired = await HasExpiredRetentionDataAsync(connection, cutoff, cancellationToken).ConfigureAwait(false);
             validation.Complete();
+
+            if (expired)
+            {
+                progress?.Report("Preparando limpeza otimizada…");
+                await EnsureRetentionIndexesAsync(connection, cancellationToken).ConfigureAwait(false);
+                await ExecuteRetentionSqlAsync(connection, null, "PRAGMA temp_store=MEMORY;", cancellationToken).ConfigureAwait(false);
+            }
+
             if (compact && compactionPending)
                 await ExecuteRetentionSqlAsync(connection, null, "PRAGMA wal_checkpoint(TRUNCATE);", cancellationToken).ConfigureAwait(false);
+
             if (!applied || expired)
             {
-                progress?.Report(expired ? "Removendo dados vencidos…" : "Nenhuma remoção necessária; atualizando o corte da retenção…");
+                progress?.Report(expired ? "Removendo um lote de dados vencidos…" : "Nenhuma remoção necessária; atualizando o corte da retenção…");
                 using var removal = _performance.Begin("maintenance", "retention-removal");
                 await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
                 if (expired)
-                    result = await PruneExpiredDataAsync(connection, transaction, cutoff, cancellationToken).ConfigureAwait(false);
+                    result = await PruneExpiredDataAsync(connection, transaction, cutoff, cancellationToken, contractBatchSize).ConfigureAwait(false);
                 await NormalizeRetentionWindowsAsync(connection, transaction, cutoff, today, cancellationToken).ConfigureAwait(false);
-                await using var complete = connection.CreateCommand();
-                complete.Transaction = transaction;
-                complete.CommandText = "UPDATE maintenance_state SET last_retention_date = $today WHERE id = 1;";
-                complete.Parameters.AddWithValue("$today", FormatDate(today));
-                await complete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
                 removal.Complete(result.RemovedContracts + result.RemovedReferences);
             }
-        }
-        // Cascades and existing per-contract triggers maintain affected index records.
-        // Retention is complete independently of downloading/preparing national indexes.
 
-        result = result with { Message = (!result.Applied ? "Nenhuma remoção necessária. " : "") + $"Janela de 11 meses: {result.RemovedContracts:N0} contratações e " +
-            $"{result.RemovedReferences:N0} referências removidas; {result.AffectedLines:N0} itens para reconfirmar." };
-        if (compact && compactionPending)
+            var pending = await HasExpiredRetentionDataAsync(connection, cutoff, cancellationToken).ConfigureAwait(false);
+            result = result with { Pending = pending };
+            if (!pending)
+            {
+                await using var complete = connection.CreateCommand();
+                complete.CommandText = "UPDATE maintenance_state SET last_retention_date = $today WHERE id = 1;";
+                complete.Parameters.AddWithValue("$today", FormatDate(today));
+                await complete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                if (expired)
+                    await PruneOrphanEvidenceAssetsAsync(connection, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        result = result with
+        {
+            Message = result.Pending
+                ? $"Limpeza parcial da janela de 11 meses: {result.RemovedContracts:N0} contratações e {result.RemovedReferences:N0} referências removidas; continuação agendada para a próxima ociosidade."
+                : (!result.Applied ? "Nenhuma remoção necessária. " : "") +
+                  $"Janela de 11 meses: {result.RemovedContracts:N0} contratações e {result.RemovedReferences:N0} referências removidas; {result.AffectedLines:N0} itens para reconfirmar."
+        };
+
+        if (compact && compactionPending && !result.Pending)
         {
             var before = new FileInfo(DatabasePath).Length;
             var available = availableFreeBytes ?? Math.Min(
@@ -88,8 +151,12 @@ public sealed partial class SqliteContractRepository
                 new DriveInfo(Path.GetPathRoot(Path.GetTempPath())!).AvailableFreeSpace);
             if (available < checked(before * 2))
             {
-                result = result with { BytesBefore = before, BytesAfter = before,
-                    Message = result.Message + " Compactação pendente: espaço livre insuficiente (reserva de duas vezes o banco)." };
+                result = result with
+                {
+                    BytesBefore = before,
+                    BytesAfter = before,
+                    Message = result.Message + " Compactação pendente: espaço livre insuficiente (reserva de duas vezes o banco)."
+                };
             }
             else
             {
@@ -98,18 +165,58 @@ public sealed partial class SqliteContractRepository
                 await using var writer = await _connections.WorkCoordinator.EnterWriterAsync(
                     SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
                 await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-                await ExecuteRetentionSqlAsync(connection, null, "PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);", cancellationToken).ConfigureAwait(false);
+                await ExecuteRetentionSqlAsync(connection, null,
+                    "PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);",
+                    cancellationToken).ConfigureAwait(false);
                 await VerifyRetentionIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
                 await ExecuteRetentionSqlAsync(connection, null,
                     "UPDATE maintenance_state SET retention_compaction_completed = 1 WHERE id = 1; PRAGMA optimize; PRAGMA wal_checkpoint(TRUNCATE);",
                     cancellationToken).ConfigureAwait(false);
-                result = result with { Compacted = true, BytesBefore = before, BytesAfter = new FileInfo(DatabasePath).Length,
+                result = result with
+                {
+                    Compacted = true,
+                    BytesBefore = before,
+                    BytesAfter = new FileInfo(DatabasePath).Length,
                     Message = result.Message + $" Compactação concluída em {watch.Elapsed.TotalSeconds:N1} s; " +
-                        $"{before:N0} → {new FileInfo(DatabasePath).Length:N0} bytes." };
+                              $"{before:N0} → {new FileInfo(DatabasePath).Length:N0} bytes."
+                };
             }
         }
+
         span.Complete(result.RemovedContracts + result.RemovedReferences);
         return result;
+    }
+
+    private static async Task EnsureRetentionIndexesAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await ExecuteRetentionSqlAsync(connection, null, """
+            CREATE INDEX IF NOT EXISTS idx_quotation_processed_contracts_contract
+                ON quotation_processed_contracts(contract_id);
+            CREATE INDEX IF NOT EXISTS idx_quotation_item_search_hits_contract
+                ON quotation_item_search_hits(contract_id, line_id, prompt_slot);
+            CREATE INDEX IF NOT EXISTS idx_quotation_item_search_failures_contract
+                ON quotation_item_search_failures(contract_id, line_id, prompt_slot);
+            CREATE INDEX IF NOT EXISTS idx_quotation_references_retention
+                ON quotation_references(source_kind, result_date, publication_date, contract_id);
+            CREATE INDEX IF NOT EXISTS idx_quotation_internet_price_drafts_retention
+                ON quotation_internet_price_drafts(captured_at, id);
+            """, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task PruneOrphanEvidenceAssetsAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await ExecuteRetentionSqlAsync(connection, null, """
+            DELETE FROM quotation_internet_evidence_assets
+             WHERE sha256 NOT IN (
+                SELECT price_image_sha256 FROM quotation_internet_price_evidence
+                UNION SELECT tax_id_image_sha256 FROM quotation_internet_price_evidence
+                UNION SELECT price_image_sha256 FROM quotation_internet_price_drafts WHERE price_image_sha256 IS NOT NULL
+                UNION SELECT tax_id_image_sha256 FROM quotation_internet_price_drafts WHERE tax_id_image_sha256 IS NOT NULL);
+            """, cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task<bool> HasExpiredRetentionDataAsync(SqliteConnection connection,
@@ -135,12 +242,19 @@ public sealed partial class SqliteContractRepository
 
     internal static async Task<DataRetentionResult> PruneExpiredDataAsync(
         SqliteConnection connection, SqliteTransaction transaction, DateOnly cutoff,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, int? contractBatchSize = null)
     {
+        var contractLimit = contractBatchSize ?? int.MaxValue;
+        var referenceLimit = contractBatchSize.HasValue
+            ? Math.Max(250, checked(contractBatchSize.Value * 4))
+            : int.MaxValue;
+
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.Parameters.AddWithValue("$cutoff", FormatDate(cutoff));
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$contractLimit", contractLimit);
+        command.Parameters.AddWithValue("$referenceLimit", referenceLimit);
         command.CommandText = """
             CREATE TEMP TABLE IF NOT EXISTS expired_contracts(id TEXT PRIMARY KEY) WITHOUT ROWID;
             CREATE TEMP TABLE IF NOT EXISTS expired_references(line_id TEXT, id TEXT, PRIMARY KEY(line_id, id)) WITHOUT ROWID;
@@ -152,14 +266,44 @@ public sealed partial class SqliteContractRepository
             DELETE FROM expired_references;
             DELETE FROM retention_affected_lines;
             DELETE FROM retention_affected_workspaces;
-            INSERT INTO expired_contracts SELECT pncp_id FROM contracts WHERE publication_date < $cutoff;
-            INSERT INTO expired_references
-            SELECT qr.line_id, qr.id FROM quotation_references qr
-            LEFT JOIN contracts c ON c.pncp_id = qr.contract_id
-            LEFT JOIN quotation_internet_price_evidence e ON e.line_id = qr.line_id AND e.reference_id = qr.id
-            WHERE CASE WHEN qr.source_kind = 1
-                THEN COALESCE(qr.result_date, substr(e.captured_at, 1, 10), qr.publication_date)
-                ELSE COALESCE(c.publication_date, qr.publication_date) END < $cutoff;
+
+            INSERT INTO expired_contracts
+            SELECT pncp_id
+              FROM contracts
+             WHERE publication_date < $cutoff
+             ORDER BY publication_date, pncp_id
+             LIMIT $contractLimit;
+
+            -- PNCP references tied to the contracts in this small batch can use the
+            -- contract_id index directly instead of rescanning every quotation reference.
+            INSERT OR IGNORE INTO expired_references
+            SELECT qr.line_id, qr.id
+              FROM quotation_references qr
+              JOIN expired_contracts ec ON ec.id = qr.contract_id
+             WHERE qr.source_kind <> 1;
+
+            -- Imported/snapshot PNCP references may no longer have a local parent contract.
+            INSERT OR IGNORE INTO expired_references
+            SELECT qr.line_id, qr.id
+              FROM quotation_references qr
+             WHERE qr.source_kind <> 1
+               AND qr.publication_date < $cutoff
+               AND NOT EXISTS(SELECT 1 FROM contracts c WHERE c.pncp_id = qr.contract_id)
+             ORDER BY qr.publication_date, qr.line_id, qr.id
+             LIMIT $referenceLimit;
+
+            -- Internet references use their result/capture date and are also bounded so
+            -- a slow HDD never receives an unbounded delete at once.
+            INSERT OR IGNORE INTO expired_references
+            SELECT qr.line_id, qr.id
+              FROM quotation_references qr
+              LEFT JOIN quotation_internet_price_evidence e
+                ON e.line_id = qr.line_id AND e.reference_id = qr.id
+             WHERE qr.source_kind = 1
+               AND COALESCE(qr.result_date, substr(e.captured_at, 1, 10), qr.publication_date) < $cutoff
+             ORDER BY COALESCE(qr.result_date, substr(e.captured_at, 1, 10), qr.publication_date), qr.line_id, qr.id
+             LIMIT $referenceLimit;
+
             INSERT INTO retention_affected_lines SELECT DISTINCT line_id FROM expired_references;
             INSERT INTO retention_affected_workspaces
             SELECT h.line_id, h.prompt_slot, COUNT(*), SUM((SELECT COUNT(*) FROM item_results r
@@ -169,6 +313,7 @@ public sealed partial class SqliteContractRepository
             GROUP BY h.line_id, h.prompt_slot;
             """;
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
         command.CommandText = "SELECT (SELECT COUNT(*) FROM expired_contracts), (SELECT COUNT(*) FROM expired_references), (SELECT COUNT(*) FROM retention_affected_lines);";
         DataRetentionResult result;
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
@@ -176,6 +321,7 @@ public sealed partial class SqliteContractRepository
             await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
             result = new(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2), Applied: true);
         }
+
         command.CommandText = """
             DELETE FROM quotation_references WHERE (line_id, id) IN (SELECT line_id, id FROM expired_references);
             DELETE FROM quotation_manual_baskets
@@ -204,12 +350,12 @@ public sealed partial class SqliteContractRepository
             DELETE FROM coverage_day_modalities WHERE coverage_date < $cutoff;
             DELETE FROM sync_partitions WHERE end_date < $cutoff;
             DELETE FROM sync_runs WHERE end_date < $cutoff;
-            DELETE FROM quotation_internet_price_drafts WHERE captured_at < $cutoff;
-            DELETE FROM quotation_internet_evidence_assets WHERE sha256 NOT IN (
-                SELECT price_image_sha256 FROM quotation_internet_price_evidence
-                UNION SELECT tax_id_image_sha256 FROM quotation_internet_price_evidence
-                UNION SELECT price_image_sha256 FROM quotation_internet_price_drafts WHERE price_image_sha256 IS NOT NULL
-                UNION SELECT tax_id_image_sha256 FROM quotation_internet_price_drafts WHERE tax_id_image_sha256 IS NOT NULL);
+            DELETE FROM quotation_internet_price_drafts
+             WHERE id IN (
+                SELECT id FROM quotation_internet_price_drafts
+                 WHERE captured_at < $cutoff
+                 ORDER BY captured_at, id
+                 LIMIT $referenceLimit);
             UPDATE maintenance_state SET last_optimize_date = '' WHERE id = 1;
             """;
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
