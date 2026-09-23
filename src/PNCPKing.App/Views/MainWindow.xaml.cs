@@ -42,7 +42,7 @@ public partial class MainWindow : Window
         DataContext = viewModel;
         _viewModel.PropertyChanged += ViewModel_PropertyChanged;
         Closed += (_, _) => _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
-        ClampInitialSizeToWorkArea();
+        MonitorAwareWindowBehavior.Attach(this);
         SourceInitialized += MainWindow_SourceInitialized;
         Deactivated += (_, _) => CancelItemResultHold();
         _itemResultHoldTimer.Tick += ItemResultHoldTimer_Tick;
@@ -57,17 +57,6 @@ public partial class MainWindow : Window
         if (e.PropertyName != nameof(MainViewModel.ItemSearchGeneration)) return;
         ItemResultsGrid.Items.SortDescriptions.Clear();
         foreach (var column in ItemResultsGrid.Columns) column.SortDirection = null;
-    }
-
-    private void ClampInitialSizeToWorkArea()
-    {
-        var workArea = SystemParameters.WorkArea;
-        var availableWidth = Math.Max(500, workArea.Width - 12);
-        var availableHeight = Math.Max(360, workArea.Height - 12);
-        MinWidth = Math.Min(MinWidth, availableWidth);
-        MinHeight = Math.Min(MinHeight, availableHeight);
-        Width = Math.Max(MinWidth, Math.Min(Width, availableWidth));
-        Height = Math.Max(MinHeight, Math.Min(Height, availableHeight));
     }
 
     private void MainWindow_SourceInitialized(object? sender, EventArgs e)

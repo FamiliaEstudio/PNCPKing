@@ -21,6 +21,7 @@ public partial class QuotationImportWindow : Window
     {
         _columnLayouts = columnLayouts;
         InitializeComponent();
+        MonitorAwareWindowBehavior.Attach(this);
         columnLayouts.Register("quotation-import-preview", ImportItemsGrid);
         Closed += (_, _) => _columnLayouts.Unregister(ImportItemsGrid);
         Items = document.Items;

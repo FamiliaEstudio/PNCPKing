@@ -10,8 +10,8 @@
         </Grid.RowDefinitions>
         <TabControl x:Name="StepsTab">
             <TabItem Header="1 — PDF, provedor e custo">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <Grid Margin="12">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                    <Grid Margin="12" MinWidth="1000">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="190" />
                             <ColumnDefinition Width="*" />
@@ -206,10 +206,9 @@
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="205" />
                             <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="205" />
-                            <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
                         <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
@@ -221,45 +220,55 @@
                         <TextBlock Text="Cotação existente" VerticalAlignment="Center" />
                         <ComboBox x:Name="ProjectComboBox" Grid.Column="1" DisplayMemberPath="Name"
                                   SelectionChanged="ProjectComboBox_SelectionChanged" />
-                        <TextBlock Grid.Column="2" Text="Ou nome da nova cotação" VerticalAlignment="Center" />
-                        <TextBox x:Name="NewProjectNameTextBox" Grid.Column="3"
+                        <TextBlock Grid.Row="1" Text="Ou nome da nova cotação" VerticalAlignment="Center" />
+                        <TextBox x:Name="NewProjectNameTextBox" Grid.Row="1" Grid.Column="1"
                                  TextChanged="NewProjectNameTextBox_TextChanged" />
 
-                        <TextBlock Grid.Row="1" Text="Filtro geográfico" VerticalAlignment="Center" />
-                        <ComboBox x:Name="GeoFilterComboBox" Grid.Row="1" Grid.Column="1"
+                        <TextBlock Grid.Row="2" Text="Filtro geográfico" VerticalAlignment="Center" />
+                        <ComboBox x:Name="GeoFilterComboBox" Grid.Row="2" Grid.Column="1"
                                   DisplayMemberPath="DisplayName" />
-                        <TextBlock Grid.Row="1" Grid.Column="2" Text="Período" VerticalAlignment="Center" />
-                        <StackPanel Grid.Row="1" Grid.Column="3" Orientation="Horizontal">
+                        <TextBlock Grid.Row="3" Text="Período" VerticalAlignment="Center" />
+                        <WrapPanel Grid.Row="3" Grid.Column="1">
                             <DatePicker x:Name="StartDatePicker" Width="125" />
                             <TextBlock Text=" até " VerticalAlignment="Center" />
                             <DatePicker x:Name="EndDatePicker" Width="125" />
-                        </StackPanel>
+                        </WrapPanel>
 
-                        <TextBlock Grid.Row="2" Text="Pesos do índice (%)" VerticalAlignment="Center" />
-                        <StackPanel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="3" Orientation="Horizontal">
-                            <TextBlock Text="Descrição" VerticalAlignment="Center" />
-                            <TextBox x:Name="DescriptionWeightTextBox" Width="45" Text="50" />
-                            <TextBlock Text=" Unidade" VerticalAlignment="Center" />
-                            <TextBox x:Name="UnitWeightTextBox" Width="45" Text="20" />
-                            <TextBlock Text=" Quantidade" VerticalAlignment="Center" />
-                            <TextBox x:Name="QuantityWeightTextBox" Width="45" Text="10" />
-                            <TextBlock Text=" Proximidade" VerticalAlignment="Center" />
-                            <TextBox x:Name="ProximityWeightTextBox" Width="45" Text="15" />
-                            <TextBlock Text=" Atualidade" VerticalAlignment="Center" />
-                            <TextBox x:Name="RecencyWeightTextBox" Width="45" Text="5" />
-                        </StackPanel>
+                        <TextBlock Grid.Row="4" Text="Pesos do índice (%)" VerticalAlignment="Center" />
+                        <WrapPanel Grid.Row="4" Grid.Column="1">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="Descrição" VerticalAlignment="Center" />
+                                <TextBox x:Name="DescriptionWeightTextBox" Width="45" Text="50" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text=" Unidade" VerticalAlignment="Center" />
+                                <TextBox x:Name="UnitWeightTextBox" Width="45" Text="20" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text=" Quantidade" VerticalAlignment="Center" />
+                                <TextBox x:Name="QuantityWeightTextBox" Width="45" Text="10" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text=" Proximidade" VerticalAlignment="Center" />
+                                <TextBox x:Name="ProximityWeightTextBox" Width="45" Text="15" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text=" Atualidade" VerticalAlignment="Center" />
+                                <TextBox x:Name="RecencyWeightTextBox" Width="45" Text="5" />
+                            </StackPanel>
+                        </WrapPanel>
 
-                        <TextBlock Grid.Row="3" Text="Tempo total de pesquisa" VerticalAlignment="Center" />
-                        <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal">
+                        <TextBlock Grid.Row="5" Text="Tempo total de pesquisa" VerticalAlignment="Center" />
+                        <WrapPanel Grid.Row="5" Grid.Column="1">
                             <TextBox x:Name="TimeMinutesTextBox" Width="80" Text="30" />
                             <TextBlock Text=" minutos (5 a 1.440)" VerticalAlignment="Center" />
-                        </StackPanel>
-                        <TextBlock Grid.Row="3" Grid.Column="2" Text="Alvo padrão de preços" VerticalAlignment="Center" />
-                        <TextBox x:Name="DefaultBasketSizeTextBox" Grid.Row="3" Grid.Column="3"
+                        </WrapPanel>
+                        <TextBlock Grid.Row="6" Text="Alvo padrão de preços" VerticalAlignment="Center" />
+                        <TextBox x:Name="DefaultBasketSizeTextBox" Grid.Row="6" Grid.Column="1"
                                  Width="80" HorizontalAlignment="Left" Text="3"
                                  TextChanged="DefaultBasketSizeTextBox_TextChanged" />
 
-                        <Border Grid.Row="4" Grid.ColumnSpan="4" Margin="0,14,0,0" Padding="10"
+                        <Border Grid.Row="7" Grid.ColumnSpan="2" Margin="0,14,0,0" Padding="10"
                                 Background="#EAF2FF" BorderBrush="#A9C5F2" BorderThickness="1">
                             <TextBlock TextWrapping="Wrap">
                                 Cada lote abre 50 contratações únicas e compara seus itens com todas as linhas
@@ -273,14 +282,18 @@
             </TabItem>
         </TabControl>
 
-        <DockPanel Grid.Row="1" Margin="0,12,0,0">
-            <TextBlock x:Name="BottomStatusTextBlock" DockPanel.Dock="Left"
-                       VerticalAlignment="Center" Text="Selecione um PDF para começar." />
-            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+        <Grid Grid.Row="1" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="BottomStatusTextBlock" VerticalAlignment="Center"
+                       TextWrapping="Wrap" Text="Selecione um PDF para começar." />
+            <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
                 <Button Content="Fechar" IsCancel="True" MinWidth="95" />
                 <Button x:Name="StartAutomationButton" Content="Criar e iniciar pesquisa"
                         MinWidth="155" IsDefault="True" Click="StartAutomation_Click" />
-            </StackPanel>
-        </DockPanel>
+            </WrapPanel>
+        </Grid>
     </Grid>
 </Window>

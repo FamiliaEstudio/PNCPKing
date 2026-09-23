@@ -1,11 +1,14 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
+using System.Windows.Interop;
 using System.Windows.Threading;
+using PNCPKing.App.Services;
 using PNCPKing.App.ViewModels;
 using PNCPKing.Core.Models;
 using PNCPKing.Core.Search;
@@ -17,6 +20,22 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args is ["--layout"])
+        {
+            var layoutApp = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            layoutApp.Startup += async (_, _) =>
+            {
+                try
+                {
+                    await CheckMonitorPlacementAsync();
+                    Console.WriteLine("Monitor placement: passed");
+                    layoutApp.Shutdown();
+                }
+                catch (Exception error) { Console.Error.WriteLine(error); layoutApp.Shutdown(1); }
+            };
+            return layoutApp.Run();
+        }
+
         if (args.Length < 1) throw new ArgumentException("Informe o JSON de saída e, opcionalmente, uma cópia de benchmark.");
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         app.Startup += async (_, _) =>
@@ -39,28 +58,75 @@ internal static class Program
         return app.Run();
     }
 
+    private static async Task CheckMonitorPlacementAsync()
+    {
+        var window = new Window
+        {
+            Title = "Validação de janela em monitor pequeno",
+            Width = SystemParameters.PrimaryScreenWidth * 2,
+            Height = SystemParameters.PrimaryScreenHeight * 2,
+            MinWidth = SystemParameters.PrimaryScreenWidth * 1.5,
+            MinHeight = SystemParameters.PrimaryScreenHeight * 1.5
+        };
+        MonitorAwareWindowBehavior.Attach(window);
+        try
+        {
+            window.Show();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            var handle = new WindowInteropHelper(window).Handle;
+            var monitor = MonitorFromWindow(handle, 2);
+            var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+            Require(monitor != IntPtr.Zero && GetMonitorInfo(monitor, ref info), "Monitor não encontrado.");
+            Require(GetWindowRect(handle, out var rect), "Janela não encontrada.");
+            Require(rect.Left >= info.WorkArea.Left && rect.Top >= info.WorkArea.Top &&
+                    rect.Right <= info.WorkArea.Right && rect.Bottom <= info.WorkArea.Bottom,
+                "A janela ultrapassou a área útil do monitor.");
+        }
+        finally { window.Close(); }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int Left, Top, Right, Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    private struct MonitorInfo
+    {
+        public int Size;
+        public NativeRect Monitor, WorkArea;
+        public uint Flags;
+    }
+
     private static object CheckGitHubUpdateDialog()
     {
-        var package = new PriceUpdatePackage(new(1, 28, Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"),
-            1, true, Guid.NewGuid().ToString("N"), new string('a', 64), 1), 4096,
-            new(1024, new string('b', 64), [new("base.pncpupdate", 1024, new string('b', 64))]));
-        var plan = new GitHubUpdatePlan(null, [package], true, "Programa instalado: 1.1.0.", "Base inicial necessária.");
+        var plan = new GitHubUpdatePlan(
+            new AppUpdateManifest(1, "1.2.4", "win-x64", 30,
+                new ReleaseFile("PNCPKing.exe", 1024, new string('a', 64))),
+            null, "Nova versão disponível.", "Preços em dia.");
         var window = new PNCPKing.App.Views.GitHubUpdateWindow(plan);
         try
         {
             window.Show();
             window.UpdateLayout();
             var panel = (StackPanel)window.Content;
-            var consent = panel.Children.OfType<CheckBox>().Single();
             var buttons = panel.Children.OfType<StackPanel>().Single().Children.OfType<Button>().ToArray();
             var update = buttons.Single(b => Equals(b.Content, "Atualizar agora"));
-            Require(!update.IsEnabled, "A troca de linhagem precisa de concordância explícita.");
-            consent.IsChecked = true;
-            Require(update.IsEnabled, "A confirmação não habilitou a atualização.");
-            consent.IsChecked = false;
-            Require(!update.IsEnabled, "A retirada da concordância não bloqueou a atualização.");
+            Require(update.IsEnabled, "A atualização disponível não habilitou o botão.");
             Require(buttons.Any(b => b.IsCancel), "A prévia precisa permitir cancelar.");
-            return new { passed = true, explicitBaseAdoption = true, cancelAvailable = true, window.ActualHeight };
+            return new { passed = true, appUpdateAvailable = true, cancelAvailable = true, window.ActualHeight };
         }
         finally { window.Close(); }
     }

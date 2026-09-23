@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Windows;
+using PNCPKing.App.Services;
 using PNCPKing.App.ViewModels;
 
 namespace PNCPKing.App.Views;
@@ -10,6 +11,7 @@ public partial class ColumnChooserWindow : Window
     public ColumnChooserWindow(IEnumerable<ColumnChooserRow> rows)
     {
         InitializeComponent();
+        MonitorAwareWindowBehavior.Attach(this);
         Rows = new ObservableCollection<ColumnChooserRow>(rows);
         DataContext = this;
     }
@@ -17,12 +19,18 @@ public partial class ColumnChooserWindow : Window
     public ObservableCollection<ColumnChooserRow> Rows { get; }
 
     public event EventHandler<IReadOnlyDictionary<string, bool>>? ApplyRequested;
+    public event EventHandler? ResetRequested;
 
     private void Reset_Click(object sender, RoutedEventArgs e)
     {
-        foreach (var row in Rows)
+        try
         {
-            row.IsVisible = row.IsDefaultVisible;
+            ResetRequested?.Invoke(this, EventArgs.Empty);
+            Close();
+        }
+        catch (Exception exception) when (!AsyncCommandRuntime.IsCritical(exception))
+        {
+            AsyncCommandRuntime.Handle(exception);
         }
     }
 
@@ -47,14 +55,12 @@ public partial class ColumnChooserWindow : Window
 public sealed class ColumnChooserRow(
     string key,
     string header,
-    bool isVisible,
-    bool isDefaultVisible) : INotifyPropertyChanged
+    bool isVisible) : INotifyPropertyChanged
 {
     private bool _isVisible = isVisible;
 
     public string Key { get; } = key;
     public string Header { get; } = header;
-    public bool IsDefaultVisible { get; } = isDefaultVisible;
 
     public bool IsVisible
     {

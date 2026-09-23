@@ -28,6 +28,7 @@ public partial class CatalogDictionaryWindow : Window, INotifyPropertyChanged
         _diagnosticLog = diagnosticLog;
         _telemetry = telemetry;
         InitializeComponent();
+        MonitorAwareWindowBehavior.Attach(this);
         DataContext = this;
         Loaded += OnLoaded;
         Closing += OnClosing;

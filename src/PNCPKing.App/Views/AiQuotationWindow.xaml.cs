@@ -65,6 +65,7 @@ public partial class AiQuotationWindow : Window
             .ToHashSet(StringComparer.Ordinal) ?? [];
         DraftItems = [];
         InitializeComponent();
+        MonitorAwareWindowBehavior.Attach(this);
         CredentialModes =
         [
             new CredentialModeChoice(AiCredentialPersistence.Saved, "Salvar no Gerenciador de Credenciais do Windows"),

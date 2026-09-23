@@ -19,13 +19,17 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <DockPanel>
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
             <StackPanel>
                 <TextBlock Text="{Binding Header}" FontSize="20" FontWeight="SemiBold"
                            TextWrapping="Wrap" />
                 <TextBlock Text="{Binding ItemSummary}" Margin="0,4,0,0" TextWrapping="Wrap" />
             </StackPanel>
-            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
+            <WrapPanel Grid.Row="1" Margin="0,5,0,0">
                 <Button Content="✎ Editar nome" Click="RenameItem_Click"
                         ToolTip="F2 — altera somente o nome visível, sem recalcular pesquisas ou preços." />
                 <Button Content="Editar dados" Click="EditItemDetails_Click"
@@ -34,8 +38,8 @@
                 <Button Content="Atualizar" Click="Refresh_Click" />
                 <Button Content="Pausar automação" Click="Pause_Click" />
                 <Button Content="Retomar automação" Click="Resume_Click" />
-            </StackPanel>
-        </DockPanel>
+            </WrapPanel>
+        </Grid>
 
         <Border Grid.Row="1" Background="#F4F7FA" BorderBrush="#C7D2DE" BorderThickness="1"
                 CornerRadius="4" Padding="8" Margin="0,8,0,8">
@@ -73,23 +77,23 @@
                         </DataGrid.Columns>
                     </DataGrid>
 
-                    <DockPanel Grid.Row="1" Margin="0,6">
-                        <StackPanel Orientation="Horizontal">
+                    <StackPanel Grid.Row="1" Margin="0,6">
+                        <WrapPanel>
                             <TextBlock Text="Mostrar:" VerticalAlignment="Center" FontWeight="SemiBold" />
                             <Button Content="Na cesta" Click="ScopeInBasket_Click" />
                             <Button Content="Elegíveis fora" Click="ScopeOutside_Click" />
                             <Button Content="Descartados/duplicados" Click="ScopeRejected_Click" />
                             <Button Content="Todos" Click="ScopeAll_Click" />
                             <TextBlock Text="{Binding ReferenceScopeSummary}" VerticalAlignment="Center"
-                                       Margin="10,0" Foreground="#5F6871" />
-                        </StackPanel>
-                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                       Margin="10,0" Foreground="#5F6871" TextWrapping="Wrap" MaxWidth="320" />
+                        </WrapPanel>
+                        <WrapPanel>
                             <Button Content="Usar média" Click="UseMean_Click" />
                             <Button Content="Usar mediana" Click="UseMedian_Click" />
                             <Button Content="Confirmar cesta" Click="ConfirmBasket_Click" />
                             <Button Content="Inserir preço da internet" Click="NewInternetPrice_Click" />
-                        </StackPanel>
-                    </DockPanel>
+                        </WrapPanel>
+                    </StackPanel>
 
                     <DataGrid x:Name="PriceGrid" Grid.Row="2"
                               ItemsSource="{Binding VisibleReferences}"
@@ -166,12 +170,16 @@
                         </DataGrid.Columns>
                     </DataGrid>
 
-                    <DockPanel Grid.Row="3" Margin="0,6,0,0">
+                    <Grid Grid.Row="3" Margin="0,6,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
                         <TextBlock Text="{Binding BasketCalculation}" VerticalAlignment="Center"
-                                   FontWeight="SemiBold" />
-                        <Button DockPanel.Dock="Right" Content="Escolher colunas"
+                                   FontWeight="SemiBold" TextWrapping="Wrap" />
+                        <Button Grid.Column="1" Content="Escolher colunas"
                                 Click="ChooseColumns_Click" Tag="{Binding ElementName=PriceGrid}" />
-                    </DockPanel>
+                    </Grid>
                 </Grid>
             </TabItem>
 
@@ -305,16 +313,16 @@
                         </DataGrid.Columns>
                     </DataGrid>
 
-                    <DockPanel Grid.Row="6" Margin="0,6,0,0">
+                    <StackPanel Grid.Row="6" Margin="0,6,0,0">
                         <TextBlock Text="{Binding SearchRows.Count, StringFormat=Linhas visíveis: {0:N0}}"
                                    VerticalAlignment="Center" />
-                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                        <WrapPanel>
                             <Button Content="Escolher colunas" Click="ChooseColumns_Click"
                                     Tag="{Binding ElementName=SearchResultsGrid}" />
                             <Button Content="Adicionar selecionados à cesta manual"
                                     Click="AddSearchResults_Click" />
-                        </StackPanel>
-                    </DockPanel>
+                        </WrapPanel>
+                    </StackPanel>
                 </Grid>
             </TabItem>
 
@@ -323,19 +331,21 @@
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
-                    <DockPanel>
-                        <ComboBox Width="650" ItemsSource="{Binding References}"
-                                  SelectedItem="{Binding SelectedReference}"
-                                  DisplayMemberPath="DisplayTitle" />
+                    <ComboBox ItemsSource="{Binding References}"
+                              SelectedItem="{Binding SelectedReference}"
+                              DisplayMemberPath="DisplayTitle" />
+                    <WrapPanel Grid.Row="1" Margin="0,5,0,0">
                         <Button Content="Preparar páginas relevantes" Click="PrepareDocuments_Click" />
                         <Button Content="Abrir PDF relevante" Click="OpenRelevantPdf_Click"
                                 IsEnabled="{Binding CanOpenRelevantPdf}" />
-                    </DockPanel>
-                    <TextBlock Grid.Row="1" Text="{Binding DocumentSummary}" Margin="0,8"
+                    </WrapPanel>
+                    <TextBlock Grid.Row="2" Text="{Binding DocumentSummary}" Margin="0,8"
                                TextWrapping="Wrap" />
-                    <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+                    <ScrollViewer Grid.Row="3" VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Auto">
                         <ItemsControl ItemsSource="{Binding DocumentThumbnails}">
                             <ItemsControl.ItemsPanel>
                                 <ItemsPanelTemplate>
@@ -383,11 +393,11 @@
                                                     IsReadOnly="True" Width="105" />
                         </DataGrid.Columns>
                     </DataGrid>
-                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                    <WrapPanel Grid.Row="2" HorizontalAlignment="Right">
                         <Button Content="Novo preço da internet" Click="NewInternetPrice_Click" />
                         <Button Content="Continuar rascunho" Click="EditDraft_Click" />
                         <Button Content="Excluir rascunho" Click="DeleteDraft_Click" />
-                    </StackPanel>
+                    </WrapPanel>
                 </Grid>
             </TabItem>
 
@@ -411,22 +421,25 @@
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="160" />
                             <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
                         <ComboBox ItemsSource="{Binding CatalogKinds}" SelectedItem="{Binding SelectedCatalogKind}" />
                         <TextBox x:Name="CatalogQueryBox" Grid.Column="1" Margin="8,0"
                                  Text="{Binding CatalogQuery, UpdateSourceTrigger=PropertyChanged}"
                                  PreviewKeyDown="CatalogQuery_KeyDown"
                                  ToolTip="Pesquise livremente por nome, característica, medida ou pelo código." />
-                        <StackPanel Grid.Column="2" Orientation="Horizontal">
+                        <WrapPanel Grid.Row="1" Grid.ColumnSpan="2" Margin="0,5,0,0">
                             <Button Content="Pesquisar" Click="CatalogSearch_Click"
                                     IsEnabled="{Binding IsCatalogAvailable}" MinWidth="90" />
                             <Button Content="Editar equivalências" Click="CatalogDictionary_Click" />
-                        </StackPanel>
+                        </WrapPanel>
                     </Grid>
                     <Grid Grid.Row="2">
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="285" />
+                            <ColumnDefinition Width="220" />
                             <ColumnDefinition Width="8" />
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
@@ -471,18 +484,18 @@
                             </DataGrid.Columns>
                         </DataGrid>
                     </Grid>
-                    <DockPanel Grid.Row="3" Margin="0,8,0,0">
-                        <StackPanel Orientation="Horizontal">
+                    <StackPanel Grid.Row="3" Margin="0,8,0,0">
+                        <WrapPanel>
                             <Button Content="Anterior" Click="CatalogPrevious_Click" />
                             <Button Content="Próxima" Click="CatalogNext_Click" />
                             <TextBlock Text="{Binding CatalogPageSummary}" VerticalAlignment="Center" Margin="8,0" />
-                        </StackPanel>
-                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                        </WrapPanel>
+                        <WrapPanel>
                             <Button Content="Atribuir/substituir código principal" Click="CatalogAssign_Click" />
                             <Button Content="Remover código principal" Click="CatalogRemove_Click" />
                             <Button Content="Copiar código" Click="CatalogCopy_Click" />
-                        </StackPanel>
-                    </DockPanel>
+                        </WrapPanel>
+                    </StackPanel>
                 </Grid>
             </TabItem>
         </TabControl>

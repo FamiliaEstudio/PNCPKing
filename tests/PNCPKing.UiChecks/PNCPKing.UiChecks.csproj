@@ -13,5 +13,6 @@
     <Compile Include="../../src/PNCPKing.App/ViewModels/ObservableObject.cs" Link="ObservableObject.cs" />
     <Compile Include="../../src/PNCPKing.App/ViewModels/SearchOptions.cs" Link="SearchOptions.cs" />
     <Compile Include="../../src/PNCPKing.App/Views/GitHubUpdateWindow.cs" Link="GitHubUpdateWindow.cs" />
+    <Compile Include="../../src/PNCPKing.App/Services/MonitorAwareWindowBehavior.cs" Link="MonitorAwareWindowBehavior.cs" />
   </ItemGroup>
 </Project>
