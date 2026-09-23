@@ -374,6 +374,26 @@ public sealed class UiBindingTests
     }
 
     [Fact]
+    public void MedicationMode_HasCheckableMenuAndMonetaryColumnsKeepNumericSorting()
+    {
+        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        var document = LoadView("MainWindow.xaml");
+        var menu = Assert.Single(document.Descendants(presentation + "MenuItem"),
+            element => element.Attribute("Command")?.Value == "{Binding ToggleQuotationMedicationCommand}");
+        Assert.Equal("True", menu.Attribute("IsCheckable")?.Value);
+        Assert.Equal("{Binding IsMedicationQuotation, Mode=OneWay}", menu.Attribute("IsChecked")?.Value);
+        foreach (var view in new[] { document, LoadView("QuotationItemWindow.xaml") })
+        {
+            foreach (var property in new[] { "EffectiveUnitPrice", "AdoptedPrice", "MinimumPrice", "MaximumPrice" })
+            {
+                var column = Assert.Single(view.Descendants(presentation + "DataGridTextColumn"),
+                    element => element.Attribute("SortMemberPath")?.Value == property);
+                Assert.Equal($"{{Binding {property}Text}}", column.Attribute("Binding")?.Value);
+            }
+        }
+    }
+
+    [Fact]
     public void MainWindow_QuotationActions_AreGroupedInCompactMenus()
     {
         var document = LoadView("MainWindow.xaml");
@@ -390,6 +410,7 @@ public sealed class UiBindingTests
                     "{Binding NewQuotationCommand}",
                     "{Binding RenameQuotationCommand}",
                     "{Binding DeleteQuotationCommand}",
+                    "{Binding ToggleQuotationMedicationCommand}",
                     "{Binding NewQuotationItemCommand}",
                     "{Binding DeleteQuotationLineCommand}",
                     "{Binding RenameQuotationLineCommand}",

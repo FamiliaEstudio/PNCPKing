@@ -65,9 +65,9 @@
                             <DataGridTextColumn Header="Situação" Binding="{Binding Status}" Width="125" />
                             <DataGridTextColumn Header="Preços" Binding="{Binding ReferenceCount}" Width="65" />
                             <DataGridTextColumn Header="Critério" Binding="{Binding AggregationMethod}" Width="80" />
-                            <DataGridTextColumn Header="Valor adotado" Binding="{Binding AdoptedPrice, StringFormat=C2}" Width="115" />
-                            <DataGridTextColumn Header="Menor" Binding="{Binding MinimumPrice, StringFormat=C2}" Width="110" />
-                            <DataGridTextColumn Header="Maior" Binding="{Binding MaximumPrice, StringFormat=C2}" Width="110" />
+                            <DataGridTextColumn Header="Valor adotado" Binding="{Binding AdoptedPriceText}" SortMemberPath="AdoptedPrice" Width="125" />
+                            <DataGridTextColumn Header="Menor" Binding="{Binding MinimumPriceText}" SortMemberPath="MinimumPrice" Width="125" />
+                            <DataGridTextColumn Header="Maior" Binding="{Binding MaximumPriceText}" SortMemberPath="MaximumPrice" Width="125" />
                             <DataGridTextColumn Header="Desvio máximo" Binding="{Binding MaximumDeviationPercent, StringFormat={}{0:N2}%}" Width="105" />
                             <DataGridTextColumn Header="Classificação" Binding="{Binding Tags}" Width="*" MinWidth="180" />
                         </DataGrid.Columns>
@@ -135,7 +135,7 @@
                             <DataGridTextColumn Header="Empresa" Binding="{Binding SupplierName}" Width="210" />
                             <DataGridTextColumn Header="Preço PNCP" Binding="{Binding UnitPrice, StringFormat=C4}" Width="115" />
                             <DataGridTextColumn Header="Fator" Binding="{Binding ConversionFactor, StringFormat=N6}" Width="85" />
-                            <DataGridTextColumn Header="Preço efetivo" Binding="{Binding EffectiveUnitPrice, StringFormat=C2}" Width="115" />
+                            <DataGridTextColumn Header="Preço efetivo" Binding="{Binding EffectiveUnitPriceText}" SortMemberPath="EffectiveUnitPrice" Width="125" />
                             <DataGridTextColumn Header="Situação" Binding="{Binding State}" Width="90" />
                             <DataGridTemplateColumn Header="Ações" Width="82"
                                                     services:DataGridColumnLayoutService.Key="actions">

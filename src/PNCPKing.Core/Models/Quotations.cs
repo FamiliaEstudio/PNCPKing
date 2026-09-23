@@ -83,7 +83,11 @@ public sealed record QuotationProject(
     Guid Id,
     string Name,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt)
+{
+    public bool IsMedication { get; init; }
+    public int PriceDecimalPlaces => IsMedication ? 4 : 2;
+}
 
 public sealed record QuotationLine
 {
@@ -407,6 +411,8 @@ public sealed record QuotationLineAnalysis(
     int RejectedCount,
     int BasketPoolCount)
 {
+    public int PriceDecimalPlaces { get; init; } = 2;
+
     public QuotationBasket? SelectedBasket => Line.SelectedBasketKey is null
         ? null
         : Baskets.FirstOrDefault(basket => basket.Key == Line.SelectedBasketKey);

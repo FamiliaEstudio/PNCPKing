@@ -728,6 +728,10 @@ public sealed class QuotationPackageService : IQuotationPackageService
                     cancellationToken)
                 .ConfigureAwait(false);
             var compatibleColumns = columns.ToHashSet(StringComparer.Ordinal);
+            if (manifest?.DatabaseSchemaVersion < 30 && definition.Name == "quotation_projects")
+            {
+                compatibleColumns.Remove("is_medication");
+            }
             if (manifest?.DatabaseSchemaVersion == 12 &&
                 string.Equals(
                     definition.Name,
@@ -852,6 +856,11 @@ public sealed class QuotationPackageService : IQuotationPackageService
         }
 
         var projectId = GetRequiredText(projects[0], "id");
+        if (projects[0].ContainsKey("is_medication") &&
+            GetRequiredLong(projects[0], "is_medication") is not (0 or 1))
+        {
+            throw new InvalidDataException("A opção de cotação de medicamentos é inválida.");
+        }
         var runs = GetRows(payload, "quotation_automation_runs");
         var runIds = runs.Select(row => GetRequiredText(row, "id"))
             .ToHashSet(StringComparer.Ordinal);
@@ -1084,6 +1093,9 @@ public sealed class QuotationPackageService : IQuotationPackageService
                     };
                 }).ToArray(),
                 StringComparer.Ordinal);
+        var project = GetRows(payload, "quotation_projects").Single();
+        var priceDecimalPlaces = project.ContainsKey("is_medication") &&
+                                 GetRequiredLong(project, "is_medication") == 1 ? 4 : 2;
         var analyzer = new QuotationAnalyzer();
         foreach (var row in GetRows(payload, "quotation_lines"))
         {
@@ -1097,7 +1109,8 @@ public sealed class QuotationPackageService : IQuotationPackageService
             var analysis = analyzer.Analyze(
                 line,
                 references.GetValueOrDefault(lineKey, []),
-                baskets.GetValueOrDefault(lineKey, []));
+                baskets.GetValueOrDefault(lineKey, []),
+                priceDecimalPlaces);
             if (analysis.Baskets.All(basket =>
                     !string.Equals(
                         basket.Key,
@@ -1233,6 +1246,14 @@ public sealed class QuotationPackageService : IQuotationPackageService
         JsonObject payload,
         int databaseSchemaVersion)
     {
+        if (databaseSchemaVersion < 30)
+        {
+            foreach (var project in GetRows(payload, "quotation_projects"))
+            {
+                project["is_medication"] = 0;
+            }
+        }
+
         if (databaseSchemaVersion < 13)
         {
             foreach (var reference in GetRows(payload, "quotation_references"))

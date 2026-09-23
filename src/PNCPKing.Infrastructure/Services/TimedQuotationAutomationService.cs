@@ -230,7 +230,7 @@ public sealed class TimedQuotationAutomationService(
 
                         var updated = await CaptureAndConfirmAsync(
                             run.ProjectId,
-                            analysis.Line,
+                            analysis,
                             rows,
                             cancellationToken).ConfigureAwait(false);
                         if (IsStrictlyResolved(updated))
@@ -602,13 +602,12 @@ public sealed class TimedQuotationAutomationService(
                     continue;
                 }
 
-                var line = (await quotations.GetAnalysesAsync(run.ProjectId, cancellationToken)
+                var analysis = (await quotations.GetAnalysesAsync(run.ProjectId, cancellationToken)
                         .ConfigureAwait(false))
-                    .Single(value => value.Line.Id == set.LineId)
-                    .Line;
+                    .Single(value => value.Line.Id == set.LineId);
                 var updated = await CaptureAndConfirmAsync(
                     run.ProjectId,
-                    line,
+                    analysis,
                     rows,
                     cancellationToken).ConfigureAwait(false);
                 if (IsStrictlyResolved(updated))
@@ -637,10 +636,11 @@ public sealed class TimedQuotationAutomationService(
 
     private async Task<QuotationLineAnalysis> CaptureAndConfirmAsync(
         Guid projectId,
-        QuotationLine line,
+        QuotationLineAnalysis analysis,
         IReadOnlyList<ItemSearchRow> rows,
         CancellationToken cancellationToken)
     {
+        var line = analysis.Line;
         var stages = line.UseEstimatedPrice && line.EstimatedUnitPrice is > 0
             ? new[]
             {
@@ -652,7 +652,7 @@ public sealed class TimedQuotationAutomationService(
         QuotationLineAnalysis? latest = null;
         foreach (var stage in stages)
         {
-            var (minimum, maximum) = GetRange(line.EstimatedUnitPrice, stage);
+            var (minimum, maximum) = GetRange(line.EstimatedUnitPrice, stage, analysis.PriceDecimalPlaces);
             latest = await quotations.CaptureSampleAsync(
                 projectId,
                 line.Id,
@@ -728,14 +728,15 @@ public sealed class TimedQuotationAutomationService(
 
     private static (decimal? Minimum, decimal? Maximum) GetRange(
         decimal? estimate,
-        EstimateResolutionStage stage) =>
+        EstimateResolutionStage stage,
+        int priceDecimalPlaces) =>
         estimate is not > 0 || stage is EstimateResolutionStage.NotApplicable or EstimateResolutionStage.Unrestricted
             ? (null, null)
             : stage == EstimateResolutionStage.Within25Percent
-                ? (QuotationMoney.TruncateToCents(estimate.Value * 0.75m),
-                    QuotationMoney.TruncateToCents(estimate.Value * 1.25m))
-                : (QuotationMoney.TruncateToCents(estimate.Value * 0.50m),
-                    QuotationMoney.TruncateToCents(estimate.Value * 1.50m));
+                ? (QuotationMoney.Truncate(estimate.Value * 0.75m, priceDecimalPlaces),
+                    QuotationMoney.Truncate(estimate.Value * 1.25m, priceDecimalPlaces))
+                : (QuotationMoney.Truncate(estimate.Value * 0.50m, priceDecimalPlaces),
+                    QuotationMoney.Truncate(estimate.Value * 1.50m, priceDecimalPlaces));
 
     private static bool IsStrictlyResolved(QuotationLineAnalysis analysis) =>
         analysis.Baskets

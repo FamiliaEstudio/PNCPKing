@@ -133,6 +133,8 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         string responsibleName,
         CancellationToken cancellationToken)
     {
+        var priceDecimalPlaces = report.Project.PriceDecimalPlaces;
+        var moneyFormat = "R$ #,##0." + new string('0', priceDecimalPlaces);
         var sheet = workbook.Worksheet(1);
         ResizeHeaderPicture(sheet);
         var prototype = workbook.Worksheets.Add("__PNCPKing_Block_Template");
@@ -182,7 +184,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 clearContents: false);
             row++;
 
-            var references = SelectExportedReferences(analysis);
+            var references = SelectExportedReferences(analysis, priceDecimalPlaces);
             var priceRowCount = Math.Max(MinimumPriceRows, references.Count);
             var firstPriceRow = row;
             var lastPriceRow = checked(firstPriceRow + priceRowCount - 1);
@@ -205,7 +207,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
 
                 if (index < references.Count)
                 {
-                    WriteReference(sheet, row, references[index]);
+                    WriteReference(sheet, row, references[index], moneyFormat);
                 }
                 else
                 {
@@ -219,7 +221,9 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                     row,
                     firstPriceRow,
                     lastPriceRow,
-                    references.Count > 0 && references[0].Basket.IsManual);
+                    references.Count > 0 && references[0].Basket.IsManual,
+                    priceDecimalPlaces,
+                    moneyFormat);
                 row++;
             }
 
@@ -240,10 +244,10 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             sheet.Range(row, 3, row, 6).Merge();
             sheet.Cell(row, 3).FormulaA1 = aggregationMethod == QuotationAggregationMethod.Median
                 ? $"IF(COUNTIF(K{firstPriceRow}:K{lastPriceRow},\">0\")=0,\"\"," +
-                  $"TRUNC(MEDIAN(K{firstPriceRow}:K{lastPriceRow}),2))"
+                  $"TRUNC(MEDIAN(K{firstPriceRow}:K{lastPriceRow}),{priceDecimalPlaces}))"
                 : $"IFERROR(TRUNC(SUM(K{firstPriceRow}:K{lastPriceRow})/" +
-                  $"COUNTIF(K{firstPriceRow}:K{lastPriceRow},\">0\"),2),\"\")";
-            sheet.Cell(row, 3).Style.NumberFormat.Format = "R$ #,##0.00";
+                  $"COUNTIF(K{firstPriceRow}:K{lastPriceRow},\">0\"),{priceDecimalPlaces}),\"\")";
+            sheet.Cell(row, 3).Style.NumberFormat.Format = moneyFormat;
             row++;
 
             if (itemIndex < analyses.Length - 1)
@@ -311,7 +315,8 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
     }
 
     private static IReadOnlyList<ExportedBasketPrice> SelectExportedReferences(
-        QuotationLineAnalysis analysis)
+        QuotationLineAnalysis analysis,
+        int priceDecimalPlaces)
     {
         var selectedBasket = analysis.Line.SelectionConfirmed
             ? analysis.SelectedBasket
@@ -324,7 +329,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 : selectedBasket.References.Select(reference => new QuotationBasketPrice
                 {
                     Reference = reference,
-                    EffectiveUnitPrice = QuotationMoney.TruncateToCents(reference.UnitPrice)
+                    EffectiveUnitPrice = QuotationMoney.Truncate(reference.UnitPrice, priceDecimalPlaces)
                 }).ToArray();
             return entries
                 .Select(entry => new ExportedBasketPrice(selectedBasket, entry))
@@ -350,20 +355,20 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         {
             Key = "fallback",
             References = fallbackReferences,
-            AveragePrice = QuotationMoney.TruncateToCents(
-                fallbackReferences.Average(reference => reference.UnitPrice)),
+            AveragePrice = QuotationMoney.Truncate(
+                fallbackReferences.Average(reference => reference.UnitPrice), priceDecimalPlaces),
             MedianPrice = 0,
             AdoptedPrice = 0,
             MinimumPrice = fallbackReferences.Min(reference =>
-                QuotationMoney.TruncateToCents(reference.UnitPrice)),
+                QuotationMoney.Truncate(reference.UnitPrice, priceDecimalPlaces)),
             MaximumPrice = fallbackReferences.Max(reference =>
-                QuotationMoney.TruncateToCents(reference.UnitPrice)),
+                QuotationMoney.Truncate(reference.UnitPrice, priceDecimalPlaces)),
             MaximumDeviationPercent = 0,
             Score = 0,
             PriceEntries = fallbackReferences.Select(reference => new QuotationBasketPrice
             {
                 Reference = reference,
-                EffectiveUnitPrice = QuotationMoney.TruncateToCents(reference.UnitPrice)
+                EffectiveUnitPrice = QuotationMoney.Truncate(reference.UnitPrice, priceDecimalPlaces)
             }).ToArray()
         };
         return fallbackBasket.PriceEntries
@@ -405,7 +410,8 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
     private static void WriteReference(
         IXLWorksheet sheet,
         int row,
-        ExportedBasketPrice exported)
+        ExportedBasketPrice exported,
+        string moneyFormat)
     {
         var reference = exported.Entry.Reference;
         var supplierCell = sheet.Cell(row, 2);
@@ -428,7 +434,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         }
 
         sheet.Cell(row, 6).Value = exported.Entry.EffectiveUnitPrice;
-        sheet.Cell(row, 6).Style.NumberFormat.Format = "R$ #,##0.00";
+        sheet.Cell(row, 6).Style.NumberFormat.Format = moneyFormat;
     }
 
     private static string FormatSupplierName(QuotationReference reference)
@@ -470,7 +476,9 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         int row,
         int firstPriceRow,
         int lastPriceRow,
-        bool isManualBasket)
+        bool isManualBasket,
+        int priceDecimalPlaces,
+        string moneyFormat)
     {
         var otherPrices = new List<string>(2);
         if (row > firstPriceRow)
@@ -484,8 +492,10 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         }
 
         sheet.Cell(row, 7).FormulaA1 =
-            $"IF(F{row}=\"\",\"\",IFERROR(TRUNC(AVERAGE({string.Join(",", otherPrices)}),2),\"\"))";
-        sheet.Cell(row, 7).Style.NumberFormat.Format = "R$ #,##0.00";
+            $"IF(F{row}=\"\",\"\",IFERROR(TRUNC(AVERAGE({string.Join(",", otherPrices)}),{priceDecimalPlaces}),\"\"))";
+        sheet.Cell(row, 7).Style.NumberFormat.Format = moneyFormat;
+        sheet.Cell(row, 6).Style.NumberFormat.Format = moneyFormat;
+        sheet.Cell(row, 11).Style.NumberFormat.Format = moneyFormat;
         sheet.Cell(row, 8).FormulaA1 =
             $"IF(OR(F{row}=\"\",G{row}=\"\"),\"\",F{row}/G{row}-1)";
         sheet.Cell(row, 9).FormulaA1 =
@@ -574,6 +584,8 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
 
     private static void WriteReferences(XLWorkbook workbook, QuotationProjectReport report)
     {
+        var priceDecimalPlaces = report.Project.PriceDecimalPlaces;
+        var moneyFormat = "R$ #,##0." + new string('0', priceDecimalPlaces);
         var sheet = workbook.Worksheets.Add("Referências");
         var headers = new[]
         {
@@ -601,7 +613,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 : basket.References.Select(reference => new QuotationBasketPrice
                 {
                     Reference = reference,
-                    EffectiveUnitPrice = QuotationMoney.TruncateToCents(reference.UnitPrice)
+                    EffectiveUnitPrice = QuotationMoney.Truncate(reference.UnitPrice, priceDecimalPlaces)
                 }).ToArray();
             foreach (var entry in entries)
             {
@@ -650,8 +662,8 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             itemNumber++;
         }
 
-        sheet.Range(2, 7, Math.Max(2, row - 1), 7).Style.NumberFormat.Format = "R$ #,##0.00";
-        sheet.Range(2, 23, Math.Max(2, row - 1), 23).Style.NumberFormat.Format = "R$ #,##0.00";
+        sheet.Range(2, 7, Math.Max(2, row - 1), 7).Style.NumberFormat.Format = moneyFormat;
+        sheet.Range(2, 23, Math.Max(2, row - 1), 23).Style.NumberFormat.Format = moneyFormat;
         sheet.Range(2, 12, Math.Max(2, row - 1), 12).Style.DateFormat.Format = "dd/mm/yyyy";
         sheet.Range(2, 16, Math.Max(2, row - 1), 22).Style.NumberFormat.Format = "0.00";
         sheet.Range(2, 24, Math.Max(2, row - 1), 24).Style.NumberFormat.Format = "0.00";

@@ -25,7 +25,7 @@ public sealed class GitHubUpdateTests
             "day:" + start.AddDays(index).ToString("yyyy-MM-dd"), "publication-day",
             "days/" + start.AddDays(index).ToString("yyyy-MM-dd") + ".db", start.AddDays(index),
             4096, Hash(Bytes), Hash(Encoding.UTF8.GetBytes("logical-" + index)), 0, 0, 0, 0, 0, 1)).ToArray();
-        return new(2, Schema, start, end, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
+        return new(2, OfficialUpdateService.PayloadSchemaVersion, start, end, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
             Guid.NewGuid().ToString("N"), chunks);
     }
 
@@ -37,7 +37,7 @@ public sealed class GitHubUpdateTests
             new(file.Size, file.Sha256, [file]));
     }
 
-    private static PricesUpdateManifest Prices() => new(2, DateTimeOffset.UtcNow, "1.2.0", Schema, Package());
+    private static PricesUpdateManifest Prices() => new(2, DateTimeOffset.UtcNow, "1.2.0", OfficialUpdateService.PayloadSchemaVersion, Package());
     private static AppUpdateManifest App(string version = "1.3.0", int schema = Schema) =>
         new(1, version, "win-x64", schema, File("PNCPKing.exe"));
     private static GitHubUpdateCheck Check(AppUpdateManifest? app, PricesUpdateManifest? prices) => new(
@@ -68,6 +68,8 @@ public sealed class GitHubUpdateTests
     public void OneMobilePackageIsIndependentOfDatabaseOriginAndCompletedReceiptSkipsIt()
     {
         var prices = Prices();
+        Assert.Equal(29, prices.Schema);
+        GitHubUpdateValidation.Validate(prices);
         var plan = GitHubUpdateValidation.Plan(Check(null, prices), new(1, 2, 0), Schema, Empty());
         Assert.Equal(prices.Update, plan.Package);
         Assert.Equal(prices.Update.Download.Size, plan.DownloadSize);

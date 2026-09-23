@@ -31,6 +31,7 @@ public sealed class OfficialUpdateTests
         var manifest = await new OfficialUpdateService(source.Repository.DatabasePath).ExportAsync(path);
 
         Assert.Equal(2, manifest.Format);
+        Assert.Equal(29, manifest.Schema);
         Assert.Equal(Start, manifest.StartDate);
         Assert.Equal(Today, manifest.EndDate);
         Assert.Equal(10, manifest.Chunks.Count(chunk => chunk.Kind == "publication-day"));

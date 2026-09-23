@@ -149,8 +149,8 @@ public sealed class DataRetentionTests
         await DowngradeTo26Async(database.Repository.DatabasePath);
         var migrated = await database.Repository.InitializeAsync();
         Assert.Equal(26, migrated.PreviousVersion);
-        Assert.Equal(29, migrated.CurrentVersion);
-        Assert.Equal([27, 28, 29], migrated.AppliedMigrations);
+        Assert.Equal(30, migrated.CurrentVersion);
+        Assert.Equal([27, 28, 29, 30], migrated.AppliedMigrations);
         Assert.Empty((await database.Repository.InitializeAsync()).AppliedMigrations);
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();

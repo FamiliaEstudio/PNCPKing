@@ -69,6 +69,8 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis)
                     ? "Escolha anterior inválida"
                     : "Aguardando escolha";
     public decimal? SelectedAveragePrice => Analysis.SelectedBasket?.AdoptedPrice;
+    public string SelectedAveragePriceText => SelectedAveragePrice?.ToString($"C{Analysis.PriceDecimalPlaces}") ?? string.Empty;
+    public string EstimatedUnitPriceText => EstimatedUnitPrice?.ToString($"C{Analysis.PriceDecimalPlaces}") ?? string.Empty;
     public string AutomationStatus => Line.AutomationState switch
     {
         QuotationAutomationItemState.Manual => "Manual",
@@ -84,7 +86,7 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis)
     public string AutomationMessage => Line.AutomationMessage;
 }
 
-public sealed class QuotationBasketDisplay(QuotationBasket source, bool wasPreviouslySelected = false)
+public sealed class QuotationBasketDisplay(QuotationBasket source, bool wasPreviouslySelected = false, int priceDecimalPlaces = 2)
 {
     public QuotationBasket Source { get; } = source;
     public bool WasPreviouslySelected { get; } = wasPreviouslySelected;
@@ -96,6 +98,9 @@ public sealed class QuotationBasketDisplay(QuotationBasket source, bool wasPrevi
         : "Média";
     public decimal MinimumPrice => Source.MinimumPrice;
     public decimal MaximumPrice => Source.MaximumPrice;
+    public string AdoptedPriceText => AdoptedPrice.ToString($"C{priceDecimalPlaces}");
+    public string MinimumPriceText => MinimumPrice.ToString($"C{priceDecimalPlaces}");
+    public string MaximumPriceText => MaximumPrice.ToString($"C{priceDecimalPlaces}");
     public decimal MaximumDeviationPercent => Source.MaximumDeviationPercent;
     public decimal Score => Source.Score;
     public string Type => Source.IsManual ? "Manual" : "Automática";
@@ -186,7 +191,8 @@ public sealed class QuotationPriceDisplayRow(
     QuotationReference source,
     bool isInSelectedBasket,
     decimal conversionFactor = 1m,
-    decimal? effectiveUnitPrice = null) : ObservableObject
+    decimal? effectiveUnitPrice = null,
+    int priceDecimalPlaces = 2) : ObservableObject
 {
     private bool _isInSelectedBasket = isInSelectedBasket;
 
@@ -206,7 +212,8 @@ public sealed class QuotationPriceDisplayRow(
     public decimal UnitPrice => Source.UnitPrice;
     public decimal ConversionFactor { get; } = conversionFactor;
     public decimal EffectiveUnitPrice { get; } = effectiveUnitPrice ??
-        QuotationMoney.TruncateToCents(source.UnitPrice * conversionFactor);
+        QuotationMoney.Truncate(source.UnitPrice * conversionFactor, priceDecimalPlaces);
+    public string EffectiveUnitPriceText => EffectiveUnitPrice.ToString($"C{priceDecimalPlaces}");
     public string State => Source.State switch
     {
         QuotationReferenceState.Eligible => "Elegível",

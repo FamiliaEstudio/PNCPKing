@@ -44,10 +44,12 @@ public sealed partial class QuotationAnalyzer
     public QuotationLineAnalysis Analyze(
         QuotationLine line,
         IReadOnlyList<QuotationReference> collectedReferences,
-        IReadOnlyList<QuotationManualBasket>? manualBaskets = null)
+        IReadOnlyList<QuotationManualBasket>? manualBaskets = null,
+        int priceDecimalPlaces = 2)
     {
         ArgumentNullException.ThrowIfNull(line);
         ArgumentNullException.ThrowIfNull(collectedReferences);
+        _ = QuotationMoney.Truncate(0m, priceDecimalPlaces);
         line.Weights.Validate();
         if (line.RequestedBasketSize is < 3 or > 10)
         {
@@ -65,8 +67,8 @@ public sealed partial class QuotationAnalyzer
         var pool = BuildBasketPool(
             eligible.Where(reference =>
                 reference.Source == QuotationReferenceSource.PncpIncisoII).ToArray());
-        var automaticBaskets = BuildAutomaticBaskets(pool, line.RequestedBasketSize);
-        var persistedManualBaskets = BuildManualBaskets(scored, manualBaskets ?? []);
+        var automaticBaskets = BuildAutomaticBaskets(pool, line.RequestedBasketSize, priceDecimalPlaces);
+        var persistedManualBaskets = BuildManualBaskets(scored, manualBaskets ?? [], priceDecimalPlaces);
         var baskets = persistedManualBaskets.Concat(automaticBaskets).ToArray();
 
         return new QuotationLineAnalysis(
@@ -77,7 +79,10 @@ public sealed partial class QuotationAnalyzer
             eligible.Length,
             0,
             scored.Count(reference => reference.State == QuotationReferenceState.Rejected),
-            pool.Count);
+            pool.Count)
+        {
+            PriceDecimalPlaces = priceDecimalPlaces
+        };
     }
 
     public QuotationReference ScoreReference(QuotationLine line, QuotationReference reference)
@@ -343,7 +348,8 @@ public sealed partial class QuotationAnalyzer
 
     private static IReadOnlyList<QuotationBasket> BuildAutomaticBaskets(
         IReadOnlyList<QuotationReference> pool,
-        int requestedSize)
+        int requestedSize,
+        int priceDecimalPlaces)
     {
         if (pool.Count < 2)
         {
@@ -375,7 +381,8 @@ public sealed partial class QuotationAnalyzer
                     candidates,
                     Enumerable.Range(0, basketSize)
                         .Select(offset => ranking[(start + offset) % ranking.Length]),
-                    requestedSize);
+                    requestedSize,
+                    priceDecimalPlaces);
             }
         }
 
@@ -396,7 +403,8 @@ public sealed partial class QuotationAnalyzer
                             null,
                             requestedSize,
                             QuotationAggregationMethod.Mean,
-                            null)
+                            null,
+                            priceDecimalPlaces)
                     })
                     .OrderByDescending(candidate => candidate.Basket.Score)
                     .ThenBy(candidate => BasketPromptRank(candidate.Basket))
@@ -407,7 +415,7 @@ public sealed partial class QuotationAnalyzer
                 selected.Add(next);
             }
 
-            AddAutomaticCandidate(candidates, selected, requestedSize);
+            AddAutomaticCandidate(candidates, selected, requestedSize, priceDecimalPlaces);
         }
 
         var baskets = candidates.Values.ToArray();
@@ -467,7 +475,8 @@ public sealed partial class QuotationAnalyzer
     private static void AddAutomaticCandidate(
         IDictionary<string, QuotationBasket> candidates,
         IEnumerable<QuotationReference> references,
-        int requestedSize)
+        int requestedSize,
+        int priceDecimalPlaces)
     {
         var basket = CreateBasket(
             references.ToArray(),
@@ -476,13 +485,15 @@ public sealed partial class QuotationAnalyzer
             null,
             requestedSize,
             QuotationAggregationMethod.Mean,
-            null);
+            null,
+            priceDecimalPlaces);
         candidates.TryAdd(basket.Key, basket);
     }
 
     private static IReadOnlyList<QuotationBasket> BuildManualBaskets(
         IReadOnlyList<QuotationReference> scoredReferences,
-        IReadOnlyList<QuotationManualBasket> manualBaskets)
+        IReadOnlyList<QuotationManualBasket> manualBaskets,
+        int priceDecimalPlaces)
     {
         var referencesById = scoredReferences.ToDictionary(reference => reference.Id, StringComparer.Ordinal);
         var result = new List<QuotationBasket>();
@@ -505,7 +516,8 @@ public sealed partial class QuotationAnalyzer
                 manual.Id,
                 requestedSize: 3,
                 manual.AggregationMethod,
-                manual.ConversionFactors));
+                manual.ConversionFactors,
+                priceDecimalPlaces));
         }
 
         return result;
@@ -518,7 +530,8 @@ public sealed partial class QuotationAnalyzer
         Guid? manualBasketId,
         int requestedSize,
         QuotationAggregationMethod aggregationMethod,
-        IReadOnlyDictionary<string, decimal>? conversionFactors)
+        IReadOnlyDictionary<string, decimal>? conversionFactors,
+        int priceDecimalPlaces)
     {
         var orderedPrices = references
             .Select(reference =>
@@ -532,17 +545,17 @@ public sealed partial class QuotationAnalyzer
                 {
                     Reference = reference,
                     ConversionFactor = factor,
-                    EffectiveUnitPrice = QuotationMoney.TruncateToCents(
-                        checked(reference.UnitPrice * factor))
+                    EffectiveUnitPrice = QuotationMoney.Truncate(
+                        checked(reference.UnitPrice * factor), priceDecimalPlaces)
                 };
             })
             .OrderBy(entry => entry.EffectiveUnitPrice)
             .ThenBy(entry => entry.Reference.Id, StringComparer.Ordinal)
             .ToArray();
         var ordered = orderedPrices.Select(entry => entry.Reference).ToArray();
-        var average = QuotationMoney.TruncateToCents(
-            orderedPrices.Average(entry => entry.EffectiveUnitPrice));
-        var median = CalculateMedian(orderedPrices.Select(entry => entry.EffectiveUnitPrice).ToArray());
+        var average = QuotationMoney.Truncate(
+            orderedPrices.Average(entry => entry.EffectiveUnitPrice), priceDecimalPlaces);
+        var median = CalculateMedian(orderedPrices.Select(entry => entry.EffectiveUnitPrice).ToArray(), priceDecimalPlaces);
         var adopted = aggregationMethod == QuotationAggregationMethod.Median ? median : average;
         var maximumDeviation = average <= 0
             ? 0
@@ -599,13 +612,13 @@ public sealed partial class QuotationAnalyzer
         };
     }
 
-    private static decimal CalculateMedian(IReadOnlyList<decimal> orderedValues)
+    private static decimal CalculateMedian(IReadOnlyList<decimal> orderedValues, int priceDecimalPlaces)
     {
         var middle = orderedValues.Count / 2;
         return orderedValues.Count % 2 == 1
             ? orderedValues[middle]
-            : QuotationMoney.TruncateToCents(
-                (orderedValues[middle - 1] + orderedValues[middle]) / 2m);
+            : QuotationMoney.Truncate(
+                (orderedValues[middle - 1] + orderedValues[middle]) / 2m, priceDecimalPlaces);
     }
 
     private static int PromptRank(QuotationReference reference)

@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed partial class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 29;
+    public const int CurrentSchemaVersion = 30;
 
     private const string GeographicGroupExpression = "CASE WHEN c.geo_layer = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -725,6 +725,23 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
             await ApplySchemaV29Async(connection, transaction, cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             version = 29;
+        }
+
+        if (version < 30)
+        {
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = transaction;
+            migration.CommandText = "SELECT COUNT(*) FROM pragma_table_info('quotation_projects') WHERE name = 'is_medication';";
+            if (Convert.ToInt32(await migration.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)) == 0)
+            {
+                migration.CommandText = "ALTER TABLE quotation_projects ADD COLUMN is_medication INTEGER NOT NULL DEFAULT 0 CHECK(is_medication IN (0, 1));";
+                await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            migration.CommandText = "UPDATE schema_info SET version = 30 WHERE id = 1;";
+            await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 30;
         }
 
         stopwatch.Stop();

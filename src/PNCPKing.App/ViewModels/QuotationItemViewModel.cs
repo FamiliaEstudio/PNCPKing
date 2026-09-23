@@ -505,8 +505,8 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
 
     public string BasketCalculation => SelectedBasket is null
         ? "Nenhuma cesta selecionada."
-        : $"{SelectedBasket.AggregationMethod} {SelectedBasket.AdoptedPrice:C2} · " +
-          $"menor {SelectedBasket.MinimumPrice:C2} · maior {SelectedBasket.MaximumPrice:C2} · " +
+        : $"{SelectedBasket.AggregationMethod} {SelectedBasket.AdoptedPriceText} · " +
+          $"menor {SelectedBasket.MinimumPriceText} · maior {SelectedBasket.MaximumPriceText} · " +
           $"desvio máximo {SelectedBasket.MaximumDeviationPercent:N2}% · " +
           $"{SelectedBasket.Status}";
 
@@ -538,7 +538,8 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             {
                 Baskets.Add(new QuotationBasketDisplay(
                     basket,
-                    basket.Key == analysis.Line.SelectedBasketKey));
+                    basket.Key == analysis.Line.SelectedBasketKey,
+                    analysis.PriceDecimalPlaces));
             }
 
             References.Clear();
@@ -1454,7 +1455,8 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                     reference,
                     inBasket,
                     price?.ConversionFactor ?? 1m,
-                    price?.EffectiveUnitPrice));
+                    price?.EffectiveUnitPrice,
+                    Line.Analysis.PriceDecimalPlaces));
             }
         }
 

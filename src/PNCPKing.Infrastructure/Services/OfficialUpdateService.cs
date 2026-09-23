@@ -46,6 +46,8 @@ public sealed record OfficialTransferStatus(IReadOnlyDictionary<string, Official
 public sealed class OfficialUpdateService
 {
     public const int CurrentFormat = 2;
+    // The v2 official-data payload is unchanged by migrations of local quotations.
+    public const int PayloadSchemaVersion = 29;
     public const int WindowDays = 10;
     private const string DayKind = "publication-day";
     private const string LateKind = "late-changes";
@@ -133,7 +135,7 @@ public sealed class OfficialUpdateService
             var validatedAt = DateTimeOffset.UtcNow;
             var manifest = new OfficialUpdateManifest(
                 CurrentFormat,
-                SqliteContractRepository.CurrentSchemaVersion,
+                PayloadSchemaVersion,
                 startDate,
                 endDate,
                 validatedAt,
@@ -545,7 +547,7 @@ public sealed class OfficialUpdateService
 
     private static void ValidateManifest(OfficialUpdateManifest manifest, ZipArchive zip)
     {
-        if (manifest.Format != CurrentFormat || manifest.Schema != SqliteContractRepository.CurrentSchemaVersion)
+        if (manifest.Format != CurrentFormat || manifest.Schema != PayloadSchemaVersion)
             throw new InvalidDataException("Formato ou esquema do pacote incompatível.");
         if (manifest.EndDate.DayNumber - manifest.StartDate.DayNumber != WindowDays - 1 ||
             !Guid.TryParseExact(manifest.PackageId, "N", out _) || manifest.Chunks is null)

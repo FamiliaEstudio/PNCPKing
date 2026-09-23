@@ -23,7 +23,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
     {
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id, name, created_at, updated_at FROM quotation_projects ORDER BY updated_at DESC, name;";
+        command.CommandText = "SELECT id, name, created_at, updated_at, is_medication FROM quotation_projects ORDER BY updated_at DESC, name;";
         var projects = new List<QuotationProject>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -63,6 +63,32 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         {
             throw new InvalidOperationException("A cotação não existe mais.");
         }
+    }
+
+    public async Task SetProjectMedicationAsync(
+        Guid projectId,
+        bool isMedication,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT is_medication FROM quotation_projects WHERE id = $id;";
+        command.Parameters.AddWithValue("$id", projectId.ToString("N"));
+        var current = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("A cotação não existe mais.");
+        if ((Convert.ToInt32(current) != 0) != isMedication)
+        {
+            command.CommandText = """
+                UPDATE quotation_projects SET is_medication = $medication, updated_at = $updated WHERE id = $id;
+                UPDATE quotation_lines SET selection_confirmed = 0 WHERE project_id = $id;
+                """;
+            command.Parameters.AddWithValue("$medication", isMedication ? 1 : 0);
+            command.Parameters.AddWithValue("$updated", FormatDateTime(DateTimeOffset.UtcNow));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task RenameLineDisplayNameAsync(
@@ -2750,7 +2776,10 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         Guid.ParseExact(reader.GetString(0), "N"),
         reader.GetString(1),
         ParseDateTime(reader.GetString(2)),
-        ParseDateTime(reader.GetString(3)));
+        ParseDateTime(reader.GetString(3)))
+    {
+        IsMedication = reader.GetInt32(4) != 0
+    };
 
     private static QuotationAutomationRun ReadAutomationRun(SqliteDataReader reader)
     {

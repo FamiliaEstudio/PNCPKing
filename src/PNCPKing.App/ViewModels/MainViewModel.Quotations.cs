@@ -63,6 +63,8 @@ public sealed partial class MainViewModel
     public ICommand NewQuotationCommand { get; private set; } = null!;
     public ICommand NewQuotationItemCommand { get; private set; } = null!;
     public ICommand RenameQuotationCommand { get; private set; } = null!;
+    public ICommand ToggleQuotationMedicationCommand { get; private set; } = null!;
+    public bool IsMedicationQuotation => SelectedQuotationProject?.Source.IsMedication == true;
     public ICommand DeleteQuotationCommand { get; private set; } = null!;
     public ICommand DeleteQuotationLineCommand { get; private set; } = null!;
     public ICommand RenameQuotationLineCommand { get; private set; } = null!;
@@ -86,6 +88,7 @@ public sealed partial class MainViewModel
         {
             if (SetProperty(ref _selectedQuotationProject, value))
             {
+                OnPropertyChanged(nameof(IsMedicationQuotation));
                 _ = LoadQuotationProjectAsync(value?.Id);
                 NotifyCommands();
             }
@@ -261,6 +264,13 @@ public sealed partial class MainViewModel
         RenameQuotationCommand = new AsyncRelayCommand(
             RenameQuotationAsync,
             () => !IsFileBusy && !IsPriceBusy && SelectedQuotationProject is not null);
+        ToggleQuotationMedicationCommand = new AsyncRelayCommand(
+            ToggleQuotationMedicationAsync,
+            () => SelectedQuotationProject is not null &&
+                  !IsFileBusy && !IsPriceBusy && !IsDocumentBusy && !IsForegroundBusy &&
+                  !IsQuotationAutomationRunning && !IsAnyAggressivePncpMode &&
+                  _quotationItemWindow?.ViewModel.IsBusy != true &&
+                  _quotationItemWindow?.ViewModel.IsSearchBusy != true);
         DeleteQuotationCommand = new AsyncRelayCommand(
             DeleteQuotationAsync,
             () => !IsFileBusy && !IsPriceBusy && SelectedQuotationProject is not null);
@@ -401,12 +411,20 @@ public sealed partial class MainViewModel
         {
             Owner = Application.Current.MainWindow
         };
+        void RefreshMedicationCommand(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
+        {
+            if (args.PropertyName is nameof(QuotationItemViewModel.IsBusy) or nameof(QuotationItemViewModel.IsSearchBusy))
+                ((AsyncRelayCommand)ToggleQuotationMedicationCommand).NotifyCanExecuteChanged();
+        }
+        viewModel.PropertyChanged += RefreshMedicationCommand;
         window.Closed += (_, _) =>
         {
+            viewModel.PropertyChanged -= RefreshMedicationCommand;
             if (ReferenceEquals(_quotationItemWindow, window))
             {
                 _quotationItemWindow = null;
             }
+            ((AsyncRelayCommand)ToggleQuotationMedicationCommand).NotifyCanExecuteChanged();
         };
         _quotationItemWindow = window;
         if (!string.IsNullOrWhiteSpace(referenceId))
@@ -735,6 +753,31 @@ public sealed partial class MainViewModel
         if (createdLineId is { } lineId && SelectedQuotationLine?.Line.Id == lineId)
         {
             OpenSelectedQuotationItem();
+        }
+    }
+
+    private async Task ToggleQuotationMedicationAsync()
+    {
+        var project = SelectedQuotationProject;
+        if (project is null) return;
+        var lineId = SelectedQuotationLine?.Line.Id;
+        var isMedication = !project.Source.IsMedication;
+        IsFileBusy = true;
+        try
+        {
+            await _quotationService.SetProjectMedicationAsync(project.Id, isMedication).ConfigureAwait(true);
+            await RefreshQuotationProjectsAsync(project.Id).ConfigureAwait(true);
+            await LoadQuotationProjectAsync(project.Id, lineId).ConfigureAwait(true);
+            if (_quotationItemWindow?.ViewModel is { } item && item.ProjectId == project.Id)
+            {
+                await item.LoadAsync().ConfigureAwait(true);
+            }
+            StatusText = $"Cotação com {(isMedication ? 4 : 2)} casas decimais. Reconfirme as cestas escolhidas.";
+        }
+        finally
+        {
+            IsFileBusy = false;
+            OnPropertyChanged(nameof(IsMedicationQuotation));
         }
     }
 
@@ -2273,7 +2316,8 @@ public sealed partial class MainViewModel
                     value.Reference,
                     value.InBasket,
                     price?.ConversionFactor ?? 1m,
-                    price?.EffectiveUnitPrice);
+                    price?.EffectiveUnitPrice,
+                    SelectedQuotationLine.Analysis.PriceDecimalPlaces);
             }) ?? [];
         VisibleQuotationReferences.ReplaceAll(visibleReferences);
 
@@ -2300,7 +2344,8 @@ public sealed partial class MainViewModel
                 .Take(QuotationBasketPageSize)
                 .Select(basket => new QuotationBasketDisplay(
                     basket,
-                    basket.Key == SelectedQuotationLine.Line.SelectedBasketKey)) ?? []);
+                    basket.Key == SelectedQuotationLine.Line.SelectedBasketKey,
+                    SelectedQuotationLine.Analysis.PriceDecimalPlaces)) ?? []);
 
         SelectedQuotationBasket = QuotationBaskets.FirstOrDefault(basket => basket.Key == previouslySelectedKey)
                                     ?? QuotationBaskets.FirstOrDefault(basket => basket.WasPreviouslySelected)

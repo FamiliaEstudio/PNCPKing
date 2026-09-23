@@ -19,8 +19,18 @@ public static class DecimalScale
 
 public static class QuotationMoney
 {
-    public static decimal TruncateToCents(decimal value) =>
-        decimal.Truncate(value * 100m) / 100m;
+    public static decimal TruncateToCents(decimal value) => Truncate(value, 2);
+
+    public static decimal Truncate(decimal value, int decimalPlaces)
+    {
+        var scale = decimalPlaces switch
+        {
+            2 => 100m,
+            4 => 10_000m,
+            _ => throw new ArgumentOutOfRangeException(nameof(decimalPlaces))
+        };
+        return decimal.Truncate(value * scale) / scale;
+    }
 
     public static void ValidateConversionFactor(decimal value)
     {

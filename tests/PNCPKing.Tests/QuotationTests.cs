@@ -1493,6 +1493,177 @@ public sealed class QuotationTests
         }
     }
 
+    [Theory]
+    [InlineData("0.1234", "1", "0.1234")]
+    [InlineData("0.0001", "1", "0.0001")]
+    [InlineData("0.1234", "1.234567", "0.1523")]
+    [InlineData("10.9999", "1.5", "16.4998")]
+    public void MedicationBasket_PreservesFourPlacesAfterConversion(string priceText, string factorText, string expectedText)
+    {
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        var price = decimal.Parse(priceText, culture);
+        var factor = decimal.Parse(factorText, culture);
+        var expected = decimal.Parse(expectedText, culture);
+        var line = Line("Medicamento", 100m, "unidade");
+        var reference = Reference("a", "ca", "11222333000181", price);
+        var manual = Manual(line, "Convertida", "a") with
+        {
+            ConversionFactors = new Dictionary<string, decimal> { ["a"] = factor }
+        };
+        var analysis = new QuotationAnalyzer(Today).Analyze(line, [reference], [manual], priceDecimalPlaces: 4);
+        var basket = Assert.Single(analysis.Baskets);
+        Assert.Equal(4, analysis.PriceDecimalPlaces);
+        Assert.Equal(expected, Assert.Single(basket.PriceEntries).EffectiveUnitPrice);
+        Assert.Equal(expected, basket.AdoptedPrice);
+        Assert.Equal(price, reference.UnitPrice);
+
+        var displayed = new PNCPKing.App.ViewModels.QuotationPriceDisplayRow(
+            reference, false, factor, priceDecimalPlaces: 4);
+        Assert.Equal(expected, displayed.EffectiveUnitPrice);
+        Assert.Equal(expected.ToString("C4"), displayed.EffectiveUnitPriceText);
+    }
+
+    [Theory]
+    [InlineData(QuotationAggregationMethod.Mean)]
+    [InlineData(QuotationAggregationMethod.Median)]
+    public void MedicationBasket_TruncatesAverageAndEvenMedianToFourPlaces(QuotationAggregationMethod method)
+    {
+        var line = Line("Medicamento", 100m, "unidade");
+        var manual = Manual(line, "Medicamentos", "a", "b") with { AggregationMethod = method };
+        var basket = new QuotationAnalyzer(Today).Analyze(line,
+            [Reference("a", "ca", "11222333000181", 0.1234m), Reference("b", "cb", "11222333000181", 0.1235m)],
+            [manual], priceDecimalPlaces: 4).Baskets.Single(value => value.IsManual);
+        Assert.Equal(0.1234m, basket.AveragePrice);
+        Assert.Equal(0.1234m, basket.MedianPrice);
+        Assert.Equal(0.1234m, basket.AdoptedPrice);
+        Assert.Equal(0.1234m, basket.MinimumPrice);
+        Assert.Equal(0.1235m, basket.MaximumPrice);
+        var display = new PNCPKing.App.ViewModels.QuotationBasketDisplay(basket, priceDecimalPlaces: 4);
+        Assert.Equal(0.1234m.ToString("C4"), display.AdoptedPriceText);
+        Assert.Equal(0.1235m.ToString("C4"), display.MaximumPriceText);
+    }
+
+    [Fact]
+    public async Task MedicationMode_PersistsPerProjectAndRequiresReconfirmationWithoutLosingOriginalPrices()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer(Today));
+        var project = await service.CreateProjectAsync("Medicamentos");
+        var other = await service.CreateProjectAsync("Outros materiais");
+        Assert.False(project.IsMedication);
+        var input = new QuotationLineInput("Café torrado", 100m, "pacote", null, null);
+        var rows = new[] { Row("a", "11222333000181", 0.1234m), Row("b", "60701190000104", 0.1235m) };
+        var analysis = await service.CaptureSampleAsync(project.Id, null, input, rows);
+        var basket = analysis.Baskets.First();
+        await service.ConfirmBasketAsync(analysis, basket.Key);
+        var otherAnalysis = await service.CaptureSampleAsync(other.Id, null, input, rows);
+        await service.ConfirmBasketAsync(otherAnalysis, otherAnalysis.Baskets.First().Key);
+
+        await service.SetProjectMedicationAsync(project.Id, true);
+        var reopened = new QuotationService(new SqliteQuotationRepository(database.Repository.DatabasePath), new QuotationAnalyzer(Today));
+        var report = await reopened.GetReportAsync(project.Id);
+        Assert.True(report.Project.IsMedication);
+        analysis = Assert.Single(report.Lines);
+        Assert.False(analysis.Line.SelectionConfirmed);
+        Assert.Equal(basket.Key, analysis.Line.SelectedBasketKey);
+        Assert.Equal(4, analysis.PriceDecimalPlaces);
+        Assert.Equal(0.1234m, analysis.SelectedBasket!.AdoptedPrice);
+        Assert.All(analysis.SelectedBasket.PriceEntries, entry => Assert.Equal(entry.Reference.UnitPrice, entry.EffectiveUnitPrice));
+        var otherReport = await reopened.GetReportAsync(other.Id);
+        Assert.False(otherReport.Project.IsMedication);
+        Assert.True(Assert.Single(otherReport.Lines).Line.SelectionConfirmed);
+        Assert.Equal(0.12m, otherReport.Lines[0].SelectedBasket!.AdoptedPrice);
+
+        await reopened.ConfirmBasketAsync(analysis, basket.Key);
+        await reopened.SetProjectMedicationAsync(project.Id, true);
+        Assert.True((await reopened.GetAnalysisAsync(project.Id, analysis.Line.Id))!.Line.SelectionConfirmed);
+        await reopened.SetProjectMedicationAsync(project.Id, false);
+        analysis = (await reopened.GetAnalysisAsync(project.Id, analysis.Line.Id))!;
+        Assert.False(analysis.Line.SelectionConfirmed);
+        Assert.Equal(0.12m, analysis.SelectedBasket!.AdoptedPrice);
+        Assert.Equal(new[] { 0.1234m, 0.1235m }, analysis.References.Select(reference => reference.UnitPrice).Order().ToArray());
+        await reopened.SetProjectMedicationAsync(project.Id, true);
+        Assert.Equal(0.1234m, (await reopened.GetAnalysisAsync(project.Id, analysis.Line.Id))!.SelectedBasket!.AdoptedPrice);
+
+        var empty = await reopened.CreateLineAsync(project.Id, input);
+        Assert.Equal(4, empty.PriceDecimalPlaces);
+        var captured = await reopened.CaptureSampleAsync(project.Id, empty.Line.Id, input, rows);
+        Assert.Equal(4, captured.PriceDecimalPlaces);
+        var manual = await reopened.SaveManualBasketAsync(project.Id, null, input, null, "Nova cesta", rows);
+        Assert.Equal(4, manual.Analysis.PriceDecimalPlaces);
+    }
+
+    [Theory]
+    [InlineData(false, QuotationAggregationMethod.Mean)]
+    [InlineData(true, QuotationAggregationMethod.Mean)]
+    [InlineData(true, QuotationAggregationMethod.Median)]
+    public async Task MedicationWorkbook_PreservesValuesFormatsAndCalculatedResults(bool manual, QuotationAggregationMethod method)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var project = new QuotationProject(Guid.NewGuid(), "Medicamentos", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow)
+        {
+            IsMedication = true
+        };
+        var line = Line("Café torrado", 100m, "pacote");
+        var references = new[]
+        {
+            Reference("a", "ca", "11222333000181", manual ? 0.2468m : 0.1234m),
+            Reference("b", "cb", "60701190000104", 0.1235m),
+            Reference("c", "cc", "33000167000101", 0.1236m)
+        };
+        var manualBasket = Manual(line, "Convertida", "a", "b", "c") with
+        {
+            AggregationMethod = method,
+            ConversionFactors = new Dictionary<string, decimal> { ["a"] = 0.5m }
+        };
+        var analysis = new QuotationAnalyzer(Today).Analyze(line, references, manual ? [manualBasket] : [], 4);
+        analysis = Confirm(analysis, analysis.Baskets.First(value => value.IsManual == manual));
+        var path = Path.Combine(database.Directory, "medicamentos.xlsx");
+        await new QuotationWorkbookService().ExportAsync(path, new QuotationProjectReport(project, [analysis]), "Responsável");
+        using var workbook = new XLWorkbook(path);
+        var sheet = workbook.Worksheet(1);
+        Assert.Equal(new[] { 0.1234m, 0.1235m, 0.1236m },
+            sheet.Range("F6:F8").Cells().Select(cell => cell.GetValue<decimal>()).ToArray());
+        Assert.Equal("R$ #,##0.0000", sheet.Cell("F6").Style.NumberFormat.Format);
+        Assert.Equal("R$ #,##0.0000", sheet.Cell("G6").Style.NumberFormat.Format);
+        Assert.Equal("R$ #,##0.0000", sheet.Cell("C9").Style.NumberFormat.Format);
+        Assert.Contains(",4)", sheet.Cell("G6").FormulaA1);
+        Assert.Contains(",4)", sheet.Cell("C9").FormulaA1);
+        Assert.Equal(0.1235m, sheet.Cell("G6").GetValue<decimal>());
+        Assert.Equal(analysis.SelectedBasket!.AdoptedPrice, sheet.Cell("C9").GetValue<decimal>());
+        var referenceSheet = workbook.Worksheet("Referências");
+        Assert.Equal(0.1234m, referenceSheet.Cell("G2").GetValue<decimal>());
+        Assert.Equal("R$ #,##0.0000", referenceSheet.Cell("G2").Style.NumberFormat.Format);
+        Assert.Equal(0.1235m, referenceSheet.Cell("W2").GetValue<decimal>());
+        Assert.Equal("R$ #,##0.0000", referenceSheet.Cell("W2").Style.NumberFormat.Format);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MedicationWorkbook_FallbackPreservesSubCentPrices(bool basketWithoutEntries)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var project = new QuotationProject(Guid.NewGuid(), "Medicamentos", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow) { IsMedication = true };
+        var line = Line("Café torrado", 100m, "pacote");
+        var reference = Reference("a", "ca", "11222333000181", 0.0001m);
+        var manual = Manual(line, "Única referência", "a");
+        var analysis = new QuotationAnalyzer(Today).Analyze(line, [reference], basketWithoutEntries ? [manual] : [], 4);
+        if (basketWithoutEntries)
+        {
+            var basket = analysis.Baskets.Single() with { PriceEntries = [] };
+            analysis = Confirm(analysis with { Baskets = [basket] }, basket);
+        }
+        var path = Path.Combine(database.Directory, "subcentavo.xlsx");
+        await new QuotationWorkbookService().ExportAsync(path, new QuotationProjectReport(project, [analysis]), "Responsável");
+        using var workbook = new XLWorkbook(path);
+        Assert.Equal(0.0001m, workbook.Worksheet(1).Cell("F6").GetValue<decimal>());
+        Assert.Equal("R$ #,##0.0000", workbook.Worksheet(1).Cell("F6").Style.NumberFormat.Format);
+        if (basketWithoutEntries)
+            Assert.Equal(0.0001m, workbook.Worksheet("Referências").Cell("G2").GetValue<decimal>());
+    }
+
     private static QuotationLine Line(string description, decimal quantity, string unit) => new()
     {
         Id = Guid.NewGuid(),

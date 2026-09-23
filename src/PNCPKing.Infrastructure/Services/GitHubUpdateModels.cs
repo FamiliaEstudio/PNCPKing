@@ -56,7 +56,7 @@ public static class GitHubUpdateValidation
 
     public static void Validate(PricesUpdateManifest manifest)
     {
-        if (manifest is null || manifest.Format != 2 || manifest.Schema != SqliteContractRepository.CurrentSchemaVersion ||
+        if (manifest is null || manifest.Format != 2 || manifest.Schema != OfficialUpdateService.PayloadSchemaVersion ||
             manifest.PublishedAt == default || manifest.Update is null)
             throw new InvalidDataException("Manifesto dos preços inválido.");
         ParseVersion(manifest.MinimumAppVersion);
@@ -92,7 +92,8 @@ public static class GitHubUpdateValidation
         var pricesStatus = check.PricesStatus;
         if (check.Prices?.Manifest is { } prices)
         {
-            if (prices.Schema != (app?.Schema ?? currentSchema) ||
+            if (prices.Schema != OfficialUpdateService.PayloadSchemaVersion ||
+                prices.Schema > (app?.Schema ?? currentSchema) ||
                 ParseVersion(prices.MinimumAppVersion) > (app is null ? currentVersion : ParseVersion(app.Version)))
                 pricesStatus = "Preços indisponíveis: exigem uma versão compatível do programa.";
             else

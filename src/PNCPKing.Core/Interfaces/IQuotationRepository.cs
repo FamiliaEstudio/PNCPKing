@@ -7,6 +7,7 @@ public interface IQuotationRepository
     Task<IReadOnlyList<QuotationProject>> GetProjectsAsync(CancellationToken cancellationToken = default);
     Task<QuotationProject> CreateProjectAsync(string name, CancellationToken cancellationToken = default);
     Task RenameProjectAsync(Guid projectId, string name, CancellationToken cancellationToken = default);
+    Task SetProjectMedicationAsync(Guid projectId, bool isMedication, CancellationToken cancellationToken = default);
     Task RenameLineDisplayNameAsync(
         Guid lineId,
         string displayName,

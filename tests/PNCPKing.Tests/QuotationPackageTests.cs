@@ -13,6 +13,51 @@ namespace PNCPKing.Tests;
 
 public sealed class QuotationPackageTests
 {
+    [Theory]
+    [InlineData(false, QuotationPackageImportMode.PreserveIdentity)]
+    [InlineData(false, QuotationPackageImportMode.Copy)]
+    [InlineData(false, QuotationPackageImportMode.Replace)]
+    [InlineData(true, QuotationPackageImportMode.PreserveIdentity)]
+    public async Task Package_PreservesMedicationModeAndDefaultsLegacyPackagesToCommonMode(
+        bool legacy,
+        QuotationPackageImportMode mode)
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(source.Repository.DatabasePath);
+        var quotations = new QuotationService(repository, new QuotationAnalyzer());
+        var project = await quotations.CreateProjectAsync("Medicamentos");
+        await quotations.SetProjectMedicationAsync(project.Id, true);
+        var lineId = Guid.NewGuid();
+        await repository.SaveSampleAsync(project.Id, lineId,
+            new QuotationLineInput("Café torrado", 100m, "pacote", null, null),
+            [Reference(lineId, "a", 0.2468m), Reference(lineId, "b", 0.1235m), Reference(lineId, "c", 0.1236m)]);
+        var basket = await repository.SaveManualBasketAsync(lineId, null, "Convertida", ["a", "b", "c"]);
+        await repository.SetManualBasketConversionFactorAsync(basket.Id, "a", 0.5m);
+        await repository.SetManualBasketAggregationMethodAsync(basket.Id, QuotationAggregationMethod.Median);
+        await repository.ConfirmBasketAsync(lineId, basket.Key);
+        var path = Path.Combine(source.Directory, "medicamentos.pncpcotacao");
+        await new QuotationPackageService(source.Repository.DatabasePath, source.Directory).ExportAsync(path, project.Id);
+        if (legacy) await DowngradePackageToSchemaTwentyNineAsync(path);
+
+        var packages = new QuotationPackageService(destination.Repository.DatabasePath, destination.Directory);
+        var destinationRepository = new SqliteQuotationRepository(destination.Repository.DatabasePath);
+        if (mode == QuotationPackageImportMode.Replace)
+        {
+            await packages.ImportAsync(path, QuotationPackageImportMode.PreserveIdentity);
+            await destinationRepository.SetProjectMedicationAsync(project.Id, false);
+        }
+        var imported = await packages.ImportAsync(path, mode);
+        var report = await new QuotationService(destinationRepository, new QuotationAnalyzer()).GetReportAsync(imported.ProjectId);
+        Assert.Equal(!legacy, report.Project.IsMedication);
+        Assert.Equal(legacy ? 2 : 4, report.Project.PriceDecimalPlaces);
+        var restored = Assert.Single(report.Lines);
+        Assert.True(restored.Line.SelectionConfirmed);
+        Assert.Equal(legacy ? 0.12m : 0.1235m, restored.SelectedBasket!.AdoptedPrice);
+        Assert.Equal(0.2468m, restored.SelectedBasket.PriceEntries.Single(entry => entry.ConversionFactor == 0.5m).Reference.UnitPrice);
+        if (mode == QuotationPackageImportMode.Copy) Assert.NotEqual(project.Id, imported.ProjectId);
+    }
+
     [Fact]
     public async Task Package_RoundTripsPricesBasketsSearchesDraftsAndPrints()
     {
@@ -733,6 +778,7 @@ public sealed class QuotationPackageTests
         using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
         var payload = JsonNode.Parse(
             await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
+        payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("is_medication");
         var references = payload["tables"]!["quotation_references"]!.AsArray();
         foreach (var reference in references)
         {
@@ -767,6 +813,7 @@ public sealed class QuotationPackageTests
         using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
         var payload = JsonNode.Parse(
             await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
+        payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("is_medication");
         foreach (var line in payload["tables"]!["quotation_lines"]!.AsArray())
         {
             line!.AsObject().Remove("display_name");
@@ -787,6 +834,7 @@ public sealed class QuotationPackageTests
         using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
         var payload = JsonNode.Parse(
             await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
+        payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("is_medication");
         foreach (var run in payload["tables"]!["quotation_automation_runs"]!.AsArray())
         {
             run!.AsObject().Remove("responsible_name");
@@ -807,6 +855,7 @@ public sealed class QuotationPackageTests
         using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
         var payload = JsonNode.Parse(
             await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
+        payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("is_medication");
         foreach (var basket in payload["tables"]!["quotation_manual_baskets"]!.AsArray())
         {
             basket!.AsObject().Remove("calculation_method");
@@ -825,6 +874,20 @@ public sealed class QuotationPackageTests
         manifest["databaseSchemaVersion"] = 20;
         manifest["dataSha256"] = Convert.ToHexString(SHA256.HashData(payloadBytes)).ToLowerInvariant();
         ReplaceEntry(archive, "manifest.json", Encoding.UTF8.GetBytes(manifest.ToJsonString(jsonOptions)));
+    }
+
+    private static async Task DowngradePackageToSchemaTwentyNineAsync(string path)
+    {
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
+        var payload = JsonNode.Parse(await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
+        payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("is_medication");
+        var options = new JsonSerializerOptions { WriteIndented = true };
+        var bytes = Encoding.UTF8.GetBytes(payload.ToJsonString(options));
+        ReplaceEntry(archive, "quotation.json", bytes);
+        var manifest = JsonNode.Parse(await ReadEntryAsync(archive.GetEntry("manifest.json")!))!.AsObject();
+        manifest["databaseSchemaVersion"] = 29;
+        manifest["dataSha256"] = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        ReplaceEntry(archive, "manifest.json", Encoding.UTF8.GetBytes(manifest.ToJsonString(options)));
     }
 
     private static async Task<byte[]> ReadEntryAsync(ZipArchiveEntry entry)

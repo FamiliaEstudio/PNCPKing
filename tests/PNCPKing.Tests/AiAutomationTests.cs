@@ -521,6 +521,35 @@ public sealed class AiAutomationTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TimedAutomation_UsesProjectPrecisionForSubCentEstimateRanges(bool isMedication)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var contract = Contract("subcentavo", "Materiais para terapia ocupacional");
+        await database.Repository.UpsertContractsAsync([contract]);
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var quotations = new QuotationService(repository, new QuotationAnalyzer());
+        var project = await quotations.CreateProjectAsync("Precisão da automação");
+        await quotations.SetProjectMedicationAsync(project.Id, isMedication);
+        var run = await quotations.CreateTimedAutomationRunAsync(project.Id, SearchGeoFilter.All,
+            new DateOnly(2026, 1, 1), new DateOnly(2026, 12, 31),
+            [new QuotationImportItem(1, "pincel", "Pincel", 1, "unidade", null, null, 1,
+                EstimatedUnitPrice: 0.0001m, UseEstimatedPrice: true)],
+            AdequacyWeights.Default, TimeSpan.FromMinutes(5), ["terapia"]);
+        var client = new CountingPncpClient(contract, unitPrice: 0.0001m, resultCount: 3);
+        await using var search = new ItemSearchSessionService(client, database.Repository, Path.Combine(database.Directory, "search.db"));
+        await new TimedQuotationAutomationService(database.Repository, search, quotations).RunAsync(run);
+        var analysis = Assert.Single(await quotations.GetAnalysesAsync(project.Id));
+        Assert.Equal(isMedication ? 4 : 2, analysis.PriceDecimalPlaces);
+        Assert.True(analysis.Line.SelectionConfirmed);
+        Assert.Equal(isMedication ? 0.0001m : 0m, analysis.SelectedBasket!.AdoptedPrice);
+        Assert.Equal(isMedication ? EstimateResolutionStage.Within25Percent : EstimateResolutionStage.Unrestricted,
+            analysis.Line.SearchCheckpoint.EstimateStage);
+        if (isMedication) Assert.Equal(0.0001m, analysis.Line.MaximumUnitPrice);
+    }
+
     [Fact]
     public async Task TimedAutomation_StartsAtFirstPopulatedPromptWhenRestrictiveIsEmpty()
     {
@@ -960,7 +989,7 @@ public sealed class AiAutomationTests
         }
     }
 
-    private sealed class CountingPncpClient(ContractRecord contract) : IPncpClient
+    private sealed class CountingPncpClient(ContractRecord contract, decimal unitPrice = 12.34m, int resultCount = 1) : IPncpClient
     {
         public int ItemListCalls { get; private set; }
         public int ResultCalls { get; private set; }
@@ -991,19 +1020,17 @@ public sealed class AiAutomationTests
         {
             ResultCalls++;
             return Task.FromResult<IReadOnlyList<HomologationResult>>(
-            [
-                new HomologationResult
+                Enumerable.Range(1, resultCount).Select(sequence => new HomologationResult
                 {
                     ContractId = requested.PncpId,
                     ItemNumber = itemNumber,
-                    ResultSequence = 1,
+                    ResultSequence = sequence,
                     SupplierName = "Fornecedor",
                     SupplierTaxId = "12345678000199",
-                    HomologatedUnitValueScaled = DecimalScale.ToScaled(12.34m),
+                    HomologatedUnitValueScaled = DecimalScale.ToScaled(unitPrice),
                     ResultStatusId = 1,
                     ResultStatusName = "Ativo"
-                }
-            ]);
+                }).ToArray());
         }
 
         public Task<IReadOnlyList<Modality>> GetModalitiesAsync(CancellationToken cancellationToken = default) =>

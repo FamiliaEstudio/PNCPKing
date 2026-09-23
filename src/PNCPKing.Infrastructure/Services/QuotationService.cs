@@ -20,6 +20,14 @@ public sealed class QuotationService(
     public Task RenameProjectAsync(Guid projectId, string name, CancellationToken cancellationToken = default) =>
         repository.RenameProjectAsync(projectId, name, cancellationToken);
 
+    public Task SetProjectMedicationAsync(Guid projectId, bool isMedication, CancellationToken cancellationToken = default) =>
+        repository.SetProjectMedicationAsync(projectId, isMedication, cancellationToken);
+
+    private async Task<QuotationProject> GetProjectAsync(Guid projectId, CancellationToken cancellationToken) =>
+        (await repository.GetProjectsAsync(cancellationToken).ConfigureAwait(false))
+        .SingleOrDefault(project => project.Id == projectId)
+        ?? throw new InvalidOperationException("O projeto de cotação não existe mais.");
+
     public Task RenameLineDisplayNameAsync(
         Guid lineId,
         string displayName,
@@ -56,7 +64,8 @@ public sealed class QuotationService(
     {
         var line = await repository.CreateLineAsync(projectId, input, cancellationToken)
             .ConfigureAwait(false);
-        return analyzer.Analyze(line, [], []);
+        var project = await GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
+        return analyzer.Analyze(line, [], [], project.PriceDecimalPlaces);
     }
 
     public Task<QuotationAutomationRun> CreateAutomationRunAsync(
@@ -238,6 +247,7 @@ public sealed class QuotationService(
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(collectedRows);
+        var project = await GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
         var existingLine = lineId is null
             ? null
             : (await repository.GetLinesAsync(projectId, cancellationToken).ConfigureAwait(false))
@@ -292,7 +302,7 @@ public sealed class QuotationService(
         var manualBaskets = existingLine is null
             ? []
             : await repository.GetManualBasketsAsync(id, cancellationToken).ConfigureAwait(false);
-        var analysis = analyzer.Analyze(transientLine, union, manualBaskets);
+        var analysis = analyzer.Analyze(transientLine, union, manualBaskets, project.PriceDecimalPlaces);
         var savedLine = await repository.SaveSampleAsync(
                 projectId,
                 id,
@@ -300,20 +310,21 @@ public sealed class QuotationService(
                 analysis.References,
                 cancellationToken)
             .ConfigureAwait(false);
-        return analyzer.Analyze(savedLine, analysis.References, manualBaskets);
+        return analyzer.Analyze(savedLine, analysis.References, manualBaskets, project.PriceDecimalPlaces);
     }
 
     public async Task<IReadOnlyList<QuotationLineAnalysis>> GetAnalysesAsync(
         Guid projectId,
         CancellationToken cancellationToken = default)
     {
+        var project = await GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
         var lines = await repository.GetLinesAsync(projectId, cancellationToken).ConfigureAwait(false);
         var analyses = new List<QuotationLineAnalysis>(lines.Count);
         foreach (var line in lines)
         {
             var references = await repository.GetReferencesAsync(line.Id, cancellationToken).ConfigureAwait(false);
             var manualBaskets = await repository.GetManualBasketsAsync(line.Id, cancellationToken).ConfigureAwait(false);
-            analyses.Add(analyzer.Analyze(line, references, manualBaskets));
+            analyses.Add(analyzer.Analyze(line, references, manualBaskets, project.PriceDecimalPlaces));
         }
 
         return analyses;
@@ -334,7 +345,8 @@ public sealed class QuotationService(
 
         var references = await repository.GetReferencesAsync(lineId, cancellationToken).ConfigureAwait(false);
         var manualBaskets = await repository.GetManualBasketsAsync(lineId, cancellationToken).ConfigureAwait(false);
-        var analysis = analyzer.Analyze(line, references, manualBaskets);
+        var project = await GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
+        var analysis = analyzer.Analyze(line, references, manualBaskets, project.PriceDecimalPlaces);
         span.Complete(references.Count + manualBaskets.Count + 1);
         return analysis;
     }
@@ -368,6 +380,7 @@ public sealed class QuotationService(
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(selectedRows);
+        var project = await GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
         var rows = selectedRows
             .Where(row => row.PriceState == ItemSearchPriceState.Homologated &&
                           row.Result is { IsActive: true, HomologatedUnitValue: > 0 })
@@ -418,7 +431,7 @@ public sealed class QuotationService(
             SampleVersion = 1,
             SampledAt = DateTimeOffset.UtcNow
         };
-        var scored = analyzer.Analyze(transientLine, union, existingManualBaskets);
+        var scored = analyzer.Analyze(transientLine, union, existingManualBaskets, project.PriceDecimalPlaces);
         var savedLine = await repository.SaveSampleAsync(
                 projectId,
                 id,
@@ -435,7 +448,7 @@ public sealed class QuotationService(
             .ConfigureAwait(false);
         var allManualBaskets = await repository.GetManualBasketsAsync(savedLine.Id, cancellationToken)
             .ConfigureAwait(false);
-        var analysis = analyzer.Analyze(savedLine, scored.References, allManualBaskets);
+        var analysis = analyzer.Analyze(savedLine, scored.References, allManualBaskets, project.PriceDecimalPlaces);
         return (analysis, manualBasket);
     }
 
@@ -603,9 +616,7 @@ public sealed class QuotationService(
         Guid projectId,
         CancellationToken cancellationToken = default)
     {
-        var project = (await repository.GetProjectsAsync(cancellationToken).ConfigureAwait(false))
-            .SingleOrDefault(item => item.Id == projectId)
-            ?? throw new InvalidOperationException("O projeto de cotação não existe mais.");
+        var project = await GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
         var lines = await GetAnalysesAsync(projectId, cancellationToken).ConfigureAwait(false);
         return new QuotationProjectReport(project, lines);
     }
