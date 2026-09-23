@@ -58,7 +58,7 @@ Invoke-Dotnet @('test', (Join-Path $root 'tests\PNCPKing.Tests\PNCPKing.Tests.cs
     '--', 'xUnit.ParallelizeTestCollections=false')
 
 Invoke-Dotnet @('run', '--project', (Join-Path $root 'tests\PNCPKing.UiChecks\PNCPKing.UiChecks.csproj'),
-    '--configuration', 'Release', '--no-build', '--', '--layout')
+    '--configuration', 'Release', '--', '--layout')
 
 if (Test-Path $output) {
     $existing = @(Get-ChildItem $output -Force)
