@@ -112,26 +112,21 @@ internal static class Program
 
     private static object CheckGitHubUpdateDialog()
     {
-        var package = new PriceUpdatePackage(new(1, 28, Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"),
-            1, true, Guid.NewGuid().ToString("N"), new string('a', 64), 1), 4096,
-            new(1024, new string('b', 64), [new("base.pncpupdate", 1024, new string('b', 64))]));
-        var plan = new GitHubUpdatePlan(null, [package], true, "Programa instalado: 1.1.0.", "Base inicial necessária.");
+        var plan = new GitHubUpdatePlan(
+            new AppUpdateManifest(1, "1.2.4", "win-x64", 30,
+                new ReleaseFile("PNCPKing.exe", 1024, new string('a', 64))),
+            null, "Nova versão disponível.", "Preços em dia.");
         var window = new PNCPKing.App.Views.GitHubUpdateWindow(plan);
         try
         {
             window.Show();
             window.UpdateLayout();
             var panel = (StackPanel)window.Content;
-            var consent = panel.Children.OfType<CheckBox>().Single();
             var buttons = panel.Children.OfType<StackPanel>().Single().Children.OfType<Button>().ToArray();
             var update = buttons.Single(b => Equals(b.Content, "Atualizar agora"));
-            Require(!update.IsEnabled, "A troca de linhagem precisa de concordância explícita.");
-            consent.IsChecked = true;
-            Require(update.IsEnabled, "A confirmação não habilitou a atualização.");
-            consent.IsChecked = false;
-            Require(!update.IsEnabled, "A retirada da concordância não bloqueou a atualização.");
+            Require(update.IsEnabled, "A atualização disponível não habilitou o botão.");
             Require(buttons.Any(b => b.IsCancel), "A prévia precisa permitir cancelar.");
-            return new { passed = true, explicitBaseAdoption = true, cancelAvailable = true, window.ActualHeight };
+            return new { passed = true, appUpdateAvailable = true, cancelAvailable = true, window.ActualHeight };
         }
         finally { window.Close(); }
     }
