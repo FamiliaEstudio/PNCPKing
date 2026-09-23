@@ -14,115 +14,109 @@ public sealed partial class MainViewModel
     {
         if (_repository is not SqliteContractRepository repository)
             return;
+
         var today = DateOnly.FromDateTime(DateTime.Today);
-        var progress = new Progress<string>(message =>
+        if (compact)
         {
-            if (IsInitializing) SetStartupPhase(message);
-            else FileOperationProgressText = message;
-        });
-        var result = await Task.Run(() => repository.MaintainRetentionAsync(
-            today, compact, cancellationToken: cancellationToken, progress: progress), cancellationToken).ConfigureAwait(true);
-        if (result.Applied)
-        {
-            await _itemSearchService.InvalidateAsync(cancellationToken).ConfigureAwait(true);
-            await _transientItemSearchService.InvalidateAsync(cancellationToken).ConfigureAwait(true);
+            var progress = new Progress<string>(message =>
+            {
+                if (IsInitializing) SetStartupPhase(message);
+                else FileOperationProgressText = message;
+            });
+            var result = await Task.Run(() => repository.MaintainRetentionAsync(
+                today, compact: true, cancellationToken: cancellationToken, progress: progress), cancellationToken)
+                .ConfigureAwait(true);
+            _lastRetentionDate = result.Pending ? null : today;
+            _diagnosticLog.Info("retention", result.Message);
+            MaintenanceActivityText = result.Message;
+            return;
         }
-        var quotationRepository = new SqliteQuotationRepository(repository.DatabasePath);
-        var hashes = await quotationRepository.GetReferencedInternetEvidenceHashesAsync(cancellationToken).ConfigureAwait(true);
-        await _internetEvidenceStore.DeleteOrphansAsync(hashes, cancellationToken).ConfigureAwait(true);
-        _lastRetentionDate = today;
-        _diagnosticLog.Info("retention", result.Message);
-        MaintenanceActivityText = result.Message;
-        // A large first compaction can cross midnight while startup is blocked.
-        if (DateOnly.FromDateTime(DateTime.Today) != today)
-            await ApplyLocalRetentionAsync(compact: false, cancellationToken).ConfigureAwait(true);
+
+        // Startup only advances the logical 11-month window. Physical deletion is
+        // intentionally deferred so old mechanical disks never pay the cleanup cost
+        // before the UI becomes usable.
+        _lastRetentionDate = await repository.PrepareRetentionWindowAsync(today, cancellationToken).ConfigureAwait(true);
+        MaintenanceActivityText = _lastRetentionDate == today
+            ? "Janela de 11 meses atualizada."
+            : "Janela de 11 meses atualizada; limpeza física aguardando ociosidade.";
     }
 
     private async Task ApplyDailyRetentionAsync()
     {
-        if (_disposed || IsInitializing || _lastRetentionDate is null || _retentionRunning ||
-            DateOnly.FromDateTime(DateTime.Today) == _lastRetentionDate || DateTimeOffset.UtcNow < _nextRetentionAttempt)
+        if (_disposed || IsInitializing || _retentionRunning ||
+            DateOnly.FromDateTime(DateTime.Today) == _lastRetentionDate ||
+            DateTimeOffset.UtcNow < _nextRetentionAttempt ||
+            IsFileBusy || IsIndexBusy || IsCatalogBusy || IsPriceBusy || IsForegroundBusy || IsDocumentBusy ||
+            _automaticMaintenanceRunning)
             return;
-        if (IsFileBusy)
+
+        var decision = _maintenanceCoordinator.GetDecision();
+        if (!decision.CanRun)
         {
-            _quotationAutomationCancellation?.Cancel();
+            MaintenanceActivityText = $"Limpeza da janela aguardando: {decision.Description}.";
             return;
         }
-        // Let an already open modal dialog finish before taking its owner's UI.
-        if (Application.Current.Windows.Cast<Window>().Any(window => window.IsVisible && !window.IsEnabled))
+
+        await using var maintenanceLease = _maintenanceCoordinator.TryEnter();
+        if (maintenanceLease is null)
             return;
+
+        if (_repository is not SqliteContractRepository repository)
+            return;
+
         _retentionRunning = true;
-        IsFileBusy = true;
-        IsFileOperationIndeterminate = true;
-        FileOperationProgressText = "Atualizando a janela de 11 meses…";
-        var windows = Application.Current.Windows.Cast<Window>()
-            .Select(window => (Window: window, Enabled: window.IsEnabled)).ToArray();
-        foreach (var entry in windows) entry.Window.IsEnabled = false;
-        NotifyCommands();
         try
         {
-            _maintenanceCoordinator.NotifyVisibleActivity();
-            _indexCancellation?.Cancel();
-            _catalogCancellation?.Cancel();
-            _contractSearchCancellation?.Cancel();
-            _contractCountCancellation?.Cancel();
-            _selectedContractCacheCancellation?.Cancel();
-            _priceCancellation?.Cancel();
-            _foregroundCancellation?.Cancel();
-            _documentCancellation?.Cancel();
-            _quotationAutomationCancellation?.Cancel();
-            if (_quotationAutomationCompletion is { } completion)
-                await completion.Task.ConfigureAwait(true);
-            await StopAggressivePriceCacheAsync(scheduleNormalMaintenance: false).ConfigureAwait(true);
-            await StopAggressiveNationalPriceIndexAsync(scheduleNormalMaintenance: false).ConfigureAwait(true);
-            await CancelAndAwaitPriceCacheCycleAsync().ConfigureAwait(true);
-            await CancelAndAwaitNationalPriceIndexCycleAsync().ConfigureAwait(true);
-            if (_quotationItemWindow is { } itemWindow)
-                await itemWindow.PrepareForRetentionAsync().ConfigureAwait(true);
-            await _itemSearchService.InvalidateAsync(_startupCancellation.Token).ConfigureAwait(true);
-            await _transientItemSearchService.InvalidateAsync(_startupCancellation.Token).ConfigureAwait(true);
-            while (IsIndexBusy || IsCatalogBusy || IsPriceBusy || IsForegroundBusy || IsDocumentBusy || _automaticMaintenanceRunning)
-                await Task.Delay(50, _startupCancellation.Token).ConfigureAwait(true);
-            Interlocked.Increment(ref _priceRunGeneration);
-            _retainedItemRows.Clear();
-            ItemSearchRows.Clear();
-            ContractItemRows.Clear();
-            _localPriceCursor = null;
-            _restartPriceSessionOnNextExpansion = true;
-            await ApplyLocalRetentionAsync(compact: false, _startupCancellation.Token).ConfigureAwait(true);
+            // Keep each physical delete deliberately small. The next idle tick resumes
+            // from the remaining expired rows, so a 15-year-old HDD never receives one
+            // giant startup transaction.
+            var batchSize = decision.Resources.Pressure == SystemResourcePressure.Constrained ? 25 : 75;
             var today = DateOnly.FromDateTime(DateTime.Today);
-            var range = DataWindow.Normalize(
-                DateOnly.FromDateTime(CustomStartDate ?? DateTime.Today),
-                DateOnly.FromDateTime(CustomEndDate ?? DateTime.Today), today);
-            CustomStartDate = range.Start.ToDateTime(TimeOnly.MinValue);
-            CustomEndDate = range.End.ToDateTime(TimeOnly.MinValue);
-            await SearchAsync(resetSession: true, restartPriceSession: true, revalidateStalePrices: false).ConfigureAwait(true);
-            await RefreshDatasetSummaryAsync().ConfigureAwait(true);
-            await RefreshCoverageAsync().ConfigureAwait(true);
-            await RefreshPriceCacheProgressAsync().ConfigureAwait(true);
-            await RefreshNationalPriceIndexProgressAsync().ConfigureAwait(true);
-            if (_quotationsInitialized)
+            var result = await repository.MaintainRetentionAsync(
+                today,
+                compact: false,
+                cancellationToken: _startupCancellation.Token,
+                contractBatchSize: batchSize).ConfigureAwait(true);
+
+            if (result.Applied)
             {
-                await RefreshQuotationProjectsAsync().ConfigureAwait(true);
-                await LoadQuotationProjectAsync(SelectedQuotationProject?.Id).ConfigureAwait(true);
+                await _itemSearchService.InvalidateAsync(_startupCancellation.Token).ConfigureAwait(true);
+                await _transientItemSearchService.InvalidateAsync(_startupCancellation.Token).ConfigureAwait(true);
             }
-            if (_quotationItemWindow is { } refreshedWindow)
-                await refreshedWindow.ViewModel.LoadAsync().ConfigureAwait(true);
+
+            _diagnosticLog.Info("retention", result.Message);
+            MaintenanceActivityText = result.Message;
+
+            if (result.Pending)
+            {
+                // Yield to visible work and continue only after another idle interval.
+                _nextRetentionAttempt = DateTimeOffset.UtcNow.Add(decision.RetryDelay);
+            }
+            else
+            {
+                _lastRetentionDate = today;
+                _nextRetentionAttempt = DateTimeOffset.MinValue;
+                var quotationRepository = new SqliteQuotationRepository(repository.DatabasePath);
+                var hashes = await quotationRepository.GetReferencedInternetEvidenceHashesAsync(_startupCancellation.Token)
+                    .ConfigureAwait(true);
+                await _internetEvidenceStore.DeleteOrphansAsync(hashes, _startupCancellation.Token).ConfigureAwait(true);
+                await RefreshDatasetSummaryAsync().ConfigureAwait(true);
+                await RefreshCoverageAsync().ConfigureAwait(true);
+                await RefreshPriceCacheProgressAsync().ConfigureAwait(true);
+                await RefreshNationalPriceIndexProgressAsync().ConfigureAwait(true);
+            }
         }
-        catch (OperationCanceledException) when (_disposed) { }
+        catch (OperationCanceledException) when (_disposed || _startupCancellation.IsCancellationRequested) { }
         catch (Exception exception)
         {
             _nextRetentionAttempt = DateTimeOffset.UtcNow.AddMinutes(1);
-            _diagnosticLog.Error("retention", "Não foi possível concluir a manutenção da janela de 11 meses.", exception);
+            _diagnosticLog.Error("retention", "Não foi possível concluir um lote da manutenção da janela de 11 meses.", exception);
             MaintenanceActivityText = $"Limpeza pendente: {exception.Message}";
         }
         finally
         {
-            foreach (var entry in windows) entry.Window.IsEnabled = entry.Enabled;
-            IsFileOperationIndeterminate = false;
-            IsFileBusy = false;
             _retentionRunning = false;
-            NotifyCommands();
         }
     }
+
 }
