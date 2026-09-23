@@ -103,7 +103,6 @@ public sealed partial class SqliteContractRepository
             if (expired)
             {
                 progress?.Report("Preparando limpeza otimizada…");
-                await EnsureRetentionIndexesAsync(connection, cancellationToken).ConfigureAwait(false);
                 await ExecuteRetentionSqlAsync(connection, null, "PRAGMA temp_store=MEMORY;", cancellationToken).ConfigureAwait(false);
             }
 
@@ -185,24 +184,6 @@ public sealed partial class SqliteContractRepository
 
         span.Complete(result.RemovedContracts + result.RemovedReferences);
         return result;
-    }
-
-    private static async Task EnsureRetentionIndexesAsync(
-        SqliteConnection connection,
-        CancellationToken cancellationToken)
-    {
-        await ExecuteRetentionSqlAsync(connection, null, """
-            CREATE INDEX IF NOT EXISTS idx_quotation_processed_contracts_contract
-                ON quotation_processed_contracts(contract_id);
-            CREATE INDEX IF NOT EXISTS idx_quotation_item_search_hits_contract
-                ON quotation_item_search_hits(contract_id, line_id, prompt_slot);
-            CREATE INDEX IF NOT EXISTS idx_quotation_item_search_failures_contract
-                ON quotation_item_search_failures(contract_id, line_id, prompt_slot);
-            CREATE INDEX IF NOT EXISTS idx_quotation_references_retention
-                ON quotation_references(source_kind, result_date, publication_date, contract_id);
-            CREATE INDEX IF NOT EXISTS idx_quotation_internet_price_drafts_retention
-                ON quotation_internet_price_drafts(captured_at, id);
-            """, cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task PruneOrphanEvidenceAssetsAsync(
@@ -340,6 +321,9 @@ public sealed partial class SqliteContractRepository
                  WHERE other.line_id = quotation_references.line_id AND other.id = quotation_references.duplicate_of_reference_id);
             DELETE FROM quotation_item_search_hits WHERE contract_id IN (SELECT id FROM expired_contracts);
             DELETE FROM quotation_item_search_failures WHERE contract_id IN (SELECT id FROM expired_contracts);
+            -- Explicitly remove this child set once per batch. Without this step SQLite
+            -- would enforce its FK cascade by probing it once for every deleted contract.
+            DELETE FROM quotation_processed_contracts WHERE contract_id IN (SELECT id FROM expired_contracts);
             UPDATE quotation_item_search_workspaces SET
                 matched_items = MAX(0, matched_items - (SELECT removed_hits FROM retention_affected_workspaces w
                     WHERE w.line_id = quotation_item_search_workspaces.line_id AND w.prompt_slot = quotation_item_search_workspaces.prompt_slot)),
