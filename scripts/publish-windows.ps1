@@ -57,6 +57,9 @@ Invoke-Dotnet @('build', (Join-Path $root 'PNCPKing.sln'), '--configuration', 'R
 Invoke-Dotnet @('test', (Join-Path $root 'tests\PNCPKing.Tests\PNCPKing.Tests.csproj'), '--configuration', 'Release', '--no-build',
     '--', 'xUnit.ParallelizeTestCollections=false')
 
+Invoke-Dotnet @('run', '--project', (Join-Path $root 'tests\PNCPKing.UiChecks\PNCPKing.UiChecks.csproj'),
+    '--configuration', 'Release', '--no-build', '--', '--layout')
+
 if (Test-Path $output) {
     $existing = @(Get-ChildItem $output -Force)
     if (@($existing | Where-Object { $_.PSIsContainer -or

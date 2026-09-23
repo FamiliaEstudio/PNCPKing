@@ -28,7 +28,7 @@
         </ListBox>
 
         <DockPanel Grid.Row="2" Margin="0,8,0,0">
-            <Button Content="Restaurar padrão" Click="Reset_Click" DockPanel.Dock="Left" />
+            <Button Content="Restaurar layout da tabela" Click="Reset_Click" DockPanel.Dock="Left" />
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
                 <Button Content="Cancelar" IsCancel="True" Click="Cancel_Click" />
                 <Button Content="Aplicar" IsDefault="True" Click="Apply_Click" />

@@ -50,14 +50,13 @@ jobs:
           gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
           if ($LASTEXITCODE -eq 0) { throw "A release $tag ja existe." }
           $notes = @"
-          ## Retenção otimizada para HDDs antigos
+          ## Janelas adaptadas a monitores menores e escalas diferentes
 
-          - A abertura do PNCP King apenas avança a janela lógica de 11 meses; a exclusão física deixa de bloquear a inicialização.
-          - A limpeza roda em pequenos lotes somente durante ociosidade, com lotes ainda menores quando a máquina está sob pressão de recursos.
-          - As tabelas temporárias da retenção usam memória durante os lotes, reduzindo I/O aleatório no HDD.
-          - Evita sondagens repetidas de chave estrangeira ao remover contratações vencidas.
-          - Mantém a correção da v1.2.2: prazo de handshake do instalador auxiliar de 120 segundos e validação SHA-256 integral.
-          - O banco continua no esquema 30, preservando compatibilidade de rollback com a v1.2.2.
+          - As janelas principais de cotação cabem na área útil do monitor, inclusive após troca de monitor ou DPI.
+          - Barras de comandos e a seleção de documentos se ajustam a larguras menores.
+          - A etapa de pesquisa temporal da cotação por IA reorganiza campos e pesos em várias linhas.
+          - O seletor de colunas permite restaurar larguras, ordem e visibilidade padrão da tabela.
+          - Mantém as melhorias de retenção da v1.2.3 e o esquema 30, sem migração do banco.
           "@
-          gh release create $tag ./artifacts/win-x64/PNCPKing.exe ./artifacts/win-x64/app-update.json --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "PNCP King $version — retenção otimizada para HDDs antigos" --notes $notes
+          gh release create $tag ./artifacts/win-x64/PNCPKing.exe ./artifacts/win-x64/app-update.json --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "PNCP King $version — janelas adaptadas a diferentes monitores" --notes $notes
           if ($LASTEXITCODE -ne 0) { throw "Falha ao publicar a release $tag." }

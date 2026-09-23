@@ -106,8 +106,7 @@ public sealed class DataGridColumnLayoutService
             .Select(item => new ColumnChooserRow(
                 item.Key,
                 item.Column.Header?.ToString() ?? "Coluna",
-                item.Column.Visibility == Visibility.Visible,
-                registration.Defaults.First(state => state.Key == item.Key).IsVisible))
+                item.Column.Visibility == Visibility.Visible))
             .ToArray();
         var chooser = new ColumnChooserWindow(rows)
         {
@@ -116,6 +115,7 @@ public sealed class DataGridColumnLayoutService
         _activeChooser = chooser;
         _activeChooserGrid = dataGrid;
         chooser.ApplyRequested += (_, draft) => ApplyVisibilityDraft(registration, dataGrid, draft);
+        chooser.ResetRequested += (_, _) => Reset(registration);
         chooser.Closed += (_, _) =>
         {
             if (ReferenceEquals(_activeChooser, chooser))
@@ -282,7 +282,8 @@ public sealed class DataGridColumnLayoutService
         Registration registration,
         IReadOnlyList<ColumnLayoutSetting> states)
     {
-        var byKey = states.ToDictionary(item => item.Key, StringComparer.Ordinal);
+        var byKey = states.GroupBy(item => item.Key, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal);
         foreach (var item in registration.Columns)
         {
             if (!byKey.TryGetValue(item.Key, out var state))

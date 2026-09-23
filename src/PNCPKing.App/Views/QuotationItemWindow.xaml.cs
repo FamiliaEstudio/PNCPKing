@@ -27,6 +27,7 @@ public partial class QuotationItemWindow : Window
         DataGridColumnLayoutService columnLayouts)
     {
         InitializeComponent();
+        MonitorAwareWindowBehavior.Attach(this);
         ViewModel = viewModel;
         _capture = capture;
         _evidenceStore = evidenceStore;

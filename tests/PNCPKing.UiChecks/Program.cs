@@ -1,11 +1,14 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
+using System.Windows.Interop;
 using System.Windows.Threading;
+using PNCPKing.App.Services;
 using PNCPKing.App.ViewModels;
 using PNCPKing.Core.Models;
 using PNCPKing.Core.Search;
@@ -17,6 +20,22 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args is ["--layout"])
+        {
+            var layoutApp = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            layoutApp.Startup += async (_, _) =>
+            {
+                try
+                {
+                    await CheckMonitorPlacementAsync();
+                    Console.WriteLine("Monitor placement: passed");
+                    layoutApp.Shutdown();
+                }
+                catch (Exception error) { Console.Error.WriteLine(error); layoutApp.Shutdown(1); }
+            };
+            return layoutApp.Run();
+        }
+
         if (args.Length < 1) throw new ArgumentException("Informe o JSON de saída e, opcionalmente, uma cópia de benchmark.");
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         app.Startup += async (_, _) =>
@@ -37,6 +56,58 @@ internal static class Program
             catch (Exception error) { Console.Error.WriteLine(error); app.Shutdown(1); }
         };
         return app.Run();
+    }
+
+    private static async Task CheckMonitorPlacementAsync()
+    {
+        var window = new Window
+        {
+            Title = "Validação de janela em monitor pequeno",
+            Width = SystemParameters.PrimaryScreenWidth * 2,
+            Height = SystemParameters.PrimaryScreenHeight * 2,
+            MinWidth = SystemParameters.PrimaryScreenWidth * 1.5,
+            MinHeight = SystemParameters.PrimaryScreenHeight * 1.5
+        };
+        MonitorAwareWindowBehavior.Attach(window);
+        try
+        {
+            window.Show();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            var handle = new WindowInteropHelper(window).Handle;
+            var monitor = MonitorFromWindow(handle, 2);
+            var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+            Require(monitor != IntPtr.Zero && GetMonitorInfo(monitor, ref info), "Monitor não encontrado.");
+            Require(GetWindowRect(handle, out var rect), "Janela não encontrada.");
+            Require(rect.Left >= info.WorkArea.Left && rect.Top >= info.WorkArea.Top &&
+                    rect.Right <= info.WorkArea.Right && rect.Bottom <= info.WorkArea.Bottom,
+                "A janela ultrapassou a área útil do monitor.");
+        }
+        finally { window.Close(); }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int Left, Top, Right, Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    private struct MonitorInfo
+    {
+        public int Size;
+        public NativeRect Monitor, WorkArea;
+        public uint Flags;
     }
 
     private static object CheckGitHubUpdateDialog()

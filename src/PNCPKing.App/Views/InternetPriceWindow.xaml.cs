@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using PNCPKing.App.Services;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
 using PNCPKing.Core.Quotations;
@@ -41,6 +42,7 @@ public partial class InternetPriceWindow : Window
     {
         ArgumentNullException.ThrowIfNull(draft);
         InitializeComponent();
+        MonitorAwareWindowBehavior.Attach(this);
         _capture = capture;
         _evidenceStore = evidenceStore;
         _currentPrices = currentPrices;
