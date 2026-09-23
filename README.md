@@ -155,3 +155,25 @@ As medições em cópias isoladas e os cenários de validação estão em [docs/
 O estudo histórico de custo está em `docs/price-load-study.md`. A atualização atual usa uma única prévia e reutiliza listas e resultados completos da versão vigente, inclusive respostas vazias.
 
 O Sweet Code pode ser aberto ao lado da pesquisa. Cole um crivo por linha, ative as sugestões e use ↑/↓ e `TAB` para preencher sem impedir a digitação livre.
+
+## Licença e direitos autorais
+
+**PNCP King — Copyright © 2026 Felipe Arcencio. Todos os direitos reservados.**
+
+Este é um projeto de **código-fonte publicamente disponível, mas não open source**. A disponibilização do código neste repositório não concede autorização para utilização, modificação, distribuição ou criação de trabalhos derivados.
+
+O uso depende de autorização prévia por escrito. Solicitações de licença: **felipearcencio@gmail.com**.
+
+Consulte o arquivo [`LICENSE`](LICENSE) para as condições completas.
+
+O PNCP King é um projeto independente e não oficial. Não pertence, não é mantido e não representa a Prefeitura Municipal de Ribeirão Preto.
+
+---
+
+## Aviso de independência institucional
+
+O PNCP King é um projeto independente e não oficial, desenvolvido e mantido por iniciativa de seu autor. Não é um software da Prefeitura Municipal de Ribeirão Preto, não é mantido pela Prefeitura e não representa manifestação, produto ou serviço oficial do Município, sendo realizado como projeto pessoal. A Prefeitura de Ribeirão Preto possui, ainda assim, autorização de uso gratuito e livre de custos para sempre, ainda que o programa se torne posteriormente comercial.
+
+Eventuais referências à Prefeitura Municipal de Ribeirão Preto, inclusive seu Brasão de Armas, aparecem exclusivamente quando necessárias à reprodução ou compatibilidade com modelos oficiais de documentos utilizados no fluxo administrativo. A presença desses elementos não implica patrocínio, aprovação, certificação ou vínculo institucional do PNCP King com a Prefeitura.
+
+O programa utiliza dados públicos disponibilizados por fontes oficiais, especialmente o Portal Nacional de Contratações Públicas — PNCP. O código, funcionalidades, documentação e decisões de desenvolvimento do PNCP King são de responsabilidade de seus mantenedores, ressalvados os direitos sobre símbolos, documentos, dados e demais conteúdos pertencentes aos respectivos titulares.
