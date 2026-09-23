@@ -36,6 +36,54 @@ public sealed class DataRetentionTests
     }
 
     [Fact]
+    public async Task StartupPreparationAdvancesWindowWithoutDeletingExpiredContracts()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var old = PriceCacheTests.RecentContract("startup-old", DataWindow.Start(today).AddDays(-1), 1);
+        await database.Repository.UpsertContractsAsync([old]);
+
+        var lastCompleted = await database.Repository.PrepareRetentionWindowAsync(today);
+
+        Assert.Null(lastCompleted);
+        Assert.NotNull(await database.Repository.GetContractAsync(old.PncpId));
+
+        var firstBatch = await database.Repository.MaintainRetentionAsync(today, contractBatchSize: 1);
+        Assert.False(firstBatch.Pending);
+        Assert.Equal(1, firstBatch.RemovedContracts);
+        Assert.Null(await database.Repository.GetContractAsync(old.PncpId));
+    }
+
+    [Fact]
+    public async Task BatchedRetentionRemovesOnlyConfiguredContractsAndResumes()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var oldDate = DataWindow.Start(today).AddDays(-1);
+        var contracts = Enumerable.Range(1, 5)
+            .Select(i => PriceCacheTests.RecentContract("batch-" + i, oldDate, i))
+            .ToArray();
+        await database.Repository.UpsertContractsAsync(contracts);
+
+        await database.Repository.PrepareRetentionWindowAsync(today);
+        var first = await database.Repository.MaintainRetentionAsync(today, contractBatchSize: 2);
+
+        Assert.Equal(2, first.RemovedContracts);
+        Assert.True(first.Pending);
+        Assert.Equal(3, (await database.Repository.GetCountsAsync()).Contracts);
+
+        var second = await database.Repository.MaintainRetentionAsync(today, contractBatchSize: 2);
+        Assert.Equal(2, second.RemovedContracts);
+        Assert.True(second.Pending);
+
+        var third = await database.Repository.MaintainRetentionAsync(today, contractBatchSize: 2);
+        Assert.Equal(1, third.RemovedContracts);
+        Assert.False(third.Pending);
+        Assert.Equal(0, (await database.Repository.GetCountsAsync()).Contracts);
+        Assert.False((await database.Repository.MaintainRetentionAsync(today, contractBatchSize: 2)).Applied);
+    }
+
+    [Fact]
     public async Task RetentionRemovesPinnedAndQuotedPricesPreservesProjectsAndInvalidatesBaskets()
     {
         await using var database = await TestDatabase.CreateAsync();
