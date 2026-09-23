@@ -30,7 +30,6 @@ public static class GitHubAppInstaller
             info.FileMinorPart != GitHubUpdateValidation.ParseVersion(manifest.Version).Minor ||
             info.FileBuildPart != GitHubUpdateValidation.ParseVersion(manifest.Version).Build)
             throw new InvalidDataException("A versão do executável diverge da release.");
-        // The native host must be PE32+ for AMD64; a DLL or other architecture cannot replace the app.
         using var input = new BinaryReader(File.OpenRead(path));
         if (input.ReadUInt16() != 0x5a4d || input.BaseStream.Length < 64) throw new InvalidDataException("Executável Windows inválido.");
         input.BaseStream.Position = 0x3c;
@@ -92,15 +91,15 @@ public static class GitHubAppInstaller
             foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-RequestPath", requestPath })
                 info.ArgumentList.Add(arg);
             using var installer = Process.Start(info) ?? throw new IOException("Não foi possível iniciar o instalador.");
-            // Do not close the app unless the helper has read and validated its local request.
-            for (var attempt = 0; attempt < 100 && !File.Exists(requestPath + ".ready"); attempt++)
+            // Slow HDDs and antivirus scanning can make validation of the ~200 MB staged executable take well over 10 seconds.
+            // Keep the helper liveness check, but allow up to two minutes for the validated handoff marker.
+            for (var attempt = 0; attempt < 1200 && !File.Exists(requestPath + ".ready"); attempt++)
             {
                 if (installer.HasExited) throw new IOException("O instalador foi interrompido antes do encerramento do programa.");
                 await Task.Delay(100, ct).ConfigureAwait(false);
             }
             if (!File.Exists(requestPath + ".ready")) throw new IOException("O instalador não respondeu; o programa continuará aberto.");
             ct.ThrowIfCancellationRequested();
-            // The helper must observe this handoff as well as process exit before replacing anything.
             await File.WriteAllTextAsync(requestPath + ".commit", "ready", ct).ConfigureAwait(false);
             handedOff = true;
         }
