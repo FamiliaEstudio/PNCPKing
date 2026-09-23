@@ -816,7 +816,7 @@
                                 <RowDefinition Height="*" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
-                                <RowDefinition Height="180" />
+                                <RowDefinition Height="*" />
                             </Grid.RowDefinitions>
                                     <DataGrid x:Name="QuotationBasketsGrid" ItemsSource="{Binding QuotationBaskets}"
                                               SelectedItem="{Binding SelectedQuotationBasket}"
@@ -846,24 +846,27 @@
                                             <DataGridTextColumn Header="Índice" Binding="{Binding Score, StringFormat=N2}" Width="75" />
                                         </DataGrid.Columns>
                                     </DataGrid>
-                                    <DockPanel Grid.Row="1" Margin="0,5">
-                                        <TextBlock Text="{Binding QuotationBasketPageSummary}" VerticalAlignment="Center" />
-                                        <WrapPanel DockPanel.Dock="Right">
-                                            <Button Content="Escolher colunas — cestas" Click="ChooseColumns_Click"
-                                                    Tag="{Binding ElementName=QuotationBasketsGrid}" />
-                                            <Button Content="Escolher colunas — referências" Click="ChooseColumns_Click"
-                                                    Tag="{Binding ElementName=SelectedBasketReferencesGrid}" />
-                                            <Button Content="Página anterior" Command="{Binding PreviousQuotationBasketPageCommand}" />
-                                            <Button Content="Próxima página" Command="{Binding NextQuotationBasketPageCommand}" />
-                                            <Button Content="Renomear manual" Command="{Binding RenameManualBasketCommand}" />
-                                            <Button Content="Excluir manual" Command="{Binding DeleteManualBasketCommand}" />
-                                            <Button Content="Usar média" Click="MainUseMean_Click" />
-                                            <Button Content="Usar mediana" Click="MainUseMedian_Click" />
-                                            <Button Content="Confirmar cesta escolhida" Command="{Binding ConfirmQuotationBasketCommand}" />
-                                        </WrapPanel>
-                                    </DockPanel>
+                                    <StackPanel Grid.Row="1" Margin="0,5">
+                                        <TextBlock Text="{Binding QuotationBasketPageSummary}" TextWrapping="Wrap" Margin="0,0,0,3" />
+                                        <ScrollViewer MaxHeight="100" VerticalScrollBarVisibility="Auto"
+                                                      HorizontalScrollBarVisibility="Disabled">
+                                            <WrapPanel>
+                                                <Button Content="Escolher colunas — cestas" Click="ChooseColumns_Click"
+                                                        Tag="{Binding ElementName=QuotationBasketsGrid}" />
+                                                <Button Content="Escolher colunas — referências" Click="ChooseColumns_Click"
+                                                        Tag="{Binding ElementName=SelectedBasketReferencesGrid}" />
+                                                <Button Content="Página anterior" Command="{Binding PreviousQuotationBasketPageCommand}" />
+                                                <Button Content="Próxima página" Command="{Binding NextQuotationBasketPageCommand}" />
+                                                <Button Content="Renomear manual" Command="{Binding RenameManualBasketCommand}" />
+                                                <Button Content="Excluir manual" Command="{Binding DeleteManualBasketCommand}" />
+                                                <Button Content="Usar média" Click="MainUseMean_Click" />
+                                                <Button Content="Usar mediana" Click="MainUseMedian_Click" />
+                                                <Button Content="Confirmar cesta escolhida" Command="{Binding ConfirmQuotationBasketCommand}" />
+                                            </WrapPanel>
+                                        </ScrollViewer>
+                                    </StackPanel>
 
-                                    <DockPanel Grid.Row="2" Margin="0,2,0,4">
+                                    <WrapPanel Grid.Row="2" Margin="0,2,0,4">
                                         <TextBlock Text="Preços:" FontWeight="SemiBold" VerticalAlignment="Center" />
                                         <Button Content="Na cesta" Click="MainScopeInBasket_Click" />
                                         <Button Content="Elegíveis fora" Click="MainScopeOutside_Click" />
@@ -871,7 +874,7 @@
                                         <Button Content="Todos" Click="MainScopeAll_Click" />
                                         <TextBlock Text="{Binding QuotationReferenceScopeSummary}"
                                                    VerticalAlignment="Center" Margin="8,0" />
-                                    </DockPanel>
+                                    </WrapPanel>
 
                                     <DataGrid x:Name="SelectedBasketReferencesGrid" Grid.Row="3"
                                               ItemsSource="{Binding VisibleQuotationReferences}"
