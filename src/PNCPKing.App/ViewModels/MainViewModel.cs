@@ -3194,10 +3194,25 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 retryDelay = contractFailure is not null ? SyncService.AutomaticRetryDelay :
                     madeProgress ? TimeSpan.FromMinutes(1) :
                     TimeSpan.FromMinutes(Math.Min(10, retryDelay.TotalMinutes * 2));
+                if (contractsComplete && items.PendingContracts == 0 && prices.PendingContracts == 0)
+                {
+                    var itemRetry = items.FailedContracts > 0
+                        ? await _priceCacheRepository.GetNextRetryAtAsync(prices: false, cancellationToken)
+                        : null;
+                    var priceRetry = prices.FailedContracts > 0
+                        ? await _priceCacheRepository.GetNextRetryAtAsync(prices: true, cancellationToken)
+                        : null;
+                    DateTimeOffset? nextRetry = itemRetry is { } itemAt && priceRetry is { } priceAt
+                        ? (itemAt <= priceAt ? itemAt : priceAt)
+                        : itemRetry ?? priceRetry;
+                    if (nextRetry is { } eligibleAt && eligibleAt > DateTimeOffset.UtcNow)
+                        retryDelay = TimeSpan.FromTicks(Math.Max(retryDelay.Ticks,
+                            (eligibleAt - DateTimeOffset.UtcNow).Ticks));
+                }
                 SetIndexUpdateStage(0);
                 StatusText = $"Ciclo {cycle} com pendências: contratações {(contractsComplete ? "concluídas" : "pendentes")}; " +
                     $"listas {items.PendingContracts + items.FailedContracts:N0}; preços {prices.PendingContracts + prices.FailedContracts:N0}. " +
-                    $"Nova tentativa em {retryDelay.TotalMinutes:N0} min. {contractFailure}";
+                    $"Nova tentativa em {FormatDuration(retryDelay)}. {contractFailure}";
                 await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(true);
             }
         }

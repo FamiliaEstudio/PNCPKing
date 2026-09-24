@@ -12,6 +12,30 @@ namespace PNCPKing.Tests;
 public sealed class PriceCacheTests
 {
     [Fact]
+    public async Task NextRetryUsesTheEarliestPersistedCheckpointForEachStage()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var first = RecentContract("retry-first", today, 1);
+        var second = RecentContract("retry-second", today, 2);
+        await database.Repository.UpsertContractsAsync([first, second]);
+        var cache = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
+        await cache.SetAuthorizationAsync(true, DataWindow.Start(today), today);
+        await cache.PrepareWindowAsync(DataWindow.Start(today), today);
+        var soon = DateTimeOffset.UtcNow.AddMinutes(3);
+        var later = soon.AddHours(2);
+        await cache.MarkContractFailedAsync(first.PncpId, "Transitório", later);
+        await cache.MarkContractFailedAsync(second.PncpId, "Transitório", soon);
+        Assert.Equal(soon, await cache.GetNextRetryAtAsync(prices: false));
+
+        await cache.SetNationalPriceIndexAuthorizationAsync(true, DataWindow.Start(today), today);
+        await cache.PrepareNationalPriceIndexAsync(DataWindow.Start(today), today);
+        await cache.MarkNationalPriceContractFailedAsync(first.PncpId, "Transitório", later);
+        await cache.MarkNationalPriceContractFailedAsync(second.PncpId, "Transitório", soon);
+        Assert.Equal(soon, await cache.GetNextRetryAtAsync(prices: true));
+    }
+
+    [Fact]
     public async Task CacheMeasurements_UseExplicitOrCachedAggregates()
     {
         await using var database = await TestDatabase.CreateAsync();

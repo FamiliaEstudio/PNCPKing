@@ -56,6 +56,9 @@ public interface IPriceCacheRepository
         string contractId,
         CancellationToken cancellationToken = default);
     Task<PriceCacheProgress> GetProgressAsync(CancellationToken cancellationToken = default);
+    Task<DateTimeOffset?> GetNextRetryAtAsync(
+        bool prices,
+        CancellationToken cancellationToken = default);
     Task RemoveBackgroundCacheAsync(CancellationToken cancellationToken = default);
     Task<NationalPriceIndexPolicy> GetNationalPriceIndexPolicyAsync(
         CancellationToken cancellationToken = default);
