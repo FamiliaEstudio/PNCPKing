@@ -12,6 +12,40 @@ public sealed class QuotationTests
     private static readonly DateOnly Today = new(2026, 7, 21);
 
     [Fact]
+    public async Task QuotationEditsWaitForTheSharedBackgroundWriter()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var connections = new SqliteConnectionFactory(database.Repository.DatabasePath);
+        var quotations = new SqliteQuotationRepository(connections);
+
+        Task<QuotationProject> create;
+        await using (var background = await connections.WorkCoordinator.EnterWriterAsync(SqliteWorkPriority.Background))
+        {
+            create = quotations.CreateProjectAsync("Cotação durante atualização");
+            Assert.False(create.IsCompleted);
+        }
+        var project = await create.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Task rename;
+        await using (var background = await connections.WorkCoordinator.EnterWriterAsync(SqliteWorkPriority.Background))
+        {
+            rename = quotations.RenameProjectAsync(project.Id, "Cotação editada");
+            Assert.False(rename.IsCompleted);
+        }
+        await rename.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal("Cotação editada", Assert.Single(await quotations.GetProjectsAsync()).Name);
+
+        Task delete;
+        await using (var background = await connections.WorkCoordinator.EnterWriterAsync(SqliteWorkPriority.Background))
+        {
+            delete = quotations.DeleteProjectAsync(project.Id);
+            Assert.False(delete.IsCompleted);
+        }
+        await delete.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Empty(await quotations.GetProjectsAsync());
+    }
+
+    [Fact]
     public async Task AlphabeticalItems_PersistFollowVisibleNamesAndKeepAutomationOrder()
     {
         await using var database = await TestDatabase.CreateAsync();

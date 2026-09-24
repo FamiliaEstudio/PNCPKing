@@ -544,6 +544,7 @@ public sealed partial class MainViewModel
         _lastNationalPriceIndexProgress = progress;
         NationalPriceIndexStatus = progress.Status;
         NationalPriceIndexProgress = progress.Percentage;
+        UpdateManualUpdateProgress();
         NationalPriceIndexSummary =
             $"{progress.CompletedItems:N0}/{progress.EligibleItems:N0} itens consultados · " +
             $"{progress.PricedItems:N0} com preço · {progress.ResultRows:N0} resultado(s) · " +

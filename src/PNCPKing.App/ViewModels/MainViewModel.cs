@@ -126,6 +126,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private string _maximumPriceText = string.Empty;
     private bool _isIndexBusy;
     private int _indexUpdateStage;
+    private bool _manualUpdateRunning;
+    private int _manualUpdateCycle;
+    private double _manualUpdateProgress;
     private bool _isIndexPaused;
     private bool _canPauseIndex;
     private bool _isPriceBusy;
@@ -963,6 +966,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             {
                 OnPropertyChanged(nameof(IndexActivityText));
                 OnPropertyChanged(nameof(IsIndexTransferActive));
+                OnPropertyChanged(nameof(IsIndexProgressIndeterminate));
                 NotifyCommands();
             }
         }
@@ -977,20 +981,29 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             {
                 OnPropertyChanged(nameof(IndexActivityText));
                 OnPropertyChanged(nameof(IsIndexTransferActive));
+                OnPropertyChanged(nameof(IsIndexProgressIndeterminate));
                 OnPropertyChanged(nameof(PauseIndexButtonText));
             }
         }
     }
 
     public bool IsIndexTransferActive => IsIndexBusy && !IsIndexPaused;
+    public bool IsIndexProgressIndeterminate => IsIndexTransferActive && !_manualUpdateRunning;
+    public double ManualUpdateProgress
+    {
+        get => _manualUpdateProgress;
+        private set => SetProperty(ref _manualUpdateProgress, Math.Clamp(value, 0d, 100d));
+    }
 
     public string IndexActivityText => _indexUpdateStage > 0
-        ? $"Etapa {_indexUpdateStage}/3: " + (_indexUpdateStage switch
+        ? $"{(_manualUpdateRunning ? $"Ciclo {_manualUpdateCycle} — " : "")}Etapa {_indexUpdateStage}/3: " + (_indexUpdateStage switch
         {
             1 => "contratações",
             2 => "listas de itens",
             _ => "preços"
         }) + (IsIndexPaused ? " (pausada)" : " (em andamento)")
+        : _manualUpdateRunning
+            ? $"Ciclo {_manualUpdateCycle}: aguardando nova tentativa" + (IsIndexPaused ? " (pausada)" : "")
         : IsIndexPaused
             ? "Índice: pausa solicitada/ativa após a etapa atual"
             : IsIndexBusy ? "Índice: consultando o PNCP" : "Atualização: inativa";
@@ -1001,6 +1014,17 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         OnPropertyChanged(nameof(IndexActivityText));
         OnPropertyChanged(nameof(PriceCacheActivityText));
         OnPropertyChanged(nameof(NationalPriceIndexActivityText));
+    }
+
+    private void UpdateManualUpdateProgress()
+    {
+        if (!_manualUpdateRunning) return;
+        var coverage = CoverageDays.Count == 0 ? 0d : CoverageDays.Average(day => day.Percentage);
+        var items = _lastPriceCacheProgress?.Percentage ?? 0d;
+        var prices = _lastNationalPriceIndexProgress?.Percentage ?? 0d;
+        // All three measures come from stored data; finalization of the global
+        // update is checked separately before the bar may reach 100%.
+        ManualUpdateProgress = Math.Min(99.9d, (coverage + items + prices) / 3d);
     }
 
     public string PauseIndexButtonText => IsIndexPaused ? "Continuar" : "Pausar";
@@ -2983,7 +3007,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             $"Banco estimado: {FormatBytes(preflight.EstimatedDatabaseMinBytes)} a {FormatBytes(preflight.EstimatedDatabaseMaxBytes)}\n" +
             $"Itens e preços: estimativa adicional de {FormatBytes(preflight.EstimatedFullCacheMinBytes)} a {FormatBytes(preflight.EstimatedFullCacheMaxBytes)}\n" +
             "PDFs: 0 bytes\n\n" +
-            "Este ciclo atualizará contratações, listas de itens e preços. Não haverá downloads automáticos após seu término.",
+            "Atualizar repetirá as três etapas automaticamente até concluir ou até você pausar/cancelar. Não haverá downloads automáticos após a conclusão.",
             "Confirmar tamanho e iniciar",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question);
@@ -3000,15 +3024,18 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task SynchronizeManuallyAsync(CancellationToken cancellationToken)
     {
-        var progress = CreateSyncProgress("1/3 — Contratações: ");
         if (_maintenanceCoordinator.GetDecision().Resources.Pressure == SystemResourcePressure.Critical)
             throw new InvalidOperationException("Atualização adiada: memória em pressão crítica. Feche outras aplicações e use Atualizar novamente.");
-        SetIndexUpdateStage(1);
+        _manualUpdateRunning = true;
+        _manualUpdateCycle = 0;
+        ManualUpdateProgress = 0;
+        OnPropertyChanged(nameof(IsIndexProgressIndeterminate));
         using var aggressive = _requestScheduler.EnableAggressiveBackgroundRequests();
         long lastRetryReport = 0;
         var retryProgress = new Progress<string>(message =>
         {
-            if (IsIndexBusy && !IsIndexPaused && Stopwatch.GetElapsedTime(lastRetryReport) >= TimeSpan.FromSeconds(1))
+            if (IsIndexBusy && !IsIndexPaused && _indexUpdateStage > 0 &&
+                Stopwatch.GetElapsedTime(lastRetryReport) >= TimeSpan.FromSeconds(1))
             {
                 lastRetryReport = Stopwatch.GetTimestamp();
                 StatusText = $"{_indexUpdateStage}/3 — {message}";
@@ -3017,79 +3044,170 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         using var retryScope = PncpRequestOptions.BeginScope(PncpRequestPriority.IndexMaintenance,
             retryTransientFailures: true, waitForResume: _syncService.WaitWhilePausedAsync,
             retryProgress: retryProgress);
-        var today = DateOnly.FromDateTime(DateTime.Today);
-        var start = DataWindow.Start(today);
-        var itemPolicy = await _priceCacheRepository.GetPolicyAsync(cancellationToken);
-        if (!itemPolicy.Authorized || !itemPolicy.Enabled)
-            await _priceCacheRepository.SetAuthorizationAsync(true, start, today, cancellationToken);
-        await _priceCacheRepository.SetPausedAsync(false, cancellationToken: cancellationToken);
-        var pricePolicy = await _priceCacheRepository.GetNationalPriceIndexPolicyAsync(cancellationToken);
-        if (!pricePolicy.Authorized || !pricePolicy.Enabled)
-            await _priceCacheRepository.SetNationalPriceIndexAuthorizationAsync(true, start, today, cancellationToken);
-        await _priceCacheRepository.SetNationalPriceIndexPausedAsync(false, cancellationToken: cancellationToken);
-        await new OfficialUpdateService(_calibrationService.Connections).PrepareRevalidationAsync(cancellationToken);
-        var parallel = _requestScheduler.GetSnapshot().MaximumConcurrency;
-        StatusText = "1/3 — Atualizando contratações PNCP…";
-        string? contractFailure = null;
         try
         {
-            await Task.Run(() => _autoSyncCoordinator.SynchronizeAsync(progress, cancellationToken, parallel), cancellationToken).ConfigureAwait(true);
+            var today = DateOnly.FromDateTime(DateTime.Today);
+            var start = DataWindow.Start(today);
+            var itemPolicy = await _priceCacheRepository.GetPolicyAsync(cancellationToken);
+            if (!itemPolicy.Authorized || !itemPolicy.Enabled)
+                await _priceCacheRepository.SetAuthorizationAsync(true, start, today, cancellationToken);
+            await _priceCacheRepository.SetPausedAsync(false, cancellationToken: cancellationToken);
+            var pricePolicy = await _priceCacheRepository.GetNationalPriceIndexPolicyAsync(cancellationToken);
+            if (!pricePolicy.Authorized || !pricePolicy.Enabled)
+                await _priceCacheRepository.SetNationalPriceIndexAuthorizationAsync(true, start, today, cancellationToken);
+            await _priceCacheRepository.SetNationalPriceIndexPausedAsync(false, cancellationToken: cancellationToken);
+            await new OfficialUpdateService(_calibrationService.Connections).PrepareRevalidationAsync(cancellationToken);
+            await RefreshCoverageAsync(cancellationToken).ConfigureAwait(true);
+            UpdatePriceCacheProgress(await _priceCacheRepository.GetProgressAsync(cancellationToken));
+            UpdateNationalPriceIndexProgress(await _priceCacheRepository.GetNationalPriceIndexProgressAsync(cancellationToken));
+
+            var parallel = _requestScheduler.GetSnapshot().MaximumConcurrency;
+            var contractsComplete = false;
+            var retryDelay = TimeSpan.FromMinutes(1);
+            long previousCoverage = 0, previousItems = 0, previousPrices = 0;
+            for (var cycle = 1; ; cycle++)
+            {
+                var currentCycle = cycle;
+                cancellationToken.ThrowIfCancellationRequested();
+                await _syncService.WaitWhilePausedAsync(cancellationToken);
+                if (today != DateOnly.FromDateTime(DateTime.Today))
+                {
+                    today = DateOnly.FromDateTime(DateTime.Today);
+                    start = DataWindow.Start(today);
+                    contractsComplete = false;
+                }
+                _manualUpdateCycle = cycle;
+                SetIndexUpdateStage(1);
+                string? contractFailure = null;
+                var ranContracts = !contractsComplete;
+                if (ranContracts)
+                {
+                    StatusText = $"Ciclo {cycle} — 1/3: atualizando contratações PNCP…";
+                    Task? coverageProgressRefresh = null;
+                    long lastCoverageRefresh = 0;
+                    var contractProgress = new Progress<SyncProgress>(p =>
+                    {
+                        if (!_manualUpdateRunning || _manualUpdateCycle != currentCycle || _indexUpdateStage != 1) return;
+                        StatusText = $"Ciclo {currentCycle} — 1/3: {p.Message} ({p.CompletedPartitions}/{p.TotalPartitions} partições deste lote)";
+                        if (coverageProgressRefresh?.IsCompleted != false &&
+                            Stopwatch.GetElapsedTime(lastCoverageRefresh) >= TimeSpan.FromSeconds(5))
+                        {
+                            lastCoverageRefresh = Stopwatch.GetTimestamp();
+                            coverageProgressRefresh = RefreshCoverageAsync(cancellationToken);
+                        }
+                    });
+                    try
+                    {
+                        await Task.Run(() => _autoSyncCoordinator.SynchronizeAsync(contractProgress, cancellationToken, parallel), cancellationToken).ConfigureAwait(true);
+                    }
+                    catch (Exception exception) when (PncpClient.IsTransientFailure(exception))
+                    {
+                        contractFailure = GetSynchronizationErrorMessage(exception);
+                    }
+
+                    if (coverageProgressRefresh is not null)
+                        await coverageProgressRefresh.ConfigureAwait(true);
+                    if (contractFailure is null)
+                    {
+                        var state = await Task.Run(() => _repository.GetDatasetStateAsync(cancellationToken), cancellationToken);
+                        contractsComplete = state.StartDate is { } storedStart && storedStart <= start &&
+                            state.EndDate is { } storedEnd && storedEnd >= today &&
+                            state.LastSuccessfulSync is { } lastSync && lastSync.LocalDateTime.Date >= DateTime.Today &&
+                            _repository is ICoverageRepository coverage &&
+                            await coverage.IsCoverageCompleteAsync(start, today, cancellationToken);
+                    }
+                    await RefreshCoverageAsync(cancellationToken).ConfigureAwait(true);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                SetIndexUpdateStage(2);
+                StatusText = $"Ciclo {cycle} — 2/3: listas de itens" +
+                    (contractsComplete ? "…" : " dos contratos disponíveis…");
+                var items = await _priceCacheRepository.GetProgressAsync(cancellationToken);
+                var ranItems = ranContracts || items.Status != PriceCacheStatus.Complete ||
+                    items.PendingContracts + items.FailedContracts > 0;
+                if (ranItems)
+                {
+                    var itemProgress = new Progress<PriceCacheProgress>(p =>
+                    {
+                        if (!_manualUpdateRunning || _manualUpdateCycle != currentCycle || _indexUpdateStage != 2) return;
+                        UpdatePriceCacheProgress(p);
+                        StatusText = $"Ciclo {currentCycle} — 2/3: itens {p.CompletedContracts:N0}/{p.TotalContracts:N0}; pendências {p.PendingContracts + p.FailedContracts:N0}";
+                    });
+                    await Task.Run(() => _priceCacheService.SynchronizeAggressivelyAsync(parallel, itemProgress, cancellationToken), cancellationToken);
+                    items = await _priceCacheRepository.GetProgressAsync(cancellationToken);
+                }
+                UpdatePriceCacheProgress(items);
+                if (items.Status is PriceCacheStatus.Paused or PriceCacheStatus.InsufficientSpace or
+                    PriceCacheStatus.Disabled or PriceCacheStatus.NotAuthorized)
+                {
+                    StatusText = $"Atualização pausada nas listas de itens. {items.Message}";
+                    return;
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                SetIndexUpdateStage(3);
+                StatusText = $"Ciclo {cycle} — 3/3: preços dos itens disponíveis…";
+                var prices = await _priceCacheRepository.GetNationalPriceIndexProgressAsync(cancellationToken);
+                if (ranItems || items.Status != PriceCacheStatus.Complete || prices.Status != PriceCacheStatus.Complete ||
+                    prices.PendingContracts + prices.FailedContracts > 0)
+                {
+                    var priceProgress = new Progress<NationalPriceIndexProgress>(p =>
+                    {
+                        if (!_manualUpdateRunning || _manualUpdateCycle != currentCycle || _indexUpdateStage != 3) return;
+                        UpdateNationalPriceIndexProgress(p);
+                        StatusText = $"Ciclo {currentCycle} — 3/3: preços {p.CompletedItems:N0}/{p.EligibleItems:N0}; pendências {p.PendingContracts + p.FailedContracts:N0}";
+                    });
+                    await Task.Run(() => _nationalPriceIndexService.SynchronizeAggressivelyAsync(parallel, priceProgress, cancellationToken), cancellationToken);
+                    prices = await _priceCacheRepository.GetNationalPriceIndexProgressAsync(cancellationToken);
+                }
+                UpdateNationalPriceIndexProgress(prices);
+                if (prices.Status is PriceCacheStatus.Paused or PriceCacheStatus.InsufficientSpace or
+                    PriceCacheStatus.Disabled or PriceCacheStatus.NotAuthorized)
+                {
+                    StatusText = $"Atualização pausada nos preços. {prices.Message}";
+                    return;
+                }
+
+                if (contractsComplete && items.Status == PriceCacheStatus.Complete &&
+                    items.PendingContracts == 0 && items.FailedContracts == 0 &&
+                    items.CompletedContracts >= items.TotalContracts &&
+                    prices.Status == PriceCacheStatus.Complete &&
+                    prices.PendingContracts == 0 && prices.FailedContracts == 0 &&
+                    prices.CompletedItems >= prices.EligibleItems)
+                {
+                    await _repository.MarkOptimizePendingAsync(cancellationToken).ConfigureAwait(true);
+                    _lastOptimizeDate = null;
+                    StatusText = $"Atualização concluída em {cycle:N0} ciclo(s); contratações, listas e preços completos.";
+                    await RefreshDatasetSummaryAsync().ConfigureAwait(true);
+                    await RefreshCoverageAsync().ConfigureAwait(true);
+                    ManualUpdateProgress = 100;
+                    return;
+                }
+
+                var currentCoverage = CoverageDays.Sum(day => (long)day.CompletedModalities);
+                var madeProgress = currentCoverage > previousCoverage ||
+                    items.CompletedContracts > previousItems || prices.CompletedItems > previousPrices;
+                previousCoverage = currentCoverage;
+                previousItems = items.CompletedContracts;
+                previousPrices = prices.CompletedItems;
+                retryDelay = contractFailure is not null ? SyncService.AutomaticRetryDelay :
+                    madeProgress ? TimeSpan.FromMinutes(1) :
+                    TimeSpan.FromMinutes(Math.Min(10, retryDelay.TotalMinutes * 2));
+                SetIndexUpdateStage(0);
+                StatusText = $"Ciclo {cycle} com pendências: contratações {(contractsComplete ? "concluídas" : "pendentes")}; " +
+                    $"listas {items.PendingContracts + items.FailedContracts:N0}; preços {prices.PendingContracts + prices.FailedContracts:N0}. " +
+                    $"Nova tentativa em {retryDelay.TotalMinutes:N0} min. {contractFailure}";
+                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(true);
+            }
         }
-        catch (Exception exception) when (PncpClient.CanDeferContractFailure(exception))
+        finally
         {
-            contractFailure = GetSynchronizationErrorMessage(exception);
+            _manualUpdateRunning = false;
+            _manualUpdateCycle = 0;
+            OnPropertyChanged(nameof(IsIndexProgressIndeterminate));
+            OnPropertyChanged(nameof(IndexActivityText));
         }
-        cancellationToken.ThrowIfCancellationRequested();
-        SetIndexUpdateStage(2);
-        OperationProgress = 0;
-        StatusText = contractFailure is null
-            ? "2/3 — Atualizando listas de itens…"
-            : "2/3 — Contratações com pendências; atualizando itens já disponíveis…";
-        var itemProgress = new Progress<PriceCacheProgress>(p =>
-        {
-            UpdatePriceCacheProgress(p);
-            OperationProgress = p.Percentage;
-            StatusText = $"2/3 — Itens: {p.CompletedContracts:N0}/{p.TotalContracts:N0}; pendências: {p.PendingContracts + p.FailedContracts:N0}";
-        });
-        await Task.Run(() => _priceCacheService.SynchronizeAggressivelyAsync(parallel, itemProgress, cancellationToken), cancellationToken);
-        await RefreshPriceCacheProgressAsync();
-        var items = await _priceCacheRepository.GetProgressAsync(cancellationToken);
-        if (items.Status is PriceCacheStatus.Paused or PriceCacheStatus.InsufficientSpace or
-            PriceCacheStatus.Disabled or PriceCacheStatus.NotAuthorized)
-        {
-            StatusText = $"Atualização pausada nas listas de itens. {items.Message}";
-            return;
-        }
-        OperationProgress = 0;
-        SetIndexUpdateStage(3);
-        StatusText = "3/3 — Atualizando preços dos itens disponíveis…";
-        var priceProgress = new Progress<NationalPriceIndexProgress>(p =>
-        {
-            UpdateNationalPriceIndexProgress(p);
-            OperationProgress = p.Percentage;
-            StatusText = $"3/3 — Preços: {p.CompletedItems:N0}/{p.EligibleItems:N0}; pendências: {p.PendingContracts + p.FailedContracts:N0}";
-        });
-        await Task.Run(() => _nationalPriceIndexService.SynchronizeAggressivelyAsync(parallel, priceProgress, cancellationToken), cancellationToken);
-        await RefreshNationalPriceIndexProgressAsync();
-        var prices = await _priceCacheRepository.GetNationalPriceIndexProgressAsync(cancellationToken);
-        if (contractFailure is not null || items.Status != PriceCacheStatus.Complete || prices.Status != PriceCacheStatus.Complete)
-        {
-            StatusText = "Ciclo encerrado com pendências: " +
-                (contractFailure is null ? "" : "contratações não concluídas; ") +
-                $"listas de itens: {items.PendingContracts + items.FailedContracts:N0}; " +
-                $"preços: {prices.PendingContracts + prices.FailedContracts:N0}. " +
-                "Dados obtidos preservados. Use Atualizar para retomar.";
-            if (contractFailure is not null) StatusText += $" Motivo: {contractFailure}";
-            await RefreshDatasetSummaryAsync().ConfigureAwait(true);
-            await RefreshCoverageAsync().ConfigureAwait(true);
-            return;
-        }
-        await _repository.MarkOptimizePendingAsync(cancellationToken).ConfigureAwait(true);
-        _lastOptimizeDate = null;
-        OperationProgress = 100;
-        StatusText = "Sincronização concluída; janela móvel de 11 meses atualizada.";
-        await RefreshDatasetSummaryAsync().ConfigureAwait(true);
-        await RefreshCoverageAsync().ConfigureAwait(true);
     }
 
     private async Task<bool> TryRunAutomaticMaintenanceAsync(
@@ -3517,6 +3635,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
         var complete = CoverageDays.Count(day => day.IsComplete);
         CoverageSummary = new CoverageSummary(CoverageDays, complete, CoverageDays.Count).Display;
+        UpdateManualUpdateProgress();
     }
 
     private async Task ExportBackupAsync()

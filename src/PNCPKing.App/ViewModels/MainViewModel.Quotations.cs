@@ -361,18 +361,20 @@ public sealed partial class MainViewModel
         if (IsIndexBusy && !_syncService.IsPaused)
         {
             _syncService.Pause();
+            _priceCacheService.Pause();
+            _nationalPriceIndexService.Pause();
             IsIndexPaused = true;
             _indexPausedForVisibleActivity = true;
-            resumeIndex = true;
         }
+        resumeIndex = IsIndexBusy && _indexPausedForVisibleActivity;
 
         if (IsCatalogBusy && !IsCatalogPaused)
         {
             _catalogSyncService.Pause();
             IsCatalogPaused = true;
             _catalogPausedForVisibleActivity = true;
-            resumeCatalog = true;
         }
+        resumeCatalog = IsCatalogBusy && _catalogPausedForVisibleActivity;
 
         _ = ResumeVisiblePausedWorkAfterIdleAsync(
             resumeIndex,

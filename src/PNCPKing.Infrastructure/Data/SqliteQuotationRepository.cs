@@ -39,6 +39,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         var now = DateTimeOffset.UtcNow;
         var project = new QuotationProject(Guid.NewGuid(), name.Trim(), now, now);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = "INSERT INTO quotation_projects(id, name, created_at, updated_at) VALUES($id, $name, $created, $updated);";
@@ -53,6 +55,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
     public async Task RenameProjectAsync(Guid projectId, string name, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = "UPDATE quotation_projects SET name = $name, updated_at = $updated WHERE id = $id;";
@@ -70,6 +74,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         bool isMedication,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
@@ -93,6 +99,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
 
     public async Task SetProjectAlphabeticalOrderAsync(Guid projectId, CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = "UPDATE quotation_projects SET sort_items_alphabetically = 1, updated_at = $updated WHERE id = $id;";
@@ -116,6 +124,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         }
 
         var now = DateTimeOffset.UtcNow;
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var line = connection.CreateCommand())
@@ -151,6 +161,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         var normalizedUnit = (requestedUnit ?? string.Empty).Trim();
         var requestedQuantityScaled = DecimalScale.ToScaled(requestedQuantity)!.Value;
         var now = DateTimeOffset.UtcNow;
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         long currentQuantityScaled;
@@ -210,6 +222,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         }
 
         var now = DateTimeOffset.UtcNow;
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var command = connection.CreateCommand())
@@ -246,6 +260,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
 
     public async Task DeleteProjectAsync(Guid projectId, CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM quotation_projects WHERE id = $id;";
@@ -255,6 +271,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
 
     public async Task DeleteLineAsync(Guid lineId, CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var command = connection.CreateCommand())
@@ -374,6 +392,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(contractId);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -399,6 +419,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         string contractId,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -416,6 +438,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(workspace);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         SetWorkspaceCommand(command, workspace);
@@ -429,6 +453,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
     {
         ArgumentNullException.ThrowIfNull(workspace);
         ArgumentNullException.ThrowIfNull(hits);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var saveWorkspace = connection.CreateCommand())
@@ -483,6 +509,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(workspace);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var delete = connection.CreateCommand())
@@ -690,6 +718,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         ValidateInput(input);
         var id = Guid.NewGuid();
         var now = DateTimeOffset.UtcNow;
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var project = connection.CreateCommand())
@@ -754,6 +784,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         ValidateInput(input);
         var id = lineId ?? Guid.NewGuid();
         var now = DateTimeOffset.UtcNow;
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var lineCommand = connection.CreateCommand())
@@ -826,6 +858,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
     public async Task ConfirmBasketAsync(Guid lineId, string basketKey, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(basketKey);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -861,6 +895,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
 
         var id = basketId ?? Guid.NewGuid();
         var now = DateTimeOffset.UtcNow;
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         var existingFactors = new Dictionary<string, long>(StringComparer.Ordinal);
@@ -989,6 +1025,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -1011,6 +1049,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(referenceId);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         Guid lineId;
@@ -1070,6 +1110,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             throw new ArgumentOutOfRangeException(nameof(aggregationMethod));
         }
 
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         var lineId = await GetManualBasketLineIdAsync(
@@ -1108,6 +1150,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(referenceId);
         var scaledFactor = ScaleConversionFactor(conversionFactor);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         var lineId = await GetManualBasketLineIdAsync(
@@ -1186,6 +1230,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
 
     public async Task DeleteManualBasketAsync(Guid basketId, CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         Guid lineId;
@@ -1285,6 +1331,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             UpdatedAt = now
         };
 
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await UpsertEvidenceAssetAsync(
@@ -1341,6 +1389,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         Guid draftId,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM quotation_internet_price_drafts WHERE id = $id;";
@@ -1405,8 +1455,10 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             throw new ArgumentException("A referência e as evidências da internet não correspondem.");
         }
 
-        await using (var connection = await OpenAsync(cancellationToken).ConfigureAwait(false))
+        await using (var writer = await _connections.WorkCoordinator
+                         .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false))
         {
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await UpsertEvidenceAssetAsync(
                 connection,
@@ -1468,6 +1520,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(referenceId);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var delete = connection.CreateCommand())
@@ -1539,6 +1593,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
     {
         weights.Validate();
         var now = DateTimeOffset.UtcNow;
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var line = connection.CreateCommand())
@@ -1694,6 +1750,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             SourcePdfSha256 = sourcePdfSha256 ?? string.Empty,
             StrategyVersion = mode == QuotationAutomationMode.TimedRoundRobin ? 3 : 0
         };
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var runCommand = connection.CreateCommand())
@@ -1903,6 +1961,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
 
     public async Task RecoverInterruptedAutomationAsync(CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var lines = connection.CreateCommand())
@@ -1932,6 +1992,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         string message,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = "UPDATE quotation_lines SET automation_state = $state, automation_message = $message WHERE id = $id;";
@@ -1947,6 +2009,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         string message,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = "UPDATE quotation_automation_runs SET state = $state, message = $message, updated_at = $updated WHERE id = $id;";
@@ -1963,6 +2027,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(checkpoint);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -2015,6 +2081,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                 "O tempo total deve ficar entre 5 minutos e 24 horas.");
         }
 
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = newTimeBudget is null
@@ -2050,6 +2118,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
         var normalized = Path.GetFullPath(outputPath);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -2073,6 +2143,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(responsibleName);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -2100,6 +2172,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             throw new ArgumentOutOfRangeException(nameof(strategyVersion));
         }
 
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var prompts = connection.CreateCommand())
@@ -2153,6 +2227,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(pdfSha256);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -2210,6 +2286,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             _ = PNCPKing.Core.Search.SearchText.Parse(text);
         }
 
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         var currentVersion = 0;
@@ -2277,6 +2355,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         int revealedPrices,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -2358,6 +2438,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(prompt);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -2433,6 +2515,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
     {
         ArgumentNullException.ThrowIfNull(checkpoint);
         ArgumentNullException.ThrowIfNull(progress);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var insert = connection.CreateCommand())
@@ -2526,6 +2610,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         int promptVersion,
         CancellationToken cancellationToken = default)
     {
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -2758,6 +2844,11 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken)
     {
+        // Microsoft.Data.Sqlite can perform synchronous disk I/O even through OpenAsync.
+        // Keep quotation commands and refreshes off the WPF dispatcher on slow disks.
+        if (SynchronizationContext.Current is not null)
+            return await Task.Run(() => _connections.OpenAsync(cancellationToken), cancellationToken)
+                .ConfigureAwait(false);
         return await _connections.OpenAsync(cancellationToken).ConfigureAwait(false);
     }
 
