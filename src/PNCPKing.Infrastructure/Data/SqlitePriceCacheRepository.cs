@@ -100,6 +100,31 @@ public sealed partial class SqlitePriceCacheRepository : IPriceCacheRepository
         };
     }
 
+    public async Task<DateTimeOffset?> GetNextRetryAtAsync(
+        bool prices,
+        CancellationToken cancellationToken = default)
+    {
+        var status = prices ? "price_index_status" : "status";
+        var retry = prices ? "price_index_next_retry_at" : "next_retry_at";
+        var control = prices ? "national_price_index_control" : "price_cache_control";
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT MIN(pc.{retry})
+              FROM price_cache_contracts pc
+              JOIN {control} policy ON policy.id = 1
+             WHERE pc.{status} = $failed
+               AND pc.{retry} IS NOT NULL
+               AND pc.publication_date >= policy.window_start
+               AND pc.publication_date < date(policy.window_end, '+1 day');
+            """;
+        command.Parameters.AddWithValue("$failed", (int)PriceCacheContractStatus.Failed);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            ? ParseDateTime(reader, 0)
+            : null;
+    }
+
     public async Task<PriceCacheEstimate> EstimateAsync(
         DateOnly startDate,
         DateOnly endDate,

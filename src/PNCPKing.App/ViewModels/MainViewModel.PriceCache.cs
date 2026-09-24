@@ -586,6 +586,7 @@ public sealed partial class MainViewModel
         _lastPriceCacheProgress = progress;
         PriceCacheStatus = progress.Status;
         PriceCacheProgress = progress.Percentage;
+        UpdateManualUpdateProgress();
         PriceCacheSummary =
             $"{progress.CompletedContracts:N0}/{progress.TotalContracts:N0} contratações · " +
             $"{progress.ItemCount:N0} itens · {progress.ActiveResultCount:N0} preços permanentes ativos · " +
