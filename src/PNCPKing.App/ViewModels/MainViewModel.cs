@@ -128,9 +128,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private int _indexUpdateStage;
     private bool _manualUpdateRunning;
     private int _manualUpdateCycle;
+    private DateTimeOffset? _manualUpdateRetryAt;
     private double _manualUpdateProgress;
     private bool _isIndexPaused;
     private bool _canPauseIndex;
+    private bool _indexPausedByUser;
+    private bool _indexPausedForMemoryPressure;
     private bool _isPriceBusy;
     private bool _isResultPageLoading;
     private bool _priceOperationUsesNetwork;
@@ -368,7 +371,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         StartSyncCommand = new AsyncRelayCommand(
             StartSyncAsync,
             () => !IsAnyAggressivePncpMode && !IsFileBusy && !IsIndexBusy && !IsCatalogBusy);
-        PauseSyncCommand = new RelayCommand(TogglePause, () => _canPauseIndex && _indexCancellation is not null);
+        PauseSyncCommand = new RelayCommand(TogglePause, () => _canPauseIndex &&
+            _indexCancellation is not null && !_indexPausedForMemoryPressure);
         CancelIndexCommand = new RelayCommand(() => _indexCancellation?.Cancel(), () => _indexCancellation is not null);
         HydrateCommand = new AsyncRelayCommand(
             () => HydrateSelectedAsync(true),
@@ -641,8 +645,30 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 $"{FormatBytes(live.Resources.TotalPhysicalMemoryBytes)} " +
                 $"({live.Resources.MemoryLoadPercent}% em uso)";
             _aggressivePriceCacheResourcePressure = live.Resources.Pressure;
-            if (IsIndexBusy && _canPauseIndex && live.Resources.Pressure == SystemResourcePressure.Critical)
-                _indexCancellation?.Cancel();
+            if (IsIndexBusy && _canPauseIndex)
+            {
+                var lowMemory = live.Resources.Pressure == SystemResourcePressure.Critical ||
+                    _indexPausedForMemoryPressure &&
+                    live.Resources.AvailablePhysicalMemoryBytes < 768L * 1024 * 1024;
+                if (lowMemory != _indexPausedForMemoryPressure)
+                {
+                    _indexPausedForMemoryPressure = lowMemory;
+                    ApplyIndexPauseState();
+                    if (lowMemory)
+                    {
+                        StatusText = "Atualização aguardando a recuperação da memória; checkpoints preservados.";
+                        _diagnosticLog.Warning("manual-update", "Pausada por pressão crítica de memória.");
+                    }
+                    else
+                    {
+                        StatusText = IsIndexPaused ? "Memória recuperada; atualização ainda pausada." :
+                            "Memória recuperada; atualização retomada automaticamente.";
+                        _diagnosticLog.Info("manual-update", "Memória recuperada; pausa automática encerrada.");
+                    }
+                }
+            }
+            if (_manualUpdateRunning && _manualUpdateRetryAt is not null)
+                OnPropertyChanged(nameof(IndexActivityText));
             if (IsAnyAggressivePncpMode &&
                 live.Resources.Pressure == SystemResourcePressure.Critical)
             {
@@ -1003,7 +1029,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             _ => "preços"
         }) + (IsIndexPaused ? " (pausada)" : " (em andamento)")
         : _manualUpdateRunning
-            ? $"Ciclo {_manualUpdateCycle}: aguardando nova tentativa" + (IsIndexPaused ? " (pausada)" : "")
+            ? _manualUpdateRetryAt is { } retryAt
+                ? $"Ciclo {_manualUpdateCycle}: próxima tentativa em " +
+                  $"{FormatDuration(retryAt - DateTimeOffset.Now)} às {retryAt:HH:mm:ss}" +
+                  (IsIndexPaused ? " (pausada)" : "")
+                : $"Ciclo {_manualUpdateCycle}: aguardando nova tentativa" + (IsIndexPaused ? " (pausada)" : "")
         : IsIndexPaused
             ? "Índice: pausa solicitada/ativa após a etapa atual"
             : IsIndexBusy ? "Índice: consultando o PNCP" : "Atualização: inativa";
@@ -1027,7 +1057,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         ManualUpdateProgress = Math.Min(99.9d, (coverage + items + prices) / 3d);
     }
 
-    public string PauseIndexButtonText => IsIndexPaused ? "Continuar" : "Pausar";
+    public string PauseIndexButtonText => _indexPausedForMemoryPressure ? "Aguardando RAM" :
+        IsIndexPaused ? "Continuar" : "Pausar";
 
     public bool IsPriceBusy
     {
@@ -1534,13 +1565,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             _startupCancellation.Token);
         var visibleIdleToken = _visibleIdleResumeCancellation.Token;
         _priceCacheService.PauseForVisibleActivity();
-        if (IsIndexBusy && !_syncService.IsPaused)
+        if (IsIndexBusy && !_indexPausedByUser)
         {
-            _syncService.Pause();
-            _priceCacheService.Pause();
-            _nationalPriceIndexService.Pause();
-            IsIndexPaused = true;
             _indexPausedForVisibleActivity = true;
+            ApplyIndexPauseState();
         }
 
         if (IsCatalogBusy && !IsCatalogPaused)
@@ -1686,13 +1714,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                     AdaptiveMaintenanceCoordinator.VisibleIdleDelay,
                     cancellationToken)
                 .ConfigureAwait(true);
-            if (resumeIndex && IsIndexBusy && _syncService.IsPaused)
+            if (resumeIndex && IsIndexBusy && _indexPausedForVisibleActivity)
             {
-                _syncService.Resume();
-                _priceCacheService.Resume();
-                _nationalPriceIndexService.Resume();
-                IsIndexPaused = false;
                 _indexPausedForVisibleActivity = false;
+                ApplyIndexPauseState();
             }
 
             if (resumeCatalog && IsCatalogBusy && IsCatalogPaused)
@@ -3024,12 +3049,19 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task SynchronizeManuallyAsync(CancellationToken cancellationToken)
     {
-        if (_maintenanceCoordinator.GetDecision().Resources.Pressure == SystemResourcePressure.Critical)
-            throw new InvalidOperationException("Atualização adiada: memória em pressão crítica. Feche outras aplicações e use Atualizar novamente.");
         _manualUpdateRunning = true;
         _manualUpdateCycle = 0;
+        _manualUpdateRetryAt = null;
         ManualUpdateProgress = 0;
         OnPropertyChanged(nameof(IsIndexProgressIndeterminate));
+        _diagnosticLog.Info("manual-update", "Atualização manual iniciada.");
+        if (_maintenanceCoordinator.GetDecision().Resources.Pressure == SystemResourcePressure.Critical)
+        {
+            _indexPausedForMemoryPressure = true;
+            ApplyIndexPauseState();
+            StatusText = "Atualização aguardando a recuperação da memória; checkpoints preservados.";
+            _diagnosticLog.Warning("manual-update", "Iniciada sob pressão crítica de memória; aguardando recuperação.");
+        }
         using var aggressive = _requestScheduler.EnableAggressiveBackgroundRequests();
         long lastRetryReport = 0;
         var retryProgress = new Progress<string>(message =>
@@ -3078,6 +3110,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 }
                 _manualUpdateCycle = cycle;
                 SetIndexUpdateStage(1);
+                _diagnosticLog.Info("manual-update", $"Ciclo {cycle} iniciado.");
                 string? contractFailure = null;
                 var ranContracts = !contractsComplete;
                 if (ranContracts)
@@ -3118,6 +3151,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                     }
                     await RefreshCoverageAsync(cancellationToken).ConfigureAwait(true);
                 }
+                _diagnosticLog.Info("manual-update", $"Ciclo {cycle}, contratações: " +
+                    $"concluídas={contractsComplete}; falha_transitória={contractFailure ?? "nenhuma"}.");
 
                 cancellationToken.ThrowIfCancellationRequested();
                 SetIndexUpdateStage(2);
@@ -3138,10 +3173,14 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                     items = await _priceCacheRepository.GetProgressAsync(cancellationToken);
                 }
                 UpdatePriceCacheProgress(items);
+                _diagnosticLog.Info("manual-update", $"Ciclo {cycle}, listas: status={items.Status}; " +
+                    $"completos={items.CompletedContracts}; pendentes={items.PendingContracts}; falhos={items.FailedContracts}.");
                 if (items.Status is PriceCacheStatus.Paused or PriceCacheStatus.InsufficientSpace or
                     PriceCacheStatus.Disabled or PriceCacheStatus.NotAuthorized)
                 {
                     StatusText = $"Atualização pausada nas listas de itens. {items.Message}";
+                    _diagnosticLog.Warning("manual-update", $"Ciclo {cycle} interrompido nas listas: " +
+                        $"status={items.Status}; motivo={items.Message}");
                     return;
                 }
 
@@ -3162,10 +3201,15 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                     prices = await _priceCacheRepository.GetNationalPriceIndexProgressAsync(cancellationToken);
                 }
                 UpdateNationalPriceIndexProgress(prices);
+                _diagnosticLog.Info("manual-update", $"Ciclo {cycle}, preços: status={prices.Status}; " +
+                    $"itens={prices.CompletedItems}/{prices.EligibleItems}; " +
+                    $"pendentes={prices.PendingContracts}; falhos={prices.FailedContracts}.");
                 if (prices.Status is PriceCacheStatus.Paused or PriceCacheStatus.InsufficientSpace or
                     PriceCacheStatus.Disabled or PriceCacheStatus.NotAuthorized)
                 {
                     StatusText = $"Atualização pausada nos preços. {prices.Message}";
+                    _diagnosticLog.Warning("manual-update", $"Ciclo {cycle} interrompido nos preços: " +
+                        $"status={prices.Status}; motivo={prices.Message}");
                     return;
                 }
 
@@ -3179,6 +3223,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                     await _repository.MarkOptimizePendingAsync(cancellationToken).ConfigureAwait(true);
                     _lastOptimizeDate = null;
                     StatusText = $"Atualização concluída em {cycle:N0} ciclo(s); contratações, listas e preços completos.";
+                    _diagnosticLog.Info("manual-update", $"Atualização concluída após {cycle} ciclo(s), " +
+                        "sem pendências nas contratações, listas e preços.");
                     await RefreshDatasetSummaryAsync().ConfigureAwait(true);
                     await RefreshCoverageAsync().ConfigureAwait(true);
                     ManualUpdateProgress = 100;
@@ -3194,6 +3240,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 retryDelay = contractFailure is not null ? SyncService.AutomaticRetryDelay :
                     madeProgress ? TimeSpan.FromMinutes(1) :
                     TimeSpan.FromMinutes(Math.Min(10, retryDelay.TotalMinutes * 2));
+                var waitingForCheckpoint = false;
                 if (contractsComplete && items.PendingContracts == 0 && prices.PendingContracts == 0)
                 {
                     var itemRetry = items.FailedContracts > 0
@@ -3206,20 +3253,45 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                         ? (itemAt <= priceAt ? itemAt : priceAt)
                         : itemRetry ?? priceRetry;
                     if (nextRetry is { } eligibleAt && eligibleAt > DateTimeOffset.UtcNow)
+                    {
+                        waitingForCheckpoint = eligibleAt - DateTimeOffset.UtcNow > retryDelay;
                         retryDelay = TimeSpan.FromTicks(Math.Max(retryDelay.Ticks,
                             (eligibleAt - DateTimeOffset.UtcNow).Ticks));
+                    }
                 }
                 SetIndexUpdateStage(0);
+                _manualUpdateRetryAt = DateTimeOffset.Now.Add(retryDelay);
+                OnPropertyChanged(nameof(IndexActivityText));
                 StatusText = $"Ciclo {cycle} com pendências: contratações {(contractsComplete ? "concluídas" : "pendentes")}; " +
                     $"listas {items.PendingContracts + items.FailedContracts:N0}; preços {prices.PendingContracts + prices.FailedContracts:N0}. " +
-                    $"Nova tentativa em {FormatDuration(retryDelay)}. {contractFailure}";
+                    $"Nova tentativa em {FormatDuration(retryDelay)}." +
+                    (waitingForCheckpoint ? " Aguardando o horário do próximo checkpoint PNCP." : "") +
+                    (contractFailure is null ? "" : $" {contractFailure}");
+                _diagnosticLog.Info("manual-update", $"Ciclo {cycle} com pendências. " +
+                    $"Nova tentativa em {_manualUpdateRetryAt.Value:O}; " +
+                    $"aguardando_checkpoint={waitingForCheckpoint}; " +
+                    $"contratações_concluídas={contractsComplete}; " +
+                    $"listas_pendentes={items.PendingContracts + items.FailedContracts}; " +
+                    $"preços_pendentes={prices.PendingContracts + prices.FailedContracts}.");
                 await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(true);
+                _manualUpdateRetryAt = null;
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _diagnosticLog.Warning("manual-update", $"Cancelada no ciclo {_manualUpdateCycle}; checkpoints preservados.");
+            throw;
+        }
+        catch (Exception exception)
+        {
+            _diagnosticLog.Error("manual-update", $"Falha no ciclo {_manualUpdateCycle}.", exception);
+            throw;
         }
         finally
         {
             _manualUpdateRunning = false;
             _manualUpdateCycle = 0;
+            _manualUpdateRetryAt = null;
             OnPropertyChanged(nameof(IsIndexProgressIndeterminate));
             OnPropertyChanged(nameof(IndexActivityText));
         }
@@ -3345,6 +3417,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
 
         IsIndexBusy = true;
+        _indexPausedByUser = false;
+        _indexPausedForVisibleActivity = false;
+        _indexPausedForMemoryPressure = false;
         IsIndexPaused = false;
         _canPauseIndex = supportsPause;
         OperationProgress = 0;
@@ -3379,6 +3454,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         finally
         {
+            _indexPausedByUser = false;
+            _indexPausedForVisibleActivity = false;
+            _indexPausedForMemoryPressure = false;
             if (_syncService.IsPaused)
             {
                 _syncService.Resume();
@@ -4488,25 +4566,35 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private void TogglePause()
     {
+        _indexPausedByUser = !IsIndexPaused;
         _indexPausedForVisibleActivity = false;
         _visibleIdleResumeCancellation?.Cancel();
-        if (_syncService.IsPaused)
-        {
-            _syncService.Resume();
-            _priceCacheService.Resume();
-            _nationalPriceIndexService.Resume();
-            IsIndexPaused = false;
-            StatusText = "Sincronização retomada.";
-        }
-        else
+        ApplyIndexPauseState();
+        StatusText = IsIndexPaused
+            ? "Pausa solicitada; a requisição atual terminará antes de o índice parar. Use Continuar para retomar."
+            : "Sincronização retomada.";
+        _diagnosticLog.Info("manual-update", IsIndexPaused ? "Pausa solicitada pelo usuário." :
+            "Retomada solicitada pelo usuário.");
+    }
+
+    private void ApplyIndexPauseState()
+    {
+        var paused = _indexPausedByUser || _indexPausedForVisibleActivity || _indexPausedForMemoryPressure;
+        if (paused)
         {
             _syncService.Pause();
             _priceCacheService.Pause();
             _nationalPriceIndexService.Pause();
-            IsIndexPaused = true;
-            StatusText = "Pausa solicitada; a requisição atual terminará antes de o índice parar. Use Continuar para retomar.";
+        }
+        else
+        {
+            _syncService.Resume();
+            _priceCacheService.Resume();
+            _nationalPriceIndexService.Resume();
         }
 
+        IsIndexPaused = paused;
+        OnPropertyChanged(nameof(PauseIndexButtonText));
         NotifyCommands();
     }
 
