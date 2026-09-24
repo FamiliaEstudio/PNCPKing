@@ -28,6 +28,7 @@ public sealed class QuotationPackageTests
         var quotations = new QuotationService(repository, new QuotationAnalyzer());
         var project = await quotations.CreateProjectAsync("Medicamentos");
         await quotations.SetProjectMedicationAsync(project.Id, true);
+        await quotations.SetProjectAlphabeticalOrderAsync(project.Id);
         var lineId = Guid.NewGuid();
         await repository.SaveSampleAsync(project.Id, lineId,
             new QuotationLineInput("Café torrado", 100m, "pacote", null, null),
@@ -50,6 +51,7 @@ public sealed class QuotationPackageTests
         var imported = await packages.ImportAsync(path, mode);
         var report = await new QuotationService(destinationRepository, new QuotationAnalyzer()).GetReportAsync(imported.ProjectId);
         Assert.Equal(!legacy, report.Project.IsMedication);
+        Assert.Equal(!legacy, report.Project.SortItemsAlphabetically);
         Assert.Equal(legacy ? 2 : 4, report.Project.PriceDecimalPlaces);
         var restored = Assert.Single(report.Lines);
         Assert.True(restored.Line.SelectionConfirmed);
@@ -779,6 +781,7 @@ public sealed class QuotationPackageTests
         var payload = JsonNode.Parse(
             await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
         payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("is_medication");
+        payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("sort_items_alphabetically");
         var references = payload["tables"]!["quotation_references"]!.AsArray();
         foreach (var reference in references)
         {
@@ -814,6 +817,7 @@ public sealed class QuotationPackageTests
         var payload = JsonNode.Parse(
             await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
         payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("is_medication");
+        payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("sort_items_alphabetically");
         foreach (var line in payload["tables"]!["quotation_lines"]!.AsArray())
         {
             line!.AsObject().Remove("display_name");
@@ -835,6 +839,7 @@ public sealed class QuotationPackageTests
         var payload = JsonNode.Parse(
             await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
         payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("is_medication");
+        payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("sort_items_alphabetically");
         foreach (var run in payload["tables"]!["quotation_automation_runs"]!.AsArray())
         {
             run!.AsObject().Remove("responsible_name");
@@ -856,6 +861,7 @@ public sealed class QuotationPackageTests
         var payload = JsonNode.Parse(
             await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
         payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("is_medication");
+        payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("sort_items_alphabetically");
         foreach (var basket in payload["tables"]!["quotation_manual_baskets"]!.AsArray())
         {
             basket!.AsObject().Remove("calculation_method");
@@ -881,6 +887,7 @@ public sealed class QuotationPackageTests
         using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
         var payload = JsonNode.Parse(await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
         payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("is_medication");
+        payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("sort_items_alphabetically");
         var options = new JsonSerializerOptions { WriteIndented = true };
         var bytes = Encoding.UTF8.GetBytes(payload.ToJsonString(options));
         ReplaceEntry(archive, "quotation.json", bytes);

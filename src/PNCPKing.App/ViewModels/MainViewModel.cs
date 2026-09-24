@@ -4499,7 +4499,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      PreviousQuotationBasketPageCommand, NextQuotationBasketPageCommand,
                      NewQuotationCommand, NewQuotationItemCommand,
                      RenameQuotationCommand, DeleteQuotationCommand,
-                     ToggleQuotationMedicationCommand,
+                     ToggleQuotationMedicationCommand, OrganizeQuotationItemsCommand,
                      DeleteQuotationLineCommand, ImportQuotationCommand, AiQuotationCommand,
                      RenameQuotationLineCommand,
                      ResumeQuotationAutomationCommand, CancelQuotationAutomationCommand,

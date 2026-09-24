@@ -159,6 +159,51 @@ public sealed class GitHubUpdateTests
     }
 
     [Fact]
+    public async Task ReleaseNotes_IncludeEveryStableIntermediateVersionAcrossPages()
+    {
+        var pages = new List<int>();
+        using var handler = new FakeHandler(request =>
+        {
+            var page = request.RequestUri!.Query.EndsWith("&page=2", StringComparison.Ordinal) ? 2 : 1;
+            pages.Add(page);
+            if (page == 2)
+                return Json(new[]
+                {
+                    new { tag_name = "v1.2.3", body = "Correção de cotação", draft = false, prerelease = false },
+                    new { tag_name = "v1.2.2", body = "Primeira melhoria", draft = false, prerelease = false },
+                    new { tag_name = "v1.2.0", body = "Versão instalada", draft = false, prerelease = false }
+                });
+            return Json(Enumerable.Range(0, 17).Select(index =>
+                    new { tag_name = $"v0.9.{index}", body = "Antiga", draft = false, prerelease = false })
+                .Concat([
+                    new { tag_name = "v1.2.5", body = "Tela melhorada", draft = false, prerelease = false },
+                    new { tag_name = "v1.2.4", body = "", draft = false, prerelease = false },
+                    new { tag_name = "v1.2.1", body = "Rascunho", draft = true, prerelease = false }
+                ]).ToArray());
+        });
+        using var client = new HttpClient(handler);
+
+        var notes = await new GitHubUpdateService(client).GetReleaseNotesAsync(new(1, 2, 0), new(1, 2, 5));
+
+        Assert.Equal([1, 2], pages);
+        Assert.Equal(["1.2.2", "1.2.3", "1.2.4", "1.2.5"], notes.Releases.Select(value => value.Version));
+        Assert.Contains("Sem descrição", notes.Releases[2].Body);
+        Assert.Null(notes.Warning);
+    }
+
+    [Fact]
+    public async Task ReleaseNotes_FailureReportsIncompleteHistoryWithoutPreventingUpdate()
+    {
+        using var handler = new FakeHandler(_ => new(HttpStatusCode.Forbidden));
+        using var client = new HttpClient(handler);
+
+        var notes = await new GitHubUpdateService(client).GetReleaseNotesAsync(new(1, 2, 0), new(1, 2, 5));
+
+        Assert.Empty(notes.Releases);
+        Assert.Contains("Não foi possível", notes.Warning);
+    }
+
+    [Fact]
     public async Task DownloadedMetadataMatchesActualV2ExportAndReceiptSurvivesIndependentDatabase()
     {
         await using var source = await TestDatabase.CreateAsync();

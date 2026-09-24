@@ -705,6 +705,9 @@
                                                   IsChecked="{Binding IsMedicationQuotation, Mode=OneWay}"
                                                   Command="{Binding ToggleQuotationMedicationCommand}"
                                                   ToolTip="Aplica quatro casas aos preços, cálculos e Excel desta cotação. Ao alterar, reconfirme as cestas escolhidas." />
+                                        <MenuItem Header="Organizar Itens" Command="{Binding OrganizeQuotationItemsCommand}"
+                                                  Click="OrganizeQuotationItems_Click"
+                                                  ToolTip="Mantém os itens desta cotação em ordem alfabética nas telas e exportações." />
                                         <Separator />
                                         <MenuItem Header="Novo item" Command="{Binding NewQuotationItemCommand}" />
                                         <MenuItem Header="Excluir item" Command="{Binding DeleteQuotationLineCommand}" />

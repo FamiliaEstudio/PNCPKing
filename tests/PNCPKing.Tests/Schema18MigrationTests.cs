@@ -22,8 +22,8 @@ public sealed class Schema18MigrationTests
             value => progress.Add(value)));
 
         Assert.Equal(17, result.PreviousVersion);
-        Assert.Equal(30, result.CurrentVersion);
-        Assert.Equal([18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30], result.AppliedMigrations);
+        Assert.Equal(31, result.CurrentVersion);
+        Assert.Equal([18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31], result.AppliedMigrations);
         Assert.Equal((2L, 0L, 0L), await repository.GetCountsAsync());
         Assert.Contains(progress, value =>
             value.Message == "Otimizando banco v17 → v18; nenhum backup está sendo importado.");
@@ -43,8 +43,8 @@ public sealed class Schema18MigrationTests
 
         var repeated = await repository.InitializeAsync();
 
-        Assert.Equal(30, repeated.PreviousVersion);
-        Assert.Equal(30, repeated.CurrentVersion);
+        Assert.Equal(31, repeated.PreviousVersion);
+        Assert.Equal(31, repeated.CurrentVersion);
         Assert.Empty(repeated.AppliedMigrations);
     }
 
@@ -80,7 +80,7 @@ public sealed class Schema18MigrationTests
 
         var recovered = new SqliteContractRepository(database.Repository.DatabasePath);
         var result = await recovered.InitializeAsync();
-        Assert.Equal(30, result.CurrentVersion);
+        Assert.Equal(31, result.CurrentVersion);
         Assert.Equal((1L, 0L, 0L), await recovered.GetCountsAsync());
     }
 

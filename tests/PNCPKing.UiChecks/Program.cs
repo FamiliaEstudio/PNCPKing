@@ -113,19 +113,36 @@ internal static class Program
     private static object CheckGitHubUpdateDialog()
     {
         var plan = new GitHubUpdatePlan(
-            new AppUpdateManifest(1, "1.2.4", "win-x64", 30,
+            new AppUpdateManifest(1, "1.2.4", "win-x64", SqliteContractRepository.CurrentSchemaVersion,
                 new ReleaseFile("PNCPKing.exe", 1024, new string('a', 64))),
             null, "Nova versão disponível.", "Preços em dia.");
-        var window = new PNCPKing.App.Views.GitHubUpdateWindow(plan);
+        var notes = new GitHubReleaseNotes(
+            [new("1.2.4", string.Join('\n', Enumerable.Repeat("Melhoria de cotação em várias telas.", 100)))], null);
+        var window = new PNCPKing.App.Views.GitHubUpdateWindow(plan, notes);
         try
         {
             window.Show();
             window.UpdateLayout();
-            var panel = (StackPanel)window.Content;
+            var panel = (Grid)window.Content;
             var buttons = panel.Children.OfType<StackPanel>().Single().Children.OfType<Button>().ToArray();
+            var notesScroll = panel.Children.OfType<ScrollViewer>()
+                .Single(value => Grid.GetRow(value) == 1);
             var update = buttons.Single(b => Equals(b.Content, "Atualizar agora"));
             Require(update.IsEnabled, "A atualização disponível não habilitou o botão.");
             Require(buttons.Any(b => b.IsCancel), "A prévia precisa permitir cancelar.");
+            foreach (var (width, height) in new[] { (380d, 280d), (660d, 520d), (900d, 700d) })
+            {
+                window.Width = width;
+                window.Height = height;
+                window.UpdateLayout();
+                Require(notesScroll.ScrollableHeight > 0, "Notas longas precisam de rolagem própria.");
+                foreach (var button in buttons)
+                {
+                    Require(button.IsVisible, "Botões precisam permanecer visíveis.");
+                    var bounds = button.TransformToAncestor(window).TransformBounds(new Rect(button.RenderSize));
+                    Require(bounds.Bottom <= window.ActualHeight, "Botão fora da janela de atualização.");
+                }
+            }
             return new { passed = true, appUpdateAvailable = true, cancelAvailable = true, window.ActualHeight };
         }
         finally { window.Close(); }

@@ -1,3 +1,4 @@
+using System.Globalization;
 using PNCPKing.Core.Geography;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
@@ -22,6 +23,9 @@ public sealed class QuotationService(
 
     public Task SetProjectMedicationAsync(Guid projectId, bool isMedication, CancellationToken cancellationToken = default) =>
         repository.SetProjectMedicationAsync(projectId, isMedication, cancellationToken);
+
+    public Task SetProjectAlphabeticalOrderAsync(Guid projectId, CancellationToken cancellationToken = default) =>
+        repository.SetProjectAlphabeticalOrderAsync(projectId, cancellationToken);
 
     private async Task<QuotationProject> GetProjectAsync(Guid projectId, CancellationToken cancellationToken) =>
         (await repository.GetProjectsAsync(cancellationToken).ConfigureAwait(false))
@@ -327,7 +331,13 @@ public sealed class QuotationService(
             analyses.Add(analyzer.Analyze(line, references, manualBaskets, project.PriceDecimalPlaces));
         }
 
-        return analyses;
+        return project.SortItemsAlphabetically
+            ? analyses.OrderBy(analysis => analysis.Line.EffectiveDisplayName.Trim(),
+                    StringComparer.Create(CultureInfo.GetCultureInfo("pt-BR"), ignoreCase: true))
+                .ThenBy(analysis => analysis.Line.DisplayOrder)
+                .ThenBy(analysis => analysis.Line.Id)
+                .ToArray()
+            : analyses;
     }
 
     public async Task<QuotationLineAnalysis?> GetAnalysisAsync(

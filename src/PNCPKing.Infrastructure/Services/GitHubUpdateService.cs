@@ -12,6 +12,7 @@ public sealed class GitHubUpdateService(HttpClient client)
 {
     public const string Repository = "FamiliaEstudio/PNCPKing";
     private const int MetadataLimit = 1024 * 1024;
+    private const int ReleaseNotesPageLimit = 4 * 1024 * 1024;
 
     public async Task<GitHubUpdateCheck> CheckAsync(CancellationToken cancellationToken = default)
     {
@@ -20,6 +21,51 @@ public sealed class GitHubUpdateService(HttpClient client)
         await Task.WhenAll(app, prices).ConfigureAwait(false);
         return new(app.Result.Release, prices.Result.Release,
             app.Result.Error ?? "Programa disponível.", prices.Result.Error ?? "Preços disponíveis.");
+    }
+
+    public async Task<GitHubReleaseNotes> GetReleaseNotesAsync(
+        Version installedVersion, Version offeredVersion, CancellationToken cancellationToken = default)
+    {
+        if (offeredVersion <= installedVersion) return new([], null);
+
+        var notes = new List<GitHubReleaseNote>();
+        string? warning = null;
+        try
+        {
+            const int pageSize = 20;
+            for (var page = 1; ; page++)
+            {
+                using var response = await SendAsync(
+                    $"https://api.github.com/repos/{Repository}/releases?per_page={pageSize}&page={page}",
+                    cancellationToken).ConfigureAwait(false);
+                CheckResponse(response);
+                var releases = await ReadJsonAsync<List<ReleaseSummary>>(
+                        response, cancellationToken, ReleaseNotesPageLimit)
+                    .ConfigureAwait(false);
+                foreach (var release in releases)
+                {
+                    if (release.Draft || release.Prerelease || release.Tag is not { Length: > 1 } tag || tag[0] != 'v')
+                        continue;
+                    Version version;
+                    try { version = GitHubUpdateValidation.ParseVersion(tag[1..]); }
+                    catch (InvalidDataException) { continue; }
+                    if (version > installedVersion && version <= offeredVersion)
+                        notes.Add(new(version.ToString(3), string.IsNullOrWhiteSpace(release.Body)
+                            ? "Sem descrição publicada para esta versão."
+                            : release.Body.Trim()));
+                }
+                if (releases.Count < pageSize) break;
+            }
+            if (notes.All(note => note.Version != offeredVersion.ToString(3)))
+                warning = "A descrição da versão oferecida não apareceu no histórico de releases.";
+        }
+        catch (Exception e) when (e is HttpRequestException or IOException or JsonException or InvalidOperationException or
+            OverflowException || e is OperationCanceledException && !cancellationToken.IsCancellationRequested)
+        {
+            warning = "Não foi possível consultar todo o histórico de novidades: " + e.Message;
+        }
+
+        return new(notes.OrderBy(note => GitHubUpdateValidation.ParseVersion(note.Version)).ToArray(), warning);
     }
 
     private async Task<(GitHubUpdateRelease<T>? Release, string? Error)> ReadChannelAsync<T>(
@@ -182,7 +228,8 @@ public sealed class GitHubUpdateService(HttpClient client)
         response.EnsureSuccessStatusCode();
     }
 
-    private static async Task<T> ReadJsonAsync<T>(HttpResponseMessage response, CancellationToken ct)
+    private static async Task<T> ReadJsonAsync<T>(HttpResponseMessage response, CancellationToken ct,
+        int limit = MetadataLimit)
     {
         await using var input = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         using var output = new MemoryStream();
@@ -192,7 +239,7 @@ public sealed class GitHubUpdateService(HttpClient client)
         int read;
         while ((read = await input.ReadAsync(buffer, timeout.Token).ConfigureAwait(false)) > 0)
         {
-            if (output.Length + read > MetadataLimit) throw new InvalidDataException("Metadados excedem o tamanho permitido.");
+            if (output.Length + read > limit) throw new InvalidDataException("Metadados excedem o tamanho permitido.");
             output.Write(buffer, 0, read);
         }
         return JsonSerializer.Deserialize<T>(output.ToArray(), GitHubUpdateValidation.Json)
@@ -201,5 +248,7 @@ public sealed class GitHubUpdateService(HttpClient client)
 
     private sealed record Release([property: JsonPropertyName("tag_name")] string Tag,
         bool Draft, bool Prerelease, List<Asset> Assets);
+    private sealed record ReleaseSummary([property: JsonPropertyName("tag_name")] string? Tag,
+        string? Body, bool Draft, bool Prerelease);
     private sealed record Asset(string Name, long Size, string State, string? Digest);
 }

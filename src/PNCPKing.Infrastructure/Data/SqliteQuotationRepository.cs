@@ -23,7 +23,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
     {
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id, name, created_at, updated_at, is_medication FROM quotation_projects ORDER BY updated_at DESC, name;";
+        command.CommandText = "SELECT id, name, created_at, updated_at, is_medication, sort_items_alphabetically FROM quotation_projects ORDER BY updated_at DESC, name;";
         var projects = new List<QuotationProject>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -89,6 +89,17 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task SetProjectAlphabeticalOrderAsync(Guid projectId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE quotation_projects SET sort_items_alphabetically = 1, updated_at = $updated WHERE id = $id;";
+        command.Parameters.AddWithValue("$updated", FormatDateTime(DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$id", projectId.ToString("N"));
+        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+            throw new InvalidOperationException("A cotação não existe mais.");
     }
 
     public async Task RenameLineDisplayNameAsync(
@@ -2778,7 +2789,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         ParseDateTime(reader.GetString(2)),
         ParseDateTime(reader.GetString(3)))
     {
-        IsMedication = reader.GetInt32(4) != 0
+        IsMedication = reader.GetInt32(4) != 0,
+        SortItemsAlphabetically = reader.GetInt32(5) != 0
     };
 
     private static QuotationAutomationRun ReadAutomationRun(SqliteDataReader reader)

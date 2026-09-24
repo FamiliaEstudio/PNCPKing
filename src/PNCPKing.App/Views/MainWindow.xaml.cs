@@ -59,6 +59,12 @@ public partial class MainWindow : Window
         foreach (var column in ItemResultsGrid.Columns) column.SortDirection = null;
     }
 
+    private void OrganizeQuotationItems_Click(object sender, RoutedEventArgs e)
+    {
+        QuotationLinesGrid.Items.SortDescriptions.Clear();
+        foreach (var column in QuotationLinesGrid.Columns) column.SortDirection = null;
+    }
+
     private void MainWindow_SourceInitialized(object? sender, EventArgs e)
     {
         var source = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);

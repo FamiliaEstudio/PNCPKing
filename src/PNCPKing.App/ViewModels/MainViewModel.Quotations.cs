@@ -64,6 +64,7 @@ public sealed partial class MainViewModel
     public ICommand NewQuotationItemCommand { get; private set; } = null!;
     public ICommand RenameQuotationCommand { get; private set; } = null!;
     public ICommand ToggleQuotationMedicationCommand { get; private set; } = null!;
+    public ICommand OrganizeQuotationItemsCommand { get; private set; } = null!;
     public bool IsMedicationQuotation => SelectedQuotationProject?.Source.IsMedication == true;
     public ICommand DeleteQuotationCommand { get; private set; } = null!;
     public ICommand DeleteQuotationLineCommand { get; private set; } = null!;
@@ -271,6 +272,10 @@ public sealed partial class MainViewModel
                   !IsQuotationAutomationRunning && !IsAnyAggressivePncpMode &&
                   _quotationItemWindow?.ViewModel.IsBusy != true &&
                   _quotationItemWindow?.ViewModel.IsSearchBusy != true);
+        OrganizeQuotationItemsCommand = new AsyncRelayCommand(
+            OrganizeQuotationItemsAsync,
+            () => SelectedQuotationProject is not null && QuotationLines.Count > 0 &&
+                  !IsFileBusy && !IsPriceBusy && !IsDocumentBusy && !IsQuotationAutomationRunning);
         DeleteQuotationCommand = new AsyncRelayCommand(
             DeleteQuotationAsync,
             () => !IsFileBusy && !IsPriceBusy && SelectedQuotationProject is not null);
@@ -778,6 +783,26 @@ public sealed partial class MainViewModel
         {
             IsFileBusy = false;
             OnPropertyChanged(nameof(IsMedicationQuotation));
+        }
+    }
+
+    private async Task OrganizeQuotationItemsAsync()
+    {
+        var project = SelectedQuotationProject;
+        if (project is null) return;
+        var lineId = SelectedQuotationLine?.Line.Id;
+        IsFileBusy = true;
+        NotifyCommands();
+        try
+        {
+            await _quotationService.SetProjectAlphabeticalOrderAsync(project.Id).ConfigureAwait(true);
+            await LoadQuotationProjectAsync(project.Id, lineId).ConfigureAwait(true);
+            StatusText = "Itens da cotação organizados em ordem alfabética.";
+        }
+        finally
+        {
+            IsFileBusy = false;
+            NotifyCommands();
         }
     }
 

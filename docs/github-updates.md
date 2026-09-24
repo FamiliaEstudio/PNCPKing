@@ -1,13 +1,13 @@
 # Atualização pelo GitHub
 
-**Atualizar pelo GitHub** consulta as releases públicas de `FamiliaEstudio/PNCPKing` somente após o clique. A prévia separa o programa do pacote oficial de preços. Se houver executável novo, ele é conferido antes do encerramento e a importação confirmada continua depois da reinicialização sem outro download.
+**Atualizar pelo GitHub** consulta as releases públicas de `FamiliaEstudio/PNCPKing` somente após o clique. A prévia separa o programa do pacote oficial de preços e mostra, com rolagem, as notas de cada versão do programa entre a instalada e a oferecida. Se o histórico estiver indisponível, a prévia avisa e ainda permite atualizar. Se houver executável novo, ele é conferido antes do encerramento e a importação confirmada continua depois da reinicialização sem outro download.
 
 ## Publicar o programa
 
 1. Atualize `Version` em `src/PNCPKing.App/PNCPKing.App.csproj`, usando `X.Y.Z`.
 2. Feche o PNCP King e execute `scripts/publish-windows.ps1` no PowerShell.
 3. O script compila em Release, executa os testes e substitui `artifacts/win-x64/PNCPKing.exe`. Nenhum PDB ou banco deve ser publicado.
-4. Publique `PNCPKing.exe` e `app-update.json` na release estável `vX.Y.Z`, marcada como **Latest**.
+4. Publique `PNCPKing.exe` e `app-update.json` na release estável `vX.Y.Z`, marcada como **Latest**. O fluxo automático gera as notas da versão a partir das mudanças desde a release anterior.
 
 A versão do formato móvel v2 é `1.2.0` e o esquema correspondente é 29.
 

@@ -13,6 +13,8 @@ public sealed record PricesUpdateManifest(int Format, DateTimeOffset PublishedAt
 public sealed record GitHubUpdateRelease<T>(string Tag, T Manifest);
 public sealed record GitHubUpdateCheck(GitHubUpdateRelease<AppUpdateManifest>? App,
     GitHubUpdateRelease<PricesUpdateManifest>? Prices, string AppStatus, string PricesStatus);
+public sealed record GitHubReleaseNote(string Version, string Body);
+public sealed record GitHubReleaseNotes(IReadOnlyList<GitHubReleaseNote> Releases, string? Warning);
 public sealed record GitHubUpdatePlan(AppUpdateManifest? App, PriceUpdatePackage? Package,
     string AppStatus, string PricesStatus)
 {

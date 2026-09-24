@@ -86,6 +86,7 @@ public sealed record QuotationProject(
     DateTimeOffset UpdatedAt)
 {
     public bool IsMedication { get; init; }
+    public bool SortItemsAlphabetically { get; init; }
     public int PriceDecimalPlaces => IsMedication ? 4 : 2;
 }
 

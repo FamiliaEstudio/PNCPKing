@@ -32,7 +32,11 @@ public sealed partial class MainViewModel
                 var state = await official.GetTransferStatusAsync(ct);
                 var plan = GitHubUpdateValidation.Plan(check, ApplicationVersion, SqliteContractRepository.CurrentSchemaVersion, state);
                 ct.ThrowIfCancellationRequested();
-                var preview = new GitHubUpdateWindow(plan) { Owner = Application.Current.MainWindow };
+                var notes = plan.App is null ? new GitHubReleaseNotes([], null) :
+                    await downloads.GetReleaseNotesAsync(ApplicationVersion,
+                        GitHubUpdateValidation.ParseVersion(plan.App.Version), ct);
+                ct.ThrowIfCancellationRequested();
+                var preview = new GitHubUpdateWindow(plan, notes) { Owner = Application.Current.MainWindow };
                 if (preview.ShowDialog() != true) return;
                 ct.ThrowIfCancellationRequested();
                 if (plan.App is not null) GitHubAppInstaller.CheckDestination();
@@ -118,7 +122,7 @@ public sealed partial class MainViewModel
         {
             var expectedPath = Path.Combine(GitHubAppInstaller.CacheDirectory, item.Package.Download.Sha256.ToLowerInvariant() + ".payload");
             if (!string.Equals(Path.GetFullPath(item.Path), expectedPath, StringComparison.OrdinalIgnoreCase) ||
-                item.Package.Manifest.Schema != SqliteContractRepository.CurrentSchemaVersion)
+                item.Package.Manifest.Schema != OfficialUpdateService.PayloadSchemaVersion)
                 throw new InvalidDataException("Pacote pendente incompatível.");
             await GitHubUpdateService.ValidatePackageAsync(item.Path, item.Package, ct);
         }

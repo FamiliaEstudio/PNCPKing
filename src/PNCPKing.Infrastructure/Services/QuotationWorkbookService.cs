@@ -155,9 +155,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         sheet.Range(FirstBlockRow, 1, TemplateLastRow, TemplateLastColumn)
             .Clear(XLClearOptions.All);
 
-        var analyses = report.Lines
-            .OrderBy(line => line.Line.DisplayOrder)
-            .ToArray();
+        var analyses = report.Lines.ToArray();
         var row = FirstBlockRow;
         for (var itemIndex = 0; itemIndex < analyses.Length; itemIndex++)
         {

@@ -11,6 +11,60 @@ public sealed class QuotationTests
 {
     private static readonly DateOnly Today = new(2026, 7, 21);
 
+    [Fact]
+    public async Task AlphabeticalItems_PersistFollowVisibleNamesAndKeepAutomationOrder()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var quotations = new QuotationService(repository, new QuotationAnalyzer(Today));
+        var project = await quotations.CreateProjectAsync("Ordem dos itens");
+        var zebra = await quotations.CreateLineAsync(project.Id, new("Zebra", 1m, "unidade", null, null));
+        var firstWater = await quotations.CreateLineAsync(project.Id, new("Água", 1m, "unidade", null, null));
+        var banana = await quotations.CreateLineAsync(project.Id, new("Banana", 1m, "unidade", null, null));
+        var secondWater = await quotations.CreateLineAsync(project.Id, new("Água", 1m, "unidade", null, null));
+        Assert.Equal([zebra.Line.Id, firstWater.Line.Id, banana.Line.Id, secondWater.Line.Id],
+            (await quotations.GetAnalysesAsync(project.Id)).Select(value => value.Line.Id));
+
+        await quotations.SetProjectAlphabeticalOrderAsync(project.Id);
+        var reopened = new QuotationService(
+            new SqliteQuotationRepository(database.Repository.DatabasePath), new QuotationAnalyzer(Today));
+        Assert.True(Assert.Single(await reopened.GetProjectsAsync()).SortItemsAlphabetically);
+        Assert.Equal([firstWater.Line.Id, secondWater.Line.Id, banana.Line.Id, zebra.Line.Id],
+            (await reopened.GetAnalysesAsync(project.Id)).Select(value => value.Line.Id));
+        Assert.Equal([zebra.Line.Id, firstWater.Line.Id, banana.Line.Id, secondWater.Line.Id],
+            (await repository.GetLinesAsync(project.Id)).Select(value => value.Id));
+
+        await repository.RenameLineDisplayNameAsync(zebra.Line.Id, "Abacate");
+        var amora = await quotations.CreateLineAsync(project.Id, new("Amora", 1m, "unidade", null, null));
+        var report = await reopened.GetReportAsync(project.Id);
+        Assert.Equal([zebra.Line.Id, firstWater.Line.Id, secondWater.Line.Id, amora.Line.Id, banana.Line.Id],
+            report.Lines.Select(value => value.Line.Id));
+
+        var path = Path.Combine(database.Directory, "alfabetica.xlsx");
+        await new QuotationWorkbookService().ExportAsync(path, report, "Responsável");
+        using var workbook = new XLWorkbook(path);
+        var titles = workbook.Worksheet(1).Column(2).CellsUsed()
+            .Select(cell => cell.GetString())
+            .Where(value => value.StartsWith("Item ", StringComparison.Ordinal))
+            .ToArray();
+        Assert.Equal(["Item 1 - Abacate", "Item 2 - Água", "Item 3 - Água", "Item 4 - Amora", "Item 5 - Banana"], titles);
+
+        var evidencePath = Path.Combine(database.Directory, "alfabetica.pdf");
+        await new QuotationEvidenceExportService(null!, null!, null!).ExportAsync(evidencePath, report);
+        using var pdf = UglyToad.PdfPig.PdfDocument.Open(evidencePath);
+        Assert.Equal(6, pdf.NumberOfPages);
+        var expectedPagePath = Path.Combine(database.Directory, "ultima-pagina.pdf");
+        using (var expectedWriter = new EvidencePdfWriter())
+        {
+            expectedWriter.AddTextPage("Item 5 — Banana",
+                ["Nenhum preço foi exportado; não há documentos para pesquisar."]);
+            expectedWriter.Save(expectedPagePath);
+        }
+        using var expectedPdf = UglyToad.PdfPig.PdfDocument.Open(expectedPagePath);
+        Assert.Equal(Assert.Single(expectedPdf.GetPage(1).GetImages()).RawBytes.ToArray(),
+            Assert.Single(pdf.GetPage(6).GetImages()).RawBytes.ToArray());
+    }
+
     public static TheoryData<string, decimal, string> InvalidManualLineInputs => new()
     {
         { "", 1m, "unidade" },

@@ -732,6 +732,10 @@ public sealed class QuotationPackageService : IQuotationPackageService
             {
                 compatibleColumns.Remove("is_medication");
             }
+            if (manifest?.DatabaseSchemaVersion < 31 && definition.Name == "quotation_projects")
+            {
+                compatibleColumns.Remove("sort_items_alphabetically");
+            }
             if (manifest?.DatabaseSchemaVersion == 12 &&
                 string.Equals(
                     definition.Name,
@@ -1246,6 +1250,14 @@ public sealed class QuotationPackageService : IQuotationPackageService
         JsonObject payload,
         int databaseSchemaVersion)
     {
+        if (databaseSchemaVersion < 31)
+        {
+            foreach (var project in GetRows(payload, "quotation_projects"))
+            {
+                project["sort_items_alphabetically"] = 0;
+            }
+        }
+
         if (databaseSchemaVersion < 30)
         {
             foreach (var project in GetRows(payload, "quotation_projects"))

@@ -53,7 +53,7 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
         {
             var internetEvidence = await LoadAndValidateInternetEvidenceAsync(report, warnings, cancellationToken)
                 .ConfigureAwait(false);
-            var analyses = report.Lines.OrderBy(line => line.Line.DisplayOrder).ToArray();
+            var analyses = report.Lines.ToArray();
             var totalReferences = analyses.Sum(item => SelectExportedReferences(item).Count);
             for (var itemIndex = 0; itemIndex < analyses.Length; itemIndex++)
             {
