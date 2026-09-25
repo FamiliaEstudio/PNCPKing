@@ -1480,9 +1480,9 @@ public sealed class AiQuotationReviewItem
             reasons.Add("descrição ausente");
         }
 
-        if (Quantity is not > 0)
+        if (Quantity is not > 0 || !QuotationQuantity.IsValid(Quantity.Value))
         {
-            reasons.Add("quantidade inválida");
+            reasons.Add("quantidade deve ser inteira e positiva");
         }
 
         if (string.IsNullOrWhiteSpace(Unit))

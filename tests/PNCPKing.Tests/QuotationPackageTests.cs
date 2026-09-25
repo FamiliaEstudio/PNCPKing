@@ -775,11 +775,21 @@ public sealed class QuotationPackageTests
         State = QuotationReferenceState.Eligible
     };
 
+    private static void RemoveOrganizationColumns(JsonObject payload)
+    {
+        payload["tables"]!.AsObject().Remove("quotation_groups");
+        foreach (var project in payload["tables"]!["quotation_projects"]!.AsArray())
+            project!.AsObject().Remove("organization_json");
+        foreach (var line in payload["tables"]!["quotation_lines"]!.AsArray())
+            line!.AsObject().Remove("group_id");
+    }
+
     private static async Task DowngradePackageToSchemaTwelveAsync(string path)
     {
         using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
         var payload = JsonNode.Parse(
             await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
+        RemoveOrganizationColumns(payload);
         payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("is_medication");
         payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("sort_items_alphabetically");
         var references = payload["tables"]!["quotation_references"]!.AsArray();
@@ -816,6 +826,7 @@ public sealed class QuotationPackageTests
         using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
         var payload = JsonNode.Parse(
             await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
+        RemoveOrganizationColumns(payload);
         payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("is_medication");
         payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("sort_items_alphabetically");
         foreach (var line in payload["tables"]!["quotation_lines"]!.AsArray())
@@ -838,6 +849,7 @@ public sealed class QuotationPackageTests
         using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
         var payload = JsonNode.Parse(
             await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
+        RemoveOrganizationColumns(payload);
         payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("is_medication");
         payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("sort_items_alphabetically");
         foreach (var run in payload["tables"]!["quotation_automation_runs"]!.AsArray())
@@ -860,6 +872,7 @@ public sealed class QuotationPackageTests
         using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
         var payload = JsonNode.Parse(
             await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
+        RemoveOrganizationColumns(payload);
         payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("is_medication");
         payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("sort_items_alphabetically");
         foreach (var basket in payload["tables"]!["quotation_manual_baskets"]!.AsArray())
@@ -886,6 +899,7 @@ public sealed class QuotationPackageTests
     {
         using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
         var payload = JsonNode.Parse(await ReadEntryAsync(archive.GetEntry("quotation.json")!))!.AsObject();
+        RemoveOrganizationColumns(payload);
         payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("is_medication");
         payload["tables"]!["quotation_projects"]![0]!.AsObject().Remove("sort_items_alphabetically");
         var options = new JsonSerializerOptions { WriteIndented = true };

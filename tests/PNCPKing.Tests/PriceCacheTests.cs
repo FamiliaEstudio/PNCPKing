@@ -91,7 +91,7 @@ public sealed class PriceCacheTests
         Assert.False(policy.Authorized);
         Assert.Equal(1, progress.TotalContracts);
         Assert.Equal(1, progress.CompletedContracts);
-        Assert.Equal(31, SqliteContractRepository.CurrentSchemaVersion);
+        Assert.Equal(32, SqliteContractRepository.CurrentSchemaVersion);
         Assert.Equal((1L, 1L, 1L), await database.Repository.GetCountsAsync());
     }
 

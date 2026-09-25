@@ -36,6 +36,7 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         ArgumentNullException.ThrowIfNull(report);
+        report.ValidateExport();
         var fullDestination = Path.GetFullPath(destinationPath);
         Directory.CreateDirectory(Path.GetDirectoryName(fullDestination)!);
         var temporaryRoot = Path.Combine(
@@ -61,7 +62,7 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
                 var analysis = analyses[itemIndex];
                 itemCount++;
                 var references = SelectExportedReferences(analysis);
-                var itemTitle = BuildItemTitle(itemIndex + 1, analysis.Line);
+                var itemTitle = BuildItemTitle(report.ItemNumbers(itemIndex), analysis.Line);
                 if (references.Count == 0)
                 {
                     var unitPath = GetUnitPath(temporaryRoot, units.Count);
@@ -83,7 +84,7 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
                         DocumentProcessingStage.Matching,
                         referenceCount,
                         totalReferences,
-                        $"Item {itemIndex + 1:N0}, preço {referenceIndex + 1:N0}: pesquisando documentos…"));
+                        $"Item {report.ItemNumbers(itemIndex)}, preço {referenceIndex + 1:N0}: pesquisando documentos…"));
                     var heading = $"{itemTitle} · Preço {referenceIndex + 1:N0}";
                     var lines = BuildReferenceLines(reference);
                     var referenceNotes = new List<string>();
@@ -316,7 +317,7 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
                     if (unitWriter.PageCount is < 1 or > 2)
                     {
                         throw new InvalidDataException(
-                            $"O preço {referenceIndex + 1:N0} do item {itemIndex + 1:N0} gerou " +
+                            $"O preço {referenceIndex + 1:N0} do item {report.ItemNumbers(itemIndex)} gerou " +
                             $"{unitWriter.PageCount:N0} páginas; o limite é duas.");
                     }
 
@@ -394,11 +395,11 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
         }
     }
 
-    private static string BuildItemTitle(int itemNumber, QuotationLine line)
+    private static string BuildItemTitle(string itemNumber, QuotationLine line)
     {
         var selection = line.CatalogSelection;
         var suffix = selection is null ? string.Empty : $" ({selection.Label})";
-        return $"Item {itemNumber:N0} — {line.EffectiveDisplayName}{suffix}";
+        return $"Item {itemNumber} — {line.EffectiveDisplayName}{suffix}";
     }
 
     private static string GetUnitPath(string temporaryRoot, int index) =>

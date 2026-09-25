@@ -92,6 +92,28 @@ public sealed class AiAutomationTests
     }
 
     [Fact]
+    public async Task DraftService_FractionalQuantityRequiresCorrectionWithoutRounding()
+    {
+        var root = CreateTemporaryFolder();
+        try
+        {
+            var pdfPath = Path.Combine(root, "entrada.pdf");
+            await File.WriteAllBytesAsync(pdfPath, [1, 2, 3, 4]);
+            var service = new AiQuotationDraftService(new StaticIndexService(), new PdfToMarkdownConverter(),
+                new CountingProvider(fractional: true), new AiDraftCache(root), root);
+            var draft = await service.CreateAsync(new AiDraftAnalysisRequest
+            {
+                PdfPath = pdfPath, Provider = Provider(), ApiKey = "test", MaximumOutputTokens = 10_000
+            });
+            var item = Assert.Single(draft.Items);
+            Assert.Equal(10.5m, item.Quantity);
+            Assert.True(item.HasBlockingError);
+            Assert.Contains(item.Warnings, warning => warning.Contains("inteiro", StringComparison.Ordinal));
+        }
+        finally { DeleteDirectory(root); }
+    }
+
+    [Fact]
     public async Task DraftCache_UpgradesVersionTwoAndKeepsLegacyPromptCountRecoverable()
     {
         var root = CreateTemporaryFolder();
@@ -891,7 +913,7 @@ public sealed class AiAutomationTests
         Directory.Delete(path, true);
     }
 
-    private sealed class CountingProvider : IAiQuotationProvider
+    private sealed class CountingProvider(bool fractional = false) : IAiQuotationProvider
     {
         public int Calls { get; private set; }
 
@@ -940,7 +962,7 @@ public sealed class AiAutomationTests
                         "warnings": []
                       }]
                     }
-                    """,
+                    """.Replace("\"quantity\": 10,", fractional ? "\"quantity\": 10.5," : "\"quantity\": 10,"),
                 Status = "completed"
             });
         }

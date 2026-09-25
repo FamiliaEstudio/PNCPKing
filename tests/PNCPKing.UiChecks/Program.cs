@@ -29,6 +29,8 @@ internal static class Program
                 {
                     await CheckMonitorPlacementAsync();
                     Console.WriteLine("Monitor placement: passed");
+                    await CheckQuotationGroupsAsync();
+                    Console.WriteLine("Quotation groups dialog: passed");
                     layoutApp.Shutdown();
                 }
                 catch (Exception error) { Console.Error.WriteLine(error); layoutApp.Shutdown(1); }
@@ -81,6 +83,40 @@ internal static class Program
             Require(rect.Left >= info.WorkArea.Left && rect.Top >= info.WorkArea.Top &&
                     rect.Right <= info.WorkArea.Right && rect.Bottom <= info.WorkArea.Bottom,
                 "A janela ultrapassou a área útil do monitor.");
+        }
+        finally { window.Close(); }
+    }
+
+    private static async Task CheckQuotationGroupsAsync()
+    {
+        var project = new QuotationProject(Guid.NewGuid(), "Grupos", DateTimeOffset.Now, DateTimeOffset.Now);
+        var line = new QuotationLine { Id = Guid.NewGuid(), ProjectId = project.Id, Description = "Item de teste",
+            RequestedQuantity = 4, RequestedUnit = "unidade", SelectedBasketKey = "chosen", SelectionConfirmed = true };
+        var basket = new QuotationBasket { Key = "chosen", References = [], AveragePrice = 25000,
+            MinimumPrice = 25000, MaximumPrice = 25000, MaximumDeviationPercent = 0, Score = 100 };
+        var analysis = new QuotationLineAnalysis(line, [], [basket], 0, 0, 0, 0, 0);
+        var window = new PNCPKing.App.Views.QuotationGroupsWindow(new(project, [analysis])) { Width = 900, Height = 550 };
+        MonitorAwareWindowBehavior.Attach(window);
+        try
+        {
+            window.Show();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            var root = (DockPanel)window.Content;
+            var grid = root.Children.OfType<DataGrid>().Single();
+            Require(grid.ActualHeight > 150, "A lista de membros não tem altura utilizável.");
+            Require(grid.Items.Count == 1 && grid.Columns.Count == 10, "Colunas da organização ausentes.");
+            var row = (PNCPKing.App.Views.QuotationGroupsWindow.ItemRow)grid.Items[0];
+            Require(row.Numbers == "1 e 2" && row.PrincipalQuantity == 3 && row.ReservedQuantity == 1,
+                "A prévia das cotas está incorreta.");
+            grid.SelectedItem = row;
+            var actions = root.Children.OfType<WrapPanel>().Single();
+            var create = actions.Children.OfType<Button>().Single(button => (string)button.Content == "Criar com seleção");
+            create.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Require(window.Groups.Count == 1 && row.ResultGroups == "Grupo 1 — Principal / Grupo 2 — Reservada",
+                "O agrupamento não gerou grupos principal e reservado distintos.");
+            var remove = actions.Children.OfType<Button>().Single(button => (string)button.Content == "Excluir grupo");
+            remove.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Require(window.Groups.Count == 0 && grid.Items.Count == 1, "Excluir o grupo removeu o item.");
         }
         finally { window.Close(); }
     }

@@ -34,8 +34,8 @@ public sealed class Schema26MigrationTests
             progress: new InlineProgress<DatabaseInitializationProgress>(progress.Add));
 
         Assert.Equal(25, result.PreviousVersion);
-        Assert.Equal(31, result.CurrentVersion);
-        Assert.Equal([26, 27, 28, 29, 30, 31], result.AppliedMigrations);
+        Assert.Equal(32, result.CurrentVersion);
+        Assert.Equal([26, 27, 28, 29, 30, 31, 32], result.AppliedMigrations);
         Assert.Contains(progress, value =>
             value.Phase == "Preparando pesquisa por prefixo" && value.Percentage == 75);
         Assert.Equal(1, await CountFtsMatchesAsync(database.Repository.DatabasePath, "cafe*"));
@@ -58,8 +58,8 @@ public sealed class Schema26MigrationTests
         Assert.Equal(0, await CountFtsMatchesAsync(database.Repository.DatabasePath, "ara*"));
 
         var repeated = await repository.InitializeAsync();
-        Assert.Equal(31, repeated.PreviousVersion);
-        Assert.Equal(31, repeated.CurrentVersion);
+        Assert.Equal(32, repeated.PreviousVersion);
+        Assert.Equal(32, repeated.CurrentVersion);
         Assert.Empty(repeated.AppliedMigrations);
     }
 
@@ -99,8 +99,8 @@ public sealed class Schema26MigrationTests
         Assert.Equal(1, await CountFtsMatchesAsync(database.Repository.DatabasePath, "cafe*"));
 
         var recovered = await repository.InitializeAsync();
-        Assert.Equal(31, recovered.CurrentVersion);
-        Assert.Equal([26, 27, 28, 29, 30, 31], recovered.AppliedMigrations);
+        Assert.Equal(32, recovered.CurrentVersion);
+        Assert.Equal([26, 27, 28, 29, 30, 31, 32], recovered.AppliedMigrations);
     }
 
     private static async Task DowngradeTo25Async(string path)

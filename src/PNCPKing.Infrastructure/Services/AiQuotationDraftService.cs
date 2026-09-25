@@ -487,9 +487,9 @@ public sealed class AiQuotationDraftService : IAiQuotationDraftService
             blocking = true;
         }
 
-        if (quantity is null)
+        if (quantity is null || !QuotationQuantity.IsValid(quantity.Value))
         {
-            warnings.Add("Quantidade ausente ou inválida.");
+            warnings.Add("Quantidade ausente ou inválida; informe um número inteiro positivo.");
             blocking = true;
         }
 

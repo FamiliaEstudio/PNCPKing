@@ -65,6 +65,7 @@ public sealed partial class MainViewModel
     public ICommand RenameQuotationCommand { get; private set; } = null!;
     public ICommand ToggleQuotationMedicationCommand { get; private set; } = null!;
     public ICommand OrganizeQuotationItemsCommand { get; private set; } = null!;
+    public ICommand ManageQuotationGroupsCommand { get; private set; } = null!;
     public bool IsMedicationQuotation => SelectedQuotationProject?.Source.IsMedication == true;
     public ICommand DeleteQuotationCommand { get; private set; } = null!;
     public ICommand DeleteQuotationLineCommand { get; private set; } = null!;
@@ -274,6 +275,10 @@ public sealed partial class MainViewModel
                   _quotationItemWindow?.ViewModel.IsSearchBusy != true);
         OrganizeQuotationItemsCommand = new AsyncRelayCommand(
             OrganizeQuotationItemsAsync,
+            () => SelectedQuotationProject is not null && QuotationLines.Count > 0 &&
+                  !IsFileBusy && !IsPriceBusy && !IsDocumentBusy && !IsQuotationAutomationRunning);
+        ManageQuotationGroupsCommand = new AsyncRelayCommand(
+            ManageQuotationGroupsAsync,
             () => SelectedQuotationProject is not null && QuotationLines.Count > 0 &&
                   !IsFileBusy && !IsPriceBusy && !IsDocumentBusy && !IsQuotationAutomationRunning);
         DeleteQuotationCommand = new AsyncRelayCommand(
@@ -677,14 +682,18 @@ public sealed partial class MainViewModel
 
         try
         {
-            var analyses = await _quotationService.GetAnalysesAsync(projectId.Value).ConfigureAwait(true);
-            QuotationLines.ReplaceAll(analyses.Select(analysis => new QuotationLineDisplay(analysis)));
+            var report = await _quotationService.GetReportAsync(projectId.Value).ConfigureAwait(true);
+            QuotationLines.ReplaceAll(report.Lines.Select(analysis => new QuotationLineDisplay(analysis, report.Project.Organization)));
 
             SelectedQuotationLine = QuotationLines.FirstOrDefault(line => line.Line.Id == preferredLineId)
                                       ?? QuotationLines.FirstOrDefault();
             var resolved = QuotationLines.Count(line => line.Status == "Resolvido");
             QuotationSummary = $"{QuotationLines.Count:N0} item(ns); {resolved:N0} resolvido(s); " +
                                $"{QuotationLines.Count - resolved:N0} pendente(s).";
+            if (report.OrganizationIsStale)
+                QuotationSummary += " Organização desatualizada — clique em Organizar Itens antes de exportar.";
+            else if (report.Project.Organization is { } organization)
+                QuotationSummary += $" {organization.Groups.Count} grupos; {organization.Positions.Count} posições.";
             NotifyCommands();
         }
         catch (Exception exception)
@@ -797,15 +806,40 @@ public sealed partial class MainViewModel
         NotifyCommands();
         try
         {
-            await _quotationService.SetProjectAlphabeticalOrderAsync(project.Id).ConfigureAwait(true);
+            await _quotationService.OrganizeProjectAsync(project.Id).ConfigureAwait(true);
             await LoadQuotationProjectAsync(project.Id, lineId).ConfigureAwait(true);
-            StatusText = "Itens da cotação organizados em ordem alfabética.";
+            StatusText = "Itens organizados por grupos e cotas; numeração aplicada às telas e exportações.";
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(exception.Message, "Organizar Itens", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         finally
         {
             IsFileBusy = false;
             NotifyCommands();
         }
+    }
+
+    private async Task ManageQuotationGroupsAsync()
+    {
+        if (SelectedQuotationProject is not { } project) return;
+        IsFileBusy = true;
+        NotifyCommands();
+        try
+        {
+            var report = await _quotationService.GetReportAsync(project.Id).ConfigureAwait(true);
+            var window = new QuotationGroupsWindow(report) { Owner = Application.Current.MainWindow };
+            if (window.ShowDialog() != true) return;
+            await _quotationService.SaveGroupsAsync(project.Id, window.Groups).ConfigureAwait(true);
+            await LoadQuotationProjectAsync(project.Id, SelectedQuotationLine?.Line.Id).ConfigureAwait(true);
+            StatusText = "Grupos salvos. Use Organizar Itens para aplicar a sequência e as cotas.";
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(exception.Message, "Gerenciar grupos", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally { IsFileBusy = false; NotifyCommands(); }
     }
 
     private async Task RenameQuotationAsync()
@@ -1413,6 +1447,15 @@ public sealed partial class MainViewModel
                 analysis.Line.AutomationState is QuotationAutomationItemState.Pending or
                     QuotationAutomationItemState.Failed);
             var report = await _quotationService.GetReportAsync(run.ProjectId).ConfigureAwait(true);
+            if (report.OrganizationIsStale)
+            {
+                const string message = "Coleta encerrada; organização desatualizada. Clique em Organizar Itens e exporte novamente.";
+                await _quotationService.UpdateAutomationRunStateAsync(run.Id,
+                    remainingFailures == 0 ? QuotationAutomationRunState.Completed : QuotationAutomationRunState.Failed,
+                    message).ConfigureAwait(true);
+                StatusText = message;
+                return;
+            }
             await _quotationWorkbookService.ExportAsync(
                 run.OutputPath,
                 report,

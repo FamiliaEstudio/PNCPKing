@@ -9,8 +9,10 @@ public sealed record QuotationProjectDisplay(QuotationProject Source)
     public override string ToString() => Name;
 }
 
-public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis)
+public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis, QuotationOrganizationSnapshot? organization = null)
 {
+    public string ItemNumbers => organization?.ItemNumbers(Line.Id) ?? string.Empty;
+    public string GroupNumbers => organization?.GroupNumbers(Line.Id) ?? string.Empty;
     public QuotationLineAnalysis Analysis { get; } = analysis;
     public QuotationLine Line => Analysis.Line;
     public string Description => Line.EffectiveDisplayName;

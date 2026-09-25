@@ -24,6 +24,16 @@ public sealed class QuotationService(
     public Task SetProjectMedicationAsync(Guid projectId, bool isMedication, CancellationToken cancellationToken = default) =>
         repository.SetProjectMedicationAsync(projectId, isMedication, cancellationToken);
 
+    public Task SaveGroupsAsync(Guid projectId, IReadOnlyList<QuotationGroup> groups,
+        CancellationToken cancellationToken = default) => repository.SaveGroupsAsync(projectId, groups, cancellationToken);
+
+    public Task OrganizeProjectAsync(Guid projectId, CancellationToken cancellationToken = default) =>
+        repository.SaveOrganizationAsync(projectId, async token =>
+        {
+            var report = await GetReportAsync(projectId, token).ConfigureAwait(false);
+            return QuotationOrganization.Calculate(report.Project, report.Lines, report.Groups);
+        }, cancellationToken);
+
     public Task SetProjectAlphabeticalOrderAsync(Guid projectId, CancellationToken cancellationToken = default) =>
         repository.SetProjectAlphabeticalOrderAsync(projectId, cancellationToken);
 
@@ -331,13 +341,7 @@ public sealed class QuotationService(
             analyses.Add(analyzer.Analyze(line, references, manualBaskets, project.PriceDecimalPlaces));
         }
 
-        return project.SortItemsAlphabetically
-            ? analyses.OrderBy(analysis => analysis.Line.EffectiveDisplayName.Trim(),
-                    StringComparer.Create(CultureInfo.GetCultureInfo("pt-BR"), ignoreCase: true))
-                .ThenBy(analysis => analysis.Line.DisplayOrder)
-                .ThenBy(analysis => analysis.Line.Id)
-                .ToArray()
-            : analyses;
+        return QuotationOrganization.Order(project, analyses);
     }
 
     public async Task<QuotationLineAnalysis?> GetAnalysisAsync(
@@ -628,7 +632,8 @@ public sealed class QuotationService(
     {
         var project = await GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
         var lines = await GetAnalysesAsync(projectId, cancellationToken).ConfigureAwait(false);
-        return new QuotationProjectReport(project, lines);
+        return new QuotationProjectReport(project, lines)
+        { Groups = await repository.GetGroupsAsync(projectId, cancellationToken).ConfigureAwait(false) };
     }
 
     private static QuotationReference MapReference(Guid lineId, ItemSearchRow row)

@@ -66,6 +66,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         ArgumentNullException.ThrowIfNull(report);
+        report.ValidateExport();
         ArgumentException.ThrowIfNullOrWhiteSpace(responsibleName);
         responsibleName = responsibleName.Trim();
         cancellationToken.ThrowIfCancellationRequested();
@@ -170,7 +171,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 clearContents: true);
             var itemRange = sheet.Range(row, 2, row, 10);
             itemRange.Merge();
-            itemRange.FirstCell().Value = $"Item {itemIndex + 1} - {FormatLineName(analysis.Line)}";
+            itemRange.FirstCell().Value = $"Item {report.ItemNumbers(itemIndex)} - {FormatLineName(analysis.Line)}";
             row++;
 
             CopyTemplateRow(
@@ -616,7 +617,10 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             foreach (var entry in entries)
             {
                 var reference = entry.Reference;
-                sheet.Cell(row, 1).Value = itemNumber;
+                if (report.Project.Organization is null)
+                    sheet.Cell(row, 1).Value = itemNumber;
+                else
+                    sheet.Cell(row, 1).Value = report.ItemNumbers(itemNumber - 1);
                 sheet.Cell(row, 2).Value = FormatLineName(analysis.Line);
                 if (analysis.Line.RequestedQuantity > 0)
                 {
@@ -688,7 +692,10 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 continue;
             }
 
-            sheet.Cell(row, 1).Value = itemNumber;
+            if (report.Project.Organization is null)
+                sheet.Cell(row, 1).Value = itemNumber;
+            else
+                sheet.Cell(row, 1).Value = report.ItemNumbers(itemNumber - 1);
             sheet.Cell(row, 2).Value = FormatLineName(analysis.Line);
             sheet.Cell(row, 3).Value = analysis.Baskets.Count == 0 ? "Sem cesta válida" : "Aguardando confirmação";
             sheet.Cell(row, 4).Value = GetPendingReason(analysis);

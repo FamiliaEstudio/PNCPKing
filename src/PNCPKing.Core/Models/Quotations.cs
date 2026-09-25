@@ -87,6 +87,7 @@ public sealed record QuotationProject(
 {
     public bool IsMedication { get; init; }
     public bool SortItemsAlphabetically { get; init; }
+    public QuotationOrganizationSnapshot? Organization { get; init; }
     public int PriceDecimalPlaces => IsMedication ? 4 : 2;
 }
 
@@ -94,6 +95,7 @@ public sealed record QuotationLine
 {
     public required Guid Id { get; init; }
     public required Guid ProjectId { get; init; }
+    public Guid? GroupId { get; init; }
     public required string Description { get; init; }
     public string DisplayName { get; init; } = string.Empty;
     public QuotationCatalogSelection? CatalogSelection { get; init; }
@@ -432,4 +434,23 @@ public sealed record QuotationLineInput(
 
 public sealed record QuotationProjectReport(
     QuotationProject Project,
-    IReadOnlyList<QuotationLineAnalysis> Lines);
+    IReadOnlyList<QuotationLineAnalysis> Lines)
+{
+    public IReadOnlyList<QuotationGroup> Groups { get; init; } = [];
+    public bool OrganizationIsStale => Project.Organization is { } organization &&
+        (organization.Version != 1 || organization.Signature != QuotationOrganization.Signature(Project, Lines, Groups));
+
+    public string ItemNumbers(int index) => Project.Organization is { } organization
+        ? organization.ItemNumbers(Lines[index].Line.Id)
+        : (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    public void ValidateExport()
+    {
+        var invalid = Lines.Where(value => !QuotationQuantity.IsValid(value.Line.RequestedQuantity)).ToArray();
+        if (invalid.Length > 0)
+            throw new InvalidOperationException("Corrija as quantidades fracionadas ou negativas antes de exportar: " +
+                string.Join(", ", invalid.Select(value => value.Line.EffectiveDisplayName)));
+        if (OrganizationIsStale)
+            throw new InvalidOperationException("A organização está desatualizada. Clique em Organizar Itens antes de exportar.");
+    }
+}

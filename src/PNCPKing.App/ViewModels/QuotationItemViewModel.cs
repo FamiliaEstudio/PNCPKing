@@ -181,7 +181,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             }
 
             var quantity = Line.Line.RequestedQuantity > 0
-                ? $"Quantidade {Line.Line.RequestedQuantity:N4}"
+                ? $"Quantidade {Line.Line.RequestedQuantity:0.####}"
                 : "Quantidade não informada";
             var unit = string.IsNullOrWhiteSpace(Line.Line.RequestedUnit)
                 ? "unidade não informada"

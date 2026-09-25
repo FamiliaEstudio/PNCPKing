@@ -9,6 +9,11 @@ public interface IQuotationRepository
     Task RenameProjectAsync(Guid projectId, string name, CancellationToken cancellationToken = default);
     Task SetProjectMedicationAsync(Guid projectId, bool isMedication, CancellationToken cancellationToken = default);
     Task SetProjectAlphabeticalOrderAsync(Guid projectId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<QuotationGroup>> GetGroupsAsync(Guid projectId, CancellationToken cancellationToken = default);
+    Task SaveGroupsAsync(Guid projectId, IReadOnlyList<QuotationGroup> groups, CancellationToken cancellationToken = default);
+    Task SaveOrganizationAsync(Guid projectId,
+        Func<CancellationToken, Task<QuotationOrganizationSnapshot>> calculate,
+        CancellationToken cancellationToken = default);
     Task RenameLineDisplayNameAsync(
         Guid lineId,
         string displayName,

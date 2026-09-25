@@ -77,14 +77,14 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
                     var maximum = OptionalDecimal(row, 6, "Faixa máxima", sheetName);
                     var batchesDecimal = RequiredDecimal(row, 7, "Número de disparos", sheetName);
                     var basketSizeDecimal = OptionalDecimal(row, 8, "Número de preços na cesta", sheetName) ?? 3m;
-                    if (quantity <= 0)
+                    if (quantity <= 0 || !QuotationQuantity.IsValid(quantity))
                     {
                         throw CellError(
                             row,
                             3,
                             sheetName,
                             "Quantidade",
-                            "deve ser maior que zero.");
+                            "deve ser um número inteiro maior que zero.");
                     }
 
                     if (minimum < 0)

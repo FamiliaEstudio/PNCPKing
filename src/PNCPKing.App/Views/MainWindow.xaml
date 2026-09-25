@@ -708,9 +708,10 @@
                                                   IsChecked="{Binding IsMedicationQuotation, Mode=OneWay}"
                                                   Command="{Binding ToggleQuotationMedicationCommand}"
                                                   ToolTip="Aplica quatro casas aos preços, cálculos e Excel desta cotação. Ao alterar, reconfirme as cestas escolhidas." />
+                                        <MenuItem Header="Gerenciar grupos" Command="{Binding ManageQuotationGroupsCommand}" />
                                         <MenuItem Header="Organizar Itens" Command="{Binding OrganizeQuotationItemsCommand}"
                                                   Click="OrganizeQuotationItems_Click"
-                                                  ToolTip="Mantém os itens desta cotação em ordem alfabética nas telas e exportações." />
+                                                  ToolTip="Aplica a sequência de grupos e cotas às telas e exportações. Exige quantidades inteiras e cestas confirmadas." />
                                         <Separator />
                                         <MenuItem Header="Novo item" Command="{Binding NewQuotationItemCommand}" />
                                         <MenuItem Header="Excluir item" Command="{Binding DeleteQuotationLineCommand}" />
@@ -784,6 +785,8 @@
                                   ScrollViewer.HorizontalScrollBarVisibility="Auto"
                                   ScrollViewer.VerticalScrollBarVisibility="Auto">
                             <DataGrid.Columns>
+                                <DataGridTextColumn Header="Item(ns)" Binding="{Binding ItemNumbers}" Width="85" />
+                                <DataGridTextColumn Header="Grupo(s)" Binding="{Binding GroupNumbers}" Width="235" />
                                 <DataGridTextColumn Header="Nome do item" Binding="{Binding Description}" Width="230" MinWidth="180" />
                                 <DataGridTextColumn Header="Descrição técnica" Binding="{Binding TechnicalDescription}" Width="230" />
                                 <DataGridTextColumn Header="CATMAT/CATSER" Binding="{Binding CatalogCode}" Width="115" />
@@ -792,7 +795,7 @@
                                 <DataGridTextColumn Header="Amplo" Binding="{Binding BroadSearchText}" Width="180" />
                                 <DataGridTextColumn Header="Nível ativo" Binding="{Binding ActivePromptLevel}" Width="95" />
                                 <DataGridTextColumn Header="Contratos no nível" Binding="{Binding ContractsAtActiveLevel}" Width="105" />
-                                <DataGridTextColumn Header="Qtd." Binding="{Binding RequestedQuantity, StringFormat=N4}" Width="72" />
+                                <DataGridTextColumn Header="Qtd." Binding="{Binding RequestedQuantity, StringFormat=0.####}" Width="72" />
                                 <DataGridTextColumn Header="Unidade" Binding="{Binding RequestedUnit}" Width="75" />
                                 <DataGridTextColumn Header="Amostra" Binding="{Binding CollectedCount}" Width="66" />
                                 <DataGridTextColumn Header="Elegíveis" Binding="{Binding EligibleCount}" Width="66" />

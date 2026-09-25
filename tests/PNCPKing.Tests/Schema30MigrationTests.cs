@@ -25,8 +25,8 @@ public sealed class Schema30MigrationTests
 
         var result = await database.Repository.InitializeAsync();
         Assert.Equal(30, result.PreviousVersion);
-        Assert.Equal(31, result.CurrentVersion);
-        Assert.Equal([31], result.AppliedMigrations);
+        Assert.Equal(32, result.CurrentVersion);
+        Assert.Equal([31, 32], result.AppliedMigrations);
         Assert.False(Assert.Single(await repository.GetProjectsAsync()).SortItemsAlphabetically);
         Assert.Equal(line.Id, Assert.Single(await repository.GetLinesAsync(project.Id)).Id);
     }
@@ -51,8 +51,8 @@ public sealed class Schema30MigrationTests
         }
         var result = await database.Repository.InitializeAsync();
         Assert.Equal(29, result.PreviousVersion);
-        Assert.Equal(31, result.CurrentVersion);
-        Assert.Equal([30, 31], result.AppliedMigrations);
+        Assert.Equal(32, result.CurrentVersion);
+        Assert.Equal([30, 31, 32], result.AppliedMigrations);
         Assert.False(Assert.Single(await repository.GetProjectsAsync()).IsMedication);
         Assert.Equal(0.1234m, Assert.Single(await repository.GetReferencesAsync(line.Id)).UnitPrice);
         Assert.True((await repository.GetLineAsync(project.Id, line.Id))!.SelectionConfirmed);

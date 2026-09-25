@@ -5,7 +5,7 @@ using PNCPKing.Core.Models;
 
 namespace PNCPKing.Infrastructure.Data;
 
-public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotationItemSearchRepository
+public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQuotationItemSearchRepository
 {
     private readonly ISqliteConnectionFactory _connections;
 
@@ -23,7 +23,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
     {
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id, name, created_at, updated_at, is_medication, sort_items_alphabetically FROM quotation_projects ORDER BY updated_at DESC, name;";
+        command.CommandText = "SELECT id, name, created_at, updated_at, is_medication, sort_items_alphabetically, organization_json FROM quotation_projects ORDER BY updated_at DESC, name;";
         var projects = new List<QuotationProject>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -151,11 +151,11 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         string requestedUnit,
         CancellationToken cancellationToken = default)
     {
-        if (requestedQuantity < 0)
+        if (!QuotationQuantity.IsValid(requestedQuantity))
         {
             throw new ArgumentOutOfRangeException(
                 nameof(requestedQuantity),
-                "A quantidade não pode ser negativa.");
+                "A quantidade solicitada deve ser inteira e não pode ser negativa.");
         }
 
         var normalizedUnit = (requestedUnit ?? string.Empty).Trim();
@@ -567,7 +567,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                    p.matched_items, p.revealed_prices, p.updated_at,
                    l.display_name, s.catalog_kind, s.catalog_code,
                    s.description_snapshot, s.selected_at,
-                   CASE WHEN ce.code IS NULL THEN 1 ELSE ce.active END
+                   CASE WHEN ce.code IS NULL THEN 1 ELSE ce.active END, l.group_id
               FROM quotation_lines l
               LEFT JOIN quotation_line_search_prompts p
                 ON p.line_id = l.id AND p.is_current = 1
@@ -611,7 +611,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
                    p.matched_items, p.revealed_prices, p.updated_at,
                    l.display_name, s.catalog_kind, s.catalog_code,
                    s.description_snapshot, s.selected_at,
-                   CASE WHEN ce.code IS NULL THEN 1 ELSE ce.active END
+                   CASE WHEN ce.code IS NULL THEN 1 ELSE ce.active END, l.group_id
               FROM quotation_lines l
               LEFT JOIN quotation_line_search_prompts p
                 ON p.line_id = l.id AND p.is_current = 1
@@ -1728,6 +1728,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         }
 
         weights.Validate();
+        foreach (var item in items) QuotationQuantity.Validate(item.Quantity);
         var now = DateTimeOffset.UtcNow;
         var run = new QuotationAutomationRun
         {
@@ -2881,7 +2882,8 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
         ParseDateTime(reader.GetString(3)))
     {
         IsMedication = reader.GetInt32(4) != 0,
-        SortItemsAlphabetically = reader.GetInt32(5) != 0
+        SortItemsAlphabetically = reader.GetInt32(5) != 0,
+        Organization = QuotationOrganizationSnapshot.FromJson(reader.IsDBNull(6) ? null : reader.GetString(6))
     };
 
     private static QuotationAutomationRun ReadAutomationRun(SqliteDataReader reader)
@@ -2976,6 +2978,7 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
             ? null
             : ReadPromptSet(reader, Guid.ParseExact(reader.GetString(0), "N"), 36),
         DisplayName = reader.GetString(47),
+        GroupId = reader.IsDBNull(53) ? null : Guid.ParseExact(reader.GetString(53), "N"),
         CatalogSelection = reader.IsDBNull(48)
             ? null
             : new QuotationCatalogSelection
@@ -3037,9 +3040,9 @@ public sealed class SqliteQuotationRepository : IQuotationRepository, IQuotation
     private static void ValidateInput(QuotationLineInput input)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(input.Description);
-        if (input.RequestedQuantity < 0)
+        if (!QuotationQuantity.IsValid(input.RequestedQuantity))
         {
-            throw new ArgumentOutOfRangeException(nameof(input), "A quantidade não pode ser negativa.");
+            throw new ArgumentOutOfRangeException(nameof(input), "A quantidade solicitada deve ser inteira e não pode ser negativa.");
         }
 
         if (input.MinimumUnitPrice < 0 || input.MaximumUnitPrice < 0 ||

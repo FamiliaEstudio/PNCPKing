@@ -23,7 +23,7 @@ public partial class NewQuotationItemWindow : Window
         DescriptionTextBox.IsReadOnly = true;
         DescriptionTextBox.IsTabStop = false;
         QuantityTextBox.Text = line.RequestedQuantity > 0
-            ? line.RequestedQuantity.ToString("N4", CultureInfo.CurrentCulture)
+            ? line.RequestedQuantity.ToString("0.####", CultureInfo.CurrentCulture)
             : string.Empty;
         UnitTextBox.Text = line.RequestedUnit;
         FooterTextBlock.Text =
@@ -52,9 +52,9 @@ public partial class NewQuotationItemWindow : Window
                     QuantityTextBox.Text,
                     NumberStyles.Number,
                     CultureInfo.CurrentCulture,
-                    out quantity) || quantity <= 0))
+                    out quantity) || quantity <= 0 || !QuotationQuantity.IsValid(quantity)))
             {
-                throw new ArgumentException("Informe uma quantidade maior que zero ou deixe o campo vazio.");
+                throw new ArgumentException("Informe uma quantidade inteira maior que zero ou deixe o campo vazio.");
             }
 
             Input = new QuotationLineInput(description, quantity, unit, null, null)

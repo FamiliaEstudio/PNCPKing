@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed partial class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 31;
+    public const int CurrentSchemaVersion = 32;
 
     private const string GeographicGroupExpression = "CASE WHEN c.geo_layer = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -759,6 +759,44 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
             await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             version = 31;
+        }
+
+        if (version < 32)
+        {
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = transaction;
+            migration.CommandText = "SELECT COUNT(*) FROM pragma_table_info('quotation_lines') WHERE name = 'group_id';";
+            if (Convert.ToInt32(await migration.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)) == 0)
+            {
+                migration.CommandText = "ALTER TABLE quotation_lines ADD COLUMN group_id TEXT REFERENCES quotation_groups(id) ON DELETE SET NULL;";
+                await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            migration.CommandText = "SELECT COUNT(*) FROM pragma_table_info('quotation_projects') WHERE name = 'organization_json';";
+            if (Convert.ToInt32(await migration.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)) == 0)
+            {
+                migration.CommandText = "ALTER TABLE quotation_projects ADD COLUMN organization_json TEXT;";
+                await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            migration.CommandText = """
+                CREATE TABLE IF NOT EXISTS quotation_groups (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES quotation_projects(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_quotation_groups_project ON quotation_groups(project_id);
+                CREATE INDEX IF NOT EXISTS idx_quotation_lines_group ON quotation_lines(group_id);
+                CREATE TRIGGER IF NOT EXISTS quotation_groups_remove_empty AFTER DELETE ON quotation_lines
+                WHEN OLD.group_id IS NOT NULL
+                BEGIN
+                    DELETE FROM quotation_groups WHERE id = OLD.group_id
+                        AND NOT EXISTS(SELECT 1 FROM quotation_lines WHERE group_id = OLD.group_id);
+                END;
+                UPDATE schema_info SET version = 32 WHERE id = 1;
+                """;
+            await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 32;
         }
 
         stopwatch.Stop();

@@ -41,6 +41,10 @@ public sealed class QuotationPackageService : IQuotationPackageService
             "SELECT r.* FROM quotation_automation_runs r WHERE r.project_id = $projectId ORDER BY r.created_at, r.id;",
             ["id"]),
         new(
+            "quotation_groups",
+            "SELECT g.* FROM quotation_groups g WHERE g.project_id = $projectId ORDER BY g.id;",
+            ["id"]),
+        new(
             "quotation_lines",
             "SELECT l.* FROM quotation_lines l WHERE l.project_id = $projectId ORDER BY l.display_order, l.id;",
             ["id"]),
@@ -702,12 +706,9 @@ public sealed class QuotationPackageService : IQuotationPackageService
         var tables = payload["tables"] as JsonObject
                      ?? throw new InvalidDataException(
                          "O pacote não contém as tabelas da cotação.");
-        var compatibleDefinitions = manifest is { DatabaseSchemaVersion: < 14 }
-            ? TableDefinitions.Where(definition => !string.Equals(
-                definition.Name,
-                "quotation_catalog_selections",
-                StringComparison.Ordinal)).ToArray()
-            : TableDefinitions;
+        var compatibleDefinitions = TableDefinitions.Where(definition =>
+            !(manifest is { DatabaseSchemaVersion: < 14 } && definition.Name == "quotation_catalog_selections") &&
+            !(manifest is { DatabaseSchemaVersion: < 32 } && definition.Name == "quotation_groups")).ToArray();
         var expectedNames = compatibleDefinitions
             .Select(definition => definition.Name)
             .ToHashSet(StringComparer.Ordinal);
@@ -728,6 +729,11 @@ public sealed class QuotationPackageService : IQuotationPackageService
                     cancellationToken)
                 .ConfigureAwait(false);
             var compatibleColumns = columns.ToHashSet(StringComparer.Ordinal);
+            if (manifest?.DatabaseSchemaVersion < 32)
+            {
+                if (definition.Name == "quotation_projects") compatibleColumns.Remove("organization_json");
+                if (definition.Name == "quotation_lines") compatibleColumns.Remove("group_id");
+            }
             if (manifest?.DatabaseSchemaVersion < 30 && definition.Name == "quotation_projects")
             {
                 compatibleColumns.Remove("is_medication");
@@ -795,7 +801,8 @@ public sealed class QuotationPackageService : IQuotationPackageService
         }
 
         ValidateRelationships(payload);
-        ValidateSelectedBaskets(payload);
+        var organizationReport = BuildOrganizationReport(payload);
+        QuotationOrganization.ValidateSnapshot(organizationReport);
         var project = GetRows(payload, "quotation_projects").Single();
         var projectId = ParseGuid(GetRequiredText(project, "id"), "projeto");
         var payloadProjectId = ParseGuid(
@@ -874,13 +881,28 @@ public sealed class QuotationPackageService : IQuotationPackageService
             EnsureSame(GetRequiredText(run, "project_id"), projectId, "automação/projeto");
         }
 
+        var groups = GetOptionalRows(payload, "quotation_groups");
+        var groupIds = groups.Select(group => GetRequiredText(group, "id")).ToHashSet(StringComparer.Ordinal);
+        foreach (var group in groups)
+        {
+            EnsureGuid(group, "id", "grupo");
+            EnsureSame(GetRequiredText(group, "project_id"), projectId, "grupo/projeto");
+            if (string.IsNullOrWhiteSpace(GetRequiredText(group, "name")))
+                throw new InvalidDataException("Um grupo está sem nome.");
+        }
         var lines = GetRows(payload, "quotation_lines");
+        if (groups.Any(group => !lines.Any(line => GetOptionalText(line, "group_id") == GetRequiredText(group, "id"))))
+            throw new InvalidDataException("O pacote contém um grupo vazio.");
         var lineIds = lines.Select(row => GetRequiredText(row, "id"))
             .ToHashSet(StringComparer.Ordinal);
         foreach (var line in lines)
         {
             EnsureGuid(line, "id", "item");
             EnsureSame(GetRequiredText(line, "project_id"), projectId, "item/projeto");
+            if (!QuotationQuantity.IsValid(DecimalScale.FromScaled(GetRequiredLong(line, "requested_quantity_scaled"))!.Value))
+                throw new InvalidDataException("A quantidade solicitada do item deve ser inteira: " + GetRequiredText(line, "description"));
+            if (line.ContainsKey("group_id") && GetOptionalText(line, "group_id") is { } groupId)
+                EnsureContains(groupIds, groupId, "Um item referencia um grupo ausente do pacote.");
             var runId = GetOptionalText(line, "automation_run_id");
             if (runId is not null && !runIds.Contains(runId))
             {
@@ -1043,7 +1065,7 @@ public sealed class QuotationPackageService : IQuotationPackageService
         }
     }
 
-    private static void ValidateSelectedBaskets(JsonObject payload)
+    private static QuotationProjectReport BuildOrganizationReport(JsonObject payload)
     {
         var references = GetRows(payload, "quotation_references")
             .GroupBy(row => GetRequiredText(row, "line_id"), StringComparer.Ordinal)
@@ -1101,21 +1123,18 @@ public sealed class QuotationPackageService : IQuotationPackageService
         var priceDecimalPlaces = project.ContainsKey("is_medication") &&
                                  GetRequiredLong(project, "is_medication") == 1 ? 4 : 2;
         var analyzer = new QuotationAnalyzer();
+        var analyses = new List<QuotationLineAnalysis>();
         foreach (var row in GetRows(payload, "quotation_lines"))
         {
             var line = MapLine(row);
-            if (!line.SelectionConfirmed || string.IsNullOrWhiteSpace(line.SelectedBasketKey))
-            {
-                continue;
-            }
-
             var lineKey = line.Id.ToString("N");
             var analysis = analyzer.Analyze(
                 line,
                 references.GetValueOrDefault(lineKey, []),
                 baskets.GetValueOrDefault(lineKey, []),
                 priceDecimalPlaces);
-            if (analysis.Baskets.All(basket =>
+            analyses.Add(analysis);
+            if (line.SelectionConfirmed && !string.IsNullOrWhiteSpace(line.SelectedBasketKey) && analysis.Baskets.All(basket =>
                     !string.Equals(
                         basket.Key,
                         line.SelectedBasketKey,
@@ -1126,6 +1145,20 @@ public sealed class QuotationPackageService : IQuotationPackageService
                     "pela versão atual do cálculo.");
             }
         }
+        var mappedProject = new QuotationProject(ParseGuid(GetRequiredText(project, "id"), "projeto"),
+            GetRequiredText(project, "name"), ParseDateTime(GetRequiredText(project, "created_at")),
+            ParseDateTime(GetRequiredText(project, "updated_at")))
+        {
+            IsMedication = priceDecimalPlaces == 4,
+            Organization = QuotationOrganizationSnapshot.FromJson(project.ContainsKey("organization_json") ? GetOptionalText(project, "organization_json") : null)
+        };
+        var groups = GetOptionalRows(payload, "quotation_groups").Select(row =>
+        {
+            var id = ParseGuid(GetRequiredText(row, "id"), "grupo");
+            return new QuotationGroup(id, mappedProject.Id, GetRequiredText(row, "name"),
+                analyses.Where(value => value.Line.GroupId == id).Select(value => value.Line.Id).ToArray());
+        }).ToArray();
+        return new(mappedProject, analyses) { Groups = groups };
     }
 
     private async Task<(Guid ProjectId, string ProjectName)> RemapAsCopyAsync(
@@ -1133,6 +1166,9 @@ public sealed class QuotationPackageService : IQuotationPackageService
         string originalName,
         CancellationToken cancellationToken)
     {
+        var originalReport = BuildOrganizationReport(payload);
+        var originalOrganization = originalReport.Project.Organization;
+        var organizationWasCurrent = originalOrganization is not null && !originalReport.OrganizationIsStale;
         var projectMap = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             [GetRequiredText(
@@ -1141,12 +1177,20 @@ public sealed class QuotationPackageService : IQuotationPackageService
         };
         var runMap = CreateGuidMap(GetRows(payload, "quotation_automation_runs"), "id");
         var lineMap = CreateGuidMap(GetRows(payload, "quotation_lines"), "id");
+        // IDs break alphabetical ties; preserve their relative order in a copy so applied numbers stay valid.
+        var orderedLineIds = lineMap.Keys.OrderBy(id => Guid.ParseExact(id, "N")).ToArray();
+        var orderedCopies = lineMap.Values.OrderBy(id => Guid.ParseExact(id, "N")).ToArray();
+        for (var index = 0; index < orderedLineIds.Length; index++) lineMap[orderedLineIds[index]] = orderedCopies[index];
+        var groupMap = CreateGuidMap(GetRows(payload, "quotation_groups"), "id");
         var basketMap = CreateGuidMap(GetRows(payload, "quotation_manual_baskets"), "id");
         var draftMap = CreateGuidMap(GetRows(payload, "quotation_internet_price_drafts"), "id");
 
         Remap(GetRows(payload, "quotation_projects"), "id", projectMap);
         Remap(GetRows(payload, "quotation_automation_runs"), "id", runMap);
         Remap(GetRows(payload, "quotation_automation_runs"), "project_id", projectMap);
+        Remap(GetRows(payload, "quotation_groups"), "id", groupMap);
+        Remap(GetRows(payload, "quotation_groups"), "project_id", projectMap);
+        RemapOptional(GetRows(payload, "quotation_lines"), "group_id", groupMap);
         Remap(GetRows(payload, "quotation_lines"), "id", lineMap);
         Remap(GetRows(payload, "quotation_lines"), "project_id", projectMap);
         RemapOptional(GetRows(payload, "quotation_lines"), "automation_run_id", runMap);
@@ -1195,6 +1239,34 @@ public sealed class QuotationPackageService : IQuotationPackageService
         project["created_at"] = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
         project["updated_at"] = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
         payload["projectId"] = newProjectId.ToString("N");
+        if (originalOrganization is not null)
+        {
+            static Guid Mapped(Guid id, Dictionary<string, string> map)
+            {
+                var key = id.ToString("N");
+                if (!map.TryGetValue(key, out var replacement)) map[key] = replacement = Guid.NewGuid().ToString("N");
+                return Guid.ParseExact(replacement, "N");
+            }
+            var resultMap = originalOrganization.Groups.ToDictionary(group => group.Id.ToString("N"), _ => Guid.NewGuid().ToString("N"));
+            var remapped = originalOrganization with
+            {
+                Groups = originalOrganization.Groups.Select(group => group with
+                {
+                    Id = Mapped(group.Id, resultMap), SourceGroupId = Mapped(group.SourceGroupId, groupMap),
+                    PairedGroupId = group.PairedGroupId is { } paired ? Mapped(paired, resultMap) : null
+                }).ToArray(),
+                Positions = originalOrganization.Positions.Select(position => position with
+                {
+                    LineId = Mapped(position.LineId, lineMap),
+                    ResultGroupId = position.ResultGroupId is { } groupId ? Mapped(groupId, resultMap) : null
+                }).ToArray()
+            };
+            var copiedReport = BuildOrganizationReport(payload);
+            remapped = remapped with { Signature = organizationWasCurrent
+                ? QuotationOrganization.Signature(copiedReport.Project, copiedReport.Lines, copiedReport.Groups)
+                : "stale:" + originalOrganization.Signature };
+            project["organization_json"] = remapped.ToJson();
+        }
         return (newProjectId, projectName);
     }
 
@@ -1250,6 +1322,12 @@ public sealed class QuotationPackageService : IQuotationPackageService
         JsonObject payload,
         int databaseSchemaVersion)
     {
+        if (databaseSchemaVersion < 32)
+        {
+            ((JsonObject)payload["tables"]!)["quotation_groups"] = new JsonArray();
+            foreach (var project in GetRows(payload, "quotation_projects")) project["organization_json"] = null;
+            foreach (var line in GetRows(payload, "quotation_lines")) line["group_id"] = null;
+        }
         if (databaseSchemaVersion < 31)
         {
             foreach (var project in GetRows(payload, "quotation_projects"))
@@ -1817,6 +1895,7 @@ public sealed class QuotationPackageService : IQuotationPackageService
         {
             Id = ParseGuid(GetRequiredText(row, "id"), "item"),
             ProjectId = ParseGuid(GetRequiredText(row, "project_id"), "projeto"),
+            GroupId = row.ContainsKey("group_id") ? ParseOptionalGuid(GetOptionalText(row, "group_id"), "grupo") : null,
             Description = GetRequiredText(row, "description"),
             DisplayName = row.ContainsKey("display_name")
                 ? GetRequiredText(row, "display_name")
