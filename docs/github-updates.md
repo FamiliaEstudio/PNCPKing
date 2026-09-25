@@ -13,7 +13,7 @@ A versão do formato móvel v2 é `1.2.0` e o esquema correspondente é 29.
 
 ## Publicar os preços
 
-No computador exportador, conclua **Atualizar** e use **Exportar atualizações PNCP**. A exportação contém hoje e os nove dias anteriores, mais contratações antigas cujo `global_updated_at` entrou nessa janela. CATMAT/CATSER e dados particulares não entram no arquivo.
+No computador exportador, execute **Atualizar** até onde for possível e use **Exportar atualizações PNCP**. A exportação pode ser parcial: contém os dados oficiais já concluídos de hoje e dos nove dias anteriores, mais contratações antigas cujo `global_updated_at` entrou nessa janela. CATMAT/CATSER e dados particulares não entram no arquivo.
 
 Prepare a publicação com um único pacote:
 

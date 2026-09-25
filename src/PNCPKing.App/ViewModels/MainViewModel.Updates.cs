@@ -51,7 +51,7 @@ public sealed partial class MainViewModel
             var progress = new Progress<string>(s => FileOperationProgressText = s);
             var service = new OfficialUpdateService(_calibrationService.Connections);
             var result = await Task.Run(() => service.ExportAsync(dialog.FileName, progress, ct), ct);
-            StatusText = $"Atualização v2 exportada: {result.StartDate:dd/MM/yyyy} a {result.EndDate:dd/MM/yyyy}. Pode ser aplicada diretamente a um backup.";
+            StatusText = $"Atualização v2 exportada: {result.StartDate:dd/MM/yyyy} a {result.EndDate:dd/MM/yyyy}. Pendências podem ser retomadas com Atualizar no outro PC.";
         });
     }
 
@@ -68,7 +68,7 @@ public sealed partial class MainViewModel
             try
             {
                 var result = await Task.Run(() => service.ImportAsync(dialog.FileName, progress, ct), ct);
-                StatusText = $"Atualizações importadas: {result.Applied:N0}; versões locais preservadas: {result.Skipped:N0}.";
+                StatusText = $"Atualizações importadas: {result.Applied:N0}; versões locais preservadas: {result.Skipped:N0}. Se houver pendências, use Atualizar.";
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {

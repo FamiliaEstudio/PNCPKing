@@ -101,9 +101,9 @@ O botão **Atualizar pelo GitHub**, ao lado de **Opções**, verifica novas vers
 
 **Exportar backup** mantém a opção de banco completo `.pncpking`. A transferência `.pncpupdate` é adicional e incorpora apenas dados oficiais, preservando cotações, cestas, evidências particulares e configurações do destino, observada a retenção de 11 meses.
 
-1. Conclua **Atualizar** no PC de origem; a exportação não consulta o PNCP e recusa dias, listas ou resultados incompletos.
+1. Execute **Atualizar** no PC de origem até onde for possível. A exportação não consulta o PNCP e aceita dias ainda incompletos; leva somente listas e resultados comprovadamente concluídos, além dos checkpoints de páginas diárias já gravadas.
 2. Use **Opções → Arquivo → Exportar atualizações PNCP**. O arquivo contém hoje e os nove dias anteriores, além de contratações antigas oficialmente alteradas nesse período.
-3. No outro PC, inclusive depois de restaurar qualquer backup compatível, use **Importar atualizações PNCP**. Não é necessária uma base inicial nem uma linhagem comum.
+3. No outro PC, inclusive depois de restaurar qualquer backup compatível, use **Importar atualizações PNCP** e depois **Atualizar** para continuar as pendências. Não é necessária uma base inicial nem uma linhagem comum.
 4. Uma importação cancelada conserva os blocos diários já concluídos. Reimporte o arquivo para continuar; blocos idênticos são ignorados sem extração.
 5. Registros ausentes são inseridos. Somente versões oficiais comprovadamente mais novas substituem as locais; versões iguais, ausentes, mais novas no destino ou sem ordem segura são preservadas. A importação não inicia revalidação no PNCP.
 

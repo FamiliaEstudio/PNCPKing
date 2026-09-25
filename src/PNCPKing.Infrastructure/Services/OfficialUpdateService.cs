@@ -39,9 +39,9 @@ public sealed record OfficialImportReceipt(string Checksum, bool Completed);
 public sealed record OfficialTransferStatus(IReadOnlyDictionary<string, OfficialImportReceipt> Imports);
 
 /// <summary>
-/// Creates and applies self-contained ten-day official-data packages. Export performs the
-/// expensive completeness and SQLite checks; import only authenticates bytes it must extract
-/// and merges one typed block per transaction.
+/// Creates and applies self-contained ten-day official-data packages. Export validates each
+/// completed portion and its SQLite payload; import authenticates extracted bytes and merges
+/// one typed block per transaction.
 /// </summary>
 public sealed class OfficialUpdateService
 {
@@ -115,7 +115,6 @@ public sealed class OfficialUpdateService
             using var sourceInterruption = SqliteConnectionFactory.InterruptOnCancellation(source, cancellationToken);
             await using var snapshot = source.BeginTransaction(deferred: true);
 
-            await ValidateCoverageAsync(source, snapshot, startDate, endDate, cancellationToken).ConfigureAwait(false);
             for (var date = startDate; date <= endDate; date = date.AddDays(1))
             {
                 progress?.Report($"Validando e empacotando {date:dd/MM/yyyy}…");
@@ -163,7 +162,7 @@ public sealed class OfficialUpdateService
 
             cancellationToken.ThrowIfCancellationRequested();
             if (new FileInfo(archivePath).Length >= GitHubUpdateValidation.AssetLimit)
-                throw new InvalidOperationException("A atualização resultou em 2 GiB ou mais e foi recusada. Conclua Atualizar no computador exportador e tente novamente.");
+                throw new InvalidOperationException("A atualização resultou em 2 GiB ou mais e foi recusada.");
 
             File.Move(archivePath, outputPath, overwrite: true);
             progress?.Report($"Atualização v2 exportada: {startDate:dd/MM/yyyy} a {endDate:dd/MM/yyyy}, {chunks.Count} blocos.");
@@ -242,26 +241,6 @@ public sealed class OfficialUpdateService
     // Kept as a compatibility seam for the view model. V2 never schedules PNCP revalidation.
     public Task PrepareRevalidationAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
-    private static async Task ValidateCoverageAsync(SqliteConnection source, SqliteTransaction snapshot,
-        DateOnly startDate, DateOnly endDate, CancellationToken cancellationToken)
-    {
-        await using var command = source.CreateCommand();
-        command.Transaction = snapshot;
-        command.CommandText = """
-            SELECT COUNT(*), COUNT(DISTINCT coverage_date),
-                   COALESCE(SUM(CASE WHEN status=$complete THEN 0 ELSE 1 END),0)
-              FROM coverage_day_modalities
-             WHERE coverage_date BETWEEN $start AND $end AND uf='ALL';
-            """;
-        command.Parameters.AddWithValue("$complete", CompleteCoverage);
-        command.Parameters.AddWithValue("$start", FormatDate(startDate));
-        command.Parameters.AddWithValue("$end", FormatDate(endDate));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-        if (reader.GetInt64(0) == 0 || reader.GetInt64(1) != WindowDays || reader.GetInt64(2) != 0)
-            throw IncompleteExport("a cobertura oficial dos dez dias não está completa");
-    }
-
     private static async Task<OfficialUpdateChunk> BuildChunkAsync(
         SqliteConnection source,
         SqliteTransaction snapshot,
@@ -276,34 +255,15 @@ public sealed class OfficialUpdateService
         var selector = kind == DayKind
             ? "substr(c.publication_date,1,10)=$date"
             : "substr(c.publication_date,1,10)<$start AND substr(c.global_updated_at,1,10) BETWEEN $start AND $end";
-
-        var incompleteLists = await CountAsync(source, snapshot, $"""
-            SELECT COUNT(*) FROM contracts c
-             WHERE {selector}
-               AND NOT EXISTS(
-                   SELECT 1 FROM contract_item_snapshots s
-                    WHERE s.contract_id=c.pncp_id
-                      AND s.source_global_updated_at IS c.global_updated_at
-                      AND s.item_count=(SELECT COUNT(*) FROM items i WHERE i.contract_id=c.pncp_id));
-            """, date, startDate, endDate, cancellationToken).ConfigureAwait(false);
-        if (incompleteLists != 0)
-            throw IncompleteExport($"{incompleteLists:N0} contratação(ões) do bloco {key} têm lista de itens incompleta");
-
-        var incompleteResults = await CountAsync(source, snapshot, $"""
-            SELECT COUNT(*)
-              FROM contracts c JOIN items i ON i.contract_id=c.pncp_id
-             WHERE {selector} AND i.has_result=1
-               AND (i.hydration_status<>$itemComplete OR NOT EXISTS(
-                   SELECT 1 FROM official_result_snapshots s
-                    WHERE s.contract_id=i.contract_id AND s.item_number=i.item_number
-                      AND s.parent_version IS c.global_updated_at
-                      AND s.item_version IS i.source_updated_at
-                      AND (s.result_count IS NULL OR s.result_count=(
-                          SELECT COUNT(*) FROM item_results r
-                           WHERE r.contract_id=i.contract_id AND r.item_number=i.item_number))));
-            """, date, startDate, endDate, cancellationToken, includeItemComplete: true).ConfigureAwait(false);
-        if (incompleteResults != 0)
-            throw IncompleteExport($"{incompleteResults:N0} item(ns) do bloco {key} têm resultados incompletos");
+        var validLists = $"""
+            WITH valid_lists AS MATERIALIZED (
+                SELECT s.contract_id FROM contract_item_snapshots s
+                  JOIN contracts c ON c.pncp_id=s.contract_id
+                 WHERE {selector} AND s.source_global_updated_at IS c.global_updated_at
+                   AND s.item_count=(SELECT COUNT(*) FROM items all_items
+                        WHERE all_items.contract_id=c.pncp_id)
+            )
+            """;
 
         await using var payload = await OpenPayloadAsync(payloadPath, readOnly: false, cancellationToken).ConfigureAwait(false);
         await CreatePayloadSchemaAsync(payload, cancellationToken).ConfigureAwait(false);
@@ -316,29 +276,58 @@ public sealed class OfficialUpdateService
             $"""
              SELECT s.contract_id,s.source_global_updated_at,s.item_count
                FROM contract_item_snapshots s JOIN contracts c ON c.pncp_id=s.contract_id
-              WHERE {selector} ORDER BY s.contract_id
+              WHERE {selector} AND s.source_global_updated_at IS c.global_updated_at
+                AND s.item_count=(SELECT COUNT(*) FROM items i WHERE i.contract_id=c.pncp_id)
+              ORDER BY s.contract_id
              """, "item_snapshots", ["contract_id", "parent_version", "item_count"], date, startDate, endDate,
             cancellationToken).ConfigureAwait(false);
         var items = await CopyAsync(source, snapshot, payload, transaction,
             $"""
-             SELECT {Join("i", ItemColumns)} FROM items i JOIN contracts c ON c.pncp_id=i.contract_id
-              WHERE {selector} ORDER BY i.contract_id,i.item_number
+             {validLists}
+             SELECT {Join("i", ItemColumns)} FROM valid_lists list
+               JOIN items i ON i.contract_id=list.contract_id
+              ORDER BY i.contract_id,i.item_number
              """, "items", ItemColumns, date, startDate, endDate, cancellationToken).ConfigureAwait(false);
         var resultSnapshots = await CopyAsync(source, snapshot, payload, transaction,
             $"""
+             {validLists}
              SELECT i.contract_id,i.item_number,c.global_updated_at,i.source_updated_at,
                     (SELECT COUNT(*) FROM item_results r
                       WHERE r.contract_id=i.contract_id AND r.item_number=i.item_number)
-               FROM items i JOIN contracts c ON c.pncp_id=i.contract_id
-              WHERE {selector} ORDER BY i.contract_id,i.item_number
+               FROM valid_lists list JOIN items i ON i.contract_id=list.contract_id
+               JOIN contracts c ON c.pncp_id=i.contract_id
+              WHERE (i.has_result=0 AND NOT EXISTS(
+                       SELECT 1 FROM item_results r
+                        WHERE r.contract_id=i.contract_id AND r.item_number=i.item_number))
+                     OR (i.has_result=1 AND i.hydration_status=$itemComplete AND EXISTS(
+                       SELECT 1 FROM official_result_snapshots proof
+                        WHERE proof.contract_id=i.contract_id AND proof.item_number=i.item_number
+                          AND proof.parent_version IS c.global_updated_at
+                          AND proof.item_version IS i.source_updated_at
+                          AND proof.result_count=(SELECT COUNT(*) FROM item_results r
+                            WHERE r.contract_id=i.contract_id AND r.item_number=i.item_number)))
+              ORDER BY i.contract_id,i.item_number
              """, "result_snapshots", ["contract_id", "item_number", "parent_version", "item_version", "result_count"],
-            date, startDate, endDate, cancellationToken).ConfigureAwait(false);
+            date, startDate, endDate, cancellationToken, includeItemComplete: true).ConfigureAwait(false);
         var results = await CopyAsync(source, snapshot, payload, transaction,
             $"""
-             SELECT {Join("r", ResultColumns)}
-               FROM item_results r JOIN contracts c ON c.pncp_id=r.contract_id
-              WHERE {selector} ORDER BY r.contract_id,r.item_number,r.result_sequence
-             """, "item_results", ResultColumns, date, startDate, endDate, cancellationToken).ConfigureAwait(false);
+             {validLists}, valid_results AS MATERIALIZED (
+                 SELECT i.contract_id,i.item_number FROM valid_lists list
+                   JOIN items i ON i.contract_id=list.contract_id
+                   JOIN contracts c ON c.pncp_id=i.contract_id
+                   JOIN official_result_snapshots proof
+                     ON proof.contract_id=i.contract_id AND proof.item_number=i.item_number
+                  WHERE i.has_result=1 AND i.hydration_status=$itemComplete
+                    AND proof.parent_version IS c.global_updated_at
+                    AND proof.item_version IS i.source_updated_at
+                    AND proof.result_count=(SELECT COUNT(*) FROM item_results all_results
+                        WHERE all_results.contract_id=i.contract_id AND all_results.item_number=i.item_number)
+             )
+             SELECT {Join("r", ResultColumns)} FROM valid_results valid
+               JOIN item_results r ON r.contract_id=valid.contract_id AND r.item_number=valid.item_number
+              ORDER BY r.contract_id,r.item_number,r.result_sequence
+             """, "item_results", ResultColumns, date, startDate, endDate, cancellationToken,
+            includeItemComplete: true).ConfigureAwait(false);
         var coverage = kind == DayKind
             ? await CopyAsync(source, snapshot, payload, transaction,
                 """
@@ -349,6 +338,24 @@ public sealed class OfficialUpdateService
                 """, "coverage", ["coverage_date", "modality_id", "uf", "status", "records_count"],
                 date, startDate, endDate, cancellationToken, includeCoverageComplete: true).ConfigureAwait(false)
             : 0;
+        if (kind == DayKind)
+        {
+            await CopyAsync(source, snapshot, payload, transaction,
+                $"""
+                SELECT partition_key,start_date,modality_id,next_page,total_pages
+                  FROM sync_partitions
+                 WHERE mode=0 AND start_date=$date AND end_date=$date AND uf='ALL'
+                   AND completed=0 AND next_page>1
+                   AND partition_key='Publication:' || replace($date,'-','') || ':' ||
+                       replace($date,'-','') || ':m' || modality_id || ':ufALL'
+                   AND NOT EXISTS(SELECT 1 FROM coverage_day_modalities c
+                        WHERE c.coverage_date=$date AND c.modality_id=sync_partitions.modality_id
+                          AND c.uf='ALL' AND c.status IN ({CompleteCoverage},{(int)CoverageStatus.AssumedComplete}))
+                 ORDER BY modality_id
+                """, "publication_checkpoints",
+                ["partition_key", "start_date", "modality_id", "next_page", "total_pages"],
+                date, startDate, endDate, cancellationToken).ConfigureAwait(false);
+        }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 
         await using (var foreignKeys = payload.CreateCommand())
@@ -385,13 +392,15 @@ public sealed class OfficialUpdateService
         DateOnly startDate,
         DateOnly endDate,
         CancellationToken cancellationToken,
-        bool includeCoverageComplete = false)
+        bool includeCoverageComplete = false,
+        bool includeItemComplete = false)
     {
         await using var select = source.CreateCommand();
         select.Transaction = snapshot;
         select.CommandText = selectSql;
         AddSelectorParameters(select, date, startDate, endDate);
         if (includeCoverageComplete) select.Parameters.AddWithValue("$coverageComplete", CompleteCoverage);
+        if (includeItemComplete) select.Parameters.AddWithValue("$itemComplete", CompleteItem);
         await using var reader = await select.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 
         await using var insert = payload.CreateCommand();
@@ -408,18 +417,6 @@ public sealed class OfficialUpdateService
             count++;
         }
         return count;
-    }
-
-    private static async Task<long> CountAsync(SqliteConnection source, SqliteTransaction snapshot, string sql,
-        DateOnly? date, DateOnly startDate, DateOnly endDate, CancellationToken cancellationToken,
-        bool includeItemComplete = false)
-    {
-        await using var command = source.CreateCommand();
-        command.Transaction = snapshot;
-        command.CommandText = sql;
-        AddSelectorParameters(command, date, startDate, endDate);
-        if (includeItemComplete) command.Parameters.AddWithValue("$itemComplete", CompleteItem);
-        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
     }
 
     private static void AddSelectorParameters(SqliteCommand command, DateOnly? date, DateOnly startDate, DateOnly endDate)
@@ -468,6 +465,9 @@ public sealed class OfficialUpdateService
             CREATE TABLE coverage(
                 coverage_date TEXT NOT NULL,modality_id INTEGER NOT NULL,uf TEXT NOT NULL,status INTEGER NOT NULL,
                 records_count INTEGER,PRIMARY KEY(coverage_date,modality_id,uf));
+            CREATE TABLE publication_checkpoints(
+                partition_key TEXT PRIMARY KEY,start_date TEXT NOT NULL,modality_id INTEGER NOT NULL,
+                next_page INTEGER NOT NULL,total_pages INTEGER);
             """;
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -480,7 +480,8 @@ public sealed class OfficialUpdateService
                      ("contracts", "pncp_id"), ("item_snapshots", "contract_id"),
                      ("items", "contract_id,item_number"), ("result_snapshots", "contract_id,item_number"),
                      ("item_results", "contract_id,item_number,result_sequence"),
-                     ("coverage", "coverage_date,modality_id,uf")
+                     ("coverage", "coverage_date,modality_id,uf"),
+                     ("publication_checkpoints", "partition_key")
                  })
         {
             Append(hash, table);
@@ -677,6 +678,21 @@ public sealed class OfficialUpdateService
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
+            await using (var hasCheckpoints = destination.CreateCommand())
+            {
+                hasCheckpoints.Transaction = transaction;
+                hasCheckpoints.CommandText = "SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name='publication_checkpoints')";
+                if (Convert.ToInt64(await hasCheckpoints.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                        CultureInfo.InvariantCulture) != 0)
+                {
+                    command.CommandText = MergePublicationCheckpointsSql;
+                    command.Parameters.AddWithValue("$coveragePartial", (int)CoverageStatus.Partial);
+                    command.Parameters.AddWithValue("$coverageAssumedComplete", (int)CoverageStatus.AssumedComplete);
+                    command.Parameters.AddWithValue("$checkpointPartial", (int)SyncPartitionStatus.Partial);
+                    await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+
             await using var counts = destination.CreateCommand();
             counts.Transaction = transaction;
             counts.CommandText = """
@@ -855,6 +871,37 @@ public sealed class OfficialUpdateService
             completed=1,imported_at=excluded.imported_at;
         """;
 
+    private const string MergePublicationCheckpointsSql = """
+        INSERT INTO sync_partitions(partition_key,next_page,completed,updated_at,mode,start_date,end_date,
+                                    modality_id,uf,total_pages,status,last_error,next_retry_at)
+        SELECT p.partition_key,p.next_page,0,$now,0,p.start_date,p.start_date,p.modality_id,'ALL',
+               p.total_pages,$checkpointPartial,NULL,NULL
+          FROM incoming.publication_checkpoints p
+         WHERE p.next_page>1
+           AND p.partition_key='Publication:' || replace(p.start_date,'-','') || ':' ||
+               replace(p.start_date,'-','') || ':m' || p.modality_id || ':ufALL'
+           AND NOT EXISTS(SELECT 1 FROM coverage_day_modalities c
+                WHERE c.coverage_date=p.start_date AND c.modality_id=p.modality_id AND c.uf='ALL'
+                  AND c.status IN ($coverageComplete,$coverageAssumedComplete))
+         ON CONFLICT(partition_key) DO UPDATE SET
+             next_page=MAX(sync_partitions.next_page,excluded.next_page),
+             total_pages=COALESCE(sync_partitions.total_pages,excluded.total_pages),
+             status=$checkpointPartial,last_error=NULL,next_retry_at=NULL,updated_at=$now
+         WHERE sync_partitions.completed=0;
+
+        INSERT INTO coverage_day_modalities(coverage_date,modality_id,uf,status,records_count,updated_at,last_error)
+        SELECT p.start_date,p.modality_id,'ALL',$coveragePartial,NULL,$now,NULL
+          FROM incoming.publication_checkpoints p
+         WHERE p.next_page>1
+           AND p.partition_key='Publication:' || replace(p.start_date,'-','') || ':' ||
+               replace(p.start_date,'-','') || ':m' || p.modality_id || ':ufALL'
+           AND NOT EXISTS(SELECT 1 FROM sync_partitions existing
+                WHERE existing.partition_key=p.partition_key AND existing.completed=1)
+         ON CONFLICT(coverage_date,modality_id,uf) DO UPDATE SET
+             status=$coveragePartial,updated_at=$now,last_error=NULL
+         WHERE coverage_day_modalities.status NOT IN ($coverageComplete,$coverageAssumedComplete);
+        """;
+
     private async Task CompletePackageAsync(string packageId, long applied, long skipped,
         CancellationToken cancellationToken)
     {
@@ -901,9 +948,6 @@ public sealed class OfficialUpdateService
 
     private static long CountRows(OfficialUpdateChunk chunk) => checked(
         chunk.Contracts + chunk.ItemSnapshots + chunk.Items + chunk.ResultSnapshots + chunk.Results + chunk.CoverageCells);
-
-    private static InvalidOperationException IncompleteExport(string detail) => new(
-        $"Não foi possível criar a atualização: {detail}. Conclua Atualizar no computador exportador e tente novamente.");
 
     private static string FormatDate(DateOnly date) => date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 

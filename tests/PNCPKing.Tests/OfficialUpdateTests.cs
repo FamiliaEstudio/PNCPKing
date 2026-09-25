@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using PNCPKing.Core.Models;
+using PNCPKing.Infrastructure.Data;
 using PNCPKing.Infrastructure.Services;
 
 namespace PNCPKing.Tests;
@@ -88,26 +89,68 @@ public sealed class OfficialUpdateTests
     }
 
     [Fact]
-    public async Task ExportRefusesIncompleteCoverageListsAndResults()
+    public async Task PartialExportTransfersCompletedWorkAndResumablePublicationPage()
     {
-        await using var database = await TestDatabase.CreateAsync();
-        var service = new OfficialUpdateService(database.Repository.DatabasePath);
-        var path = Path.Combine(database.Directory, "invalid.pncpupdate");
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => service.ExportAsync(path));
-        Assert.Contains("Conclua Atualizar", error.Message);
-        Assert.False(File.Exists(path));
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        await source.Repository.EnsureCoverageWindowAsync(Start, Today, [6]);
+        await source.Repository.SetCoverageStatusAsync(Start, Today.AddDays(-1), 6, "ALL", CoverageStatus.Complete);
+        await source.Repository.SetCoverageStatusAsync(Today, Today, 6, "ALL", CoverageStatus.Partial);
 
-        await CompleteCoverageAsync(database);
-        var contract = Contract("missing-list", Today, Today);
-        await database.Repository.UpsertContractsAsync([contract]);
-        error = await Assert.ThrowsAsync<InvalidOperationException>(() => service.ExportAsync(path));
-        Assert.Contains("lista de itens", error.Message);
+        var missingList = Contract("missing-list", Today, Today);
+        var pendingResult = Contract("pending-result", Today, Today);
+        var completeResult = Contract("complete-result", Today, Today);
+        await source.Repository.UpsertContractsAsync([missingList, pendingResult, completeResult]);
+        await source.Repository.UpsertItemsAsync(pendingResult.PncpId, [PriceCacheTests.Item(pendingResult, 1)], false);
+        await source.Repository.UpsertItemsAsync(completeResult.PncpId, [PriceCacheTests.Item(completeResult, 1)], false);
+        await source.Repository.ReplaceItemResultsAsync(completeResult.PncpId, 1,
+            [PriceCacheTests.Result(completeResult, 1, 1, true)]);
+        await new SqliteQuotationRepository(source.Repository.DatabasePath).CreateProjectAsync("Cotação privada");
 
-        var item = PriceCacheTests.Item(contract, 1);
-        await database.Repository.UpsertItemsAsync(contract.PncpId, [item], false);
-        error = await Assert.ThrowsAsync<InvalidOperationException>(() => service.ExportAsync(path));
-        Assert.Contains("resultados incompletos", error.Message);
-        Assert.False(File.Exists(path));
+        var key = $"Publication:{Today:yyyyMMdd}:{Today:yyyyMMdd}:m6:ufALL";
+        await source.Repository.SavePartitionCheckpointAsync(new SyncPartitionCheckpoint
+        {
+            PartitionKey = key,
+            Mode = SyncMode.Publication,
+            StartDate = Today,
+            EndDate = Today,
+            ModalityId = 6,
+            Uf = "ALL",
+            NextPage = 3,
+            TotalPages = 5,
+            Status = SyncPartitionStatus.Partial
+        });
+
+        var path = Path.Combine(source.Directory, "partial.pncpupdate");
+        var manifest = await new OfficialUpdateService(source.Repository.DatabasePath).ExportAsync(path);
+        var current = manifest.Chunks.Single(chunk => chunk.Date == Today);
+        Assert.Equal(3, current.Contracts);
+        Assert.Equal(2, current.ItemSnapshots);
+        Assert.Equal(2, current.Items);
+        Assert.Equal(1, current.ResultSnapshots);
+        Assert.Equal(1, current.Results);
+        Assert.Equal(0, current.CoverageCells);
+
+        await new OfficialUpdateService(destination.Repository.DatabasePath).ImportAsync(path);
+        Assert.NotNull(await destination.Repository.GetContractAsync(missingList.PncpId));
+        Assert.Null(await destination.Repository.GetItemSnapshotAsync(missingList.PncpId));
+        Assert.NotNull(await destination.Repository.GetItemSnapshotAsync(pendingResult.PncpId));
+        Assert.Equal(ItemHydrationStatus.Stale,
+            (await destination.Repository.GetItemAsync(pendingResult.PncpId, 1))!.HydrationStatus);
+        Assert.Single((await destination.Repository.GetCachedItemResultsAsync(completeResult.PncpId, 1))!.Results);
+        Assert.Equal(3, await destination.Repository.GetPartitionNextPageAsync(key));
+        Assert.Contains(await destination.Repository.GetIncompleteCoverageAsync(Today, Today, 100, true),
+            cell => cell.Date == Today && cell.ModalityId == 6);
+        Assert.True(await destination.Repository.IsCoverageCompleteAsync(Start, Today.AddDays(-1)));
+        Assert.False(await destination.Repository.IsCoverageCompleteAsync(Today, Today));
+        Assert.Empty(await new SqliteQuotationRepository(destination.Repository.DatabasePath).GetProjectsAsync());
+
+        await using var completeDestination = await TestDatabase.CreateAsync();
+        await completeDestination.Repository.EnsureCoverageWindowAsync(Today, Today, [6]);
+        await completeDestination.Repository.SetCoverageStatusAsync(Today, Today, 6, "ALL", CoverageStatus.Complete);
+        await new OfficialUpdateService(completeDestination.Repository.DatabasePath).ImportAsync(path);
+        Assert.True(await completeDestination.Repository.IsCoverageCompleteAsync(Today, Today));
+        Assert.Null(await completeDestination.Repository.GetPartitionNextPageAsync(key));
     }
 
     [Fact]

@@ -8,15 +8,15 @@ O formato v2 foi desenhado para que o computador receptor, inclusive com HD lent
 
 Cada exportação usa a data local do computador de origem e inclui exatamente hoje e os nove dias anteriores. Há um SQLite tipado por dia de publicação e, quando necessário, um décimo primeiro bloco para contratações publicadas antes da janela mas oficialmente alteradas nela.
 
-Cada bloco pode conter contratações, snapshot da lista completa de itens, itens, snapshots de conjuntos completos de resultados, resultados e cobertura diária. Listas e resultados vazios são provas completas e atômicas. CATMAT/CATSER, cotações, cestas, evidências, configurações, FTS e estados operacionais não são transportados.
+Cada bloco pode conter contratações já recebidas, snapshots de listas completas de itens, itens dessas listas, snapshots de resultados concluídos, resultados e células de cobertura concluídas. A exportação parcial também leva checkpoints de páginas de publicação diária que já foram gravadas. Listas e resultados vazios são provas completas e atômicas. CATMAT/CATSER, cotações, cestas, evidências, configurações, FTS e estados operacionais particulares não são transportados.
 
 O manifesto contém período, geração, validação, identidade do pacote, formato, esquema, contagens e, para cada bloco, chave, tipo, nome, tamanho, SHA-256 e digest lógico.
 
 ## Exportação
 
-A exportação apenas empacota dados já salvos. Ela exige cobertura oficialmente concluída nos dez dias, snapshots de itens compatíveis com a versão da contratação e resultados completos compatíveis com as versões do pai e do item. Relações, chaves e contagens são verificadas. Cada SQLite gerado passa por `foreign_key_check` e `integrity_check` antes da compactação `SmallestSize`.
+A exportação apenas empacota dados já salvos e pode ocorrer com o dia atual ou outros dias incompletos. Contratações disponíveis são incluídas; listas e resultados entram somente quando há prova de conclusão compatível com a versão da contratação e do item. Células de cobertura pendentes não são marcadas como concluídas no destino. Checkpoints diários permitem retomar a página seguinte já gravada; sem checkpoint, a modalidade recomeça pela primeira página. Checkpoints de verificação global não são transferidos porque dependem da base anterior de cada computador; o destino usa sua própria última sincronização. Relações, chaves e contagens do conteúdo concluído são verificadas. Cada SQLite gerado passa por `foreign_key_check` e `integrity_check` no exportador antes da compactação `SmallestSize`.
 
-Se faltar qualquer prova, nenhum arquivo final é publicado e a mensagem orienta concluir **Atualizar** na origem. O arquivo final também é recusado atomicamente se atingir 2 GiB.
+O arquivo final é recusado atomicamente se atingir 2 GiB.
 
 ## Importação
 
@@ -31,6 +31,7 @@ As regras de conciliação são:
 - substituir listas e resultados somente com versões compatíveis e posteriores, ou completar dados comprovadamente ausentes;
 - preservar o destino quando a versão recebida for igual, ausente, mais antiga ou não puder ordenar com segurança conteúdo divergente;
 - gravar cobertura e recibo somente depois dos dados, na mesma transação.
+- aplicar checkpoints de publicação parcial sem sobrescrever trabalho já concluído no destino; **Atualizar** retoma as lacunas, listas e resultados restantes.
 
 Gatilhos normais mantêm FTS, estatísticas e índices derivados apenas para registros efetivamente alterados. Cancelamento ou falha reverte o bloco corrente; a retomada ignora os anteriores. Reimportar o mesmo pacote depende apenas do manifesto e dos recibos e não extrai bancos.
 
