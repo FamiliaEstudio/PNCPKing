@@ -3735,7 +3735,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     {
         var profileChoice = MessageBox.Show(
             "Escolha o perfil do backup:\n\n" +
-            "SIM — Completo (recomendado): inclui contratações, itens, preços, snapshots e checkpoints.\n\n" +
+            "SIM — Completo: inclui contratações, itens, preços, snapshots e checkpoints. " +
+            "Você escolherá se leva as cotações.\n\n" +
             "NÃO — Compacto: preserva os dados permanentes, mas itens e preços reconstruíveis precisarão ser carregados novamente.\n\n" +
             "CANCELAR — não exportar.",
             "Perfil do backup .pncpking",
@@ -3747,15 +3748,31 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        var profile = profileChoice == MessageBoxResult.Yes
-            ? BackupProfile.Full
-            : BackupProfile.Compact;
+        var profile = BackupProfile.Compact;
+        if (profileChoice == MessageBoxResult.Yes)
+        {
+            var quotationsChoice = MessageBox.Show(
+                "O backup completo deve incluir as cotações?\n\n" +
+                "SIM — Completo com cotações, para recuperação dos seus dados.\n\n" +
+                "NÃO — Completo sem cotações, para iniciar um banco em outro PC.\n\n" +
+                "CANCELAR — não exportar.",
+                "Cotações no backup completo",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Question,
+                MessageBoxResult.Yes);
+            if (quotationsChoice == MessageBoxResult.Cancel) return;
+            profile = quotationsChoice == MessageBoxResult.Yes
+                ? BackupProfile.Full
+                : BackupProfile.FullWithoutQuotations;
+        }
         var dialog = new SaveFileDialog
         {
             Title = "Exportar backup do PNCP King",
             Filter = "Backup PNCP King (*.pncpking)|*.pncpking",
             DefaultExt = ".pncpking",
-            FileName = $"PNCPKing-{DateTime.Today:yyyyMMdd}.pncpking"
+            FileName = profile == BackupProfile.FullWithoutQuotations
+                ? $"PNCPKing-sem-cotacoes-{DateTime.Today:yyyyMMdd}.pncpking"
+                : $"PNCPKing-{DateTime.Today:yyyyMMdd}.pncpking"
         };
         if (dialog.ShowDialog() != true)
         {
@@ -3813,9 +3830,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        var profileLabel = profile == BackupProfile.Full
-            ? "Completo — recomendado"
-            : "Compacto — itens/preços serão reconstruídos";
+        var profileLabel = profile switch
+        {
+            BackupProfile.Full => "Completo com cotações",
+            BackupProfile.FullWithoutQuotations => "Completo sem cotações",
+            _ => "Compacto — itens/preços serão reconstruídos"
+        };
         if (MessageBox.Show(
                 "PRÉVIA DO BACKUP\n\n" +
                 $"Perfil: {profileLabel}\n" +
@@ -3950,7 +3970,13 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        var profile = inspection.Profile?.ToString() ?? "legado";
+        var profile = inspection.Profile switch
+        {
+            BackupProfile.Full => "Completo com cotações",
+            BackupProfile.FullWithoutQuotations => "Completo sem cotações — somente para banco sem cotações",
+            BackupProfile.Compact => "Compacto com cotações",
+            _ => "Legado"
+        };
         if (MessageBox.Show(
                 "IMPORTAR BACKUP VALIDADO\n\n" +
                 $"Arquivo: {FormatBytes(inspection.ArchiveBytes)}\n" +

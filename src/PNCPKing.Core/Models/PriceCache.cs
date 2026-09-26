@@ -200,5 +200,6 @@ public sealed record PriceCacheLocalCursor(
 public enum BackupProfile
 {
     Compact = 0,
-    Full = 1
+    Full = 1,
+    FullWithoutQuotations = 2
 }

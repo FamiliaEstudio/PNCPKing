@@ -13,7 +13,7 @@ public sealed class BackupService(
     IContractRepository repository,
     IPerformanceTelemetry? performance = null)
 {
-    private const int CurrentArchiveFormatVersion = 2;
+    private const int CurrentArchiveFormatVersion = 3;
     private const long Fat32MaximumFileBytes = 4L * 1024 * 1024 * 1024 - 1;
     private const long ImportSafetyReserveBytes = 1L * 1024 * 1024 * 1024;
     private const long ArchiveSafetyReserveBytes = 64L * 1024 * 1024;
@@ -49,6 +49,7 @@ public sealed class BackupService(
         BackupProfile profile,
         CancellationToken cancellationToken = default)
     {
+        if (!Enum.IsDefined(profile)) throw new ArgumentOutOfRangeException(nameof(profile));
         destinationPath = NormalizeBackupPath(destinationPath);
         var destinationDirectory = Path.GetDirectoryName(Path.GetFullPath(destinationPath))!;
         var databaseBytes = File.Exists(repository.DatabasePath)
@@ -56,12 +57,14 @@ public sealed class BackupService(
             : 0L;
         var snapshot = await ReadSnapshotMetadataAsync(repository.DatabasePath, cancellationToken)
             .ConfigureAwait(false);
-        var evidence = await ReadReferencedEvidenceAssetsAsync(repository.DatabasePath, cancellationToken)
-            .ConfigureAwait(false);
+        var evidence = profile == BackupProfile.FullWithoutQuotations
+            ? []
+            : await ReadReferencedEvidenceAssetsAsync(repository.DatabasePath, cancellationToken)
+                .ConfigureAwait(false);
         var evidenceBytes = evidence.Aggregate(
             0L,
             (total, asset) => AddSaturated(total, asset.ByteLength));
-        var stagingWorkingBytes = profile == BackupProfile.Compact
+        var stagingWorkingBytes = profile is BackupProfile.Compact or BackupProfile.FullWithoutQuotations
             ? AddSaturated(databaseBytes, databaseBytes, ImportSafetyReserveBytes)
             : AddSaturated(databaseBytes, ImportSafetyReserveBytes);
         var destinationRequiredBytes = AddSaturated(
@@ -197,6 +200,16 @@ public sealed class BackupService(
                 await CompactSnapshotAsync(snapshotPath, cancellationToken).ConfigureAwait(false);
                 compactSpan.Complete(bytes: new FileInfo(snapshotPath).Length);
             }
+            else if (profile == BackupProfile.FullWithoutQuotations)
+            {
+                ReportExport(
+                    progress,
+                    BackupExportStage.Compacting,
+                    30,
+                    "Removendo cotações somente do snapshot…",
+                    isIndeterminate: true);
+                await RemoveSnapshotQuotationsAsync(snapshotPath, cancellationToken).ConfigureAwait(false);
+            }
 
             ReportExport(
                 progress,
@@ -285,7 +298,8 @@ public sealed class BackupService(
 
                 var manifest = new DatasetManifest
                 {
-                    ArchiveFormatVersion = CurrentArchiveFormatVersion,
+                    ArchiveFormatVersion = profile == BackupProfile.FullWithoutQuotations
+                        ? CurrentArchiveFormatVersion : 2,
                     SchemaVersion = SqliteContractRepository.CurrentSchemaVersion,
                     AppVersion = typeof(BackupService).Assembly.GetName().Version?.ToString() ?? "1.0.0",
                     StartDate = snapshotMetadata.StartDate,
@@ -309,7 +323,7 @@ public sealed class BackupService(
                         })
                         .ToArray(),
                     BackupProfile = profile,
-                    ContainsPriceCache = profile == BackupProfile.Full &&
+                    ContainsPriceCache = profile != BackupProfile.Compact &&
                                          snapshotMetadata.PriceCacheContracts > 0,
                     PriceCacheContractCount = snapshotMetadata.PriceCacheContracts,
                     PriceCacheItemCount = snapshotMetadata.Items,
@@ -492,6 +506,10 @@ public sealed class BackupService(
         CleanupStaleTemporaryDirectories(TimeSpan.FromMinutes(5));
         CleanupStaleDatabaseStagingDirectories(TimeSpan.FromHours(24));
         var inspection = await InspectAsync(sourcePath, cancellationToken).ConfigureAwait(false);
+        if (inspection.Profile == BackupProfile.FullWithoutQuotations)
+        {
+            await EnsureNoDestinationQuotationsAsync(cancellationToken).ConfigureAwait(false);
+        }
         if (!inspection.HasEnoughSpace)
         {
             throw new IOException(
@@ -649,6 +667,11 @@ public sealed class BackupService(
                 BackupImportStage.CheckingIntegrity,
                 58,
                 "Integridade confirmada na origem e protegida pelo checksum SHA-256.");
+            if (manifest.BackupProfile == BackupProfile.FullWithoutQuotations &&
+                await HasQuotationRowsAsync(importedDatabase, cancellationToken).ConfigureAwait(false))
+            {
+                throw new InvalidDataException("O backup marcado como sem cotações contém dados de cotação.");
+            }
 
             Report(
                 progress,
@@ -743,6 +766,10 @@ public sealed class BackupService(
             cancellationToken.ThrowIfCancellationRequested();
             await repository.CheckpointWalAsync(cancellationToken).ConfigureAwait(false);
             SqliteConnection.ClearAllPools();
+            if (manifest.BackupProfile == BackupProfile.FullWithoutQuotations)
+            {
+                await EnsureNoDestinationQuotationsAsync(cancellationToken).ConfigureAwait(false);
+            }
             var recoverableBackup = BuildRecoveryPath();
             DeleteSidecar(repository.DatabasePath, "-wal");
             DeleteSidecar(repository.DatabasePath, "-shm");
@@ -941,6 +968,88 @@ public sealed class BackupService(
         await source.OpenAsync(cancellationToken).ConfigureAwait(false);
         await destination.OpenAsync(cancellationToken).ConfigureAwait(false);
         source.BackupDatabase(destination);
+    }
+
+    private static async Task RemoveSnapshotQuotationsAsync(
+        string databasePath,
+        CancellationToken cancellationToken)
+    {
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadWrite,
+            Pooling = false,
+            ForeignKeys = true
+        }.ToString();
+        await using (var connection = new SqliteConnection(connectionString))
+        {
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using (var journal = connection.CreateCommand())
+            {
+                journal.CommandText = "PRAGMA journal_mode=DELETE;";
+                var mode = await journal.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+                if (!string.Equals(Convert.ToString(mode, CultureInfo.InvariantCulture),
+                        "delete", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Não foi possível consolidar o snapshot sem cotações.");
+            }
+            await using (var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false))
+            {
+                await using var remove = connection.CreateCommand();
+                remove.Transaction = (SqliteTransaction)transaction;
+                remove.CommandText = """
+                    DELETE FROM quotation_projects;
+                    DELETE FROM quotation_internet_evidence_assets;
+                    """;
+                await remove.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            await using var vacuum = connection.CreateCommand();
+            vacuum.CommandText = "VACUUM;";
+            await vacuum.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        if (File.Exists(databasePath + "-wal") ||
+            await HasQuotationRowsAsync(databasePath, cancellationToken).ConfigureAwait(false))
+            throw new InvalidDataException("O snapshot ainda contém dados de cotação.");
+    }
+
+    private async Task EnsureNoDestinationQuotationsAsync(CancellationToken cancellationToken)
+    {
+        if (await HasQuotationRowsAsync(repository.DatabasePath, cancellationToken).ConfigureAwait(false))
+            throw new InvalidOperationException(
+                "Este banco já contém cotações. O backup sem cotações é apenas para iniciar um banco novo; " +
+                "para atualizar este computador, use Atualizar pelo GitHub ou Importar atualizações PNCP.");
+    }
+
+    private static async Task<bool> HasQuotationRowsAsync(
+        string databasePath,
+        CancellationToken cancellationToken)
+    {
+        if (!File.Exists(databasePath)) return false;
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false
+        }.ToString();
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        var tables = new List<string>();
+        await using (var names = connection.CreateCommand())
+        {
+            names.CommandText = "SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'quotation_*';";
+            await using var reader = await names.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                tables.Add(reader.GetString(0));
+        }
+        foreach (var table in tables)
+        {
+            await using var check = connection.CreateCommand();
+            check.CommandText = $"SELECT 1 FROM \"{table.Replace("\"", "\"\"")}\" LIMIT 1;";
+            if (await check.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null)
+                return true;
+        }
+        return false;
     }
 
     private static async Task CompactSnapshotAsync(
@@ -1306,6 +1415,11 @@ public sealed class BackupService(
         {
             throw new InvalidDataException("O manifesto contém metadados de banco inválidos.");
         }
+        if (manifest.BackupProfile is { } profile && !Enum.IsDefined(profile))
+            throw new InvalidDataException("O manifesto contém um perfil de backup inválido.");
+        if ((manifest.ArchiveFormatVersion == 3) !=
+            (manifest.BackupProfile == BackupProfile.FullWithoutQuotations))
+            throw new InvalidDataException("O formato do backup não corresponde ao perfil declarado.");
     }
 
     private static string ResolveEvidencePath(string dataFolder, string relativePath)

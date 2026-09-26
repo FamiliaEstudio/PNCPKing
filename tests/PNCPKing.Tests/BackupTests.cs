@@ -11,6 +11,65 @@ namespace PNCPKing.Tests;
 
 public sealed class BackupTests
 {
+    [Fact]
+    public async Task FullBackupWithoutQuotationsKeepsHistoryButCannotReplaceLocalQuotations()
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var contract = PriceCacheTests.RecentContract("shared-history", today, 1);
+        await source.Repository.UpsertContractsAsync([contract]);
+        await source.Repository.UpsertItemsAsync(contract.PncpId, [PriceCacheTests.Item(contract, 1)], false);
+        await source.Repository.ReplaceItemResultsAsync(contract.PncpId, 1,
+            [PriceCacheTests.Result(contract, 1, 1, true)]);
+        var sourceQuotations = new SqliteQuotationRepository(source.Repository.DatabasePath);
+        var sourceProject = await sourceQuotations.CreateProjectAsync("PrivateQuotationDoNotDistribute");
+        await sourceQuotations.CreateLineAsync(sourceProject.Id,
+            new QuotationLineInput("PrivateItemDoNotDistribute", 1m, "unidade", null, null));
+        var path = Path.Combine(source.Directory, "history-without-quotations.pncpking");
+
+        await new BackupService(source.Repository).ExportAsync(path, BackupProfile.FullWithoutQuotations);
+
+        Assert.Single(await sourceQuotations.GetProjectsAsync());
+        using (var archive = ZipFile.OpenRead(path))
+        {
+            var manifest = await ReadManifestAsync(path);
+            Assert.Equal(3, manifest.ArchiveFormatVersion);
+            Assert.Equal(BackupProfile.FullWithoutQuotations, manifest.BackupProfile);
+            Assert.Empty(manifest.EvidenceAssets);
+            await using (var entry = archive.GetEntry("data.db")!.Open())
+            {
+                using var bytes = new MemoryStream();
+                await entry.CopyToAsync(bytes);
+                Assert.True(bytes.GetBuffer().AsSpan(0, (int)bytes.Length)
+                    .IndexOf("PrivateQuotationDoNotDistribute"u8) < 0);
+            }
+            var snapshot = Path.Combine(source.Directory, "distributed.db");
+            archive.GetEntry("data.db")!.ExtractToFile(snapshot);
+            Assert.Empty(await new SqliteQuotationRepository(snapshot).GetProjectsAsync());
+            await using (var connection = new SqliteConnection($"Data Source={snapshot};Mode=ReadOnly;Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await using var count = connection.CreateCommand();
+                count.CommandText = "SELECT COUNT(*) FROM quotation_lines;";
+                Assert.Equal(0L, await count.ExecuteScalarAsync());
+            }
+        }
+
+        var destinationQuotations = new SqliteQuotationRepository(destination.Repository.DatabasePath);
+        var localProject = await destinationQuotations.CreateProjectAsync("Cotação local preservada");
+        var importer = new BackupService(destination.Repository);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => importer.ImportAsync(path));
+        Assert.Contains("já contém cotações", error.Message);
+        Assert.Equal(localProject.Id, Assert.Single(await destinationQuotations.GetProjectsAsync()).Id);
+
+        await destinationQuotations.DeleteProjectAsync(localProject.Id);
+        await importer.ImportAsync(path);
+        Assert.NotNull(await destination.Repository.GetContractAsync(contract.PncpId));
+        Assert.Single((await destination.Repository.GetCachedItemResultsAsync(contract.PncpId, 1))!.Results);
+        Assert.Empty(await destinationQuotations.GetProjectsAsync());
+    }
+
     [Theory]
     [InlineData(BackupProfile.Full)]
     [InlineData(BackupProfile.Compact)]

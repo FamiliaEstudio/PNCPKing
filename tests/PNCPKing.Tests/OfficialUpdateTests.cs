@@ -106,6 +106,8 @@ public sealed class OfficialUpdateTests
         await source.Repository.ReplaceItemResultsAsync(completeResult.PncpId, 1,
             [PriceCacheTests.Result(completeResult, 1, 1, true)]);
         await new SqliteQuotationRepository(source.Repository.DatabasePath).CreateProjectAsync("Cotação privada");
+        var localQuotation = await new SqliteQuotationRepository(destination.Repository.DatabasePath)
+            .CreateProjectAsync("Cotação do destinatário");
 
         var key = $"Publication:{Today:yyyyMMdd}:{Today:yyyyMMdd}:m6:ufALL";
         await source.Repository.SavePartitionCheckpointAsync(new SyncPartitionCheckpoint
@@ -143,7 +145,9 @@ public sealed class OfficialUpdateTests
             cell => cell.Date == Today && cell.ModalityId == 6);
         Assert.True(await destination.Repository.IsCoverageCompleteAsync(Start, Today.AddDays(-1)));
         Assert.False(await destination.Repository.IsCoverageCompleteAsync(Today, Today));
-        Assert.Empty(await new SqliteQuotationRepository(destination.Repository.DatabasePath).GetProjectsAsync());
+        var destinationQuotations = await new SqliteQuotationRepository(destination.Repository.DatabasePath)
+            .GetProjectsAsync();
+        Assert.Equal(localQuotation.Id, Assert.Single(destinationQuotations).Id);
 
         await using var completeDestination = await TestDatabase.CreateAsync();
         await completeDestination.Repository.EnsureCoverageWindowAsync(Today, Today, [6]);
