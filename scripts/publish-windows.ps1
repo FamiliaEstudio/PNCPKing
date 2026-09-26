@@ -10,6 +10,7 @@ if (-not $Version) {
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
     throw 'A versao deve usar X.Y.Z, sem pre-release.'
 }
+$null = & (Join-Path $PSScriptRoot 'read-release-notes.ps1') -Version $Version
 $candidates = @()
 if ($env:PNCPKING_DOTNET) {
     $candidates += $env:PNCPKING_DOTNET

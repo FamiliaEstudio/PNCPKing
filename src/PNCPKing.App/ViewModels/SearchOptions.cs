@@ -17,6 +17,8 @@ public sealed record SearchSortOption(string Label, SearchSort Value)
     public override string ToString() => Label;
 }
 
+public enum ItemPriceAction { Pin, MarkForBasket, Clear }
+
 public sealed class ItemSearchDisplayRow : ObservableObject
 {
     private bool _isPinned;
@@ -86,6 +88,15 @@ public sealed class ItemSearchDisplayRow : ObservableObject
     }
 
     public bool IsRetained => IsPinned || IsSelectedForBasket;
+
+    public bool TryApplyAction(ItemPriceAction action)
+    {
+        if (action == ItemPriceAction.MarkForBasket && !IsBasketEligible) return false;
+        if (action == ItemPriceAction.Pin) IsPinned = true;
+        else if (action == ItemPriceAction.MarkForBasket) IsSelectedForBasket = true;
+        else { IsPinned = false; IsSelectedForBasket = false; }
+        return true;
+    }
 
     public string RetentionMarker => (IsPinned, IsSelectedForBasket) switch
     {

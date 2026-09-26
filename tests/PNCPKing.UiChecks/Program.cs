@@ -15,11 +15,25 @@ using PNCPKing.Core.Search;
 using PNCPKing.Infrastructure.Data;
 using PNCPKing.Infrastructure.Services;
 
-internal static class Program
+internal static partial class Program
 {
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args is ["--reading"])
+        {
+            var readingApp = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            readingApp.Startup += async (_, _) =>
+            {
+                try
+                {
+                    await CheckReadingAsync();
+                    readingApp.Shutdown();
+                }
+                catch (Exception error) { Console.Error.WriteLine(error); readingApp.Shutdown(1); }
+            };
+            return readingApp.Run();
+        }
         if (args is ["--layout"])
         {
             var layoutApp = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
@@ -186,12 +200,12 @@ internal static class Program
 
     private static async Task<UiMeasurement> MeasureGridAsync(int initialCount, bool sorted)
     {
-        var initial = Enumerable.Range(0, initialCount).Select(DisplayRow).ToArray();
+        var initial = Enumerable.Range(0, initialCount).Select(LongRow).ToArray();
         initial[0].IsPinned = true;
         initial[1].IsSelectedForBasket = true;
         var rows = new RangeObservableCollection<ItemSearchDisplayRow>();
         var grid = CreateGrid(rows);
-        var window = new Window { Title = "Validação da tabela PNCP King", Width = 1100, Height = 430, Content = grid };
+        var window = new Window { Title = "Validação da tabela PNCP King", Width = 1100, Height = 430, Content = new PNCPKing.App.Controls.GridReader { Table = grid } };
         var view = CollectionViewSource.GetDefaultView(rows);
         var batchTimes = new List<double>();
         var inputDelays = new List<double>();
@@ -207,7 +221,7 @@ internal static class Program
         if (sorted) view.SortDescriptions.Add(new SortDescription(nameof(ItemSearchDisplayRow.PublicationDate), ListSortDirection.Descending));
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
         // Warm the renderer/JIT before collecting input latency and batch application time.
-        buffer.Enqueue(Enumerable.Range(initialCount, 50).Select(DisplayRow));
+        buffer.Enqueue(Enumerable.Range(initialCount, 50).Select(LongRow));
         await buffer.FlushAsync();
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
         batchTimes.Clear();
@@ -216,7 +230,7 @@ internal static class Program
             rows.ReplaceAll(initial);
             grid.SelectedItem = initial[1];
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            var added = Enumerable.Range(initialCount + round * 50, 50).Select(DisplayRow).ToArray();
+            var added = Enumerable.Range(initialCount + round * 50, 50).Select(LongRow).ToArray();
             var queued = Stopwatch.GetTimestamp();
             var input = grid.Dispatcher.BeginInvoke(DispatcherPriority.Input,
                 new Action(() => inputDelays.Add(Stopwatch.GetElapsedTime(queued).TotalMilliseconds)));

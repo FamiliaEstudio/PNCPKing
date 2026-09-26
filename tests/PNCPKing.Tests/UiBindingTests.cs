@@ -52,17 +52,9 @@ public sealed class UiBindingTests
             element => element.Attribute("Name")?.Value == "ItemResultsGrid" ||
                        element.Attribute(XName.Get("Name", "http://schemas.microsoft.com/winfx/2006/xaml"))?.Value ==
                        "ItemResultsGrid");
-        Assert.Equal(
-            "ItemResultsGrid_PreviewMouseRightButtonDown",
-            grid.Attribute("PreviewMouseRightButtonDown")?.Value);
-        Assert.Equal(
-            "ItemResultsGrid_PreviewMouseLeftButtonDown",
-            grid.Attribute("PreviewMouseLeftButtonDown")?.Value);
-        Assert.Equal("ItemResultsGrid_PreviewMouseMove", grid.Attribute("PreviewMouseMove")?.Value);
-        Assert.Equal(
-            "ItemResultsGrid_PreviewMouseLeftButtonUp",
-            grid.Attribute("PreviewMouseLeftButtonUp")?.Value);
-        Assert.Equal("ItemResultsGrid_MouseDoubleClick", grid.Attribute("MouseDoubleClick")?.Value);
+        Assert.Equal("GridReader", grid.Parent!.Name.LocalName);
+        Assert.Equal("ItemResultsReader", grid.Parent.Attribute(XName.Get("Name", "http://schemas.microsoft.com/winfx/2006/xaml"))?.Value);
+        Assert.Contains("triplo clique", grid.Attribute("ToolTip")?.Value ?? string.Empty);
         Assert.Contains("1 segundo", grid.Attribute("ToolTip")?.Value ?? string.Empty);
         Assert.Contains("clique direito", grid.Attribute("ToolTip")?.Value ?? string.Empty);
         Assert.Contains(

@@ -47,7 +47,9 @@ jobs:
           [xml]$project = Get-Content ./src/PNCPKing.App/PNCPKing.App.csproj
           $version = [string]$project.Project.PropertyGroup.Version
           $tag = "v$version"
+          $null = ./scripts/read-release-notes.ps1 -Version $version
+          $notesPath = "./docs/releases/$tag.md"
           gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
           if ($LASTEXITCODE -eq 0) { throw "A release $tag ja existe." }
-          gh release create $tag ./artifacts/win-x64/PNCPKing.exe ./artifacts/win-x64/app-update.json --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "PNCP King $version" --generate-notes
+          gh release create $tag ./artifacts/win-x64/PNCPKing.exe ./artifacts/win-x64/app-update.json --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "PNCP King $version" --notes-file $notesPath --latest
           if ($LASTEXITCODE -ne 0) { throw "Falha ao publicar a release $tag." }

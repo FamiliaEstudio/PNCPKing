@@ -5,6 +5,7 @@
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/PNCPKing.App/Services/GridText.cs" Link="AppLogic/GridText.cs" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="PdfPig" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies">
@@ -20,6 +21,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="../../scripts/prepare-github-prices.ps1" Link="Scripts/prepare-github-prices.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../scripts/read-release-notes.ps1" Link="Scripts/read-release-notes.ps1" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../src/PNCPKing.App/Services/InstallGitHubUpdate.ps1" Link="Scripts/InstallGitHubUpdate.ps1" CopyToOutputDirectory="PreserveNewest" />
     <Compile Include="../../src/PNCPKing.App/Services/GitHubAppInstaller.cs" Link="AppLogic/GitHubAppInstaller.cs" />
     <Compile Include="../../src/PNCPKing.App/ViewModels/Commands.cs"

@@ -66,6 +66,14 @@ manutenção com a menor complexidade necessária.
 - Não incluir arquivos `.pdb` na distribuição final.
 - Após publicar, verificar que há exatamente um arquivo `PNCPKing.exe` sob `artifacts/` e atualizar a documentação somente se o caminho canônico mudar.
 
+## Notas das releases no GitHub
+
+- Toda release deve conter, no corpo da publicação, um descritivo breve em português do que mudou e do efeito para o usuário.
+- Nas releases do programa, registrar o resumo em tópicos no arquivo `docs/releases/vX.Y.Z.md` correspondente à versão e publicar esse conteúdo com `--notes-file`.
+- Nunca publicar somente um link para `Full Changelog`, uma lista automática de commits ou notas vazias. Links para o histórico podem complementar o resumo, mas não substituí-lo.
+- A prévia de **Atualizar pelo GitHub** lê o corpo das releases; o resumo deve ser compreensível diretamente nessa janela, sem depender de abrir links.
+- Antes de concluir a publicação, conferir no GitHub a versão, os anexos e o corpo da release. Aplicar a mesma exigência de descrição às publicações do canal de preços.
+
 ## Validação
 
 - Antes da publicação, compilar em Release e executar os testes relevantes.

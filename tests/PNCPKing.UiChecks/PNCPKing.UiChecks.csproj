@@ -7,6 +7,8 @@
     <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/PNCPKing.App/Controls/GridReader.cs" Link="GridReader.cs" />
+    <Compile Include="../../src/PNCPKing.App/Services/GridText.cs" Link="GridText.cs" />
     <ProjectReference Include="../../src/PNCPKing.Infrastructure/PNCPKing.Infrastructure.csproj" />
     <Compile Include="../../src/PNCPKing.App/ViewModels/UiBatchBuffer.cs" Link="UiBatchBuffer.cs" />
     <Compile Include="../../src/PNCPKing.App/ViewModels/RangeObservableCollection.cs" Link="RangeObservableCollection.cs" />

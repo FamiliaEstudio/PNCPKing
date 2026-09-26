@@ -947,6 +947,44 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             .Where(row => row.IsSelectedForBasket)
             .ToArray();
 
+    public void ApplyItemPriceAction(IReadOnlyList<ItemSearchDisplayRow> rows, ItemPriceAction action)
+    {
+        var toFront = new HashSet<ItemSearchDisplayRow>();
+        var skipped = 0;
+        foreach (var row in rows.Distinct())
+        {
+            if (!row.TryApplyAction(action))
+            {
+                skipped++;
+                continue;
+            }
+
+            var key = RowKey(row);
+            if (row.IsRetained)
+            {
+                _retainedItemRows[key] = row;
+                toFront.Add(row);
+            }
+            else
+            {
+                _retainedItemRows.Remove(key);
+                if (!_currentItemResultKeys.Contains(key)) _visibleItemKeys.Remove(key);
+            }
+        }
+
+        // Reorder once, retaining source order within each group. The DataGrid view keeps its sort.
+        var replacement = ItemSearchRows.Where(toFront.Contains)
+            .Concat(ItemSearchRows.Where(row => !toFront.Contains(row) &&
+                (row.IsRetained || _currentItemResultKeys.Contains(RowKey(row)))))
+            .ToArray();
+        if (!ItemSearchRows.SequenceEqual(replacement)) ItemSearchRows.ReplaceAll(replacement);
+        OnPropertyChanged(nameof(SelectedBasketPriceCount));
+        OnPropertyChanged(nameof(HasSelectedBasketPrices));
+        OnPropertyChanged(nameof(ManualBasketButtonText));
+        StatusText = $"Ação aplicada a {rows.Count - skipped:N0} preço(s)." +
+            (skipped > 0 ? $" {skipped:N0} preço(s) inelegível(is) não foram marcados para a cesta." : string.Empty);
+    }
+
     public string StatusText
     {
         get => _statusText;

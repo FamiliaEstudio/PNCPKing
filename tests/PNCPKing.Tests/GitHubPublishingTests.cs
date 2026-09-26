@@ -8,6 +8,28 @@ namespace PNCPKing.Tests;
 
 public sealed class GitHubPublishingTests
 {
+    [Theory]
+    [InlineData("", false)]
+    [InlineData("**Full Changelog**: https://github.com/example/compare/v1...v2", false)]
+    [InlineData("- Full Changelog: https://github.com/example/compare/v1...v2", false)]
+    [InlineData("- [Histórico completo](https://github.com/example/compare/v1...v2)", false)]
+    [InlineData("Novidades:\n\n- Preços em linhas compactas e leitura do descritivo completo.", true)]
+    public async Task ReleaseNotesRequireAWrittenSummary(string notes, bool valid)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var path = Path.Combine(Path.GetTempPath(), $"pncpking-release-notes-{Guid.NewGuid():N}.md");
+        try
+        {
+            await File.WriteAllTextAsync(path, notes);
+            var result = await RunScriptAsync("read-release-notes.ps1", ["-Version", "1.2.12", "-NotesPath", path]);
+            Assert.True((result.ExitCode == 0) == valid, result.Output);
+            File.Delete(path);
+            result = await RunScriptAsync("read-release-notes.ps1", ["-Version", "1.2.12", "-NotesPath", path]);
+            Assert.NotEqual(0, result.ExitCode);
+        }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public async Task PublisherProducesOneV2AssetWithoutChangingSource()
     {

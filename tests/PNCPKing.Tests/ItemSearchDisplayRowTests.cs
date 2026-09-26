@@ -39,6 +39,21 @@ public sealed class ItemSearchDisplayRowTests
         Assert.Equal(expected, Row(active, unitPrice).IsBasketEligible);
     }
 
+    [Fact]
+    public void CollectiveActions_AreIdempotentAndSkipIneligibleBasketPrices()
+    {
+        var rows = new[] { Row(true, 12), Row(false, 12), Row(true, 0) };
+        Assert.All(rows, row => Assert.True(row.TryApplyAction(ItemPriceAction.Pin)));
+        Assert.All(rows, row => Assert.True(row.TryApplyAction(ItemPriceAction.Pin)));
+        Assert.All(rows, row => Assert.True(row.IsPinned));
+        Assert.Equal(1, rows.Count(row => row.TryApplyAction(ItemPriceAction.MarkForBasket)));
+        Assert.Equal(1, rows.Count(row => row.TryApplyAction(ItemPriceAction.MarkForBasket)));
+        Assert.True(rows[0].IsSelectedForBasket);
+        Assert.All(rows.Skip(1), row => Assert.False(row.IsSelectedForBasket));
+        Assert.All(rows, row => Assert.True(row.TryApplyAction(ItemPriceAction.Clear)));
+        Assert.All(rows, row => Assert.False(row.IsRetained));
+    }
+
     private static ItemSearchDisplayRow Row(bool active, decimal unitPrice)
     {
         var contract = RepositorySearchTests.Contract("marked-price", "Café", "SP", 1);

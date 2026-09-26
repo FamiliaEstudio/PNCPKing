@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using PNCPKing.App.Services;
+using PNCPKing.App.Controls;
 using PNCPKing.App.ViewModels;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
@@ -143,6 +144,12 @@ public partial class QuotationItemWindow : Window
 
     private async void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Key == Key.F && Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            GridReader.OpenFindIn(this);
+            e.Handled = true;
+            return;
+        }
         if (e.Key != Key.F2 || Keyboard.FocusedElement is TextBox) return;
         e.Handled = true;
         await PromptRenameItemAsync().ConfigureAwait(true);
@@ -395,28 +402,6 @@ public partial class QuotationItemWindow : Window
 
     private void SearchGrid_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e) =>
         SelectRowUnderPointer(SearchResultsGrid, e.OriginalSource as DependencyObject);
-
-    private async void PriceGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
-    {
-        if (ViewModel.SelectedPrice is null)
-        {
-            return;
-        }
-
-        WorkspaceTabs.SelectedIndex = 2;
-        await RunAsync(() => ViewModel.PreparePriceDocumentsAsync(ViewModel.SelectedPrice)).ConfigureAwait(true);
-    }
-
-    private async void SearchGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
-    {
-        if (ViewModel.SelectedSearchRow is null)
-        {
-            return;
-        }
-
-        WorkspaceTabs.SelectedIndex = 2;
-        await RunAsync(() => ViewModel.PrepareSearchDocumentsAsync(ViewModel.SelectedSearchRow)).ConfigureAwait(true);
-    }
 
     private void PriceActions_Click(object sender, RoutedEventArgs e)
     {
