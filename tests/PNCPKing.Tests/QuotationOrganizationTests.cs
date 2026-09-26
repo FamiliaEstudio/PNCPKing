@@ -109,7 +109,7 @@ public sealed class QuotationOrganizationTests
         decimal[] reserved = [0, 0, 0, 1, 1, 1, 2, 25];
         string[] numbers = ["1", "2", "3", "4 e 9", "5 e 10", "6 e 11", "7 e 12", "8 e 13"];
         var lines = quantities.Select(quantity => Item(project, $"Item {quantity:D3}", quantity, price, groupId)).ToArray();
-        var report = Apply(project, lines.Reverse().ToArray(),
+        var report = Apply(project, Enumerable.Reverse(lines).ToArray(),
             new QuotationGroup(groupId, project.Id, "Misto", lines.Select(value => value.Line.Id).ToArray()));
         var snapshot = report.Project.Organization!;
         var mainGroup = Assert.Single(snapshot.Groups, group => group.Kind == QuotationQuotaKind.Principal);
