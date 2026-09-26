@@ -32,7 +32,7 @@ public partial class SweetCodeWindow : Window
 
             try
             {
-                _ = SearchText.Parse(expression);
+                _ = SearchText.ParseMainCriteria(expression);
                 var normalized = SearchText.Normalize(expression);
                 if (unique.Add(normalized))
                 {

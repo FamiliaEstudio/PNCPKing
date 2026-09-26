@@ -395,7 +395,7 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <TextBox x:Name="QueryTextBox" Text="{Binding QueryText, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="Sintaxe: café + filtro (E); café OU chá; -cafeteira; &quot;café torrado&quot;; &quot;pacote (unidade)."
+                         ToolTip="Espaços exigem os termos juntos: café torrado. '+' separa pesquisas locais: café -solúvel + açúcar cristal. Carregar mais alterna páginas entre os trechos. Cada trecho aceita OU, exclusões, frases e unidades."
                          VerticalContentAlignment="Center" FontSize="15"
                          PreviewKeyDown="QueryTextBox_PreviewKeyDown" />
                 <CheckBox Grid.Column="1" Content="Sweet Code" IsChecked="{Binding SweetCodeEnabled}"
@@ -447,9 +447,9 @@
                          HorizontalContentAlignment="Center"
                          ToolTip="1 a 200 lotes de até 50 contratações ainda não resolvidas" />
                 <Button Content="Ampliar pela API" Command="{Binding FireBatchesCommand}"
-                        ToolTip="Operação explícita que alcança itens ausentes, falhas e contratações ainda não indexadas." />
+                        ToolTip="{Binding MainSearchApiHint}" ToolTipService.ShowOnDisabled="True" />
                 <Button Content="Carregar mais resultados" Command="{Binding LoadNextItemPageCommand}"
-                        ToolTip="Exibe outra página de até 50 resultados salvos, sem fazer chamadas ao PNCP." />
+                        ToolTip="Exibe até 50 preços salvos. Com '+', alterna para o próximo trecho, sem chamadas ao PNCP." />
                 <Button Content="Reiniciar pesquisa" Command="{Binding RestartItemSearchCommand}"
                         ToolTip="Cria uma nova rotação sem apagar o cache permanente." />
                 <Button Content="Parar preços" Command="{Binding StopItemSearchCommand}" />
@@ -634,7 +634,8 @@
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
-                                        <TextBlock Text="{Binding ContractPageSummary}" VerticalAlignment="Center" />
+                                        <TextBlock Text="{Binding ContractPageSummary}" VerticalAlignment="Center"
+                                                   TextTrimming="CharacterEllipsis" ToolTip="{Binding ContractPageSummary}" />
                                         <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
                                             <Button Content="Calcular total exato" Command="{Binding CalculateExactContractCountCommand}" />
                                             <Button Content="Cancelar contagem" Command="{Binding CancelExactContractCountCommand}" />

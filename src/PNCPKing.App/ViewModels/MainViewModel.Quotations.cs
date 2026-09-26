@@ -216,11 +216,11 @@ public sealed partial class MainViewModel
         _quotationPackageService = quotationPackageService;
         UseQuotationSampleCommand = new AsyncRelayCommand(
             UseCurrentSampleAsync,
-            () => !IsFileBusy && !IsPriceBusy && _itemSearchService.CurrentSession is not null);
+            () => !IsFileBusy && !IsPriceBusy && HasCurrentQuotationSample);
         UpdateQuotationSampleCommand = new AsyncRelayCommand(
             UpdateCurrentSampleAsync,
             () => !IsFileBusy && !IsPriceBusy && SelectedQuotationLine is not null &&
-                  SelectedQuotationProject is not null && _itemSearchService.CurrentSession is not null);
+                  SelectedQuotationProject is not null && HasCurrentQuotationSample);
         AdjustQuotationWeightsCommand = new AsyncRelayCommand(
             AdjustQuotationWeightsAsync,
             () => !IsFileBusy && SelectedQuotationLine is not null && SelectedQuotationProject is not null);
@@ -467,7 +467,7 @@ public sealed partial class MainViewModel
             return;
         }
 
-        QueryText = text;
+        QueryText = SearchText.ToMainCriteria(text);
         SelectedResultsWorkspace = ResultsWorkspace.Search;
         StatusText =
             $"Prompt {level switch
@@ -1332,7 +1332,7 @@ public sealed partial class MainViewModel
                     "Pesquisa automática em andamento.").ConfigureAwait(true);
                 try
                 {
-                    QueryText = line.SearchText;
+                    QueryText = SearchText.ToMainCriteria(line.SearchText);
                     BatchCount = line.RequestedBatchCount;
                     MinimumPriceText = line.MinimumUnitPrice?.ToString("N4") ?? string.Empty;
                     MaximumPriceText = line.MaximumUnitPrice?.ToString("N4") ?? string.Empty;
@@ -1347,6 +1347,20 @@ public sealed partial class MainViewModel
                         SearchSort.Nearest,
                         1,
                         200);
+                    if (IsCompoundSearch)
+                    {
+                        // Automation owns the grid now; do not keep cursors/filters from a compound local search.
+                        _priceCancellation?.Cancel();
+                        Interlocked.Increment(ref _contractSearchGeneration);
+                        _localSearchSequence = null;
+                        _activeSearchQuery = automationQuery;
+                        _activeItemSearchExpression = SearchText.Parse(line.SearchText);
+                        _localPricesNeedRefresh = false;
+                        _hasMoreLocalPriceRows = false;
+                        InvalidateContractResults();
+                        OnPropertyChanged(nameof(IsCompoundSearch));
+                        OnPropertyChanged(nameof(MainSearchApiHint));
+                    }
                     _localItemSearchSummary = null;
                     _searchTelemetryBaseline = _telemetry.GetSnapshot();
                     await _transientItemSearchService.StartAsync(
@@ -1586,10 +1600,7 @@ public sealed partial class MainViewModel
             analyses[project.Id] = await _quotationService.GetAnalysesAsync(project.Id).ConfigureAwait(true);
         }
 
-        var expression = SearchText.Parse(QueryText);
-        var description = expression.PositiveText.Length > 0
-            ? expression.PositiveText
-            : QueryText.Trim();
+        var description = MainCriteriaDescription();
         var window = new ManualBasketWindow(
             projects,
             analyses,
@@ -1648,10 +1659,7 @@ public sealed partial class MainViewModel
     private async Task UseCurrentSampleAsync()
     {
         var projects = (await _quotationService.GetProjectsAsync().ConfigureAwait(true));
-        var expression = SearchText.Parse(QueryText);
-        var quotationDescription = expression.PositiveText.Length > 0
-            ? expression.PositiveText
-            : QueryText.Trim();
+        var quotationDescription = MainCriteriaDescription();
         var window = new QuotationSampleWindow(projects, quotationDescription, MinimumPriceText, MaximumPriceText)
         {
             Owner = Application.Current.MainWindow
@@ -1671,10 +1679,7 @@ public sealed partial class MainViewModel
                 projectId = project.Id;
             }
 
-            var rows = await _itemSearchService.GetDiscoveredRowsAsync(
-                    minimumUnitPrice: window.Input.MinimumUnitPrice,
-                    maximumUnitPrice: window.Input.MaximumUnitPrice,
-                    cancellationToken: CancellationToken.None)
+            var rows = await GetCurrentQuotationSampleAsync(window.Input.MinimumUnitPrice, window.Input.MaximumUnitPrice)
                 .ConfigureAwait(true);
             var analysis = await _quotationService.CaptureSampleAsync(
                     projectId.Value,
@@ -1710,7 +1715,7 @@ public sealed partial class MainViewModel
             return;
         }
 
-        var sessionText = SearchText.Normalize(
+        var sessionText = SearchText.Normalize(IsCompoundSearch ? MainCriteriaDescription() :
             SearchText.Parse(_itemSearchService.CurrentSession?.Text).PositiveText);
         var lineText = SearchText.Normalize(selectedLine.Description);
         if (sessionText.Length > 0 && lineText.Length > 0 && !lineText.Contains(sessionText, StringComparison.Ordinal) &&
@@ -1741,10 +1746,7 @@ public sealed partial class MainViewModel
                 Weights = line.Weights,
                 RequestedBasketSize = line.RequestedBasketSize
             };
-            var rows = await _itemSearchService.GetDiscoveredRowsAsync(
-                    minimumUnitPrice: input.MinimumUnitPrice,
-                    maximumUnitPrice: input.MaximumUnitPrice,
-                    cancellationToken: CancellationToken.None)
+            var rows = await GetCurrentQuotationSampleAsync(input.MinimumUnitPrice, input.MaximumUnitPrice)
                 .ConfigureAwait(true);
             var analysis = await _quotationService.CaptureSampleAsync(
                     selectedProject.Id,

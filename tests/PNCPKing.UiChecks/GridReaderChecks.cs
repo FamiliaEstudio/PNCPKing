@@ -15,7 +15,7 @@ using PNCPKing.App.ViewModels;
 
 internal static partial class Program
 {
-    private static async Task CheckReadingAsync()
+    private static async Task CheckReadingAsync(bool useNativeMouse = true)
     {
         CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("pt-BR");
         var results = new List<object>();
@@ -129,7 +129,7 @@ internal static partial class Program
 
                 if (count == 50)
                 {
-                    nativeMouse = await CheckPriceMouseAsync(window, grid, rows, reader, () => pinCount, () => basketCount);
+                    nativeMouse = await CheckPriceMouseAsync(window, grid, rows, reader, () => pinCount, () => basketCount, useNativeMouse);
                     // A smaller viewport and 150% logical scaling exercise clipping without changing Windows settings.
                     window.Width = 800;
                     window.Height = 520;
@@ -146,7 +146,7 @@ internal static partial class Program
             finally { window.Close(); }
         }
         Console.WriteLine(JsonSerializer.Serialize(new { passed = true, reading = results, nativeMouse,
-            mouseNote = nativeMouse ? "Native mouse passed." : "No interactive foreground desktop; routed gesture checks passed. Native drag/edge scrolling needs an interactive session." }));
+            mouseNote = nativeMouse ? "Native mouse passed." : "Routed gesture checks passed. Native drag/edge scrolling was not validated in this run." }));
     }
 
     private static ItemSearchDisplayRow LongRow(int index)
@@ -160,7 +160,8 @@ internal static partial class Program
     }
 
     private static async Task<bool> CheckPriceMouseAsync(Window window, DataGrid grid,
-        RangeObservableCollection<ItemSearchDisplayRow> rows, GridReader reader, Func<int> pins, Func<int> baskets)
+        RangeObservableCollection<ItemSearchDisplayRow> rows, GridReader reader, Func<int> pins, Func<int> baskets,
+        bool useNativeMouse = true)
     {
         CollectionViewSource.GetDefaultView(rows).SortDescriptions.Clear();
         grid.ScrollIntoView(rows[0]);
@@ -168,6 +169,12 @@ internal static partial class Program
         // Close the reader so native pointer coordinates match the initial compact list.
         grid.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(grid), 0, System.Windows.Input.Key.Escape)
         { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+        if (!useNativeMouse)
+        {
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await CheckRoutedGesturesAsync(grid, rows, reader, pins, baskets);
+            return false;
+        }
         window.Topmost = true;
         window.Activate();
         SetForegroundWindow(new WindowInteropHelper(window).Handle);

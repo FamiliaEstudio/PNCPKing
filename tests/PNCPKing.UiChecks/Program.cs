@@ -20,14 +20,24 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        if (args is ["--reading"])
+        if (args is ["--main-search"])
+        {
+            var searchApp = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            searchApp.Startup += async (_, _) =>
+            {
+                try { await CheckMainSearchAsync(); searchApp.Shutdown(); }
+                catch (Exception error) { Console.Error.WriteLine(error); searchApp.Shutdown(1); }
+            };
+            return searchApp.Run();
+        }
+        if (args is ["--reading"] or ["--reading-routed"])
         {
             var readingApp = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
             readingApp.Startup += async (_, _) =>
             {
                 try
                 {
-                    await CheckReadingAsync();
+                    await CheckReadingAsync(useNativeMouse: args[0] == "--reading");
                     readingApp.Shutdown();
                 }
                 catch (Exception error) { Console.Error.WriteLine(error); readingApp.Shutdown(1); }

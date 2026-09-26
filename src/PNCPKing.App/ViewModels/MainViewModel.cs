@@ -359,7 +359,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             () => !IsFileBusy && !IsPriceBusy && !_isResultPageLoading && !_isLocalPricePageLoading && HasMoreStoredPriceRows);
         FireBatchesCommand = new AsyncRelayCommand(
             FireBatchesAsync,
-            () => !IsAnyAggressivePncpMode && !IsFileBusy && !IsPriceBusy && !_isLocalPricePageLoading && _isItemSearchActive);
+            () => !IsCompoundSearch && !IsAnyAggressivePncpMode && !IsFileBusy && !IsPriceBusy && !_isLocalPricePageLoading && _isItemSearchActive);
         ApplyPriceFilterCommand = new AsyncRelayCommand(
             ApplyPriceFilterAsync,
             () => !IsFileBusy && !IsPriceBusy && !_isResultPageLoading && !_isLocalPricePageLoading &&
@@ -844,8 +844,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             Math.Clamp(value, 1, ItemSearchSessionService.MaximumBatchCount));
     }
 
-    private bool HasMoreStoredPriceRows =>
-        _hasMoreLocalPriceRows ||
+    private bool HasMoreStoredPriceRows => IsCompoundSearch
+        ? _localPricesNeedRefresh || _localSearchSequence!.HasMore
+        : _hasMoreLocalPriceRows ||
         (_remotePriceExpansionStarted && _itemSearchService.CurrentSession is not null &&
          (!_temporaryPricePagingStarted || _hasMoreTemporaryPriceRows));
 
@@ -1236,11 +1237,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    public string ContractPageSummary => _contractSearchCountPending
+    public string ContractPageSummary => (IsCompoundSearch ? CompoundCriteriaLabel + " — " : string.Empty) + (_contractSearchCountPending
         ? $"Página {CurrentContractPage} - calculando o total exato…"
         : _contractSearchCountExact
             ? $"Página {CurrentContractPage} - {ContractSearchTotal:N0} contratação(ões)"
-            : $"Página {CurrentContractPage} - pelo menos {ContractSearchTotal:N0} contratação(ões)";
+            : $"Página {CurrentContractPage} - pelo menos {ContractSearchTotal:N0} contratação(ões)");
 
     public int CurrentItemPage
     {
@@ -1574,6 +1575,17 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         bool restartPriceSession = false,
         bool revalidateStalePrices = false)
     {
+        IReadOnlyList<SearchExpression> criteria;
+        try
+        {
+            // Validate before cancelling work or replacing any visible results.
+            criteria = SearchText.ParseMainCriteria(QueryText);
+        }
+        catch (SearchQueryException exception)
+        {
+            StatusText = $"Pesquisa rejeitada: {exception.Message}";
+            return;
+        }
         _calibrationCancellation?.Cancel();
         if (IsAnyAggressivePncpMode)
         {
@@ -1635,13 +1647,26 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             var (startDate, endDate) = ResolveDateRange();
             var sort = SelectedSortOption.Value;
             var activeSearchQuery = new SearchQuery(
-                QueryText.Trim(),
+                criteria[0].OriginalText,
                 SelectedGeoFilter,
                 startDate,
                 endDate,
                 sort,
                 1,
                 ContractPageSize);
+            if (resetSession)
+            {
+                _localSearchSequence = criteria.Count > 1
+                    ? new MainSearchLocalSequence(_priceCacheRepository, activeSearchQuery, criteria)
+                    : null;
+                _activeCompoundPart = 0;
+                OnPropertyChanged(nameof(IsCompoundSearch));
+                OnPropertyChanged(nameof(MainSearchApiHint));
+            }
+            else if (_localSearchSequence is { } sequence)
+            {
+                activeSearchQuery = sequence.Queries[_activeCompoundPart];
+            }
             _activeSearchQuery = activeSearchQuery;
             if (!resetSession || string.IsNullOrWhiteSpace(activeSearchQuery.Text))
             {
@@ -1676,7 +1701,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             SelectedResultsWorkspace = ResultsWorkspace.Search;
             _searchTelemetryBaseline = _telemetry.GetSnapshot();
             PriceSearchProgress = 0;
-            _activeItemSearchExpression = SearchText.Parse(activeSearchQuery.Text);
+            _activeItemSearchExpression = criteria[0];
             _localPricePage = 0;
             _localPriceCursor = null;
             _localPricesNeedRefresh = false;
@@ -1696,18 +1721,18 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 return;
             }
 
-            CurrentItemPage = localRows > 0 ? 1 : 0;
+            CurrentItemPage = _localSearchSequence?.ActionsStarted ?? (localRows > 0 ? 1 : 0);
             NotifyCommands();
             HasMoreItemCandidates = _hasMoreLocalPriceRows;
-            ItemSearchSummary = $"{localRows:N0} preços locais atuais exibidos.";
-            StatusText = $"{localRows:N0} preços locais atuais exibidos.";
+            ItemSearchSummary = IsCompoundSearch ? BuildCompoundSummary(localRows) : $"{localRows:N0} preços locais atuais exibidos.";
+            StatusText = ItemSearchSummary;
             await EnsureContractResultsAsync().ConfigureAwait(true);
             if (searchGeneration != Volatile.Read(ref _contractSearchGeneration))
             {
                 return;
             }
 
-            if (revalidateStalePrices)
+            if (revalidateStalePrices && !IsCompoundSearch)
             {
                 await RevalidateStalePricesAsync(
                         activeSearchQuery,
@@ -2084,6 +2109,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task RestartItemSearchAsync()
     {
+        if (IsCompoundSearch)
+        {
+            await SearchAsync(resetSession: true).ConfigureAwait(true);
+            return;
+        }
         if (MessageBox.Show(
                 "Reiniciar esta pesquisa cria uma nova rotação e descarta apenas o progresso " +
                 "retomável da pesquisa geral atual. O cache permanente não será alterado. Continuar?",
@@ -2130,7 +2160,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             var loadedRows = await LoadNextStoredPricePageAsync(cancellationToken)
                 .ConfigureAwait(true);
             await _itemResultBuffer.FlushAsync().ConfigureAwait(true);
-            ItemSearchSummary =
+            ItemSearchSummary = IsCompoundSearch ? BuildCompoundSummary(loadedRows) :
                 $"{BuildLocalSearchSummary()} Mais {loadedRows:N0} preço(s) entregue(s) dos resultados salvos; " +
                 "nenhuma chamada de rede foi feita.";
         }
@@ -2149,6 +2179,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task FireBatchesAsync()
     {
+        if (IsCompoundSearch) return;
         var cancellation = _priceCancellation;
         if (cancellation is null || cancellation.IsCancellationRequested)
         {
@@ -2379,6 +2410,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task ReloadAllDiscoveredRowsAsync(CancellationToken cancellationToken)
     {
+        if (IsCompoundSearch)
+        {
+            await ReloadCompoundPricesAtomicallyAsync(cancellationToken).ConfigureAwait(true);
+            return;
+        }
         var generation = Volatile.Read(ref _contractSearchGeneration);
         var dataVersion = _localPriceDataVersion;
         var (minimum, maximum) = ParsePriceRange();
@@ -2421,6 +2457,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private async Task ReloadLocalPricesAtomicallyAsync(CancellationToken cancellationToken)
     {
+        if (IsCompoundSearch)
+        {
+            await ReloadCompoundPricesAtomicallyAsync(cancellationToken).ConfigureAwait(true);
+            return;
+        }
         if (_activeSearchQuery is null || _activeItemSearchExpression is null)
         {
             return;
@@ -2486,9 +2527,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             }
         }
 
-        foreach (var source in rows.Where(row =>
-                     _activeItemSearchExpression is null ||
-                     _activeItemSearchExpression.MatchesItem(row.Item.Description, row.Item.Unit)))
+        foreach (var source in rows.Where(MatchesCurrentMainCriteria))
         {
             var display = new ItemSearchDisplayRow(source);
             var key = RowKey(display);
@@ -2509,6 +2548,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         decimal? minimum = null,
         decimal? maximum = null)
     {
+        if (IsCompoundSearch)
+            return await LoadCompoundPricePageAsync(cancellationToken, minimum, maximum).ConfigureAwait(true);
         if (minimum is null && maximum is null)
         {
             (minimum, maximum) = ParsePriceRange();
@@ -2566,6 +2607,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         int actionRowsAlreadyLoaded = 0,
         int? actionTargetRows = null)
     {
+        if (IsCompoundSearch)
+            return await LoadCompoundPricePageAsync(cancellationToken, minimum, maximum).ConfigureAwait(true);
         if (_activeSearchQuery is null || _activeItemSearchExpression is null)
         {
             return 0;
@@ -2760,10 +2803,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private int AppendUniqueRows(IEnumerable<ItemSearchRow> rows, bool localPage = false)
     {
         var pending = new List<ItemSearchDisplayRow>();
-        var expression = _activeItemSearchExpression;
         foreach (var row in rows
-                     .Where(item => expression is null ||
-                                    expression.MatchesItem(item.Item.Description, item.Item.Unit))
+                     .Where(MatchesCurrentMainCriteria)
                      .Select(item => new ItemSearchDisplayRow(item)))
         {
             var key = RowKey(row);

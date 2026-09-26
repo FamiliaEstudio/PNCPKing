@@ -119,6 +119,68 @@ public static partial class SearchText
         return Parse(query).ItemMatchQuery;
     }
 
+    /// <summary>Only the main price search treats '+' as independent local searches.</summary>
+    public static IReadOnlyList<SearchExpression> ParseMainCriteria(string? query)
+    {
+        var text = Sanitize(query);
+        var separators = MainCriteriaSeparators(text);
+        if (separators.Count == 0) return [Parse(text)];
+
+        var expressions = new List<SearchExpression>(separators.Count + 1);
+        var start = 0;
+        foreach (var end in separators.Append(text.Length))
+        {
+            var part = text[start..end].Trim();
+            if (part.Length == 0)
+                throw new SearchQueryException("Informe um critério de pesquisa antes e depois de cada '+'.");
+            expressions.Add(Parse(part));
+            start = end + 1;
+        }
+        return expressions;
+    }
+
+    /// <summary>Preserves saved quotation criteria when opening them in the main search.</summary>
+    public static string ToMainCriteria(string? legacyQuery)
+    {
+        var text = Sanitize(legacyQuery);
+        var separators = MainCriteriaSeparators(text);
+        if (separators.Count == 0) return text;
+        var characters = text.ToCharArray();
+        foreach (var index in separators) characters[index] = ' ';
+        return new string(characters);
+    }
+
+    private static List<int> MainCriteriaSeparators(string text)
+    {
+        var separators = new List<int>();
+        if (!text.Contains('+')) return separators;
+        var contract = ContractCandidateMarkerRegex().Match(text);
+        for (var index = 0; index < text.Length; index++)
+        {
+            while (contract.Success && contract.Index < index) contract = contract.NextMatch();
+            if (contract.Success && contract.Index == index)
+            {
+                var closing = FindContractCandidateClosingParenthesis(text, index + contract.Length);
+                if (closing < 0) throw new SearchQueryException("Feche o bloco C: com ')'.");
+                index = closing;
+                continue;
+            }
+
+            if (text[index] == '"')
+            {
+                // Same distinction as Tokenize: a closed phrase versus a quote-prefixed unit.
+                var closing = text.IndexOf('"', index + 1);
+                if (closing > index + 1 && !char.IsWhiteSpace(text[closing - 1]))
+                {
+                    index = closing;
+                    continue;
+                }
+            }
+            if (text[index] == '+') separators.Add(index);
+        }
+        return separators;
+    }
+
     public static SearchExpression Parse(string? query)
     {
         var sanitized = Sanitize(query);
