@@ -493,9 +493,10 @@
                     <controls:GridReader x:Name="ItemResultsReader" DescriptionPath="Item.Description">
                         <DataGrid x:Name="ItemResultsGrid" ItemsSource="{Binding ItemSearchRows}"
                                   SelectedItem="{Binding SelectedItemSearchRow}"
+                                  PreviewKeyDown="ItemResultsGrid_PreviewKeyDown"
                                   AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Extended"
                                   SelectionUnit="FullRow"
-                                  ToolTip="Clique seleciona; arraste para selecionar vários; duplo clique lê; triplo clique fixa; segure por 1 segundo para marcar ou desmarcar para cesta; clique direito limpa as marcas."
+                                  ToolTip="Clique seleciona; arraste para selecionar vários; duplo clique lê; triplo clique fixa; segure por 1 segundo para marcar ou desmarcar para cesta; clique direito limpa as marcas. Na grade, F fixa, C marca para cesta e S limpa as marcas dos selecionados."
                                   EnableRowVirtualization="True" EnableColumnVirtualization="True"
                                   VirtualizingPanel.IsVirtualizing="True"
                                   VirtualizingPanel.VirtualizationMode="Recycling"
@@ -567,9 +568,9 @@
                                        FontSize="11" Foreground="#526579" />
                         </StackPanel>
                         <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
-                            <Button Content="Fixar selecionados" Click="PinSelectedPrices_Click" />
-                            <Button Content="Marcar selecionados para cesta" Click="MarkSelectedPrices_Click" />
-                            <Button Content="Limpar marcas dos selecionados" Click="ClearSelectedPrices_Click" />
+                            <Button Content="[F]ixar selecionados" Click="PinSelectedPrices_Click" />
+                            <Button Content="Marcar selecionados na [C]esta" Click="MarkSelectedPrices_Click" />
+                            <Button Content="Limpar marcas dos [S]elecionados" Click="ClearSelectedPrices_Click" />
                             <Button Content="Escolher colunas" Click="ChooseColumns_Click"
                                     Tag="{Binding ElementName=ItemResultsGrid}"
                                     ToolTip="Personalize visibilidade, ordem e largura; o layout será mantido nos próximos usos." />

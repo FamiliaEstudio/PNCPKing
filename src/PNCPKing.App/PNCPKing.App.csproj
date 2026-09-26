@@ -8,7 +8,7 @@
     <RootNamespace>PNCPKing.App</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\Branding\PNCPKing.ico</ApplicationIcon>
-    <Version>1.2.12</Version>
+    <Version>1.2.13</Version>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="Services/InstallGitHubUpdate.ps1"

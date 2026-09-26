@@ -274,6 +274,23 @@ public partial class MainWindow : Window
     private void PinSelectedPrices_Click(object sender, RoutedEventArgs e) =>
         ApplyPriceAction(ItemResultsGrid.SelectedItems.Cast<ItemSearchDisplayRow>().ToArray(), ItemPriceAction.Pin);
 
+    private void ItemResultsGrid_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Handled || e.IsRepeat || Keyboard.Modifiers != ModifierKeys.None ||
+            e.OriginalSource is not (DataGrid or DataGridRow or DataGridCell)) return;
+
+        var action = e.Key switch
+        {
+            Key.F => ItemPriceAction.Pin,
+            Key.C => ItemPriceAction.MarkForBasket,
+            Key.S => ItemPriceAction.Clear,
+            _ => (ItemPriceAction?)null
+        };
+        if (action is null) return;
+        ApplyPriceAction(ItemResultsGrid.SelectedItems.Cast<ItemSearchDisplayRow>().ToArray(), action.Value);
+        e.Handled = true;
+    }
+
     private void MarkSelectedPrices_Click(object sender, RoutedEventArgs e) =>
         ApplyPriceAction(ItemResultsGrid.SelectedItems.Cast<ItemSearchDisplayRow>().ToArray(), ItemPriceAction.MarkForBasket);
 

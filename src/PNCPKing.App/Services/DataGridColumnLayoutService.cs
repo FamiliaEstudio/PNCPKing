@@ -77,7 +77,7 @@ public sealed class DataGridColumnLayoutService
         var registration = new Registration(gridKey, keyedColumns, defaults);
         _registrations.Add(dataGrid, registration);
 
-        ApplySaved(registration);
+        ApplySaved(registration, dataGrid);
         foreach (var keyedColumn in keyedColumns)
         {
             WidthDescriptor.AddValueChanged(keyedColumn.Column, ColumnLayoutChanged);
@@ -114,8 +114,8 @@ public sealed class DataGridColumnLayoutService
         };
         _activeChooser = chooser;
         _activeChooserGrid = dataGrid;
-        chooser.ApplyRequested += (_, draft) => ApplyVisibilityDraft(registration, dataGrid, draft);
-        chooser.ResetRequested += (_, _) => Reset(registration);
+        chooser.ApplyRequested += (_, draft) => ApplyDraft(registration, dataGrid, draft);
+        chooser.ResetRequested += (_, _) => Reset(registration, dataGrid);
         chooser.Closed += (_, _) =>
         {
             if (ReferenceEquals(_activeChooser, chooser))
@@ -188,7 +188,7 @@ public sealed class DataGridColumnLayoutService
         }
     }
 
-    private void ApplySaved(Registration registration)
+    private void ApplySaved(Registration registration, DataGrid dataGrid)
     {
         if (_settings.ColumnLayouts is null ||
             !_settings.ColumnLayouts.TryGetValue(registration.GridKey, out var saved) ||
@@ -204,26 +204,20 @@ public sealed class DataGridColumnLayoutService
         _applying = true;
         try
         {
-            foreach (var keyedColumn in registration.Columns)
+            using (dataGrid.Dispatcher.DisableProcessing())
             {
-                if (!byKey.TryGetValue(keyedColumn.Key, out var state))
+                foreach (var keyedColumn in registration.Columns)
                 {
-                    continue;
+                    if (!byKey.TryGetValue(keyedColumn.Key, out var state)) continue;
+                    keyedColumn.Column.Visibility = state.IsVisible ? Visibility.Visible : Visibility.Collapsed;
+                    keyedColumn.Column.Width = ParseWidth(state);
                 }
 
-                keyedColumn.Column.Visibility = state.IsVisible ? Visibility.Visible : Visibility.Collapsed;
-                keyedColumn.Column.Width = ParseWidth(state);
-            }
-
-            foreach (var item in registration.Columns
-                         .Where(item => byKey.ContainsKey(item.Key))
-                         .OrderBy(item => byKey[item.Key].DisplayIndex))
-            {
-                var desired = Math.Clamp(
-                    byKey[item.Key].DisplayIndex,
-                    0,
-                    Math.Max(0, registration.Columns.Count - 1));
-                item.Column.DisplayIndex = desired;
+                ApplyColumnOrder(dataGrid, registration.Columns
+                    .OrderBy(item => byKey.TryGetValue(item.Key, out var state)
+                        ? Math.Clamp(state.DisplayIndex, 0, registration.Columns.Count - 1)
+                        : item.Column.DisplayIndex)
+                    .Select(item => item.Column));
             }
         }
         finally
@@ -232,12 +226,13 @@ public sealed class DataGridColumnLayoutService
         }
     }
 
-    private void Reset(Registration registration)
+    private void Reset(Registration registration, DataGrid dataGrid)
     {
         _applying = true;
         try
         {
-            ApplyStates(registration, registration.Defaults);
+            using (dataGrid.Dispatcher.DisableProcessing())
+                ApplyStates(registration, dataGrid, registration.Defaults);
         }
         finally
         {
@@ -248,10 +243,10 @@ public sealed class DataGridColumnLayoutService
         ScheduleSave();
     }
 
-    private void ApplyVisibilityDraft(
+    private void ApplyDraft(
         Registration registration,
         DataGrid dataGrid,
-        IReadOnlyDictionary<string, bool> visibility)
+        IReadOnlyList<ColumnChooserRow> draft)
     {
         using var span = _telemetry.Begin("ui", "column-layout-apply");
         _applying = true;
@@ -259,13 +254,13 @@ public sealed class DataGridColumnLayoutService
         {
             using (dataGrid.Dispatcher.DisableProcessing())
             {
-                foreach (var item in registration.Columns)
+                var byKey = registration.Columns.ToDictionary(item => item.Key, StringComparer.Ordinal);
+                foreach (var row in draft)
                 {
-                    if (visibility.TryGetValue(item.Key, out var isVisible))
-                    {
-                        item.Column.Visibility = isVisible ? Visibility.Visible : Visibility.Collapsed;
-                    }
+                    byKey[row.Key].Column.Visibility = row.IsVisible ? Visibility.Visible : Visibility.Collapsed;
                 }
+
+                ApplyColumnOrder(dataGrid, draft.Select(row => byKey[row.Key].Column));
             }
         }
         finally
@@ -280,6 +275,7 @@ public sealed class DataGridColumnLayoutService
 
     private static void ApplyStates(
         Registration registration,
+        DataGrid dataGrid,
         IReadOnlyList<ColumnLayoutSetting> states)
     {
         var byKey = states.GroupBy(item => item.Key, StringComparer.Ordinal)
@@ -295,9 +291,25 @@ public sealed class DataGridColumnLayoutService
             item.Column.Width = ParseWidth(state);
         }
 
-        foreach (var item in registration.Columns.OrderBy(item => byKey[item.Key].DisplayIndex))
+        ApplyColumnOrder(dataGrid, registration.Columns
+            .OrderBy(item => byKey[item.Key].DisplayIndex)
+            .Select(item => item.Column));
+    }
+
+    private static void ApplyColumnOrder(DataGrid dataGrid, IEnumerable<DataGridColumn> orderedColumns)
+    {
+        var order = orderedColumns.ToArray();
+        if (order.Select((column, index) => column.DisplayIndex == index).All(matches => matches)) return;
+
+        var frozenCount = dataGrid.FrozenColumnCount;
+        if (frozenCount > 0) dataGrid.FrozenColumnCount = 0;
+        try
         {
-            item.Column.DisplayIndex = byKey[item.Key].DisplayIndex;
+            for (var index = 0; index < order.Length; index++) order[index].DisplayIndex = index;
+        }
+        finally
+        {
+            if (frozenCount > 0) dataGrid.FrozenColumnCount = frozenCount;
         }
     }
 

@@ -10,6 +10,7 @@
     <Compile Include="../../src/PNCPKing.App/Controls/GridReader.cs" Link="GridReader.cs" />
     <Compile Include="../../src/PNCPKing.App/Services/GridText.cs" Link="GridText.cs" />
     <ProjectReference Include="../../src/PNCPKing.Infrastructure/PNCPKing.Infrastructure.csproj" />
+    <ProjectReference Include="../../src/PNCPKing.App/PNCPKing.App.csproj" Aliases="AppUnderTest" />
     <Compile Include="../../src/PNCPKing.App/ViewModels/UiBatchBuffer.cs" Link="UiBatchBuffer.cs" />
     <Compile Include="../../src/PNCPKing.App/ViewModels/RangeObservableCollection.cs" Link="RangeObservableCollection.cs" />
     <Compile Include="../../src/PNCPKing.App/ViewModels/ObservableObject.cs" Link="ObservableObject.cs" />

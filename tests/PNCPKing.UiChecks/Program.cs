@@ -45,6 +45,8 @@ internal static partial class Program
                     Console.WriteLine("Monitor placement: passed");
                     await CheckQuotationGroupsAsync();
                     Console.WriteLine("Quotation groups dialog: passed");
+                    await CheckColumnChooserAsync();
+                    Console.WriteLine("Column chooser: passed");
                     layoutApp.Shutdown();
                 }
                 catch (Exception error) { Console.Error.WriteLine(error); layoutApp.Shutdown(1); }
