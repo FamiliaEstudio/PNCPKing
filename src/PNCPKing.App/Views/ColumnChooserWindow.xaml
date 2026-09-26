@@ -12,11 +12,17 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <TextBlock Text="Marque as colunas visíveis. Selecione uma coluna e escolha sua posição; a grade só mudará ao aplicar."
+        <TextBlock Text="Marque as colunas visíveis. Arraste uma linha ou escolha sua posição; a grade só mudará ao aplicar."
                    TextWrapping="Wrap" Margin="0,0,0,8" />
 
         <ListBox x:Name="ColumnsList" Grid.Row="1" ItemsSource="{Binding Rows}"
                  SelectionChanged="ColumnsList_SelectionChanged"
+                 PreviewMouseLeftButtonDown="ColumnsList_PreviewMouseLeftButtonDown"
+                 PreviewMouseLeftButtonUp="ColumnsList_PreviewMouseLeftButtonUp"
+                 PreviewMouseMove="ColumnsList_PreviewMouseMove"
+                 MouseLeave="ColumnsList_MouseLeave"
+                 AllowDrop="True" DragOver="ColumnsList_DragOver"
+                 DragLeave="ColumnsList_DragLeave" Drop="ColumnsList_Drop"
                  HorizontalContentAlignment="Stretch"
                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                  ScrollViewer.VerticalScrollBarVisibility="Auto"
@@ -26,15 +32,18 @@
                 <DataTemplate>
                     <Grid MinHeight="30">
                         <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="18" />
                             <ColumnDefinition Width="30" />
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
-                        <TextBlock Text="{Binding Position, StringFormat={}{0}.}" Width="30"
+                        <TextBlock Text="↕" Cursor="SizeAll" ToolTip="Arraste para mudar a posição"
+                                   VerticalAlignment="Center" HorizontalAlignment="Center" />
+                        <TextBlock Grid.Column="1" Text="{Binding Position, StringFormat={}{0}.}" Width="30"
                                    VerticalAlignment="Center" Margin="5,0,0,0" />
-                        <TextBlock Grid.Column="1" Text="{Binding Header}" ToolTip="{Binding Header}"
+                        <TextBlock Grid.Column="2" Text="{Binding Header}" ToolTip="{Binding Header}"
                                    TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
-                        <CheckBox Grid.Column="2" Content="Visível" IsChecked="{Binding IsVisible}"
+                        <CheckBox Grid.Column="3" Content="Visível" IsChecked="{Binding IsVisible}"
                                   PreviewMouseLeftButtonDown="ColumnCheckBox_PreviewMouseLeftButtonDown"
                                   VerticalAlignment="Center" Margin="6,0,4,0" />
                     </Grid>

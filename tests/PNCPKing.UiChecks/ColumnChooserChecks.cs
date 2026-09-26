@@ -1,6 +1,7 @@
 extern alias AppUnderTest;
 
 using System.IO;
+using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -74,6 +75,37 @@ internal static partial class Program
             if (applied.IsVisible) applied.Close();
         }
 
+        var dragged = new AppChooser(Rows());
+        var dragApplied = false;
+        dragged.ApplyRequested += (_, _) => dragApplied = true;
+        try
+        {
+            dragged.Show();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            var list = (ListBox)dragged.FindName("ColumnsList");
+            var hidden = dragged.Rows[1];
+            var last = (ListBoxItem)list.ItemContainerGenerator.ContainerFromItem(dragged.Rows[3]);
+            var over = ColumnDragEvent(last, hidden, DragDrop.DragOverEvent, last.ActualHeight - 2);
+            last.RaiseEvent(over);
+            Require(over.Effects == DragDropEffects.Move && last.BorderThickness.Bottom == 2,
+                "O destino do arrasto não foi indicado na lista.");
+            last.RaiseEvent(ColumnDragEvent(last, hidden, DragDrop.DropEvent, last.ActualHeight - 2));
+            Require(dragged.Rows.Select(row => row.Key).SequenceEqual(["a", "c", "d", "b"]) &&
+                    !hidden.IsVisible && dragged.Rows.Select(row => row.Position).SequenceEqual([1, 2, 3, 4]),
+                "Soltar uma coluna oculta não atualizou a ordem e a numeração do rascunho.");
+            Require(((ComboBox)dragged.FindName("PositionComboBox")).SelectedItem is 4 &&
+                    ReferenceEquals(list.SelectedItem, hidden),
+                "O arrasto não manteve a coluna selecionada e a posição atualizada.");
+            Require(last.ReadLocalValue(Control.BorderThicknessProperty) == DependencyProperty.UnsetValue,
+                "O indicador de destino não foi removido após soltar a coluna.");
+            FindChooserButton(dragged, "Cancelar").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Require(!dragApplied, "Cancelar aplicou a ordem arrastada.");
+        }
+        finally
+        {
+            if (dragged.IsVisible) dragged.Close();
+        }
+
         await CheckColumnLayoutPersistenceAsync();
     }
 
@@ -99,9 +131,8 @@ internal static partial class Program
                 layouts.ShowChooser(owner, grid);
                 var chooser = Application.Current.Windows.OfType<AppChooser>().Single();
                 var list = (ListBox)chooser.FindName("ColumnsList");
-                var position = (ComboBox)chooser.FindName("PositionComboBox");
-                list.SelectedItem = chooser.Rows[3];
-                position.SelectedItem = 1;
+                var first = (ListBoxItem)list.ItemContainerGenerator.ContainerFromItem(chooser.Rows[0]);
+                first.RaiseEvent(ColumnDragEvent(first, chooser.Rows[3], DragDrop.DropEvent, 2));
                 Require(LayoutHeaders(grid).SequenceEqual(["a", "b", "c", "d"]),
                     "A grade foi alterada antes de aplicar o rascunho.");
                 FindChooserButton(chooser, "Aplicar").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
@@ -156,6 +187,19 @@ internal static partial class Program
 
     private static IEnumerable<string> LayoutHeaders(DataGrid grid) =>
         grid.Columns.OrderBy(column => column.DisplayIndex).Select(column => (string)column.Header);
+
+    private static DragEventArgs ColumnDragEvent(
+        ListBoxItem target, AppChooserRow row, RoutedEvent routedEvent, double y)
+    {
+        var constructor = typeof(DragEventArgs).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance)
+            .Single();
+        var args = (DragEventArgs)constructor.Invoke(
+            [new DataObject(typeof(AppChooserRow), row), DragDropKeyStates.LeftMouseButton,
+                DragDropEffects.Move, target, new Point(5, y)]);
+        args.RoutedEvent = routedEvent;
+        args.Source = target;
+        return args;
+    }
 
     private static Button FindChooserButton(Window window, string label) =>
         VisualChildren(window).OfType<Button>().Single(button => (string)button.Content == label);
