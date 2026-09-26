@@ -45,7 +45,7 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
                 throw new InvalidDataException(
                     $"O arquivo \"{Path.GetFileName(sourcePath)}\" é uma planilha de resultado da cotação. " +
                     "Para importar, selecione a planilha de entrada com Pesquisa, Descrição, Quantidade, " +
-                    "Unidade, Faixa mínima, Faixa máxima, Disparos e Número de preços na cesta nas colunas A:H.");
+                    "Unidade, Faixa mínima, Faixa máxima, Páginas locais e Número de preços na cesta nas colunas A:H.");
             }
 
             var items = new List<QuotationImportItem>();
@@ -75,7 +75,7 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
                     var unit = RequiredText(row, 4, "Unidade", sheetName);
                     var minimum = OptionalDecimal(row, 5, "Faixa mínima", sheetName);
                     var maximum = OptionalDecimal(row, 6, "Faixa máxima", sheetName);
-                    var batchesDecimal = RequiredDecimal(row, 7, "Número de disparos", sheetName);
+                    var batchesDecimal = RequiredDecimal(row, 7, "Número de páginas locais", sheetName);
                     var basketSizeDecimal = OptionalDecimal(row, 8, "Número de preços na cesta", sheetName) ?? 3m;
                     if (quantity <= 0 || !QuotationQuantity.IsValid(quantity))
                     {
@@ -113,7 +113,7 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
                             row,
                             7,
                             sheetName,
-                            "Número de disparos",
+                            "Número de páginas locais",
                             "deve ser um inteiro de 1 a 100.");
                     }
 

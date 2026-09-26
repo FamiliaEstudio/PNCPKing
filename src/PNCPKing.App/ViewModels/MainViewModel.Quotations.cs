@@ -1196,7 +1196,7 @@ public sealed partial class MainViewModel
         _quotationAutomationCompletion = new TaskCompletionSource<bool>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         IsFileBusy = true;
-        SetPriceBusy(true, usesNetwork: true);
+        SetPriceBusy(true, usesNetwork: false);
         NotifyCommands();
         try
         {
@@ -1216,12 +1216,11 @@ public sealed partial class MainViewModel
                     $"Automação por contratações — tempo {value.ActiveElapsed:hh\\:mm\\:ss}; " +
                     $"restante {value.Remaining:hh\\:mm\\:ss}; lote {value.BatchNumber:N0}, " +
                     $"contrato {value.ContractInBatch:N0}/{value.ContractsInBatch:N0}; " +
-                    $"{value.UniqueContractsProcessed:N0} únicos; listas cache/API " +
-                    $"{value.ItemListsFromCache:N0}/{value.ItemListsFromApi:N0}; " +
+                    $"{value.UniqueContractsProcessed:N0} únicos; listas locais " +
+                    $"{value.ItemListsFromCache:N0}; " +
                     $"{value.MatchedItems:N0} correspondências; {value.RevealedPrices:N0} preços; " +
                     $"níveis R/I/A {value.RestrictiveItems:N0}/{value.IntermediateItems:N0}/{value.BroadItems:N0}; " +
                     $"resolvidos {value.ResolvedItems:N0}; " +
-                    $"chamadas de resultado {value.ItemResultCalls:N0}; falhas {value.FailedCalls:N0}. " +
                     $"sequência sem preço {value.ContractsWithoutResult:N0}. " +
                     $"{value.Message}";
                 StatusText = string.IsNullOrWhiteSpace(value.CurrentContractPrompt)
@@ -1305,7 +1304,7 @@ public sealed partial class MainViewModel
             TaskCreationOptions.RunContinuationsAsynchronously);
         var cancellationToken = _quotationAutomationCancellation.Token;
         IsFileBusy = true;
-        SetPriceBusy(true, usesNetwork: true);
+        SetPriceBusy(true, usesNetwork: false);
         NotifyCommands();
         var workbookExported = false;
         try
@@ -1326,6 +1325,7 @@ public sealed partial class MainViewModel
                 cancellationToken.ThrowIfCancellationRequested();
                 var current = pending[index];
                 var line = current.Line;
+                var localRows = new List<ItemSearchRow>();
                 await _quotationService.UpdateAutomationItemStateAsync(
                     line.Id,
                     QuotationAutomationItemState.Running,
@@ -1338,7 +1338,6 @@ public sealed partial class MainViewModel
                     MaximumPriceText = line.MaximumUnitPrice?.ToString("N4") ?? string.Empty;
                     ResetCurrentItemRows();
                     PriceSearchProgress = 0;
-                    _transientItemSearchService.Stop();
                     var automationQuery = new SearchQuery(
                         line.SearchText,
                         run.GeoFilter,
@@ -1347,49 +1346,52 @@ public sealed partial class MainViewModel
                         SearchSort.Nearest,
                         1,
                         200);
+                    var expression = SearchText.Parse(line.SearchText);
+                    _priceCancellation?.Cancel();
+                    Interlocked.Increment(ref _contractSearchGeneration);
                     if (IsCompoundSearch)
                     {
                         // Automation owns the grid now; do not keep cursors/filters from a compound local search.
-                        _priceCancellation?.Cancel();
-                        Interlocked.Increment(ref _contractSearchGeneration);
                         _localSearchSequence = null;
-                        _activeSearchQuery = automationQuery;
-                        _activeItemSearchExpression = SearchText.Parse(line.SearchText);
                         _localPricesNeedRefresh = false;
                         _hasMoreLocalPriceRows = false;
                         InvalidateContractResults();
                         OnPropertyChanged(nameof(IsCompoundSearch));
                         OnPropertyChanged(nameof(MainSearchApiHint));
                     }
+                    _activeSearchQuery = automationQuery;
+                    _activeItemSearchExpression = expression;
                     _localItemSearchSummary = null;
-                    _searchTelemetryBaseline = _telemetry.GetSnapshot();
-                    await _transientItemSearchService.StartAsync(
-                        automationQuery,
-                        cancellationToken).ConfigureAwait(true);
                     SetItemSearchActive(true);
                     var prefix = $"Item {index + 1:N0}/{pending.Length:N0} — {line.EffectiveDisplayName}. ";
-                    var progress = new Progress<PriceBatchProgress>(value =>
+                    PriceCacheLocalCursor? cursor = null;
+                    var hasMore = false;
+                    for (var pageNumber = 0; pageNumber < line.RequestedBatchCount; pageNumber++)
                     {
-                        UpdateItemSearchProgress(value);
-                        ItemSearchSummary = prefix + ItemSearchSummary;
-                    });
-                    var rowsProgress = new Progress<IReadOnlyList<ItemSearchRow>>(rows =>
-                        AppendUniqueRows(rows));
-                    await _transientItemSearchService.RunContinuousAsync(
-                        new PriceBatchRequest(
-                            line.RequestedBatchCount,
-                            true,
-                            PriceBatchBudgetMode.CandidateContracts),
-                        line.MinimumUnitPrice,
-                        line.MaximumUnitPrice,
-                        progress,
-                        rowsProgress,
-                        cancellationToken).ConfigureAwait(true);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var page = await Task.Run(
+                            () => _priceCacheRepository.SearchLocalAfterAsync(
+                                automationQuery, expression, line.MinimumUnitPrice, line.MaximumUnitPrice,
+                                cursor, ItemSearchDefaults.ContractsPerBatch,
+                                PriceCacheLocalReadOrder.Discovery, cancellationToken: cancellationToken),
+                            cancellationToken).ConfigureAwait(true);
+                        cursor = page.Cursor;
+                        hasMore = page.HasMore;
+                        localRows.AddRange(page.Rows ?? []);
+                        AppendUniqueRows(page.Rows ?? []);
+                        PriceSearchProgress = (pageNumber + 1) * 100d / line.RequestedBatchCount;
+                        ItemSearchSummary = prefix + $"{localRows.Count:N0} preço(s) do banco local; " +
+                            $"página {pageNumber + 1:N0}/{line.RequestedBatchCount:N0}.";
+                        if (!hasMore) break;
+                    }
+                    _localPriceCursor = cursor;
+                    _localPricePage = cursor?.Page ?? 0;
+                    _hasMoreLocalPriceRows = hasMore;
+                    _localPricesNeedRefresh = false;
+                    _localPriceRowsLoaded = localRows.Count;
+                    CurrentItemPage = localRows.Count > 0 ? Math.Max(1, _localPricePage) : 0;
+                    HasMoreItemCandidates = hasMore;
                     await _itemResultBuffer.FlushAsync().ConfigureAwait(true);
-                    var rows = await _transientItemSearchService.GetDiscoveredRowsAsync(
-                        line.MinimumUnitPrice,
-                        line.MaximumUnitPrice,
-                        cancellationToken).ConfigureAwait(true);
                     var input = new QuotationLineInput(
                         line.Description,
                         line.RequestedQuantity,
@@ -1404,7 +1406,7 @@ public sealed partial class MainViewModel
                         run.ProjectId,
                         line.Id,
                         input,
-                        rows,
+                        localRows,
                         cancellationToken).ConfigureAwait(true);
                     var recommended = analysis.Baskets.FirstOrDefault(basket => basket.IsRecommended);
                     if (recommended is not null)
@@ -1437,7 +1439,7 @@ public sealed partial class MainViewModel
                 }
                 catch (OperationCanceledException)
                 {
-                    await PreservePartialAutomationSampleAsync(run.ProjectId, line).ConfigureAwait(true);
+                    await PreservePartialAutomationSampleAsync(run.ProjectId, line, localRows).ConfigureAwait(true);
                     await _quotationService.UpdateAutomationItemStateAsync(
                         line.Id,
                         QuotationAutomationItemState.Pending,
@@ -1540,14 +1542,11 @@ public sealed partial class MainViewModel
         }
     }
 
-    private async Task PreservePartialAutomationSampleAsync(Guid projectId, QuotationLine line)
+    private async Task PreservePartialAutomationSampleAsync(
+        Guid projectId, QuotationLine line, IReadOnlyList<ItemSearchRow> rows)
     {
         try
         {
-            var rows = await _itemSearchService.GetDiscoveredRowsAsync(
-                line.MinimumUnitPrice,
-                line.MaximumUnitPrice,
-                CancellationToken.None).ConfigureAwait(true);
             if (rows.Count == 0)
             {
                 return;

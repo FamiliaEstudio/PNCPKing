@@ -248,7 +248,7 @@ public partial class QuotationItemWindow : Window
             return;
         }
 
-        await RunAsync(() => ViewModel.RunSearchAsync(restart)).ConfigureAwait(true);
+        await RunAsync(() => ViewModel.RunSearchAsync(true)).ConfigureAwait(true);
     }
 
     private async void ContinueSearch_Click(object sender, RoutedEventArgs e)
@@ -277,8 +277,8 @@ public partial class QuotationItemWindow : Window
         MessageBox.Show(
             this,
             $"Examinar as próximas {ViewModel.BatchCount * ItemSearchDefaults.ContractsPerBatch:N0} " +
-            "contratações ainda não resolvidas nesta pesquisa individual? " +
-            "Candidatas já cobertas pelo cache serão avançadas sem consumir essa cota.",
+            "contratações locais nesta pesquisa individual? " +
+            "Serão lidos somente itens e preços já salvos no banco.",
             "Confirmar lotes",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question) == MessageBoxResult.Yes;

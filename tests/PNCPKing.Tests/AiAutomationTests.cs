@@ -529,7 +529,7 @@ public sealed class AiAutomationTests
             var lines = await quotationRepository.GetLinesAsync(project.Id);
             Assert.Equal(60, processed.Count);
             Assert.Equal(60, processed.Select(value => value.ContractId).Distinct().Count());
-            Assert.Equal(60, client.ItemListCalls);
+            Assert.Equal(0, client.ItemListCalls);
             var pincel = lines.Single(line => line.Description == "Pincel");
             Assert.Equal(PromptMatchLevel.Broad, pincel.PromptSet!.ActiveLevel);
             Assert.Equal(10, pincel.PromptSet.ContractsAtActiveLevel);
@@ -561,6 +561,10 @@ public sealed class AiAutomationTests
                 EstimatedUnitPrice: 0.0001m, UseEstimatedPrice: true)],
             AdequacyWeights.Default, TimeSpan.FromMinutes(5), ["terapia"]);
         var client = new CountingPncpClient(contract, unitPrice: 0.0001m, resultCount: 3);
+        await database.Repository.UpsertItemsAsync(contract.PncpId,
+            await client.GetItemsAsync(contract), false);
+        await database.Repository.ReplaceItemResultsAsync(contract.PncpId, 1,
+            await client.GetItemResultsAsync(contract, 1));
         await using var search = new ItemSearchSessionService(client, database.Repository, Path.Combine(database.Directory, "search.db"));
         await new TimedQuotationAutomationService(database.Repository, search, quotations).RunAsync(run);
         var analysis = Assert.Single(await quotations.GetAnalysesAsync(project.Id));
@@ -570,6 +574,8 @@ public sealed class AiAutomationTests
         Assert.Equal(isMedication ? EstimateResolutionStage.Within25Percent : EstimateResolutionStage.Unrestricted,
             analysis.Line.SearchCheckpoint.EstimateStage);
         if (isMedication) Assert.Equal(0.0001m, analysis.Line.MaximumUnitPrice);
+        Assert.Equal(1, client.ItemListCalls);
+        Assert.Equal(1, client.ResultCalls);
     }
 
     [Fact]
@@ -617,7 +623,7 @@ public sealed class AiAutomationTests
             var line = Assert.Single(await quotationRepository.GetLinesAsync(project.Id));
             Assert.Equal(PromptMatchLevel.Intermediate, line.PromptSet!.ActiveLevel);
             Assert.Equal(1, line.PromptSet.ContractsAtActiveLevel);
-            Assert.Equal(1, client.ItemListCalls);
+            Assert.Equal(0, client.ItemListCalls);
         }
         finally
         {
@@ -764,7 +770,7 @@ public sealed class AiAutomationTests
             Assert.Contains(processed, value => value.ContractId == target.PncpId);
             Assert.Contains(prompts, value => value.Text == "produto11");
             Assert.Contains(prompts, value => value.Text == "produto12");
-            Assert.Equal(1, client.ItemListCalls);
+            Assert.Equal(0, client.ItemListCalls);
             Assert.NotNull(restored);
             Assert.True(restored!.ActiveElapsed < restored.TimeBudget);
             Assert.StartsWith("Prompts de contratação esgotados", restored.Message);

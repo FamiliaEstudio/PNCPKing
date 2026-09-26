@@ -1022,7 +1022,7 @@ public partial class AiQuotationWindow : Window
 
     private void SynchronizeContractPrompts(IReadOnlyList<string> contractPrompts)
     {
-        // Os crivos continuam armazenados para a ampliação explícita e para
+        // Os crivos continuam armazenados para a busca local por contratações e
         // compatibilidade, mas novas expressões de item não recebem bloco C:.
     }
 

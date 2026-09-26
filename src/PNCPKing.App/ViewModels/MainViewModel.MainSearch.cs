@@ -12,18 +12,13 @@ public sealed partial class MainViewModel
     private int _compoundReadGeneration;
 
     public bool IsCompoundSearch => _localSearchSequence is not null;
-    public string MainSearchApiHint => IsCompoundSearch
-        ? "Pesquisas com '+' consultam somente o banco local."
-        : "Consulta explicitamente os próximos lotes no PNCP.";
+    public string MainSearchApiHint => "Pesquisa de preços somente no banco local.";
 
-    private bool HasCurrentQuotationSample => IsCompoundSearch
-        ? !_isLocalPricePageLoading && !_isResultPageLoading && _currentItemResultKeys.Count > 0
-        : _itemSearchService.CurrentSession is not null;
+    private bool HasCurrentQuotationSample =>
+        !_isLocalPricePageLoading && !_isResultPageLoading && _currentItemResultKeys.Count > 0;
 
     private Task<IReadOnlyList<ItemSearchRow>> GetCurrentQuotationSampleAsync(decimal? minimum, decimal? maximum)
     {
-        if (!IsCompoundSearch)
-            return _itemSearchService.GetDiscoveredRowsAsync(minimumUnitPrice: minimum, maximumUnitPrice: maximum);
         IReadOnlyList<ItemSearchRow> rows = ItemSearchRows
             .Where(row => _currentItemResultKeys.Contains(RowKey(row)))
             .Select(row => row.Source)

@@ -423,10 +423,6 @@
                             IsEnabled="{Binding IsCustomDateRange}" ToolTip="Data inicial" />
                 <DatePicker Width="125" SelectedDate="{Binding CustomEndDate}"
                             IsEnabled="{Binding IsCustomDateRange}" ToolTip="Data final" />
-                <CheckBox Content="Esgotar pela API"
-                          IsChecked="{Binding SearchUntilCandidateSetExhausted}"
-                          VerticalAlignment="Center" Margin="7,0,4,0"
-                          ToolTip="Ao clicar em Ampliar pela API, percorre todas as contratações candidatas; não altera a pesquisa local nem a revalidação restrita." />
                 <Button Content="Pesquisar" Command="{Binding SearchCommand}" MinWidth="105" />
             </WrapPanel>
         </Grid>
@@ -443,11 +439,6 @@
                 <TextBox Width="115" Text="{Binding MaximumPriceText, UpdateSourceTrigger=PropertyChanged}"
                          ToolTip="Preço máximo inclusivo" />
                 <Button Content="Aplicar faixa" Command="{Binding ApplyPriceFilterCommand}" />
-                <TextBox Width="65" Text="{Binding BatchCount, UpdateSourceTrigger=LostFocus}"
-                         HorizontalContentAlignment="Center"
-                         ToolTip="1 a 200 lotes de até 50 contratações ainda não resolvidas" />
-                <Button Content="Ampliar pela API" Command="{Binding FireBatchesCommand}"
-                        ToolTip="{Binding MainSearchApiHint}" ToolTipService.ShowOnDisabled="True" />
                 <Button Content="Carregar mais resultados" Command="{Binding LoadNextItemPageCommand}"
                         ToolTip="Exibe até 50 preços salvos. Com '+', alterna para o próximo trecho, sem chamadas ao PNCP." />
                 <Button Content="Reiniciar pesquisa" Command="{Binding RestartItemSearchCommand}"

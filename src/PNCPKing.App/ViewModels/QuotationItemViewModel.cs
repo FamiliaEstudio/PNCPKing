@@ -827,18 +827,15 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         try
         {
             SearchSummary =
-                "Pesquisa em andamento; a contagem exata será refinada depois dos resultados visíveis.";
+                "Pesquisa no banco local em andamento; a contagem será refinada depois dos resultados visíveis.";
             var progress = new Progress<QuotationItemSearchProgress>(value =>
             {
                 SearchProgress = value.Percentage;
                 SearchSummary =
                     $"{value.Message} Nesta ação: {value.ProcessedContracts:N0}/{value.RequestedContracts:N0}; " +
                     $"total: {value.ContractsExamined:N0} contratos, {value.MatchedItems:N0} itens, " +
-                    $"{value.RevealedPrices:N0} preços; listas cache/API " +
-                    $"{value.ItemListsFromCache:N0}/{value.ItemListsFromApi:N0}; " +
-                    $"contratos cache/API {value.FullyResolvedContracts:N0}/{value.ExpandedContracts:N0}; " +
-                    "restantes ainda não estimadas; " +
-                    $"resultados API {value.ItemResultApiCalls:N0}; falhas {value.FailedCalls:N0}.";
+                    $"{value.RevealedPrices:N0} preços do banco local; " +
+                    $"restantes ainda não estimadas.";
             });
             var rowProgress = new Progress<IReadOnlyList<ItemSearchRow>>(rows =>
             {
@@ -1415,10 +1412,10 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         ProgressText =
             $"Tempo {value.ActiveElapsed:hh\\:mm\\:ss} · restante {value.Remaining:hh\\:mm\\:ss} · " +
             $"lote {value.BatchNumber:N0}, contrato {value.ContractInBatch:N0}/{value.ContractsInBatch:N0} · " +
-            $"{value.UniqueContractsProcessed:N0} contratos únicos · listas cache/API " +
-            $"{value.ItemListsFromCache:N0}/{value.ItemListsFromApi:N0} · " +
+            $"{value.UniqueContractsProcessed:N0} contratos únicos · listas locais " +
+            $"{value.ItemListsFromCache:N0} · " +
             $"{value.MatchedItems:N0} correspondências · {value.RevealedPrices:N0} preços · " +
-            $"resolvidos {value.ResolvedItems:N0} · falhas {value.FailedCalls:N0} · " +
+            $"resolvidos {value.ResolvedItems:N0} · " +
             $"prompt global: {value.CurrentContractPrompt}";
     }
 

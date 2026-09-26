@@ -30,6 +30,8 @@ public sealed class QuotationGroupsWindow : Window
         var root = new DockPanel { Margin = new(12) };
         Content = root;
         var intro = new TextBlock { Text = "Selecione itens com Ctrl/Shift para criar um agrupamento ou atribuí-los ao agrupamento escolhido. " +
+            "Quando houver cota, a reserva é de até 25% da quantidade total original de cada item, arredondada para baixo; " +
+            "o restante fica na principal. Itens com 1, 2 ou 3 unidades permanecem inteiros na principal. " +
             "Cada cota principal e reservada terá seu próprio número de grupo. A prévia só é aplicada por Organizar Itens.",
             TextWrapping = TextWrapping.Wrap, Margin = new(4, 4, 4, 10) };
         DockPanel.SetDock(intro, Dock.Top); root.Children.Add(intro);

@@ -197,6 +197,11 @@ public sealed class QuotationItemSearchTests
             .Select(number => Contract(number))
             .ToArray();
         await database.Repository.UpsertContractsAsync(contracts);
+        foreach (var contract in contracts)
+        {
+            await database.Repository.UpsertItemsAsync(contract.PncpId, [SearchItem(contract.PncpId)], false);
+            await database.Repository.ReplaceItemResultsAsync(contract.PncpId, 1, [SearchResult(contract)]);
+        }
         var quotation = new SqliteQuotationRepository(
             Path.Combine(database.Directory, "test.db"));
         var project = await quotation.CreateProjectAsync("Retomada");
@@ -242,8 +247,8 @@ public sealed class QuotationItemSearchTests
             lineId,
             ItemSearchPromptSlot.Restrictive))!;
         Assert.Equal(7, interrupted.Checkpoint.ContractsExamined);
-        Assert.Equal(7, client.ItemListCalls);
-        Assert.Equal(7, client.ResultCalls);
+        Assert.Equal(0, client.ItemListCalls);
+        Assert.Equal(0, client.ResultCalls);
 
         await using (var itemSearch = new ItemSearchSessionService(
                          client,
@@ -271,8 +276,8 @@ public sealed class QuotationItemSearchTests
             });
         }
 
-        Assert.Equal(60, client.ItemListCalls);
-        Assert.Equal(60, client.ResultCalls);
+        Assert.Equal(0, client.ItemListCalls);
+        Assert.Equal(0, client.ResultCalls);
         Assert.Equal(
             60,
             (await quotation.GetWorkspaceHitsAsync(
@@ -281,7 +286,7 @@ public sealed class QuotationItemSearchTests
     }
 
     [Fact]
-    public async Task IndependentSearch_RetriesFailuresAfterUnseenCandidatesAndDoesNotBlockCoverage()
+    public async Task IndependentSearch_UsesOnlyStoredPricesAndFindsNewCacheDataAfterRestart()
     {
         await using var database = await TestDatabase.CreateAsync();
         await database.Repository.UpsertContractsAsync([Contract(1), Contract(2)]);
@@ -307,24 +312,29 @@ public sealed class QuotationItemSearchTests
         var first = await service.RunAsync(seed, restart: true);
 
         Assert.True(first.Workspace.Checkpoint.CandidateSetExhausted);
-        Assert.Equal(2, first.Workspace.ExpandedContracts);
-        Assert.Single(first.Rows);
-        Assert.Single(await quotation.GetWorkspaceFailuresAsync(
-            lineId,
-            ItemSearchPromptSlot.Restrictive));
+        Assert.Equal(0, first.Workspace.ExpandedContracts);
+        Assert.Empty(first.Rows);
+        Assert.Equal(0, client.ItemListCalls);
+        Assert.Equal(0, client.ResultCalls);
 
-        var resumed = await service.RunAsync(seed, restart: false);
+        foreach (var contract in new[] { Contract(1), Contract(2) })
+        {
+            await database.Repository.UpsertItemsAsync(contract.PncpId, [SearchItem(contract.PncpId)], false);
+            await database.Repository.ReplaceItemResultsAsync(contract.PncpId, 1, [SearchResult(contract)]);
+        }
+
+        var resumed = await service.RunAsync(seed, restart: true);
 
         Assert.Equal(2, resumed.Rows.Count);
         Assert.Empty(await quotation.GetWorkspaceFailuresAsync(
             lineId,
             ItemSearchPromptSlot.Restrictive));
-        Assert.Equal(3, client.ItemListCalls);
-        Assert.Equal(2, client.ResultCalls);
+        Assert.Equal(0, client.ItemListCalls);
+        Assert.Equal(0, client.ResultCalls);
     }
 
     [Fact]
-    public async Task IndependentSearch_CachedContractsDoNotConsumeTheUnresolvedQuota()
+    public async Task IndependentSearch_LimitsEachLocalActionToRequestedContracts()
     {
         await using var database = await TestDatabase.CreateAsync();
         var contracts = Enumerable.Range(1, 60).Select(Contract).ToArray();
@@ -374,12 +384,16 @@ public sealed class QuotationItemSearchTests
 
         var completed = await service.RunAsync(seed, restart: false);
 
-        Assert.Equal(60, completed.Workspace.Checkpoint.ContractsExamined);
-        Assert.Equal(50, completed.Workspace.ExpandedContracts);
-        Assert.Equal(10, completed.Workspace.FullyResolvedContracts);
-        Assert.Equal(50, client.ItemListCalls);
-        Assert.Equal(50, client.ResultCalls);
-        Assert.True(completed.Workspace.Checkpoint.CandidateSetExhausted);
+        Assert.Equal(50, completed.Workspace.Checkpoint.ContractsExamined);
+        Assert.Equal(0, completed.Workspace.ExpandedContracts);
+        Assert.Equal(50, completed.Workspace.FullyResolvedContracts);
+        Assert.Equal(10, completed.Rows.Count);
+        Assert.Equal(0, client.ItemListCalls);
+        Assert.Equal(0, client.ResultCalls);
+        Assert.False(completed.Workspace.Checkpoint.CandidateSetExhausted);
+        var last = await service.RunAsync(seed, restart: false);
+        Assert.Equal(60, last.Workspace.Checkpoint.ContractsExamined);
+        Assert.True(last.Workspace.Checkpoint.CandidateSetExhausted);
     }
 
     [Fact]
@@ -396,7 +410,7 @@ public sealed class QuotationItemSearchTests
             lineId,
             new QuotationLineInput("Agulha", 10, "unidade", null, null),
             []);
-        var client = new CountingClient(resultFactory: contract => contract.PurchaseSequence switch
+        IReadOnlyList<HomologationResult> StoredResults(ContractRecord contract) => contract.PurchaseSequence switch
         {
             1 => [SearchResult(contract) with { HomologatedUnitValueScaled = null }],
             2 => [SearchResult(contract) with { HomologatedUnitValueScaled = DecimalScale.ToScaled(0m) }],
@@ -415,7 +429,13 @@ public sealed class QuotationItemSearchTests
                 }
             ],
             _ => throw new InvalidOperationException()
-        });
+        };
+        foreach (var contract in contracts)
+        {
+            await database.Repository.UpsertItemsAsync(contract.PncpId, [SearchItem(contract.PncpId)], false);
+            await database.Repository.ReplaceItemResultsAsync(contract.PncpId, 1, StoredResults(contract));
+        }
+        var client = new CountingClient();
         await using var itemSearch = new ItemSearchSessionService(
             client,
             database.Repository,
@@ -433,6 +453,8 @@ public sealed class QuotationItemSearchTests
             .Order()
             .ToArray());
         Assert.Single(completed.Rows, row => row.PriceState == ItemSearchPriceState.Cancelled);
+        Assert.Equal(0, client.ItemListCalls);
+        Assert.Equal(0, client.ResultCalls);
         var missingPrice = Assert.IsType<CachedItemResults>(
             await database.Repository.GetCachedItemResultsAsync(contracts[0].PncpId, 1));
         var zeroPrice = Assert.IsType<CachedItemResults>(

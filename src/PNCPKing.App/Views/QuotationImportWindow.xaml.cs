@@ -32,12 +32,12 @@ public partial class QuotationImportWindow : Window
         var baseName = Path.GetFileNameWithoutExtension(document.SourcePath);
         NewProjectNameTextBox.Text = projects.Count == 0 ? baseName : string.Empty;
         _defaultOutputName = baseName + "-cotação.xlsx";
-        var contracts = document.Items.Sum(item =>
+        var localPrices = document.Items.Sum(item =>
             checked(item.BatchCount * ItemSearchDefaults.ContractsPerBatch));
         SummaryTextBlock.Text =
-            $"{document.Items.Count:N0} item(ns), até {contracts:N0} contratações candidatas examinadas. " +
+            $"{document.Items.Count:N0} item(ns), até {localPrices:N0} preços locais exibidos. " +
             $"Filtros: {filterSummary}. Pesos: {weights}. " +
-            "Cada lote examina 50 contratações e revela todos os itens compatíveis encontrados.";
+            "A coluna G define quantas páginas de até 50 preços salvos serão lidas por item.";
     }
 
     public IReadOnlyList<QuotationImportItem> Items { get; }

@@ -79,7 +79,8 @@ public sealed class QuotationOrganizationTests
     }
 
     [Theory]
-    [InlineData(1, 0)] [InlineData(2, 0)] [InlineData(3, 0)] [InlineData(4, 1)] [InlineData(11, 2)]
+    [InlineData(1, 0)] [InlineData(2, 0)] [InlineData(3, 0)] [InlineData(4, 1)]
+    [InlineData(5, 1)] [InlineData(7, 1)] [InlineData(8, 2)] [InlineData(11, 2)] [InlineData(100, 25)]
     public void IntegerReservationNeverExceedsQuarterAndPreservesTotals(int quantity, int reserved)
     {
         var project = Project(); var item = Item(project, "Item", quantity, 90000);
@@ -87,7 +88,93 @@ public sealed class QuotationOrganizationTests
         Assert.Equal((decimal)quantity, positions.Sum(position => position.Quantity));
         Assert.Equal(quantity * 90000m, positions.Sum(position => position.TotalPrice));
         Assert.Equal((decimal)reserved, positions.Where(position => position.Kind == QuotationQuotaKind.Reserved).Sum(position => position.Quantity));
+        Assert.Equal(reserved == 0 ? 1 : 2, positions.Count);
+        Assert.All(positions.Where(position => position.Kind == QuotationQuotaKind.Reserved), position =>
+        {
+            Assert.True(position.Quantity <= quantity * 0.25m);
+            Assert.True(position.TotalPrice <= quantity * 90000m * 0.25m);
+        });
         Assert.DoesNotContain(positions, position => position.Quantity == 0);
+    }
+
+    [Theory]
+    [InlineData(false, 90000.123499, 90000.12)]
+    [InlineData(true, 90000.123499, 90000.1234)]
+    public void MixedGroupReservesPerItemWithoutDuplicatingSmallQuantities(
+        bool medication, decimal price, decimal effectivePrice)
+    {
+        var project = Project(medication); var groupId = Guid.NewGuid();
+        int[] quantities = [1, 2, 3, 4, 5, 7, 8, 100];
+        decimal[] principal = [1, 2, 3, 3, 4, 6, 6, 75];
+        decimal[] reserved = [0, 0, 0, 1, 1, 1, 2, 25];
+        string[] numbers = ["1", "2", "3", "4 e 9", "5 e 10", "6 e 11", "7 e 12", "8 e 13"];
+        var lines = quantities.Select(quantity => Item(project, $"Item {quantity:D3}", quantity, price, groupId)).ToArray();
+        var report = Apply(project, lines.Reverse().ToArray(),
+            new QuotationGroup(groupId, project.Id, "Misto", lines.Select(value => value.Line.Id).ToArray()));
+        var snapshot = report.Project.Organization!;
+        var mainGroup = Assert.Single(snapshot.Groups, group => group.Kind == QuotationQuotaKind.Principal);
+        var reserveGroup = Assert.Single(snapshot.Groups, group => group.Kind == QuotationQuotaKind.Reserved);
+        Assert.Equal(2, snapshot.Groups.Count);
+        Assert.Equal([1, 2], snapshot.Groups.Select(group => group.Number));
+        Assert.Equal(reserveGroup.Id, mainGroup.PairedGroupId);
+        Assert.Equal(mainGroup.Id, reserveGroup.PairedGroupId);
+        Assert.Equal(Enumerable.Range(1, 13), snapshot.Positions.Select(position => position.Number));
+        Assert.Equal(lines.Concat(lines.Skip(3)).Select(value => value.Line.Id),
+            snapshot.Positions.Select(position => position.LineId));
+        Assert.All(snapshot.Positions, position =>
+        {
+            Assert.True(position.Quantity > 0);
+            Assert.Equal(effectivePrice, position.UnitPrice);
+            Assert.Equal(position.Quantity * effectivePrice, position.TotalPrice);
+        });
+        for (var index = 0; index < lines.Length; index++)
+        {
+            var positions = snapshot.Positions.Where(position => position.LineId == lines[index].Line.Id).ToArray();
+            var main = Assert.Single(positions, position => position.Kind == QuotationQuotaKind.Principal);
+            var reserve = positions.Where(position => position.Kind == QuotationQuotaKind.Reserved).ToArray();
+            Assert.Equal(principal[index], main.Quantity);
+            Assert.Equal(mainGroup.Id, main.ResultGroupId);
+            Assert.Equal(reserved[index], reserve.Sum(position => position.Quantity));
+            Assert.Equal((decimal)quantities[index], positions.Sum(position => position.Quantity));
+            Assert.Equal(quantities[index] * effectivePrice, positions.Sum(position => position.TotalPrice));
+            Assert.True(reserve.Sum(position => position.Quantity) <= quantities[index] * 0.25m);
+            Assert.True(reserve.Sum(position => position.TotalPrice) <= quantities[index] * effectivePrice * 0.25m);
+            Assert.Equal(numbers[index], snapshot.ItemNumbers(lines[index].Line.Id));
+            if (quantities[index] < 4)
+            {
+                Assert.Single(positions);
+                Assert.Empty(reserve);
+                Assert.Equal("Grupo 1 — Principal", snapshot.GroupNumbers(lines[index].Line.Id));
+            }
+            else
+                Assert.Equal(reserveGroup.Id, Assert.Single(reserve).ResultGroupId);
+        }
+    }
+
+    [Theory]
+    [InlineData(false, 90000.12)]
+    [InlineData(true, 90000.1234)]
+    public void GroupOfOnlySmallExpensiveItemsHasNoReservedGroup(bool medication, decimal price)
+    {
+        var project = Project(medication); var groupId = Guid.NewGuid();
+        var lines = Enumerable.Range(1, 3)
+            .Select(quantity => Item(project, $"Item {quantity}", quantity, price, groupId)).ToArray();
+        var report = Apply(project, lines,
+            new QuotationGroup(groupId, project.Id, "Pequenas quantidades", lines.Select(value => value.Line.Id).ToArray()));
+        var snapshot = report.Project.Organization!;
+        var group = Assert.Single(snapshot.Groups);
+        Assert.Equal(QuotationQuotaKind.None, group.Kind);
+        Assert.Null(group.PairedGroupId);
+        Assert.Equal([1, 2, 3], snapshot.Positions.Select(position => position.Number));
+        foreach (var item in lines)
+        {
+            var position = Assert.Single(snapshot.Positions, position => position.LineId == item.Line.Id);
+            Assert.Equal(group.Id, position.ResultGroupId);
+            Assert.Equal(QuotationQuotaKind.None, position.Kind);
+            Assert.Equal(item.Line.RequestedQuantity, position.Quantity);
+            Assert.Equal(price, position.UnitPrice);
+            Assert.Equal(item.Line.RequestedQuantity * price, position.TotalPrice);
+        }
     }
 
     [Fact]
@@ -159,6 +246,50 @@ public sealed class QuotationOrganizationTests
         Assert.True((await service.GetReportAsync(project.Id)).OrganizationIsStale);
         await repository.DeleteLineAsync(z.Id);
         Assert.Empty(await repository.GetGroupsAsync(project.Id));
+    }
+
+    [Theory]
+    [InlineData(false, 90000.12)]
+    [InlineData(true, 90000.1234)]
+    public async Task MixedGroupKeepsSingleNumbersForSmallItemsAfterReopenAndExport(bool medication, decimal price)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer());
+        var project = await repository.CreateProjectAsync("Grupo misto");
+        await repository.SetProjectMedicationAsync(project.Id, medication);
+        int[] quantities = [1, 2, 3, 4, 5, 7, 8, 100];
+        string[] numbers = ["1", "2", "3", "4 e 9", "5 e 10", "6 e 11", "7 e 12", "8 e 13"];
+        var lines = new List<QuotationLine>();
+        foreach (var quantity in quantities)
+            lines.Add(await AddConfirmedAsync(repository, service, project, $"Item {quantity:D3}", quantity, price));
+        await service.SaveGroupsAsync(project.Id,
+            [new QuotationGroup(Guid.NewGuid(), project.Id, "Misto", lines.Select(line => line.Id).ToArray())]);
+        await service.OrganizeProjectAsync(project.Id);
+        var before = (await service.GetReportAsync(project.Id)).Project.Organization!.ToJson();
+
+        var reopened = new QuotationService(new SqliteQuotationRepository(database.Repository.DatabasePath), new QuotationAnalyzer());
+        var report = await reopened.GetReportAsync(project.Id);
+        Assert.False(report.OrganizationIsStale);
+        Assert.Equal(medication, report.Project.IsMedication);
+        Assert.Equal(before, report.Project.Organization!.ToJson());
+        QuotationOrganization.ValidateSnapshot(report);
+        Assert.Equal(lines.Select(line => line.Id), report.Lines.Select(value => value.Line.Id));
+        Assert.Equal(numbers, Enumerable.Range(0, lines.Count).Select(report.ItemNumbers));
+        Assert.All(report.Project.Organization.Positions, position => Assert.Equal(price, position.UnitPrice));
+        foreach (var line in lines.Take(3))
+        {
+            var position = Assert.Single(report.Project.Organization.Positions, position => position.LineId == line.Id);
+            Assert.Equal(QuotationQuotaKind.Principal, position.Kind);
+            Assert.Equal(line.RequestedQuantity, position.Quantity);
+        }
+
+        var path = Path.Combine(database.Directory, "grupo-misto.xlsx");
+        await new QuotationWorkbookService().ExportAsync(path, report, "Responsável");
+        using var workbook = new XLWorkbook(path);
+        var titles = workbook.Worksheet(1).Column(2).CellsUsed().Select(cell => cell.GetString())
+            .Where(text => text.StartsWith("Item ", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(quantities.Select((quantity, index) => $"Item {numbers[index]} - Item {quantity:D3}"), titles);
     }
 
     [Theory]

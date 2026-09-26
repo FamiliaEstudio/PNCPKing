@@ -2794,7 +2794,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 ? "Revalidação interrompida; os preços locais atuais foram preservados."
                 : _isLocalPricePageLoading || _isResultPageLoading
                 ? "Pesquisa local interrompida; use Carregar mais resultados para continuar."
-                : "Ampliação pela API interrompida; execute a mesma pesquisa para retomar do checkpoint.";
+                : "Pesquisa local interrompida; os preços já exibidos foram preservados.";
         }
 
         NotifyCommands();

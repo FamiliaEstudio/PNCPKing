@@ -116,12 +116,18 @@ internal static partial class Program
     private static async Task CheckQuotationGroupsAsync()
     {
         var project = new QuotationProject(Guid.NewGuid(), "Grupos", DateTimeOffset.Now, DateTimeOffset.Now);
-        var line = new QuotationLine { Id = Guid.NewGuid(), ProjectId = project.Id, Description = "Item de teste",
-            RequestedQuantity = 4, RequestedUnit = "unidade", SelectedBasketKey = "chosen", SelectionConfirmed = true };
-        var basket = new QuotationBasket { Key = "chosen", References = [], AveragePrice = 25000,
-            MinimumPrice = 25000, MaximumPrice = 25000, MaximumDeviationPercent = 0, Score = 100 };
-        var analysis = new QuotationLineAnalysis(line, [], [basket], 0, 0, 0, 0, 0);
-        var window = new PNCPKing.App.Views.QuotationGroupsWindow(new(project, [analysis])) { Width = 900, Height = 550 };
+        int[] quantities = [1, 2, 3, 4, 5, 7, 8, 100];
+        decimal[] principal = [1, 2, 3, 3, 4, 6, 6, 75];
+        decimal[] reserved = [0, 0, 0, 1, 1, 1, 2, 25];
+        string[] numbers = ["1", "2", "3", "4 e 9", "5 e 10", "6 e 11", "7 e 12", "8 e 13"];
+        var basket = new QuotationBasket { Key = "chosen", References = [], AveragePrice = 90000.12m,
+            MinimumPrice = 90000.12m, MaximumPrice = 90000.12m, MaximumDeviationPercent = 0, Score = 100 };
+        var analyses = quantities.Select(quantity => new QuotationLineAnalysis(new QuotationLine
+        {
+            Id = Guid.NewGuid(), ProjectId = project.Id, Description = $"Item {quantity:D3}",
+            RequestedQuantity = quantity, RequestedUnit = "unidade", SelectedBasketKey = "chosen", SelectionConfirmed = true
+        }, [], [basket], 0, 0, 0, 0, 0)).ToArray();
+        var window = new PNCPKing.App.Views.QuotationGroupsWindow(new(project, analyses)) { Width = 900, Height = 550 };
         MonitorAwareWindowBehavior.Attach(window);
         try
         {
@@ -130,19 +136,41 @@ internal static partial class Program
             var root = (DockPanel)window.Content;
             var grid = root.Children.OfType<DataGrid>().Single();
             Require(grid.ActualHeight > 150, "A lista de membros não tem altura utilizável.");
-            Require(grid.Items.Count == 1 && grid.Columns.Count == 10, "Colunas da organização ausentes.");
-            var row = (PNCPKing.App.Views.QuotationGroupsWindow.ItemRow)grid.Items[0];
+            Require(grid.Items.Count == quantities.Length && grid.Columns.Count == 10, "Colunas da organização ausentes.");
+            var rows = grid.Items.Cast<PNCPKing.App.Views.QuotationGroupsWindow.ItemRow>().ToArray();
+            var row = rows.Single(value => value.Quantity == 4);
             Require(row.Numbers == "1 e 2" && row.PrincipalQuantity == 3 && row.ReservedQuantity == 1,
                 "A prévia das cotas está incorreta.");
-            grid.SelectedItem = row;
+            grid.SelectAll();
             var actions = root.Children.OfType<WrapPanel>().Single();
             var create = actions.Children.OfType<Button>().Single(button => (string)button.Content == "Criar com seleção");
             create.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Require(window.Groups.Count == 1 && row.ResultGroups == "Grupo 1 — Principal / Grupo 2 — Reservada",
                 "O agrupamento não gerou grupos principal e reservado distintos.");
+            for (var index = 0; index < rows.Length; index++)
+            {
+                var item = rows[index];
+                Require(item.Numbers == numbers[index] && item.PrincipalQuantity == principal[index] &&
+                        item.ReservedQuantity == reserved[index], $"A divisão do item de {item.Quantity} unidades está incorreta.");
+                Require(item.PrincipalValue == (principal[index] * 90000.12m).ToString("C2") &&
+                        item.ReservedValue == (reserved[index] * 90000.12m).ToString("C2"),
+                    "Os valores da prévia não correspondem às quantidades de cada cota.");
+                if (item.Quantity < 4)
+                    Require(item.ResultGroups == "Grupo 1 — Principal" &&
+                            item.Note == "Reserva zero: permanece integralmente na principal",
+                        "O item de quantidade pequena foi incluído na reservada ou perdeu sua observação.");
+            }
             var remove = actions.Children.OfType<Button>().Single(button => (string)button.Content == "Excluir grupo");
             remove.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            Require(window.Groups.Count == 0 && grid.Items.Count == 1, "Excluir o grupo removeu o item.");
+            Require(window.Groups.Count == 0 && grid.Items.Count == quantities.Length, "Excluir o grupo removeu itens.");
+            grid.UnselectAll();
+            foreach (var small in rows.Where(value => value.Quantity < 4)) grid.SelectedItems.Add(small);
+            create.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Require(window.Groups.Count == 1, "Não foi possível criar o grupo de pequenas quantidades.");
+            foreach (var small in rows.Where(value => value.Quantity < 4))
+                Require(small.ResultGroups == "Grupo 1 — Sem cota" && small.ReservedQuantity == 0 &&
+                        small.PrincipalQuantity == small.Quantity && small.Numbers == small.Quantity.ToString(),
+                    "O grupo de pequenas quantidades gerou uma reserva ou numeração indevida.");
         }
         finally { window.Close(); }
     }

@@ -1,7 +1,6 @@
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
 using PNCPKing.Core.Search;
-using PNCPKing.Infrastructure.Api;
 
 namespace PNCPKing.Infrastructure.Services;
 
@@ -186,12 +185,7 @@ public sealed class QuotationItemSearchService(
             await workspaces.SaveWorkspaceAsync(workspace, cancellationToken).ConfigureAwait(false);
         }
 
-        var pendingFailures = await workspaces.GetWorkspaceFailuresAsync(
-                workspace.LineId,
-                workspace.Slot,
-                cancellationToken)
-            .ConfigureAwait(false);
-        if (workspace.Checkpoint.CandidateSetExhausted && pendingFailures.Count == 0)
+        if (workspace.Checkpoint.CandidateSetExhausted)
         {
             progress?.Report(CreateProgress(
                 workspace,
@@ -202,10 +196,9 @@ public sealed class QuotationItemSearchService(
         }
 
         var requestedContracts = checked(workspace.BatchCount * ItemSearchDefaults.ContractsPerBatch);
-        var expandedThisRun = 0;
         var examinedThisRun = 0;
         var query = BuildQuery(workspace);
-        while (expandedThisRun < requestedContracts &&
+        while (examinedThisRun < requestedContracts &&
                !workspace.Checkpoint.CandidateSetExhausted)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -232,7 +225,7 @@ public sealed class QuotationItemSearchService(
             foreach (var candidate in page.Results)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (expandedThisRun >= requestedContracts)
+                if (examinedThisRun >= requestedContracts)
                 {
                     break;
                 }
@@ -247,7 +240,7 @@ public sealed class QuotationItemSearchService(
                         candidate.Contract,
                         [new ContractItemPrompt(workspace.LineId, level, workspace.SearchText)],
                         cancellationToken,
-                        PncpRequestPriority.VisiblePrices)
+                        localOnly: true)
                     .ConfigureAwait(false);
                 var matchedRows = evaluated.RowsByLine.TryGetValue(workspace.LineId, out var values)
                     ? values.Select(row => row with
@@ -259,13 +252,6 @@ public sealed class QuotationItemSearchService(
                     }).ToArray()
                     : [];
                 examinedThisRun++;
-                var usedNetwork = evaluated.ItemListsFromApi > 0 ||
-                                  evaluated.ItemResultApiCalls > 0 ||
-                                  evaluated.FailedCalls > 0;
-                if (usedNetwork)
-                {
-                    expandedThisRun++;
-                }
                 var contractsExamined = checked(workspace.Checkpoint.ContractsExamined + 1);
                 var distinctHits = matchedRows
                     .GroupBy(row => (row.Contract.PncpId, row.Item.ItemNumber))
@@ -299,9 +285,7 @@ public sealed class QuotationItemSearchService(
                     ItemListsFromApi = checked(workspace.ItemListsFromApi + evaluated.ItemListsFromApi),
                     ItemResultApiCalls = checked(workspace.ItemResultApiCalls + evaluated.ItemResultApiCalls),
                     FailedCalls = checked(workspace.FailedCalls + evaluated.FailedCalls),
-                    ExpandedContracts = checked(workspace.ExpandedContracts + (usedNetwork ? 1 : 0)),
-                    FullyResolvedContracts = checked(
-                        workspace.FullyResolvedContracts + (usedNetwork ? 0 : 1)),
+                    FullyResolvedContracts = checked(workspace.FullyResolvedContracts + 1),
                     StatusMessage =
                         $"Contrato {candidate.Contract.PncpId}: {evaluated.MatchedItems:N0} item(ns), " +
                         $"{evaluated.RevealedPrices:N0} preço(s).",
@@ -312,25 +296,6 @@ public sealed class QuotationItemSearchService(
                         distinctHits,
                         cancellationToken)
                     .ConfigureAwait(false);
-                if (evaluated.FailedCalls > 0)
-                {
-                    await workspaces.SaveWorkspaceFailureAsync(
-                            workspace.LineId,
-                            workspace.Slot,
-                            candidate.Contract.PncpId,
-                            "Uma ou mais consultas do PNCP falharam após as tentativas automáticas.",
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                }
-                else
-                {
-                    await workspaces.RemoveWorkspaceFailureAsync(
-                            workspace.LineId,
-                            workspace.Slot,
-                            candidate.Contract.PncpId,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                }
                 var visibleRows = ApplyPriceRange(
                     matchedRows,
                     workspace.MinimumUnitPrice,
@@ -343,25 +308,15 @@ public sealed class QuotationItemSearchService(
                 progress?.Report(CreateProgress(
                     workspace,
                     requestedContracts,
-                    expandedThisRun,
+                    examinedThisRun,
                     workspace.StatusMessage,
                     candidate.Contract.PncpId));
             }
         }
 
-        if (pendingFailures.Count > 0)
-        {
-            workspace = await RetryPreviousFailuresAsync(
-                    workspace,
-                    pendingFailures.Take(ItemSearchDefaults.ContractsPerBatch).ToArray(),
-                    rowProgress,
-                    cancellationToken)
-                .ConfigureAwait(false);
-        }
-
-        var completedBatches = expandedThisRun == 0
+        var completedBatches = examinedThisRun == 0
             ? 0
-            : (int)Math.Ceiling(expandedThisRun / (double)ItemSearchDefaults.ContractsPerBatch);
+            : (int)Math.Ceiling(examinedThisRun / (double)ItemSearchDefaults.ContractsPerBatch);
         workspace = workspace with
         {
             Checkpoint = workspace.Checkpoint with
@@ -370,148 +325,16 @@ public sealed class QuotationItemSearchService(
             },
             StatusMessage = workspace.Checkpoint.CandidateSetExhausted
                 ? $"Conjunto esgotado após {workspace.Checkpoint.ContractsExamined:N0} contratação(ões)."
-                : $"Ação concluída: {expandedThisRun:N0} contratação(ões) ampliada(s) e " +
-                  $"{examinedThisRun:N0} candidata(s) examinada(s).",
+                : $"Ação local concluída: {examinedThisRun:N0} contratação(ões) examinada(s).",
             UpdatedAt = DateTimeOffset.UtcNow
         };
         await workspaces.SaveWorkspaceAsync(workspace, cancellationToken).ConfigureAwait(false);
         progress?.Report(CreateProgress(
             workspace,
             requestedContracts,
-            expandedThisRun,
+            examinedThisRun,
             workspace.StatusMessage));
         return await LoadAsync(workspace, cancellationToken).ConfigureAwait(false);
-    }
-
-    private async Task<QuotationItemSearchWorkspace> RetryPreviousFailuresAsync(
-        QuotationItemSearchWorkspace workspace,
-        IReadOnlyList<QuotationItemSearchFailure> failures,
-        IProgress<IReadOnlyList<ItemSearchRow>>? rowProgress,
-        CancellationToken cancellationToken)
-    {
-        var existingKeys = (await workspaces.GetWorkspaceHitsAsync(
-                workspace.LineId,
-                workspace.Slot,
-                cancellationToken)
-            .ConfigureAwait(false))
-            .Select(hit => (hit.ContractId, hit.ItemNumber))
-            .ToHashSet();
-        var level = workspace.Slot switch
-        {
-            ItemSearchPromptSlot.Restrictive => PromptMatchLevel.Restrictive,
-            ItemSearchPromptSlot.Intermediate => PromptMatchLevel.Intermediate,
-            _ => PromptMatchLevel.Broad
-        };
-
-        foreach (var failure in failures)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var contract = await contracts.GetContractAsync(failure.ContractId, cancellationToken)
-                .ConfigureAwait(false);
-            if (contract is null)
-            {
-                await workspaces.RemoveWorkspaceFailureAsync(
-                        workspace.LineId,
-                        workspace.Slot,
-                        failure.ContractId,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                continue;
-            }
-
-            var evaluated = await itemSearch.EvaluateContractAsync(
-                    contract,
-                    [new ContractItemPrompt(workspace.LineId, level, workspace.SearchText)],
-                    cancellationToken,
-                    PncpRequestPriority.VisiblePrices)
-                .ConfigureAwait(false);
-            var matchedRows = evaluated.RowsByLine.TryGetValue(workspace.LineId, out var values)
-                ? values.Select(row => row with
-                {
-                    MatchedPromptLevel = workspace.Slot == ItemSearchPromptSlot.Custom
-                        ? null
-                        : level,
-                    MatchedSearchText = workspace.SearchText
-                }).ToArray()
-                : [];
-            var distinctHits = matchedRows
-                .GroupBy(row => (row.Contract.PncpId, row.Item.ItemNumber))
-                .Select(group => new QuotationItemSearchHit
-                {
-                    LineId = workspace.LineId,
-                    Slot = workspace.Slot,
-                    ContractId = group.Key.PncpId,
-                    ItemNumber = group.Key.ItemNumber,
-                    MatchedPromptLevel = workspace.Slot == ItemSearchPromptSlot.Custom
-                        ? null
-                        : level,
-                    MatchedSearchText = workspace.SearchText,
-                    DiscoveredOrder = checked(
-                        (long)Math.Max(1, workspace.Checkpoint.ContractsExamined) * 1_000_000L +
-                        group.Key.ItemNumber)
-                })
-                .ToArray();
-            var newKeys = distinctHits
-                .Select(hit => (hit.ContractId, hit.ItemNumber))
-                .Where(key => !existingKeys.Contains(key))
-                .ToHashSet();
-            var revealedDelta = matchedRows.Count(row =>
-                newKeys.Contains((row.Contract.PncpId, row.Item.ItemNumber)) &&
-                row.Result is { IsActive: true, HomologatedUnitValue: > 0 });
-            workspace = workspace with
-            {
-                MatchedItems = checked(workspace.MatchedItems + newKeys.Count),
-                RevealedPrices = checked(workspace.RevealedPrices + revealedDelta),
-                ItemListsFromCache = checked(workspace.ItemListsFromCache + evaluated.ItemListsFromCache),
-                ItemListsFromApi = checked(workspace.ItemListsFromApi + evaluated.ItemListsFromApi),
-                ItemResultApiCalls = checked(workspace.ItemResultApiCalls + evaluated.ItemResultApiCalls),
-                FailedCalls = checked(workspace.FailedCalls + evaluated.FailedCalls),
-                StatusMessage = evaluated.FailedCalls == 0
-                    ? $"Falha anterior resolvida na contratação {contract.PncpId}."
-                    : $"A contratação {contract.PncpId} continua pendente após nova tentativa.",
-                UpdatedAt = DateTimeOffset.UtcNow
-            };
-            await workspaces.SaveProcessedContractAsync(
-                    workspace,
-                    distinctHits,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            foreach (var key in newKeys)
-            {
-                existingKeys.Add(key);
-            }
-
-            if (evaluated.FailedCalls == 0)
-            {
-                await workspaces.RemoveWorkspaceFailureAsync(
-                        workspace.LineId,
-                        workspace.Slot,
-                        contract.PncpId,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            else
-            {
-                await workspaces.SaveWorkspaceFailureAsync(
-                        workspace.LineId,
-                        workspace.Slot,
-                        contract.PncpId,
-                        "A consulta continuou falhando após uma retomada posterior.",
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            }
-
-            var visibleRows = ApplyPriceRange(
-                matchedRows,
-                workspace.MinimumUnitPrice,
-                workspace.MaximumUnitPrice);
-            if (visibleRows.Count > 0)
-            {
-                rowProgress?.Report(visibleRows);
-            }
-        }
-
-        return workspace;
     }
 
     private async Task<IReadOnlyList<ItemSearchRow>> BuildRowsAsync(

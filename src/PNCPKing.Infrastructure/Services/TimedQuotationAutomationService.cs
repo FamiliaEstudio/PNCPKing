@@ -217,7 +217,8 @@ public sealed class TimedQuotationAutomationService(
                     var evaluated = await itemSearch.EvaluateContractAsync(
                             candidate.Contract,
                             itemPrompts,
-                            cancellationToken)
+                            cancellationToken,
+                            localOnly: true)
                         .ConfigureAwait(false);
                     totals.Add(evaluated);
                     foreach (var analysis in analyses)
@@ -592,7 +593,8 @@ public sealed class TimedQuotationAutomationService(
                 continue;
             }
 
-            var evaluated = await itemSearch.EvaluateContractAsync(contract, prompts, cancellationToken)
+            var evaluated = await itemSearch.EvaluateContractAsync(
+                    contract, prompts, cancellationToken, localOnly: true)
                 .ConfigureAwait(false);
             totals.AddNetworkOnly(evaluated);
             foreach (var set in activated)

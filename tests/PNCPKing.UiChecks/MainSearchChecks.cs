@@ -59,6 +59,13 @@ internal static partial class Program
             Start("café + açúcar");
             await Load();
             Require(rows.Count == 50 && rows.All(row => row.Description == "café torrado"), "Primeira página não usou o primeiro trecho.");
+            Require((bool)typeof(SearchVm).GetProperty("HasCurrentQuotationSample",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(vm)!,
+                "Preços locais carregados não habilitaram a amostra para Cotações.");
+            var sample = await (Task<IReadOnlyList<ItemSearchRow>>)CallSearch(
+                vm, "GetCurrentQuotationSampleAsync", null, null)!;
+            Require(sample.Count == 50 && sample.All(row => row.Item.Description == "café torrado"),
+                "A amostra da cotação não acompanhou os preços locais exibidos.");
             var kept = rows[0];
             kept.IsPinned = true;
             kept.IsSelectedForBasket = true;

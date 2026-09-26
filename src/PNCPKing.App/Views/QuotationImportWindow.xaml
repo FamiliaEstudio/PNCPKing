@@ -29,7 +29,7 @@
                     <DataGridTextColumn Header="Unidade" Binding="{Binding Unit}" Width="120" />
                     <DataGridTextColumn Header="Mínimo" Binding="{Binding MinimumUnitPrice, StringFormat=C4}" Width="100" />
                     <DataGridTextColumn Header="Máximo" Binding="{Binding MaximumUnitPrice, StringFormat=C4}" Width="100" />
-                    <DataGridTextColumn Header="Disparos" Binding="{Binding BatchCount}" Width="70" />
+                    <DataGridTextColumn Header="Páginas locais" Binding="{Binding BatchCount}" Width="95" />
                     <DataGridTextColumn Header="Preços na cesta" Binding="{Binding RequestedBasketSize}" Width="105" />
                 </DataGrid.Columns>
             </DataGrid>

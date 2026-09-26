@@ -114,7 +114,8 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         IReadOnlyList<ContractItemPrompt> prompts,
         CancellationToken cancellationToken = default,
         PncpRequestPriority priority = PncpRequestPriority.AdditionalBatches,
-        int? maximumNetworkConcurrency = null)
+        int? maximumNetworkConcurrency = null,
+        bool localOnly = false)
     {
         ArgumentNullException.ThrowIfNull(contract);
         ArgumentNullException.ThrowIfNull(prompts);
@@ -129,6 +130,11 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
         if (snapshot?.IsCurrentFor(contract) == true)
         {
             listFromCache = 1;
+        }
+        else if (localOnly)
+        {
+            return new ContractEvaluationResult(contract,
+                new Dictionary<Guid, IReadOnlyList<ItemSearchRow>>(), 0, 0, 0, 0, 0, 0);
         }
         else
         {
@@ -223,6 +229,8 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
                 return;
             }
 
+            if (localOnly) return;
+
             await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
@@ -309,11 +317,9 @@ public sealed class ItemSearchSessionService : IAsyncDisposable
             byLine[lineGroup.Key] = rows;
         }
 
-        var actualCalls = GetActualCallDelta(
-            telemetryBefore,
-            listFromApi,
-            resultCalls,
-            failedCalls);
+        var actualCalls = localOnly
+            ? (ItemListCalls: 0, ItemResultCalls: 0, FailedCalls: 0)
+            : GetActualCallDelta(telemetryBefore, listFromApi, resultCalls, failedCalls);
         return new ContractEvaluationResult(
             contract,
             byLine,

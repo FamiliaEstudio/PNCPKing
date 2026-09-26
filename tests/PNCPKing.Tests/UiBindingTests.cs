@@ -37,14 +37,9 @@ public sealed class UiBindingTests
         Assert.Contains(healthTooltips, value => value.Contains("InterfaceIndicatorDetails", StringComparison.Ordinal));
         Assert.Contains(healthTooltips, value => value.Contains("PncpIndicatorDetails", StringComparison.Ordinal));
 
-        var exhaustive = Assert.Single(
-            document.Descendants(presentation + "CheckBox"),
+        Assert.DoesNotContain(document.Descendants(presentation + "CheckBox"),
             element => element.Attribute("Content")?.Value == "Esgotar pela API");
-        Assert.Contains(
-            "SearchUntilCandidateSetExhausted",
-            Assert.IsType<XAttribute>(exhaustive.Attribute("IsChecked")).Value);
-        Assert.Single(
-            document.Descendants(presentation + "Button"),
+        Assert.DoesNotContain(document.Descendants(presentation + "Button"),
             element => element.Attribute("Content")?.Value == "Ampliar pela API");
 
         var grid = Assert.Single(
