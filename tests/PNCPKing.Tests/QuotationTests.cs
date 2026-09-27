@@ -1481,7 +1481,7 @@ public sealed class QuotationTests
     }
 
     [Fact]
-    public async Task Workbook_UsesConvertedManualPricesAndMedianWithoutExcludingWarnings()
+    public async Task Workbook_UsesConvertedManualPricesAndMedianOfValidPrices()
     {
         var analyzer = new QuotationAnalyzer(Today);
         var project = new QuotationProject(
@@ -1521,7 +1521,9 @@ public sealed class QuotationTests
                 Assert.Equal("Inciso II", cell.GetString()));
             Assert.Equal([10m, 10.02m, 16.49m],
                 sheet.Range("F6:F8").Cells().Select(cell => cell.GetValue<decimal>()).ToArray());
-            Assert.Equal("IF(F6=\"\",\"\",F6)", sheet.Cell("K6").FormulaA1);
+            Assert.Equal("EXCESSIVO", sheet.Cell("I8").GetString());
+            Assert.Equal(string.Empty, sheet.Cell("K8").GetString());
+            Assert.Equal(10.01m, sheet.Cell("C9").GetValue<decimal>());
             Assert.Equal("Mediana dos preços válidos", sheet.Cell("B9").GetString());
             Assert.Equal(
                 "IF(COUNTIF(K6:K8,\">0\")=0,\"\",TRUNC(MEDIAN(K6:K8),2))",
@@ -1539,6 +1541,66 @@ public sealed class QuotationTests
             if (File.Exists(path)) File.Delete(path);
             var directory = Path.GetDirectoryName(path)!;
             if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false, QuotationAggregationMethod.Mean)]
+    [InlineData(true, false, QuotationAggregationMethod.Mean)]
+    [InlineData(false, false, QuotationAggregationMethod.Median)]
+    [InlineData(true, false, QuotationAggregationMethod.Median)]
+    [InlineData(false, true, QuotationAggregationMethod.Mean)]
+    [InlineData(true, true, QuotationAggregationMethod.Mean)]
+    [InlineData(false, true, QuotationAggregationMethod.Median)]
+    [InlineData(true, true, QuotationAggregationMethod.Median)]
+    public async Task Workbook_CentroCulturalAggregatesOnlyPricesValidInBothChecks(
+        bool manual, bool medication, QuotationAggregationMethod method)
+    {
+        var project = new QuotationProject(
+            Guid.NewGuid(), "Centro Cultural Evento", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow)
+        {
+            IsMedication = medication
+        };
+        var line = Line("Locação Microfone com Fio", 1m, "unidade");
+        decimal[] prices = [38m, 42m, 88.44m, 89.11m, 100m, 133m, 185m];
+        var divisor = medication ? 100m : 1m;
+        var references = prices.Select((price, index) => Reference(
+            $"price-{index}", $"contract-{index}", "11222333000181", price / divisor)).ToArray();
+        var manualBasket = Manual(line, "Microfones", references.Select(value => value.Id).ToArray()) with
+        {
+            AggregationMethod = method
+        };
+        var analysis = new QuotationAnalyzer(Today).Analyze(
+            line, references, [manualBasket], project.PriceDecimalPlaces);
+        var basket = analysis.Baskets.Single(value => value.IsManual) with
+        {
+            Kind = manual ? QuotationBasketKind.Manual : QuotationBasketKind.Automatic
+        };
+        analysis = Confirm(analysis with { Baskets = [basket] }, basket);
+        var path = Path.Combine(
+            Path.GetTempPath(), "PNCPKing.Tests", Guid.NewGuid().ToString("N"), "centro-cultural.xlsx");
+        try
+        {
+            await new QuotationWorkbookService().ExportAsync(
+                path, new QuotationProjectReport(project, [analysis]), "Responsável");
+            using var workbook = new XLWorkbook(path);
+            var sheet = workbook.Worksheet(1);
+            Assert.Equal(prices.Select(price => price / divisor),
+                sheet.Range("F6:F12").Cells().Select(cell => cell.GetValue<decimal>()));
+            Assert.All(sheet.Range("J6:J7").Cells(), cell => Assert.Equal("INEXEQUÍVEL", cell.GetString()));
+            Assert.All(sheet.Range("I11:I12").Cells(), cell => Assert.Equal("EXCESSIVO", cell.GetString()));
+            Assert.All(sheet.Range("I8:J10").Cells(), cell => Assert.Equal("VÁLIDO", cell.GetString()));
+            Assert.Equal(new[] { 88.44m / divisor, 89.11m / divisor, 100m / divisor },
+                sheet.Range("K8:K10").Cells().Select(cell => cell.GetValue<decimal>()).ToArray());
+            foreach (var address in new[] { "K6", "K7", "K11", "K12" })
+                Assert.Equal(string.Empty, sheet.Cell(address).GetString());
+            var expected = (method == QuotationAggregationMethod.Mean ? 92.51m : 89.11m) / divisor;
+            Assert.Equal(expected, sheet.Cell("C13").GetValue<decimal>());
+        }
+        finally
+        {
+            if (Directory.Exists(Path.GetDirectoryName(path)))
+                Directory.Delete(Path.GetDirectoryName(path)!, true);
         }
     }
 

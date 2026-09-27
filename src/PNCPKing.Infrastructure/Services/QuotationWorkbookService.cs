@@ -220,7 +220,6 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                     row,
                     firstPriceRow,
                     lastPriceRow,
-                    references.Count > 0 && references[0].Basket.IsManual,
                     priceDecimalPlaces,
                     moneyFormat);
                 row++;
@@ -475,7 +474,6 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         int row,
         int firstPriceRow,
         int lastPriceRow,
-        bool isManualBasket,
         int priceDecimalPlaces,
         string moneyFormat)
     {
@@ -501,9 +499,8 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             $"IF(G{row}=\"\",\"\",IF(H{row}>0.25,\"EXCESSIVO\",\"VÁLIDO\"))";
         sheet.Cell(row, 10).FormulaA1 =
             $"IF(G{row}=\"\",\"\",IF(H{row}<-0.25,\"INEXEQUÍVEL\",\"VÁLIDO\"))";
-        sheet.Cell(row, 11).FormulaA1 = isManualBasket
-            ? $"IF(F{row}=\"\",\"\",F{row})"
-            : $"IF(F{row}=\"\",\"\",IF(OR(I{row}=\"EXCESSIVO\",J{row}=\"INEXEQUÍVEL\"),\"\",F{row}))";
+        sheet.Cell(row, 11).FormulaA1 =
+            $"IF(F{row}=\"\",\"\",IF(OR(I{row}=\"EXCESSIVO\",J{row}=\"INEXEQUÍVEL\"),\"\",F{row}))";
     }
 
     private static void AddPriceConditionalFormatting(
