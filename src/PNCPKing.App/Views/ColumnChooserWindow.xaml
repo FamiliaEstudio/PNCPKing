@@ -1,4 +1,4 @@
-<Window x:Class="PNCPKing.App.Views.ColumnChooserWindow"
+<Window Style="{StaticResource AppWindow}" x:Class="PNCPKing.App.Views.ColumnChooserWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Escolher colunas" Width="460" Height="590"

@@ -142,8 +142,10 @@ public sealed class GridReader : Grid
             }
             var rowStyle = new Style(typeof(DataGridRow), value.RowStyle);
             var selected = new Trigger { Property = DataGridRow.IsSelectedProperty, Value = true };
-            selected.Setters.Add(new Setter(Control.BackgroundProperty, SystemColors.HighlightBrush));
-            selected.Setters.Add(new Setter(Control.ForegroundProperty, SystemColors.HighlightTextBrush));
+            selected.Setters.Add(new Setter(Control.BackgroundProperty,
+                new DynamicResourceExtension(SystemColors.HighlightBrushKey)));
+            selected.Setters.Add(new Setter(Control.ForegroundProperty,
+                new DynamicResourceExtension(SystemColors.HighlightTextBrushKey)));
             rowStyle.Triggers.Add(selected);
             value.RowStyle = rowStyle;
             value.PreviewMouseLeftButtonDown += OnLeftDown;

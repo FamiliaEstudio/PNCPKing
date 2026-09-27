@@ -1,4 +1,4 @@
-<Window x:Class="PNCPKing.App.Views.QuotationSampleWindow"
+<Window Style="{StaticResource AppWindow}" x:Class="PNCPKing.App.Views.QuotationSampleWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Usar amostra em uma cotação" Height="690" Width="720"
@@ -98,7 +98,7 @@
             </Grid>
         </GroupBox>
 
-        <TextBlock Grid.Row="8" Grid.ColumnSpan="3" Margin="0,14,0,0" Foreground="#5F6871"
+        <TextBlock Grid.Row="8" Grid.ColumnSpan="3" Margin="0,14,0,0" Foreground="{StaticResource MutedTextBrush}"
                    Text="Somente faixa de preço e compatibilidade descritiva bloqueiam uma referência. O índice, CNPJ, unidade, quantidade, proximidade, atualidade e dispersão permanecem informativos para sua escolha objetiva da cesta." TextWrapping="Wrap" />
 
         <StackPanel Grid.Row="9" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Right">

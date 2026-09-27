@@ -9,6 +9,7 @@ public sealed class GitHubUpdateWindow : Window
 {
     public GitHubUpdateWindow(GitHubUpdatePlan plan, GitHubReleaseNotes? releaseNotes = null)
     {
+        SetResourceReference(StyleProperty, "AppWindow");
         Title = "Atualizar pelo GitHub";
         Width = 660;
         Height = plan.App is null ? 280 : 520;

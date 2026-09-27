@@ -1,4 +1,4 @@
-<Window x:Class="PNCPKing.App.Views.InternetPriceWindow"
+<Window Style="{StaticResource AppWindow}" x:Class="PNCPKing.App.Views.InternetPriceWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Preço da internet — Inciso III"
@@ -12,7 +12,7 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <Border Background="#EAF2FF" BorderBrush="#9CBCE8" BorderThickness="1"
+        <Border Background="{StaticResource InfoBrush}" BorderBrush="{StaticResource InfoBorderBrush}" BorderThickness="1"
                 CornerRadius="4" Padding="10" Margin="0,0,0,10">
             <TextBlock TextWrapping="Wrap">
                 Com a página da internet em primeiro plano, pressione Alt+1 para capturar o preço
@@ -64,7 +64,7 @@
                         <RowDefinition Height="*" />
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
-                    <Border BorderBrush="#C8C8C8" BorderThickness="1" Background="#F7F7F7">
+                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Background="{StaticResource WindowBrush}">
                         <Image x:Name="PriceImagePreview" Stretch="Uniform" />
                     </Border>
                     <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right">
@@ -79,7 +79,7 @@
                         <RowDefinition Height="*" />
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
-                    <Border BorderBrush="#C8C8C8" BorderThickness="1" Background="#F7F7F7">
+                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Background="{StaticResource WindowBrush}">
                         <Image x:Name="TaxIdImagePreview" Stretch="Uniform" />
                     </Border>
                     <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right">

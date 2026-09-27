@@ -1,4 +1,4 @@
-<Window x:Class="PNCPKing.App.Views.GuardWindow"
+<Window Style="{StaticResource AppWindow}" x:Class="PNCPKing.App.Views.GuardWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="PNCP King — PNCP Guard"
@@ -13,7 +13,7 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <TextBlock FontSize="22" FontWeight="SemiBold" Text="PNCP Guard" />
+        <TextBlock Foreground="{StaticResource BrandBrush}" FontSize="22" FontWeight="SemiBold" Text="PNCP Guard" />
         <TextBlock Grid.Row="1" Margin="0,6,0,14" TextWrapping="Wrap"
                    Text="O PNCP King cria uma campanha finita usando somente o índice local. Cada computador recebe um plano sem sobreposição e devolve pacotes de listas de itens pela pasta sincronizada; preços são consultados somente nas pesquisas relevantes." />
 
@@ -60,7 +60,7 @@
             </GroupBox>
         </Grid>
 
-        <Border Grid.Row="4" Background="#EEF4FA" BorderBrush="#AFC7DE" BorderThickness="1"
+        <Border Grid.Row="4" Background="{StaticResource InfoBrush}" BorderBrush="{StaticResource InfoBorderBrush}" BorderThickness="1"
                 CornerRadius="4" Padding="10">
             <TextBlock x:Name="StatusTextBlock" Text="Pronto." TextWrapping="Wrap" />
         </Border>

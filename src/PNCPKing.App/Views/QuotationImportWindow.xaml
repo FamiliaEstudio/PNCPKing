@@ -1,4 +1,4 @@
-<Window x:Class="PNCPKing.App.Views.QuotationImportWindow"
+<Window Style="{StaticResource AppWindow}" x:Class="PNCPKing.App.Views.QuotationImportWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Importar cotação automática" Height="720" Width="1120"

@@ -1,4 +1,4 @@
-<Window x:Class="PNCPKing.App.Views.QuotationItemWindow"
+<Window Style="{StaticResource AppWindow}" x:Class="PNCPKing.App.Views.QuotationItemWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:controls="clr-namespace:PNCPKing.App.Controls"
@@ -26,7 +26,7 @@
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
             <StackPanel>
-                <TextBox Style="{StaticResource SelectableInfo}" Text="{Binding Header, Mode=OneWay}" FontSize="20" FontWeight="SemiBold"
+                <TextBox Style="{StaticResource SelectableInfo}" Text="{Binding Header, Mode=OneWay}" Foreground="{StaticResource BrandBrush}" FontSize="20" FontWeight="SemiBold"
                            TextWrapping="Wrap" />
                 <TextBox Style="{StaticResource SelectableInfo}" Text="{Binding ItemSummary, Mode=OneWay}" Margin="0,4,0,0" TextWrapping="Wrap" />
             </StackPanel>
@@ -42,7 +42,7 @@
             </WrapPanel>
         </Grid>
 
-        <Border Grid.Row="1" Background="#F4F7FA" BorderBrush="#C7D2DE" BorderThickness="1"
+        <Border Grid.Row="1" Background="{StaticResource InfoBrush}" BorderBrush="{StaticResource InfoBorderBrush}" BorderThickness="1"
                 CornerRadius="4" Padding="8" Margin="0,8,0,8">
             <TextBox Style="{StaticResource SelectableInfo}" Text="{Binding ProgressText, Mode=OneWay}" TextWrapping="Wrap" />
         </Border>
@@ -88,7 +88,7 @@
                             <Button Content="Descartados/duplicados" Click="ScopeRejected_Click" />
                             <Button Content="Todos" Click="ScopeAll_Click" />
                             <TextBox Style="{StaticResource SelectableInfo}" Text="{Binding ReferenceScopeSummary, Mode=OneWay}" VerticalAlignment="Center"
-                                       Margin="10,0" Foreground="#5F6871" TextWrapping="Wrap" MaxWidth="320" />
+                                       Margin="10,0" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" MaxWidth="320" />
                         </WrapPanel>
                         <WrapPanel>
                             <Button Content="Usar média" Click="UseMean_Click" />
@@ -252,7 +252,7 @@
                         <TextBlock Text="Lotes de 50 contratações locais" VerticalAlignment="Center" Margin="16,0,0,0" />
                         <TextBox Width="55" Text="{Binding BatchCount, UpdateSourceTrigger=LostFocus}"
                                  HorizontalContentAlignment="Center" />
-                        <Button Content="Pesquisar" Click="Search_Click" MinWidth="95" />
+                        <Button Style="{StaticResource SearchButton}" Content="Pesquisar" Click="Search_Click" MinWidth="95" />
                         <Button Content="Continuar" Click="ContinueSearch_Click" MinWidth="95" />
                         <Button Content="Parar" Click="StopSearch_Click" />
                     </WrapPanel>
@@ -359,7 +359,7 @@
                             </ItemsControl.ItemsPanel>
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
-                                    <Border BorderBrush="#BBB" BorderThickness="1" Margin="5" Padding="5"
+                                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Margin="5" Padding="5"
                                             Width="350">
                                         <StackPanel>
                                             <TextBlock Text="{Binding Caption}" FontWeight="SemiBold" Margin="0,0,0,5" />
@@ -414,7 +414,7 @@
                         <RowDefinition Height="*" />
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
-                    <Border Background="#F4F7FA" BorderBrush="#C7D2DE" BorderThickness="1"
+                    <Border Background="{StaticResource InfoBrush}" BorderBrush="{StaticResource InfoBorderBrush}" BorderThickness="1"
                             CornerRadius="4" Padding="8">
                         <StackPanel>
                             <TextBox Style="{StaticResource SelectableInfo}" Text="{Binding CatalogSelectionSummary, Mode=OneWay}" FontWeight="SemiBold"
@@ -437,7 +437,7 @@
                                  PreviewKeyDown="CatalogQuery_KeyDown"
                                  ToolTip="Pesquise livremente por nome, característica, medida ou pelo código." />
                         <WrapPanel Grid.Row="1" Grid.ColumnSpan="2" Margin="0,5,0,0">
-                            <Button Content="Pesquisar" Click="CatalogSearch_Click"
+                            <Button Style="{StaticResource SearchButton}" Content="Pesquisar" Click="CatalogSearch_Click"
                                     IsEnabled="{Binding IsCatalogAvailable}" MinWidth="90" />
                             <Button Content="Editar equivalências" Click="CatalogDictionary_Click" />
                         </WrapPanel>
@@ -455,7 +455,7 @@
                                       TreeViewItem.Expanded="CatalogHierarchy_Expanded"
                                       SelectedItemChanged="CatalogHierarchy_SelectedItemChanged" />
                         </DockPanel>
-                        <GridSplitter Grid.Column="1" Width="8" Background="#DDD" />
+                        <GridSplitter Grid.Column="1" Width="8" Background="{StaticResource BorderBrush}" />
                         <DataGrid Grid.Column="2" ItemsSource="{Binding CatalogResults}"
                                   SelectedItem="{Binding SelectedCatalogResult}"
                                   AutoGenerateColumns="False" IsReadOnly="True"

@@ -1,4 +1,4 @@
-<Window x:Class="PNCPKing.App.Views.SqliteCalibrationWindow"
+<Window Style="{StaticResource AppWindow}" x:Class="PNCPKing.App.Views.SqliteCalibrationWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Avaliar desempenho deste PC" Width="810" Height="610"

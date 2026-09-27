@@ -1,4 +1,4 @@
-<Window x:Class="PNCPKing.App.Views.ManualBasketWindow"
+<Window Style="{StaticResource AppWindow}" x:Class="PNCPKing.App.Views.ManualBasketWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Criar ou ampliar cesta manual" Height="560" Width="720"

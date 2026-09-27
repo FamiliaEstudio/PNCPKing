@@ -21,6 +21,7 @@ public sealed class QuotationGroupsWindow : Window
 
     public QuotationGroupsWindow(QuotationProjectReport report)
     {
+        SetResourceReference(StyleProperty, "AppWindow");
         _report = report;
         _groups = new(report.Groups);
         _rows = report.Lines.Select(value => new ItemRow(value)).ToList();

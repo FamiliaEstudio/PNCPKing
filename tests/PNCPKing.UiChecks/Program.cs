@@ -20,9 +20,20 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args is ["--appearance" or "--appearance-baseline", var sourceDirectory, var outputDirectory])
+        {
+            var appearanceApp = CreateUiApplication();
+            if (args[0] == "--appearance-baseline") LoadBaselineResources(sourceDirectory);
+            appearanceApp.Startup += async (_, _) =>
+            {
+                try { await CheckAppearanceAsync(sourceDirectory, outputDirectory); appearanceApp.Shutdown(); }
+                catch (Exception error) { Console.Error.WriteLine(error); appearanceApp.Shutdown(1); }
+            };
+            return appearanceApp.Run();
+        }
         if (args is ["--main-search"])
         {
-            var searchApp = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            var searchApp = CreateUiApplication();
             searchApp.Startup += async (_, _) =>
             {
                 try { await CheckMainSearchAsync(); searchApp.Shutdown(); }
@@ -32,7 +43,7 @@ internal static partial class Program
         }
         if (args is ["--reading"] or ["--reading-routed"])
         {
-            var readingApp = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            var readingApp = CreateUiApplication();
             readingApp.Startup += async (_, _) =>
             {
                 try
@@ -46,7 +57,7 @@ internal static partial class Program
         }
         if (args is ["--layout"])
         {
-            var layoutApp = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            var layoutApp = CreateUiApplication();
             layoutApp.Startup += async (_, _) =>
             {
                 try
@@ -57,6 +68,8 @@ internal static partial class Program
                     Console.WriteLine("Quotation groups dialog: passed");
                     await CheckColumnChooserAsync();
                     Console.WriteLine("Column chooser: passed");
+                    await CheckThemeControlsAsync();
+                    Console.WriteLine("Theme controls: passed");
                     layoutApp.Shutdown();
                 }
                 catch (Exception error) { Console.Error.WriteLine(error); layoutApp.Shutdown(1); }
@@ -65,7 +78,7 @@ internal static partial class Program
         }
 
         if (args.Length < 1) throw new ArgumentException("Informe o JSON de saída e, opcionalmente, uma cópia de benchmark.");
-        var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        var app = CreateUiApplication();
         app.Startup += async (_, _) =>
         {
             try
