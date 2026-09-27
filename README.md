@@ -40,6 +40,7 @@ A distribuição autocontida mais recente para Windows x64 está em `artifacts\w
 - atualização incremental da amostra com versionamento e reconfirmação da escolha anterior;
 - importação de cotações por `.xlsx` compatível com A:G, alvo opcional em H (`Número de preços na cesta`), CATMAT em I e quantidade mínima nominal por pedido em J, fila sequencial retomável e escolha automática da cesta recomendada;
 - exportação da **Tabela 1.1 em Word**, com localização do descritivo, grupos mesclados e quantidade mínima por pedido opcional para Registro de Preços;
+- exportação da **Tabela 9.1 em Word**, com descrição sumária, quantidades e preços das cestas selecionadas, respeitando os grupos e as cotas;
 - gerenciamento para criar, renomear e excluir cotações ou itens, além de cancelar e retomar automações;
 - exportação em uma única aba `.xlsx` baseada na planilha oficial de avaliação de preços, preservando cabeçalho e imagem da prefeitura, repetindo um bloco formatado por item e calculando por fórmulas os preços excessivos, inexequíveis e a média dos preços válidos;
 - acesso aos anexos do PNCP pela grade de preços, pelo cache da contratação e pelas referências das cestas/auditoria, com extração segura de PDF, ZIP, 7z e RAR, deduplicação e consolidação sob demanda em `Downloads`;
@@ -131,7 +132,9 @@ Os preços ocupam uma linha compacta. Dê duplo clique para ler o descritivo no 
 14. Faça novas pesquisas e adicione outros itens ao mesmo projeto. Se ampliar a coleta de um item, use **Atualizar amostra com a pesquisa atual**; a escolha anterior ficará marcada para reconfirmação.
 15. Use **Importar XLSX** para carregar vários itens pelas colunas A:G e, opcionalmente, o alvo da cesta em H, o CATMAT em I e a quantidade mínima nominal por pedido em J. H vazia usa 3. A primeira aba visível deve conter dados desde a linha 1, sem cabeçalho. Consulte o [guia de importação Excel](docs/importacao-excel.md) para o preenchimento A:J. A automação interpreta a coluna G como número de páginas locais de até 50 preços; falhas podem ser retomadas. **Exportar Excel e evidências** preenche o modelo de avaliação e salva o PDF na mesma pasta; **Exportar somente Excel** não gera documentos de evidência. **Exportar Tabela 1.1 em Word** gera o documento editável conforme o modelo, perguntando o local do descritivo e se é Registro de Preços. Neste caso, informe o percentual geral: o mínimo nominal do item tem prioridade e, quando ausente, o cálculo usa a quantidade total original, arredondando para cima e mantendo o mesmo mínimo nas cotas principal e reservada. Edite ou limpe os valores em **CATMAT e mínimo**, na janela do item. Cotações com grupos precisam de **Organizar Itens** antes da exportação.
 
-Para cotar medicamentos, marque **Cotações → Cotação de medicamentos — 4 casas decimais**. A opção fica salva por projeto e aplica quatro casas aos preços efetivos, às cestas e ao Excel, incluindo conversões, médias e medianas. Casas excedentes são truncadas. Ao alterar a opção, reconfirme as cestas escolhidas. As demais cotações continuam com duas casas nos valores efetivos; os preços PNCP originais permanecem preservados.
+Use **Cotações → Exportar/Importar → Exportar Tabela 9.1 em Word** para gerar a tabela de preços editável conforme o modelo fornecido. Ela utiliza o preço adotado da cesta selecionada e confirmada de cada item, com duas casas decimais para itens comuns e quatro para medicamentos, sem arredondamento. O total é o unitário exibido multiplicado pela quantidade da linha ou cota. Grupos, números e quantidades seguem a organização vigente; sem grupos, a coluna de grupo é removida. Confirme as cestas pendentes e atualize a organização, quando necessário, antes de exportar.
+
+Para cotar medicamentos, marque **Cotações → Cotação de medicamentos — 4 casas decimais**. A opção fica salva por projeto e aplica quatro casas aos preços efetivos, às cestas, ao Excel e à Tabela 9.1 em Word, incluindo conversões, médias e medianas. Casas excedentes são truncadas. Ao alterar a opção, reconfirme as cestas escolhidas. As demais cotações continuam com duas casas nos valores efetivos; os preços PNCP originais permanecem preservados.
 16. Na aba **Cotações**, use **Exportar pacote** para criar um `.pncpcotacao` portátil com a cotação selecionada e seus prints. **Importar pacote** mostra uma prévia e, se o mesmo identificador já existir, permite importar como cópia, substituir com recuperação automática ou cancelar.
 17. Para fixar uma contratação no cache enquanto estiver na janela de 11 meses, selecione-a na segunda aba e use **Buscar/atualizar todos os preços**.
 18. Use **Abrir contratação no PNCP** para acessar a página oficial. Use **Acessar documentos** para baixar, extrair e consolidar os PDFs; o arquivo será salvo em `Downloads` e somente será aberto se você escolher **Abrir PDF** ao final.
@@ -182,6 +185,8 @@ O Sweet Code pode ser aberto ao lado da pesquisa. Cole um crivo por linha, ative
 Este é um projeto de **código-fonte publicamente disponível, mas não open source**. A disponibilização do código neste repositório não concede autorização para utilização, modificação, distribuição ou criação de trabalhos derivados.
 
 O uso depende de autorização prévia por escrito. Solicitações de licença: **felipearcencio@gmail.com**.
+
+Se precisar do banco de dados atualizado do PNCP, entre em contato pelo e-mail **felipearcencio@gmail.com**, pois o download completo pode levar vários dias.
 
 Consulte o arquivo [`LICENSE`](LICENSE) para as condições completas.
 

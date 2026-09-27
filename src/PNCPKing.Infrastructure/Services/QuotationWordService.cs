@@ -10,14 +10,19 @@ namespace PNCPKing.Infrastructure.Services;
 public sealed class QuotationWordService : IQuotationWordService
 {
     private const string TemplateName = "PNCPKing.Infrastructure.Assets.QuotationWordTemplate.docx";
-    private static readonly int[] ColumnWidths = [870, 705, 4875, 990, 1035, 1200, 1335];
+    private const string PriceTemplateName = "PNCPKing.Infrastructure.Assets.QuotationPriceWordTemplate.docx";
+    private static readonly CultureInfo MoneyCulture = CultureInfo.GetCultureInfo("pt-BR");
 
     public Task ExportAsync(string destinationPath, QuotationProjectReport report,
         QuotationWordExportOptions options, CancellationToken cancellationToken = default) =>
-        Task.Run(() => ExportCoreAsync(destinationPath, report, options, cancellationToken), cancellationToken);
+        Task.Run(() => ExportCoreAsync(destinationPath, report, options, false, cancellationToken), cancellationToken);
+
+    public Task ExportPriceTableAsync(string destinationPath, QuotationProjectReport report,
+        CancellationToken cancellationToken = default) =>
+        Task.Run(() => ExportCoreAsync(destinationPath, report, new(), true, cancellationToken), cancellationToken);
 
     private static async Task ExportCoreAsync(string destinationPath, QuotationProjectReport report,
-        QuotationWordExportOptions options, CancellationToken cancellationToken)
+        QuotationWordExportOptions options, bool includePrices, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         options.Validate();
@@ -34,11 +39,19 @@ public sealed class QuotationWordService : IQuotationWordService
                 item.Line.RequestedQuantity, 0, 0)).ToArray();
         var groups = organization?.Groups.ToDictionary(group => group.Id) ?? [];
         var minimums = new Dictionary<Guid, decimal>();
-        foreach (var line in lines.Values)
+        var prices = new Dictionary<Guid, decimal>();
+        foreach (var analysis in report.Lines)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var line = analysis.Line;
             if (line.RequestedQuantity <= 0 || !QuotationQuantity.IsValid(line.RequestedQuantity))
                 throw new InvalidOperationException($"Informe quantidade inteira positiva para o item '{line.EffectiveDisplayName}'.");
+            if (includePrices)
+            {
+                if (!line.SelectionConfirmed || analysis.SelectedBasket is not { AdoptedPrice: > 0 } basket)
+                    throw new InvalidOperationException($"Confirme uma cesta com preço válido para o item '{line.EffectiveDisplayName}' antes de exportar a Tabela 9.1.");
+                prices[line.Id] = QuotationMoney.Truncate(basket.AdoptedPrice, report.Project.PriceDecimalPlaces);
+            }
             if (!options.IsPriceRegistration) continue;
             QuotationWordExportOptions.ValidateMinimumOrderQuantity(line.MinimumOrderQuantity);
             // Both quota positions share the original item's nominal or calculated minimum.
@@ -58,8 +71,8 @@ public sealed class QuotationWordService : IQuotationWordService
         }
 
         using var buffer = new MemoryStream();
-        using (var template = typeof(QuotationWordService).Assembly.GetManifestResourceStream(TemplateName)
-            ?? throw new InvalidOperationException("Modelo da Tabela 1.1 não encontrado."))
+        using (var template = typeof(QuotationWordService).Assembly.GetManifestResourceStream(includePrices ? PriceTemplateName : TemplateName)
+            ?? throw new InvalidOperationException("Modelo da tabela Word não encontrado."))
             await template.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
         buffer.Position = 0;
         using (var document = WordprocessingDocument.Open(buffer, true))
@@ -77,16 +90,18 @@ public sealed class QuotationWordService : IQuotationWordService
             var header = (TableRow)table.Elements<TableRow>().First().CloneNode(true);
             var prototype = (TableRow)table.Elements<TableRow>().Skip(1).First().CloneNode(true);
             var properties = (TableProperties)table.GetFirstChild<TableProperties>()!.CloneNode(true);
-            properties.TableWidth = new TableWidth { Width = "11010", Type = TableWidthUnitValues.Dxa };
+            var widths = table.GetFirstChild<TableGrid>()!.Elements<GridColumn>()
+                .Select(column => int.Parse(column.Width!.Value!, CultureInfo.InvariantCulture)).ToArray();
+            properties.TableWidth = new TableWidth
+                { Width = widths.Sum().ToString(CultureInfo.InvariantCulture), Type = TableWidthUnitValues.Dxa };
             table.RemoveAllChildren();
             table.Append(properties);
 
             var hasGroups = positions.Any(position => position.ResultGroupId is not null);
-            var widths = ColumnWidths.ToArray();
             if (!hasGroups) widths[2] += widths[0];
-            if (!options.IsPriceRegistration) widths[2] += widths[6];
+            if (!includePrices && !options.IsPriceRegistration) widths[2] += widths[6];
             var columns = Enumerable.Range(0, 7)
-                .Where(index => (index != 0 || hasGroups) && (index != 6 || options.IsPriceRegistration)).ToArray();
+                .Where(index => (index != 0 || hasGroups) && (index != 6 || includePrices || options.IsPriceRegistration)).ToArray();
             table.Append(new TableGrid(columns.Select(index => new GridColumn
                 { Width = widths[index].ToString(CultureInfo.InvariantCulture) })));
             header.TableRowProperties ??= new TableRowProperties();
@@ -114,15 +129,26 @@ public sealed class QuotationWordService : IQuotationWordService
                 }
                 previousGroup = position.ResultGroupId;
                 SetText(cells[1], position.Number.ToString(CultureInfo.InvariantCulture));
-                SetText(cells[2], line.EffectiveDisplayName, options.DescriptionSentence);
-                var catmat = !string.IsNullOrWhiteSpace(line.CatmatCodeOverride)
-                    ? line.CatmatCodeOverride.Trim()
-                    : line.CatalogSelection is { Kind: CatalogKind.Catmat } selection ? selection.Code : string.Empty;
-                SetText(cells[3], catmat);
-                SetText(cells[4], line.RequestedUnit);
-                SetText(cells[5], position.Quantity.ToString("0", CultureInfo.InvariantCulture));
-                SetText(cells[6], options.IsPriceRegistration
-                    ? minimums[position.LineId].ToString("0", CultureInfo.InvariantCulture) : string.Empty);
+                SetText(cells[2], line.EffectiveDisplayName, includePrices ? null : options.DescriptionSentence, bold: true);
+                if (includePrices)
+                {
+                    var unitPrice = prices[position.LineId];
+                    SetText(cells[3], line.RequestedUnit);
+                    SetText(cells[4], position.Quantity.ToString("0", CultureInfo.InvariantCulture));
+                    SetText(cells[5], FormatMoney(unitPrice, report.Project.PriceDecimalPlaces));
+                    SetText(cells[6], FormatMoney(checked(unitPrice * position.Quantity), report.Project.PriceDecimalPlaces));
+                }
+                else
+                {
+                    var catmat = !string.IsNullOrWhiteSpace(line.CatmatCodeOverride)
+                        ? line.CatmatCodeOverride.Trim()
+                        : line.CatalogSelection is { Kind: CatalogKind.Catmat } selection ? selection.Code : string.Empty;
+                    SetText(cells[3], catmat);
+                    SetText(cells[4], line.RequestedUnit);
+                    SetText(cells[5], position.Quantity.ToString("0", CultureInfo.InvariantCulture));
+                    SetText(cells[6], options.IsPriceRegistration
+                        ? minimums[position.LineId].ToString("0", CultureInfo.InvariantCulture) : string.Empty);
+                }
                 ConfigureColumns(row, columns, widths);
                 table.Append(row);
             }
@@ -176,13 +202,16 @@ public sealed class QuotationWordService : IQuotationWordService
         }
     }
 
-    private static void SetText(TableCell cell, string text, string? description = null)
+    private static string FormatMoney(decimal value, int decimalPlaces) =>
+        "R$ " + QuotationMoney.Truncate(value, decimalPlaces).ToString($"N{decimalPlaces}", MoneyCulture);
+
+    private static void SetText(TableCell cell, string text, string? description = null, bool bold = false)
     {
         var paragraphProperties = cell.GetFirstChild<Paragraph>()?.ParagraphProperties?.CloneNode(true);
         cell.RemoveAllChildren<Paragraph>();
         var paragraph = new Paragraph();
         if (paragraphProperties is not null) paragraph.Append(paragraphProperties);
-        paragraph.Append(TextRun(text, description is not null));
+        paragraph.Append(TextRun(text, bold));
         if (description is not null)
         {
             paragraph.Append(new Run(new Break()));

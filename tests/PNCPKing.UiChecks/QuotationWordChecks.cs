@@ -67,12 +67,16 @@ internal static partial class Program
             "Limpar os valores não restaura o cálculo e o catálogo.");
 
         var exporter = new QuotationWordService();
+        foreach (var includePrices in new[] { false, true })
         foreach (var count in new[] { 100, 1000 })
         {
             var items = Enumerable.Range(1, count).Select(index => new QuotationLineAnalysis(line with
             {
-                Id = Guid.NewGuid(), Description = $"Item {index} — Café Premium com descrição longa de embalagem e apresentação, preservando maiúsculas e minúsculas"
-            }, [], [], 0, 0, 0, 0, 0)).ToArray();
+                Id = Guid.NewGuid(), Description = $"Item {index} — Café Premium com descrição longa de embalagem e apresentação, preservando maiúsculas e minúsculas",
+                SelectionConfirmed = true, SelectedBasketKey = "selected"
+            }, [], [new QuotationBasket { Key = "selected", References = [], AveragePrice = 12.349m, AdoptedPrice = 12.349m,
+                MinimumPrice = 12.349m, MaximumPrice = 12.349m, MaximumDeviationPercent = 0, Score = 100 }], 0, 0, 0, 0, 0)).ToArray();
+            var tableNumber = includePrices ? "9.1" : "1.1";
             var ticks = 0;
             var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(15) };
             timer.Tick += (_, _) => ticks++;
@@ -80,11 +84,13 @@ internal static partial class Program
             timer.Start();
             try
             {
-                await exporter.ExportAsync(Path.Combine(outputDirectory, $"Tabela-1.1-{count}.docx"), new(project, items),
-                    new() { IsPriceRegistration = true, MinimumOrderPercentage = 10 });
+                var path = Path.Combine(outputDirectory, $"Tabela-{tableNumber}-{count}.docx");
+                if (includePrices) await exporter.ExportPriceTableAsync(path, new(project, items));
+                else await exporter.ExportAsync(path, new(project, items),
+                        new() { IsPriceRegistration = true, MinimumOrderPercentage = 10 });
             }
             finally { timer.Stop(); }
-            Console.WriteLine($"Word: {count} itens; {watch.Elapsed.TotalMilliseconds:N0} ms; {ticks} ticks de interface durante exportação; banco e rede não utilizados.");
+            Console.WriteLine($"Word {tableNumber}: {count} itens; {watch.Elapsed.TotalMilliseconds:N0} ms; {ticks} ticks de interface durante exportação; banco e rede não utilizados.");
             Require(ticks > 0, "A interface não respondeu durante a exportação.");
         }
 
@@ -99,6 +105,7 @@ internal static partial class Program
         project = project with { Organization = QuotationOrganization.Calculate(project, groupItems, groups) };
         await exporter.ExportAsync(Path.Combine(outputDirectory, "Tabela-1.1-grupos.docx"), new(project, groupItems) { Groups = groups },
             new() { IsPriceRegistration = true, MinimumOrderPercentage = 10 });
+        await exporter.ExportPriceTableAsync(Path.Combine(outputDirectory, "Tabela-9.1-grupos.docx"), new(project, groupItems) { Groups = groups });
         Console.WriteLine("Janelas Word, edição de item importado, limpeza de valores e exportação com grupos: aprovados.");
     }
 }

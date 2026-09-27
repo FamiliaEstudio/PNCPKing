@@ -433,6 +433,7 @@ public sealed class UiBindingTests
                     "{Binding ExportQuotationCommand}",
                     "{Binding ExportQuotationWithoutEvidenceCommand}",
                     "{Binding ExportQuotationWordCommand}",
+                    "{Binding ExportQuotationPriceWordCommand}",
                     "{Binding ExportQuotationPackageCommand}",
                     "{Binding ImportQuotationPackageCommand}"
                 }

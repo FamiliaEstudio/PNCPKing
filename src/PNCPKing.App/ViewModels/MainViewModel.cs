@@ -4823,7 +4823,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      UseQuotationSampleCommand, UpdateQuotationSampleCommand,
                      AdjustQuotationWeightsCommand,
                      ConfirmQuotationBasketCommand, ExportQuotationCommand,
-                     ExportQuotationWithoutEvidenceCommand, ExportQuotationWordCommand,
+                     ExportQuotationWithoutEvidenceCommand, ExportQuotationWordCommand, ExportQuotationPriceWordCommand,
                      ExportQuotationPackageCommand, ImportQuotationPackageCommand,
                      PreviousQuotationBasketPageCommand, NextQuotationBasketPageCommand,
                      NewQuotationCommand, NewQuotationItemCommand,

@@ -28,11 +28,12 @@ public sealed class QuotationWordTests(ITestOutputHelper output) : IDisposable
             MinimumPrice = price, MaximumPrice = price, MaximumDeviationPercent = 0, Score = 100
         }], 0, 0, 0, 0, 0);
 
-    private async Task<string> Export(QuotationProjectReport report, QuotationWordExportOptions? options = null)
+    private async Task<string> Export(QuotationProjectReport report, QuotationWordExportOptions? options = null, bool includePrices = false)
     {
         Directory.CreateDirectory(_directory);
         var path = Path.Combine(_directory, Guid.NewGuid() + ".docx");
-        await new QuotationWordService().ExportAsync(path, report, options ?? new());
+        if (includePrices) await new QuotationWordService().ExportPriceTableAsync(path, report);
+        else await new QuotationWordService().ExportAsync(path, report, options ?? new());
         return path;
     }
 
@@ -44,11 +45,13 @@ public sealed class QuotationWordTests(ITestOutputHelper output) : IDisposable
     }
 
     [Theory]
-    [InlineData(false, false, 5)]
-    [InlineData(false, true, 6)]
-    [InlineData(true, false, 6)]
-    [InlineData(true, true, 7)]
-    public async Task ColumnsMergesStylesAndTemplateInstructions(bool grouped, bool registration, int columns)
+    [InlineData(false, false, 5, false)]
+    [InlineData(false, true, 6, false)]
+    [InlineData(true, false, 6, false)]
+    [InlineData(true, true, 7, false)]
+    [InlineData(false, false, 6, true)]
+    [InlineData(true, false, 7, true)]
+    public async Task ColumnsMergesStylesAndTemplateInstructions(bool grouped, bool registration, int columns, bool includePrices)
     {
         var project = Project();
         Guid? group = grouped ? Guid.NewGuid() : null;
@@ -59,7 +62,7 @@ public sealed class QuotationWordTests(ITestOutputHelper output) : IDisposable
         QuotationGroup[] groups = group is { } id ? [new(id, project.Id, "Lote", [a.Line.Id, b.Line.Id])] : [];
         if (grouped) project = project with { Organization = QuotationOrganization.Calculate(project, lines, groups) };
         var path = await Export(new(project, lines) { Groups = groups }, new()
-            { IsPriceRegistration = registration, MinimumOrderPercentage = 10 });
+            { IsPriceRegistration = registration, MinimumOrderPercentage = 10 }, includePrices);
         using var doc = WordprocessingDocument.Open(path, false);
         Validate(doc);
         var body = doc.MainDocumentPart!.Document.Body!;
@@ -67,7 +70,7 @@ public sealed class QuotationWordTests(ITestOutputHelper output) : IDisposable
         var rows = table.Elements<TableRow>().ToArray();
         Assert.Equal(4, rows.Length);
         Assert.All(rows, row => Assert.Equal(columns, row.Elements<TableCell>().Count()));
-        Assert.Equal(11010, table.GetFirstChild<TableGrid>()!.Elements<GridColumn>().Sum(col => int.Parse(col.Width!)));
+        Assert.Equal(includePrices ? 11115 : 11010, table.GetFirstChild<TableGrid>()!.Elements<GridColumn>().Sum(col => int.Parse(col.Width!)));
         Assert.NotNull(rows[0].TableRowProperties!.GetFirstChild<TableHeader>());
         Assert.All(rows[0].Elements<TableCell>(), cell => Assert.Equal("d9d9d9", cell.TableCellProperties!.Shading!.Fill!.Value));
         Assert.DoesNotContain("Inserir", body.InnerText);
@@ -78,7 +81,14 @@ public sealed class QuotationWordTests(ITestOutputHelper output) : IDisposable
         Assert.DoesNotContain("descritor de pesquisa", body.InnerText);
         var specification = rows[1].Elements<TableCell>().ElementAt(grouped ? 2 : 1);
         Assert.True(specification.GetFirstChild<Paragraph>()!.Elements<Run>().First().RunProperties!.Bold!.Val!.Value);
-        Assert.Equal("16", specification.Descendants<Run>().Last().RunProperties!.FontSize!.Val!.Value);
+        if (includePrices)
+        {
+            Assert.Equal(a.Line.EffectiveDisplayName, specification.InnerText);
+            Assert.Equal(["UNID", "QTDE", "Valor Unitário", "Valor Total"],
+                rows[0].Elements<TableCell>().TakeLast(4).Select(cell => cell.InnerText));
+            Assert.DoesNotContain("especificação detalhada", body.InnerText);
+        }
+        else Assert.Equal("16", specification.Descendants<Run>().Last().RunProperties!.FontSize!.Val!.Value);
         if (grouped)
         {
             Assert.Equal("Grupo 1", rows[1].Elements<TableCell>().First().InnerText);
@@ -156,18 +166,20 @@ public sealed class QuotationWordTests(ITestOutputHelper output) : IDisposable
         Assert.Equal("preservado", await File.ReadAllTextAsync(path));
     }
 
-    [Fact]
-    public async Task RejectsUnorganizedGroupsStaleOrganizationAndEmptyQuantities()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RejectsUnorganizedGroupsStaleOrganizationAndEmptyQuantities(bool includePrices)
     {
         var project = Project();
         var groupId = Guid.NewGuid();
         var item = Item(project, group: groupId);
         QuotationGroup[] groups = [new(groupId, project.Id, "Grupo", [item.Line.Id])];
-        await Assert.ThrowsAsync<InvalidOperationException>(() => Export(new(project, [item]) { Groups = groups }));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Export(new(project, [item]) { Groups = groups }, includePrices: includePrices));
         project = project with { Organization = QuotationOrganization.Calculate(project, [item], groups) };
         var changed = item with { Line = item.Line with { RequestedQuantity = 90 } };
-        await Assert.ThrowsAsync<InvalidOperationException>(() => Export(new(project, [changed]) { Groups = groups }));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => Export(new(Project(), [Item(project, quantity: 0)])));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Export(new(project, [changed]) { Groups = groups }, includePrices: includePrices));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Export(new(Project(), [Item(project, quantity: 0)]), includePrices: includePrices));
     }
 
     [Theory]
@@ -178,17 +190,19 @@ public sealed class QuotationWordTests(ITestOutputHelper output) : IDisposable
         new QuotationWordExportOptions { IsPriceRegistration = true, MinimumOrderPercentage = percentage }.Validate());
 
     [Theory]
-    [InlineData(100)]
-    [InlineData(1000)]
-    public async Task LargeExportUsesOnlyTheSuppliedReport(int count)
+    [InlineData(100, false)]
+    [InlineData(1000, false)]
+    [InlineData(100, true)]
+    [InlineData(1000, true)]
+    public async Task LargeExportUsesOnlyTheSuppliedReport(int count, bool includePrices)
     {
         var project = Project();
         var lines = Enumerable.Range(1, count).Select(index => Item(project,
             $"Item {index} — descrição longa com maiúsculas e minúsculas, acentos e especificação de apresentação")).ToArray();
         var timer = Stopwatch.StartNew();
-        var path = await Export(new(project, lines), new() { IsPriceRegistration = true, MinimumOrderPercentage = 10 });
+        var path = await Export(new(project, lines), new() { IsPriceRegistration = true, MinimumOrderPercentage = 10 }, includePrices);
         timer.Stop();
-        output.WriteLine($"{count} itens: {timer.Elapsed.TotalMilliseconds:N0} ms; DOCX: {new FileInfo(path).Length:N0} bytes; sem repositório ou rede no exportador.");
+        output.WriteLine($"Tabela {(includePrices ? "9.1" : "1.1")}, {count} itens: {timer.Elapsed.TotalMilliseconds:N0} ms; DOCX: {new FileInfo(path).Length:N0} bytes; sem repositório ou rede no exportador.");
         using var doc = WordprocessingDocument.Open(path, false);
         Assert.Equal(count + 1, doc.MainDocumentPart!.Document.Descendants<TableRow>().Count());
         Validate(doc);
@@ -196,8 +210,98 @@ public sealed class QuotationWordTests(ITestOutputHelper output) : IDisposable
         if (!string.IsNullOrWhiteSpace(reviewDirectory))
         {
             Directory.CreateDirectory(reviewDirectory);
-            File.Copy(path, Path.Combine(reviewDirectory, $"Tabela-1.1-{count}.docx"), true);
+            File.Copy(path, Path.Combine(reviewDirectory, $"Tabela-{(includePrices ? "9.1" : "1.1")}-{count}.docx"), true);
         }
+    }
+
+    [Theory]
+    [InlineData(false, "R$ 1,23", "R$ 123,00")]
+    [InlineData(true, "R$ 1,2399", "R$ 123,9900")]
+    public async Task PriceTableUsesSelectedAdoptedPriceAndTruncatesToProjectPrecision(bool medication, string unit, string total)
+    {
+        var project = Project() with { IsMedication = medication };
+        var item = Item(project, price: 1.23999m);
+        var selected = item.Baskets.Single() with { AveragePrice = 99, MedianPrice = 88,
+            AggregationMethod = QuotationAggregationMethod.Median };
+        item = item with { Baskets = [selected with { Key = "recommended", AdoptedPrice = 500, IsRecommended = true }, selected] };
+        var path = await Export(new(project, [item]), includePrices: true);
+        using var doc = WordprocessingDocument.Open(path, false);
+        Validate(doc);
+        var cells = doc.MainDocumentPart!.Document.Descendants<TableRow>().ElementAt(1).Elements<TableCell>().ToArray();
+        Assert.Equal(["1", "Café Premium", "pacote", "100", unit, total], cells.Select(cell => cell.InnerText));
+        Assert.Equal(1.23999m, item.SelectedBasket!.AdoptedPrice);
+    }
+
+    [Theory]
+    [InlineData(false, false, "R$ 1.000,12", "R$ 76.009,12", "R$ 25.003,00")]
+    [InlineData(true, false, "R$ 1.000,12", "R$ 76.009,12", "R$ 25.003,00")]
+    [InlineData(false, true, "R$ 1.000,1234", "R$ 76.009,3784", "R$ 25.003,0850")]
+    [InlineData(true, true, "R$ 1.000,1234", "R$ 76.009,3784", "R$ 25.003,0850")]
+    public async Task PriceTableUsesEachQuotaQuantity(bool grouped, bool medication, string unit, string principal, string reserved)
+    {
+        var project = Project() with { IsMedication = medication };
+        Guid? groupId = grouped ? Guid.NewGuid() : null;
+        var item = Item(project, quantity: 101, price: 1000.12349m, group: groupId);
+        QuotationGroup[] groups = groupId is { } id ? [new(id, project.Id, "Grupo", [item.Line.Id])] : [];
+        project = project with { Organization = QuotationOrganization.Calculate(project, [item], groups) };
+        var path = await Export(new(project, [item]) { Groups = groups }, includePrices: true);
+        using var doc = WordprocessingDocument.Open(path, false);
+        Validate(doc);
+        var rows = doc.MainDocumentPart!.Document.Descendants<TableRow>().Skip(1)
+            .Select(row => row.Elements<TableCell>().Select(cell => cell.InnerText).ToArray()).ToArray();
+        Assert.Equal(2, rows.Length);
+        Assert.Equal(["1", "2"], rows.Select(row => row[grouped ? 1 : 0]));
+        Assert.Equal(["76", "25"], rows.Select(row => row[^3]));
+        Assert.All(rows, row => Assert.Equal(unit, row[^2]));
+        Assert.Equal([principal, reserved], rows.Select(row => row[^1]));
+        if (grouped) Assert.Equal(["Grupo 1", "Grupo 2"], rows.Select(row => row[0]));
+    }
+
+    [Fact]
+    public async Task PriceTableWithoutOrganizationKeepsReportOrder()
+    {
+        var project = Project();
+        var path = await Export(new(project, [Item(project, "Zinco"), Item(project, "Água")]), includePrices: true);
+        using var doc = WordprocessingDocument.Open(path, false);
+        Assert.Equal(["Zinco", "Água"], doc.MainDocumentPart!.Document.Descendants<TableRow>().Skip(1)
+            .Select(row => row.Elements<TableCell>().ElementAt(1).InnerText));
+    }
+
+    [Theory]
+    [InlineData(false, "selected", 1)]
+    [InlineData(true, null, 1)]
+    [InlineData(true, "missing", 1)]
+    [InlineData(true, "selected", 0)]
+    [InlineData(true, "selected", -1)]
+    public async Task PriceTableRequiresConfirmedSelectedBasketAndPreservesDestination(bool confirmed, string? key, int price)
+    {
+        var project = Project();
+        var item = Item(project, price: price);
+        item = item with { Line = item.Line with { SelectionConfirmed = confirmed, SelectedBasketKey = key } };
+        Directory.CreateDirectory(_directory);
+        var path = Path.Combine(_directory, "existing.docx");
+        await File.WriteAllTextAsync(path, "preservado");
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new QuotationWordService().ExportPriceTableAsync(path, new(project, [item])));
+        Assert.Contains(item.Line.EffectiveDisplayName, error.Message);
+        Assert.Contains("Confirme uma cesta", error.Message);
+        Assert.Equal("preservado", await File.ReadAllTextAsync(path));
+        // The specification table still supports items without confirmed prices.
+        await Export(new(project, [item]));
+    }
+
+    [Fact]
+    public async Task PriceTableCancellationPreservesDestination()
+    {
+        var project = Project();
+        Directory.CreateDirectory(_directory);
+        var path = Path.Combine(_directory, "cancelled.docx");
+        await File.WriteAllTextAsync(path, "preservado");
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new QuotationWordService().ExportPriceTableAsync(path, new(project, [Item(project)]), cancellation.Token));
+        Assert.Equal("preservado", await File.ReadAllTextAsync(path));
     }
 
     public void Dispose()

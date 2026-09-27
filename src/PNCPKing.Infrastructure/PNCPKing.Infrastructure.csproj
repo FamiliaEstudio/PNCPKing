@@ -16,6 +16,8 @@
   <ItemGroup>
     <EmbeddedResource Include="../../Tabela_1.1_Modelo com Orientações.docx"
                       LogicalName="PNCPKing.Infrastructure.Assets.QuotationWordTemplate.docx" />
+    <EmbeddedResource Include="../../Tabela_9.1_Modelo.docx"
+                      LogicalName="PNCPKing.Infrastructure.Assets.QuotationPriceWordTemplate.docx" />
     <EmbeddedResource Include="../../Planilha de Avaliação de Preços.xlsx"
                       Link="Assets/QuotationWorkbookTemplate.xlsx"
                       LogicalName="PNCPKing.Infrastructure.Assets.QuotationWorkbookTemplate.xlsx" />

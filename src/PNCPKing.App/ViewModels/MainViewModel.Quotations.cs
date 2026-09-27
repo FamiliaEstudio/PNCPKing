@@ -59,6 +59,7 @@ public sealed partial class MainViewModel
     public ICommand ExportQuotationCommand { get; private set; } = null!;
     public ICommand ExportQuotationWithoutEvidenceCommand { get; private set; } = null!;
     public ICommand ExportQuotationWordCommand { get; private set; } = null!;
+    public ICommand ExportQuotationPriceWordCommand { get; private set; } = null!;
     public ICommand ExportQuotationPackageCommand { get; private set; } = null!;
     public ICommand ImportQuotationPackageCommand { get; private set; } = null!;
     public ICommand PreviousQuotationBasketPageCommand { get; private set; } = null!;
@@ -242,7 +243,8 @@ public sealed partial class MainViewModel
             () => ExportQuotationAsync(includeEvidence: false),
             () => !IsAnyAggressivePncpMode && !IsFileBusy && !IsDocumentBusy &&
                   SelectedQuotationProject is not null && QuotationLines.Count > 0);
-        ExportQuotationWordCommand = new AsyncRelayCommand(ExportQuotationWordAsync, CanExportQuotationWord);
+        ExportQuotationWordCommand = new AsyncRelayCommand(() => ExportQuotationWordAsync(false), CanExportQuotationWord);
+        ExportQuotationPriceWordCommand = new AsyncRelayCommand(() => ExportQuotationWordAsync(true), CanExportQuotationWord);
         ExportQuotationPackageCommand = new AsyncRelayCommand(
             ExportQuotationPackageAsync,
             () => !IsFileBusy && !IsPriceBusy && !IsDocumentBusy &&
@@ -438,6 +440,7 @@ public sealed partial class MainViewModel
             {
                 ((AsyncRelayCommand)ToggleQuotationMedicationCommand).NotifyCanExecuteChanged();
                 ((AsyncRelayCommand)ExportQuotationWordCommand).NotifyCanExecuteChanged();
+                ((AsyncRelayCommand)ExportQuotationPriceWordCommand).NotifyCanExecuteChanged();
             }
         }
         viewModel.PropertyChanged += RefreshMedicationCommand;
@@ -452,6 +455,7 @@ public sealed partial class MainViewModel
                 _ = LoadQuotationProjectAsync(selected.Id);
             ((AsyncRelayCommand)ToggleQuotationMedicationCommand).NotifyCanExecuteChanged();
             ((AsyncRelayCommand)ExportQuotationWordCommand).NotifyCanExecuteChanged();
+            ((AsyncRelayCommand)ExportQuotationPriceWordCommand).NotifyCanExecuteChanged();
         };
         _quotationItemWindow = window;
         if (!string.IsNullOrWhiteSpace(referenceId))
@@ -734,6 +738,7 @@ public sealed partial class MainViewModel
         var lines = report.Lines.Select(item => item.Line.Id == analysis.Line.Id ? analysis : item).ToArray();
         _quotationWordReport = report with { Lines = QuotationOrganization.Order(report.Project, lines) };
         ((AsyncRelayCommand)ExportQuotationWordCommand).NotifyCanExecuteChanged();
+        ((AsyncRelayCommand)ExportQuotationPriceWordCommand).NotifyCanExecuteChanged();
     }
 
     private bool CanExportQuotationWord() =>
@@ -743,17 +748,23 @@ public sealed partial class MainViewModel
         _quotationItemWindow?.ViewModel.IsBusy != true && _quotationItemWindow?.ViewModel.IsSearchBusy != true &&
         _quotationItemWindow?.ViewModel.IsInteracting != true;
 
-    private async Task ExportQuotationWordAsync()
+    private async Task ExportQuotationWordAsync(bool includePrices)
     {
         if (!CanExportQuotationWord() || _quotationWordReport is not { } report) return;
-        var window = new QuotationWordExportWindow { Owner = Application.Current.MainWindow };
-        if (window.ShowDialog() != true || window.Options is not { } options) return;
+        var tableNumber = includePrices ? "9.1" : "1.1";
+        QuotationWordExportOptions? options = null;
+        if (!includePrices)
+        {
+            var window = new QuotationWordExportWindow { Owner = Application.Current.MainWindow };
+            if (window.ShowDialog() != true || window.Options is null) return;
+            options = window.Options;
+        }
         var dialog = new SaveFileDialog
         {
-            Title = "Exportar Tabela 1.1 em Word",
+            Title = $"Exportar Tabela {tableNumber} em Word",
             Filter = "Documento do Word (*.docx)|*.docx",
             DefaultExt = ".docx", AddExtension = true,
-            FileName = SanitizeFileName(report.Project.Name) + " - Tabela 1.1.docx"
+            FileName = SanitizeFileName(report.Project.Name) + $" - Tabela {tableNumber}.docx"
         };
         if (dialog.ShowDialog() != true) return;
         // Do not export a report replaced or invalidated while a dialog was open.
@@ -761,12 +772,15 @@ public sealed partial class MainViewModel
         IsFileBusy = true;
         try
         {
-            await _quotationWordService.ExportAsync(dialog.FileName, report, options).ConfigureAwait(true);
-            StatusText = $"Tabela 1.1 exportada: {dialog.FileName}";
+            if (includePrices)
+                await _quotationWordService.ExportPriceTableAsync(dialog.FileName, report).ConfigureAwait(true);
+            else
+                await _quotationWordService.ExportAsync(dialog.FileName, report, options!).ConfigureAwait(true);
+            StatusText = $"Tabela {tableNumber} exportada: {dialog.FileName}";
         }
         catch (Exception exception)
         {
-            MessageBox.Show(exception.Message, "Exportar Tabela 1.1", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(exception.Message, $"Exportar Tabela {tableNumber}", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally { IsFileBusy = false; }
     }
