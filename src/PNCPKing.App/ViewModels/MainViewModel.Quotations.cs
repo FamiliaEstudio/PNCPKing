@@ -6,6 +6,7 @@ using Microsoft.Win32;
 using PNCPKing.App.Views;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
+using PNCPKing.Core.Quotations;
 using PNCPKing.Core.Search;
 using PNCPKing.Infrastructure.Services;
 
@@ -16,6 +17,9 @@ public sealed partial class MainViewModel
     private const int QuotationBasketPageSize = 100;
     private QuotationService _quotationService = null!;
     private IQuotationWorkbookService _quotationWorkbookService = null!;
+    private IQuotationWordService _quotationWordService = null!;
+    private QuotationProjectReport? _quotationWordReport;
+    private int _quotationReportLoadVersion;
     private IQuotationWorkbookImportService _quotationWorkbookImportService = null!;
     private IQuotationPackageService _quotationPackageService = null!;
     private CancellationTokenSource? _quotationAutomationCancellation;
@@ -54,6 +58,7 @@ public sealed partial class MainViewModel
     public ICommand ConfirmQuotationBasketCommand { get; private set; } = null!;
     public ICommand ExportQuotationCommand { get; private set; } = null!;
     public ICommand ExportQuotationWithoutEvidenceCommand { get; private set; } = null!;
+    public ICommand ExportQuotationWordCommand { get; private set; } = null!;
     public ICommand ExportQuotationPackageCommand { get; private set; } = null!;
     public ICommand ImportQuotationPackageCommand { get; private set; } = null!;
     public ICommand PreviousQuotationBasketPageCommand { get; private set; } = null!;
@@ -207,11 +212,13 @@ public sealed partial class MainViewModel
     private void InitializeQuotation(
         QuotationService quotationService,
         IQuotationWorkbookService quotationWorkbookService,
+        IQuotationWordService quotationWordService,
         IQuotationWorkbookImportService quotationWorkbookImportService,
         IQuotationPackageService quotationPackageService)
     {
         _quotationService = quotationService;
         _quotationWorkbookService = quotationWorkbookService;
+        _quotationWordService = quotationWordService;
         _quotationWorkbookImportService = quotationWorkbookImportService;
         _quotationPackageService = quotationPackageService;
         UseQuotationSampleCommand = new AsyncRelayCommand(
@@ -235,6 +242,7 @@ public sealed partial class MainViewModel
             () => ExportQuotationAsync(includeEvidence: false),
             () => !IsAnyAggressivePncpMode && !IsFileBusy && !IsDocumentBusy &&
                   SelectedQuotationProject is not null && QuotationLines.Count > 0);
+        ExportQuotationWordCommand = new AsyncRelayCommand(ExportQuotationWordAsync, CanExportQuotationWord);
         ExportQuotationPackageCommand = new AsyncRelayCommand(
             ExportQuotationPackageAsync,
             () => !IsFileBusy && !IsPriceBusy && !IsDocumentBusy &&
@@ -425,8 +433,12 @@ public sealed partial class MainViewModel
         };
         void RefreshMedicationCommand(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
         {
-            if (args.PropertyName is nameof(QuotationItemViewModel.IsBusy) or nameof(QuotationItemViewModel.IsSearchBusy))
+            if (args.PropertyName is nameof(QuotationItemViewModel.IsBusy) or nameof(QuotationItemViewModel.IsSearchBusy)
+                or nameof(QuotationItemViewModel.IsInteracting))
+            {
                 ((AsyncRelayCommand)ToggleQuotationMedicationCommand).NotifyCanExecuteChanged();
+                ((AsyncRelayCommand)ExportQuotationWordCommand).NotifyCanExecuteChanged();
+            }
         }
         viewModel.PropertyChanged += RefreshMedicationCommand;
         window.Closed += (_, _) =>
@@ -436,7 +448,10 @@ public sealed partial class MainViewModel
             {
                 _quotationItemWindow = null;
             }
+            if (_quotationWordReport is null && SelectedQuotationProject is { } selected)
+                _ = LoadQuotationProjectAsync(selected.Id);
             ((AsyncRelayCommand)ToggleQuotationMedicationCommand).NotifyCanExecuteChanged();
+            ((AsyncRelayCommand)ExportQuotationWordCommand).NotifyCanExecuteChanged();
         };
         _quotationItemWindow = window;
         if (!string.IsNullOrWhiteSpace(referenceId))
@@ -675,6 +690,8 @@ public sealed partial class MainViewModel
 
     private async Task LoadQuotationProjectAsync(Guid? projectId, Guid? preferredLineId = null)
     {
+        var loadVersion = ++_quotationReportLoadVersion;
+        InvalidateQuotationWordReport();
         if (projectId is null)
         {
             return;
@@ -683,6 +700,8 @@ public sealed partial class MainViewModel
         try
         {
             var report = await _quotationService.GetReportAsync(projectId.Value).ConfigureAwait(true);
+            if (loadVersion != _quotationReportLoadVersion || SelectedQuotationProject?.Id != projectId) return;
+            _quotationWordReport = report;
             QuotationLines.ReplaceAll(report.Lines.Select(analysis => new QuotationLineDisplay(analysis, report.Project.Organization)));
 
             SelectedQuotationLine = QuotationLines.FirstOrDefault(line => line.Line.Id == preferredLineId)
@@ -698,8 +717,58 @@ public sealed partial class MainViewModel
         }
         catch (Exception exception)
         {
+            if (loadVersion != _quotationReportLoadVersion) return;
             QuotationSummary = $"Não foi possível abrir o projeto: {exception.Message}";
         }
+    }
+
+    internal void InvalidateQuotationWordReport()
+    {
+        _quotationWordReport = null;
+        NotifyCommands();
+    }
+
+    internal void RefreshQuotationWordItem(QuotationLineAnalysis analysis)
+    {
+        if (_quotationWordReport is not { } report || report.Project.Id != analysis.Line.ProjectId) return;
+        var lines = report.Lines.Select(item => item.Line.Id == analysis.Line.Id ? analysis : item).ToArray();
+        _quotationWordReport = report with { Lines = QuotationOrganization.Order(report.Project, lines) };
+        ((AsyncRelayCommand)ExportQuotationWordCommand).NotifyCanExecuteChanged();
+    }
+
+    private bool CanExportQuotationWord() =>
+        _quotationWordReport is { Lines.Count: > 0 } report && report.Project.Id == SelectedQuotationProject?.Id &&
+        !IsFileBusy && !IsPriceBusy && !IsDocumentBusy && !IsForegroundBusy &&
+        !IsQuotationAutomationRunning && !IsAnyAggressivePncpMode &&
+        _quotationItemWindow?.ViewModel.IsBusy != true && _quotationItemWindow?.ViewModel.IsSearchBusy != true &&
+        _quotationItemWindow?.ViewModel.IsInteracting != true;
+
+    private async Task ExportQuotationWordAsync()
+    {
+        if (!CanExportQuotationWord() || _quotationWordReport is not { } report) return;
+        var window = new QuotationWordExportWindow { Owner = Application.Current.MainWindow };
+        if (window.ShowDialog() != true || window.Options is not { } options) return;
+        var dialog = new SaveFileDialog
+        {
+            Title = "Exportar Tabela 1.1 em Word",
+            Filter = "Documento do Word (*.docx)|*.docx",
+            DefaultExt = ".docx", AddExtension = true,
+            FileName = SanitizeFileName(report.Project.Name) + " - Tabela 1.1.docx"
+        };
+        if (dialog.ShowDialog() != true) return;
+        // Do not export a report replaced or invalidated while a dialog was open.
+        if (!CanExportQuotationWord() || !ReferenceEquals(report, _quotationWordReport)) return;
+        IsFileBusy = true;
+        try
+        {
+            await _quotationWordService.ExportAsync(dialog.FileName, report, options).ConfigureAwait(true);
+            StatusText = $"Tabela 1.1 exportada: {dialog.FileName}";
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(exception.Message, "Exportar Tabela 1.1", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally { IsFileBusy = false; }
     }
 
     internal Task RefreshQuotationItemAsync(Guid projectId, Guid lineId) =>

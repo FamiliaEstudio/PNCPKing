@@ -14,6 +14,8 @@
     <PackageReference Include="SkiaSharp" />
   </ItemGroup>
   <ItemGroup>
+    <EmbeddedResource Include="../../Tabela_1.1_Modelo com Orientações.docx"
+                      LogicalName="PNCPKing.Infrastructure.Assets.QuotationWordTemplate.docx" />
     <EmbeddedResource Include="../../Planilha de Avaliação de Preços.xlsx"
                       Link="Assets/QuotationWorkbookTemplate.xlsx"
                       LogicalName="PNCPKing.Infrastructure.Assets.QuotationWorkbookTemplate.xlsx" />

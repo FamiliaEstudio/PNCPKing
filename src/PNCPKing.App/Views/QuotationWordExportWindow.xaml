@@ -1,0 +1,35 @@
+<Window Style="{StaticResource AppWindow}" x:Class="PNCPKing.App.Views.QuotationWordExportWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Exportar Tabela 1.1 em Word" Width="560" SizeToContent="Height"
+        ResizeMode="NoResize" WindowStartupLocation="CenterOwner">
+    <StackPanel Margin="20">
+        <TextBlock Text="Onde está a especificação detalhada dos itens?" TextWrapping="Wrap" />
+        <ComboBox x:Name="LocationBox" SelectedIndex="0" SelectionChanged="OptionsChanged">
+            <ComboBoxItem Content="Item 3.2 do Termo de Referência" />
+            <ComboBoxItem Content="Item 5 do Termo de Referência" />
+            <ComboBoxItem Content="Memorial Descritivo" />
+            <ComboBoxItem Content="Outro número de item" />
+        </ComboBox>
+        <StackPanel x:Name="OtherItemPanel" Visibility="Collapsed" Margin="0,8,0,0">
+            <TextBlock Text="Número do item (ex.: 7.1)" />
+            <TextBox x:Name="OtherItemBox" TextChanged="OptionsChanged" />
+        </StackPanel>
+        <TextBlock x:Name="PreviewText" TextWrapping="Wrap" Margin="0,10,0,16" />
+        <TextBlock Text="É Registro de Preços?" />
+        <ComboBox x:Name="RegistrationBox" SelectedIndex="0" SelectionChanged="OptionsChanged">
+            <ComboBoxItem Content="Não" />
+            <ComboBoxItem Content="Sim" />
+        </ComboBox>
+        <StackPanel x:Name="PercentagePanel" Visibility="Collapsed" Margin="0,8,0,0">
+            <TextBlock Text="Percentual geral da quantidade mínima por pedido (%)" TextWrapping="Wrap" />
+            <TextBox x:Name="PercentageBox" />
+            <TextBlock Text="Calculado sobre a quantidade total original, com arredondamento para cima e mesmo mínimo nas cotas principal e reservada. O mínimo nominal do item tem prioridade."
+                       TextWrapping="Wrap" Margin="0,6,0,0" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+            <Button Content="Cancelar" IsCancel="True" MinWidth="100" />
+            <Button Content="Escolher arquivo…" IsDefault="True" Click="Accept_Click" MinWidth="130" />
+        </StackPanel>
+    </StackPanel>
+</Window>

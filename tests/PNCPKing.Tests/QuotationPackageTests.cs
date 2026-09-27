@@ -781,7 +781,11 @@ public sealed class QuotationPackageTests
         foreach (var project in payload["tables"]!["quotation_projects"]!.AsArray())
             project!.AsObject().Remove("organization_json");
         foreach (var line in payload["tables"]!["quotation_lines"]!.AsArray())
+        {
             line!.AsObject().Remove("group_id");
+            line!.AsObject().Remove("catmat_code_override");
+            line!.AsObject().Remove("minimum_order_quantity_scaled");
+        }
     }
 
     private static async Task DowngradePackageToSchemaTwelveAsync(string path)

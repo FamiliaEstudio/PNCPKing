@@ -31,6 +31,8 @@
                     <DataGridTextColumn Header="Máximo" Binding="{Binding MaximumUnitPrice, StringFormat=C4}" Width="100" />
                     <DataGridTextColumn Header="Páginas locais" Binding="{Binding BatchCount}" Width="95" />
                     <DataGridTextColumn Header="Preços na cesta" Binding="{Binding RequestedBasketSize}" Width="105" />
+                    <DataGridTextColumn Header="CATMAT informado" Binding="{Binding CatmatCodeOverride}" Width="115" />
+                    <DataGridTextColumn Header="Qtd. mínima por pedido" Binding="{Binding MinimumOrderQuantity, StringFormat=0}" Width="145" />
                 </DataGrid.Columns>
             </DataGrid>
             <Button Grid.Row="1" Content="Escolher colunas"

@@ -29,16 +29,16 @@ public sealed class Schema21MigrationTests
         var result = await repository.InitializeAsync();
 
         Assert.Equal(20, result.PreviousVersion);
-        Assert.Equal(32, result.CurrentVersion);
-        Assert.Equal([21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32], result.AppliedMigrations);
+        Assert.Equal(33, result.CurrentVersion);
+        Assert.Equal([21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33], result.AppliedMigrations);
         var restored = Assert.Single(await quotations.GetManualBasketsAsync(lineId));
         Assert.Equal(basket.Id, restored.Id);
         Assert.Equal(QuotationAggregationMethod.Mean, restored.AggregationMethod);
         Assert.Equal(1m, restored.GetConversionFactor("a"));
 
         var repeated = await repository.InitializeAsync();
-        Assert.Equal(32, repeated.PreviousVersion);
-        Assert.Equal(32, repeated.CurrentVersion);
+        Assert.Equal(33, repeated.PreviousVersion);
+        Assert.Equal(33, repeated.CurrentVersion);
         Assert.Empty(repeated.AppliedMigrations);
     }
 

@@ -497,6 +497,15 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         private set => SetProperty(ref _isBusy, value);
     }
 
+    private bool _isInteracting;
+    public bool IsInteracting
+    {
+        get => _isInteracting;
+        internal set => SetProperty(ref _isInteracting, value);
+    }
+
+    internal void InvalidateWordReport() => _main.InvalidateQuotationWordReport();
+
     public bool IsSearchBusy
     {
         get => _isSearchBusy;
@@ -528,6 +537,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             var analysis = await _quotations.GetAnalysisAsync(_projectId, _lineId).ConfigureAwait(true)
                            ?? throw new InvalidOperationException("O item da cotação não existe mais.");
             Line = new QuotationLineDisplay(analysis);
+            _main.RefreshQuotationWordItem(analysis);
             if (string.IsNullOrWhiteSpace(CatalogQuery))
             {
                 CatalogQuery = analysis.Line.EffectiveDisplayName;
@@ -611,6 +621,28 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             .ConfigureAwait(true);
         await LoadAsync(SelectedBasket?.Key).ConfigureAwait(true);
         await _main.RefreshQuotationItemAsync(_projectId, _lineId).ConfigureAwait(true);
+    }
+
+    public async Task UpdateDocumentDetailsAsync(string catmatCodeOverride, decimal? minimumOrderQuantity)
+    {
+        var current = Line?.Analysis ?? throw new InvalidOperationException("Aguarde o carregamento do item.");
+        IsBusy = true;
+        try
+        {
+            await _quotations.UpdateLineDocumentDetailsAsync(_lineId, catmatCodeOverride, minimumOrderQuantity)
+                .ConfigureAwait(true);
+            var updated = current with
+            {
+                Line = current.Line with
+                {
+                    CatmatCodeOverride = catmatCodeOverride.Trim(),
+                    MinimumOrderQuantity = minimumOrderQuantity
+                }
+            };
+            Line = new QuotationLineDisplay(updated);
+            _main.RefreshQuotationWordItem(updated);
+        }
+        finally { IsBusy = false; }
     }
 
     public async Task SearchCatalogAsync(int page = 1)

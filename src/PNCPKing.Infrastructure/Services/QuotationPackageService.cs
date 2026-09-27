@@ -729,6 +729,11 @@ public sealed class QuotationPackageService : IQuotationPackageService
                     cancellationToken)
                 .ConfigureAwait(false);
             var compatibleColumns = columns.ToHashSet(StringComparer.Ordinal);
+            if (manifest?.DatabaseSchemaVersion < 33 && definition.Name == "quotation_lines")
+            {
+                compatibleColumns.Remove("catmat_code_override");
+                compatibleColumns.Remove("minimum_order_quantity_scaled");
+            }
             if (manifest?.DatabaseSchemaVersion < 32)
             {
                 if (definition.Name == "quotation_projects") compatibleColumns.Remove("organization_json");
@@ -1127,6 +1132,7 @@ public sealed class QuotationPackageService : IQuotationPackageService
         foreach (var row in GetRows(payload, "quotation_lines"))
         {
             var line = MapLine(row);
+            QuotationWordExportOptions.ValidateMinimumOrderQuantity(line.MinimumOrderQuantity);
             var lineKey = line.Id.ToString("N");
             var analysis = analyzer.Analyze(
                 line,
@@ -1322,6 +1328,14 @@ public sealed class QuotationPackageService : IQuotationPackageService
         JsonObject payload,
         int databaseSchemaVersion)
     {
+        if (databaseSchemaVersion < 33)
+        {
+            foreach (var line in GetRows(payload, "quotation_lines"))
+            {
+                line["catmat_code_override"] = string.Empty;
+                line["minimum_order_quantity_scaled"] = null;
+            }
+        }
         if (databaseSchemaVersion < 32)
         {
             ((JsonObject)payload["tables"]!)["quotation_groups"] = new JsonArray();
@@ -1896,6 +1910,10 @@ public sealed class QuotationPackageService : IQuotationPackageService
             Id = ParseGuid(GetRequiredText(row, "id"), "item"),
             ProjectId = ParseGuid(GetRequiredText(row, "project_id"), "projeto"),
             GroupId = row.ContainsKey("group_id") ? ParseOptionalGuid(GetOptionalText(row, "group_id"), "grupo") : null,
+            CatmatCodeOverride = row.ContainsKey("catmat_code_override")
+                ? GetOptionalText(row, "catmat_code_override") ?? string.Empty : string.Empty,
+            MinimumOrderQuantity = row.ContainsKey("minimum_order_quantity_scaled")
+                ? DecimalScale.FromScaled(GetOptionalLong(row, "minimum_order_quantity_scaled")) : null,
             Description = GetRequiredText(row, "description"),
             DisplayName = row.ContainsKey("display_name")
                 ? GetRequiredText(row, "display_name")

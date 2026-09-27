@@ -320,6 +320,7 @@ public partial class App : Application
                 new BackupService(repository, _performanceTelemetry),
                 quotationService,
                 new QuotationWorkbookService(),
+                new QuotationWordService(),
                 new QuotationWorkbookImportService(),
                 new QuotationPackageService(databasePath, settings.DataFolder),
                 catalogRepository,

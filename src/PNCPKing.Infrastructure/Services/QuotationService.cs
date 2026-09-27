@@ -68,6 +68,10 @@ public sealed class QuotationService(
     public Task DeleteProjectAsync(Guid projectId, CancellationToken cancellationToken = default) =>
         repository.DeleteProjectAsync(projectId, cancellationToken);
 
+    public Task UpdateLineDocumentDetailsAsync(Guid lineId, string catmatCodeOverride,
+        decimal? minimumOrderQuantity, CancellationToken cancellationToken = default) =>
+        repository.UpdateLineDocumentDetailsAsync(lineId, catmatCodeOverride, minimumOrderQuantity, cancellationToken);
+
     public Task DeleteLineAsync(Guid lineId, CancellationToken cancellationToken = default) =>
         repository.DeleteLineAsync(lineId, cancellationToken);
 

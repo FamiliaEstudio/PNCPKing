@@ -99,6 +99,8 @@ public sealed record QuotationLine
     public required string Description { get; init; }
     public string DisplayName { get; init; } = string.Empty;
     public QuotationCatalogSelection? CatalogSelection { get; init; }
+    public string CatmatCodeOverride { get; init; } = string.Empty;
+    public decimal? MinimumOrderQuantity { get; init; }
     public required decimal RequestedQuantity { get; init; }
     public required string RequestedUnit { get; init; }
     public decimal? MinimumUnitPrice { get; init; }
@@ -193,7 +195,11 @@ public sealed record QuotationImportItem(
     bool UseEstimatedPrice = false,
     string IntermediateSearchText = "",
     string BroadSearchText = "",
-    SearchPromptOrigin PromptOrigin = SearchPromptOrigin.Ai);
+    SearchPromptOrigin PromptOrigin = SearchPromptOrigin.Ai)
+{
+    public string CatmatCodeOverride { get; init; } = string.Empty;
+    public decimal? MinimumOrderQuantity { get; init; }
+}
 
 public sealed record QuotationImportDocument(
     string SourcePath,

@@ -125,6 +125,15 @@ public partial class QuotationItemWindow : Window
         }
     }
 
+    private async void EditDocumentDetails_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel.Line?.Line is not { } line) return;
+        var window = new QuotationItemDocumentWindow(line) { Owner = this };
+        if (window.ShowDialog() == true)
+            await RunAsync(() => ViewModel.UpdateDocumentDetailsAsync(
+                window.CatmatCodeOverride, window.MinimumOrderQuantity)).ConfigureAwait(true);
+    }
+
     private async Task PromptRenameItemAsync()
     {
         var current = ViewModel.Line?.Line.EffectiveDisplayName;
@@ -664,14 +673,17 @@ public partial class QuotationItemWindow : Window
 
         try
         {
+            ViewModel.IsInteracting = true;
             await action().ConfigureAwait(true);
         }
         catch (Exception exception)
         {
+            ViewModel.InvalidateWordReport();
             ShowError(exception);
         }
         finally
         {
+            ViewModel.IsInteracting = false;
             _interactionGate.Release();
         }
     }

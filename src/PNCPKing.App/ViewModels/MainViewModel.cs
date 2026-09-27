@@ -207,6 +207,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         BackupService backupService,
         QuotationService quotationService,
         IQuotationWorkbookService quotationWorkbookService,
+        IQuotationWordService quotationWordService,
         IQuotationWorkbookImportService quotationWorkbookImportService,
         IQuotationPackageService quotationPackageService,
         ICatalogRepository catalogRepository,
@@ -258,6 +259,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         InitializeQuotation(
             quotationService,
             quotationWorkbookService,
+            quotationWordService,
             quotationWorkbookImportService,
             quotationPackageService);
         InitializeCatalog(
@@ -4821,7 +4823,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      UseQuotationSampleCommand, UpdateQuotationSampleCommand,
                      AdjustQuotationWeightsCommand,
                      ConfirmQuotationBasketCommand, ExportQuotationCommand,
-                     ExportQuotationWithoutEvidenceCommand,
+                     ExportQuotationWithoutEvidenceCommand, ExportQuotationWordCommand,
                      ExportQuotationPackageCommand, ImportQuotationPackageCommand,
                      PreviousQuotationBasketPageCommand, NextQuotationBasketPageCommand,
                      NewQuotationCommand, NewQuotationItemCommand,

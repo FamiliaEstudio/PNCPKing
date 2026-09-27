@@ -20,6 +20,20 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args is ["--word", var wordOutputDirectory])
+        {
+            var wordApp = CreateUiApplication();
+            wordApp.Startup += async (_, _) =>
+            {
+                try
+                {
+                    await CheckQuotationWordAsync(wordOutputDirectory);
+                    wordApp.Shutdown();
+                }
+                catch (Exception error) { Console.Error.WriteLine(error); wordApp.Shutdown(1); }
+            };
+            return wordApp.Run();
+        }
         if (args is ["--appearance" or "--appearance-baseline", var sourceDirectory, var outputDirectory])
         {
             var appearanceApp = CreateUiApplication();

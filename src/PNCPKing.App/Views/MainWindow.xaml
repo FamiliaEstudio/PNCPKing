@@ -745,6 +745,8 @@
                                                   Command="{Binding ExportQuotationCommand}" />
                                         <MenuItem Header="Exportar somente Excel"
                                                   Command="{Binding ExportQuotationWithoutEvidenceCommand}" />
+                                        <MenuItem Header="Exportar Tabela 1.1 em Word"
+                                                  Command="{Binding ExportQuotationWordCommand}" />
                                         <Separator />
                                         <MenuItem Header="Exportar pacote"
                                                   Command="{Binding ExportQuotationPackageCommand}"

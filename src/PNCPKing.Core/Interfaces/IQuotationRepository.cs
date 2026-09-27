@@ -27,6 +27,8 @@ public interface IQuotationRepository
         Guid lineId,
         QuotationCatalogSelection? selection,
         CancellationToken cancellationToken = default);
+    Task UpdateLineDocumentDetailsAsync(Guid lineId, string catmatCodeOverride,
+        decimal? minimumOrderQuantity, CancellationToken cancellationToken = default);
     Task DeleteProjectAsync(Guid projectId, CancellationToken cancellationToken = default);
     Task DeleteLineAsync(Guid lineId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<QuotationLine>> GetLinesAsync(Guid projectId, CancellationToken cancellationToken = default);

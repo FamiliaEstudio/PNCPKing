@@ -210,6 +210,30 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task UpdateLineDocumentDetailsAsync(Guid lineId, string catmatCodeOverride,
+        decimal? minimumOrderQuantity, CancellationToken cancellationToken = default)
+    {
+        QuotationWordExportOptions.ValidateMinimumOrderQuantity(minimumOrderQuantity);
+        var scaled = DecimalScale.ToScaled(minimumOrderQuantity);
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE quotation_lines SET catmat_code_override = $catmat, minimum_order_quantity_scaled = $minimum
+            WHERE id = $id;
+            """;
+        command.Parameters.AddWithValue("$id", lineId.ToString("N"));
+        command.Parameters.AddWithValue("$catmat", (catmatCodeOverride ?? string.Empty).Trim());
+        command.Parameters.AddWithValue("$minimum", DbValue(scaled));
+        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+            throw new InvalidOperationException("O item da cotação não existe mais.");
+        await TouchLineProjectAsync(connection, transaction, lineId, DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task SetLineCatalogSelectionAsync(
         Guid lineId,
         QuotationCatalogSelection? selection,
@@ -567,7 +591,8 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
                    p.matched_items, p.revealed_prices, p.updated_at,
                    l.display_name, s.catalog_kind, s.catalog_code,
                    s.description_snapshot, s.selected_at,
-                   CASE WHEN ce.code IS NULL THEN 1 ELSE ce.active END, l.group_id
+                   CASE WHEN ce.code IS NULL THEN 1 ELSE ce.active END, l.group_id,
+                   l.catmat_code_override, l.minimum_order_quantity_scaled
               FROM quotation_lines l
               LEFT JOIN quotation_line_search_prompts p
                 ON p.line_id = l.id AND p.is_current = 1
@@ -611,7 +636,8 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
                    p.matched_items, p.revealed_prices, p.updated_at,
                    l.display_name, s.catalog_kind, s.catalog_code,
                    s.description_snapshot, s.selected_at,
-                   CASE WHEN ce.code IS NULL THEN 1 ELSE ce.active END, l.group_id
+                   CASE WHEN ce.code IS NULL THEN 1 ELSE ce.active END, l.group_id,
+                   l.catmat_code_override, l.minimum_order_quantity_scaled
               FROM quotation_lines l
               LEFT JOIN quotation_line_search_prompts p
                 ON p.line_id = l.id AND p.is_current = 1
@@ -1728,7 +1754,11 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
         }
 
         weights.Validate();
-        foreach (var item in items) QuotationQuantity.Validate(item.Quantity);
+        foreach (var item in items)
+        {
+            QuotationQuantity.Validate(item.Quantity);
+            QuotationWordExportOptions.ValidateMinimumOrderQuantity(item.MinimumOrderQuantity);
+        }
         var now = DateTimeOffset.UtcNow;
         var run = new QuotationAutomationRun
         {
@@ -1820,16 +1850,18 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
                     automation_message, requested_basket_size, estimated_unit_price_scaled,
                     estimated_total_price_scaled, use_estimated_price, estimate_stage,
                     search_random_pivot, search_contracts_examined, search_batches_completed,
-                    search_candidate_exhausted)
+                    search_candidate_exhausted, catmat_code_override, minimum_order_quantity_scaled)
                 VALUES($id, $projectId, $description, $description, $quantity, $unit, $minimum, $maximum,
                        $descriptionWeight, $unitWeight, $quantityWeight, $proximityWeight, $recencyWeight,
                        0, $sampledAt, NULL, 0, $searchText, $batches, $displayOrder, $runId, $state, '',
                        $basketSize, $estimatedUnit, $estimatedTotal, $useEstimated, $estimateStage,
-                       0, 0, 0, 0);
+                       0, 0, 0, 0, $catmatOverride, $minimumOrder);
                 """;
             line.Parameters.AddWithValue("$id", lineId.ToString("N"));
             line.Parameters.AddWithValue("$projectId", projectId.ToString("N"));
             line.Parameters.AddWithValue("$description", item.OutputDescription.Trim());
+            line.Parameters.AddWithValue("$catmatOverride", item.CatmatCodeOverride.Trim());
+            line.Parameters.AddWithValue("$minimumOrder", DbValue(DecimalScale.ToScaled(item.MinimumOrderQuantity)));
             line.Parameters.AddWithValue("$quantity", DecimalScale.ToScaled(item.Quantity)!.Value);
             line.Parameters.AddWithValue("$unit", item.Unit.Trim());
             line.Parameters.AddWithValue("$minimum", DbValue(DecimalScale.ToScaled(item.MinimumUnitPrice)));
@@ -2979,6 +3011,8 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
             : ReadPromptSet(reader, Guid.ParseExact(reader.GetString(0), "N"), 36),
         DisplayName = reader.GetString(47),
         GroupId = reader.IsDBNull(53) ? null : Guid.ParseExact(reader.GetString(53), "N"),
+        CatmatCodeOverride = reader.GetString(54),
+        MinimumOrderQuantity = DecimalScale.FromScaled(ReadNullableLong(reader, 55)),
         CatalogSelection = reader.IsDBNull(48)
             ? null
             : new QuotationCatalogSelection

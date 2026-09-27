@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed partial class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 32;
+    public const int CurrentSchemaVersion = 33;
 
     private const string GeographicGroupExpression = "CASE WHEN c.geo_layer = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -797,6 +797,30 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
             await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             version = 32;
+        }
+
+        if (version < 33)
+        {
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = transaction;
+            foreach (var (name, definition) in new[]
+            {
+                ("catmat_code_override", "TEXT NOT NULL DEFAULT ''"),
+                ("minimum_order_quantity_scaled", "INTEGER")
+            })
+            {
+                migration.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('quotation_lines') WHERE name = '{name}';";
+                if (Convert.ToInt32(await migration.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)) == 0)
+                {
+                    migration.CommandText = $"ALTER TABLE quotation_lines ADD COLUMN {name} {definition};";
+                    await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+            migration.CommandText = "UPDATE schema_info SET version = 33 WHERE id = 1;";
+            await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 33;
         }
 
         stopwatch.Stop();
