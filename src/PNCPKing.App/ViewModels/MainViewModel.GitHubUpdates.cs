@@ -133,14 +133,14 @@ public sealed partial class MainViewModel
             GitHubUpdateService.EnsureSpace(GitHubAppInstaller.CacheDirectory, checked(package.Download.Size * 2));
             using var http = new HttpClient(new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(30) })
                 { Timeout = Timeout.InfiniteTimeSpan };
-            var progress = new Progress<UpdateDownloadProgress>(p =>
+            var downloadProgress = new Progress<UpdateDownloadProgress>(p =>
             {
                 FileOperationProgressText = p.Message;
                 IsFileOperationIndeterminate = p.Message.StartsWith("Recompondo", StringComparison.Ordinal);
                 OperationProgress = p.Total > 0 ? 100d * p.Received / p.Total : 0;
             });
             var path = await new GitHubUpdateService(http).DownloadAsync(deferred.Tag, package.Download,
-                GitHubAppInstaller.CacheDirectory, progress, ct);
+                GitHubAppInstaller.CacheDirectory, downloadProgress, ct);
             pending = pending with { PriceUpdate = new(path, package), DeferredPrices = null };
         }
         if (pending.PriceUpdate is { } item)
