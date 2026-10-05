@@ -41,10 +41,11 @@ public sealed partial class MainViewModel
                 ct.ThrowIfCancellationRequested();
                 if (plan.App is not null) GitHubAppInstaller.CheckDestination();
                 var databasePath = _calibrationService.Connections.DatabasePath;
-                if (plan.Package is { } pricePackage)
+                if (plan.App is null && plan.Package is { } pricePackage)
                     GitHubUpdateService.EnsureSpace(Path.GetDirectoryName(databasePath)!, pricePackage.ExpandedSize);
                 Directory.CreateDirectory(GitHubAppInstaller.CacheDirectory);
-                GitHubUpdateService.EnsureSpace(GitHubAppInstaller.CacheDirectory, checked(plan.DownloadSize * 2));
+                var firstDownloadSize = plan.App?.File.Size ?? plan.Package?.Download.Size ?? 0;
+                GitHubUpdateService.EnsureSpace(GitHubAppInstaller.CacheDirectory, checked(firstDownloadSize * 2));
                 DownloadedPriceUpdate? downloadedPrices = null;
                 var progress = new Progress<UpdateDownloadProgress>(p =>
                 {
@@ -60,7 +61,9 @@ public sealed partial class MainViewModel
                     FileOperationProgressText = "Validando a versão do programa…";
                     await GitHubAppInstaller.ValidateBinaryAsync(executable, app, ct);
                 }
-                if (plan.Package is { } package)
+                // Install and restart before downloading prices. A slow or unavailable price
+                // package must not delay installation of an already validated program update.
+                if (plan.App is null && plan.Package is { } package)
                 {
                     var path = await downloads.DownloadAsync(check.Prices!.Tag, package.Download, GitHubAppInstaller.CacheDirectory, progress, ct);
                     FileOperationProgressText = "Conferindo o manifesto do pacote de preços…";
@@ -68,7 +71,8 @@ public sealed partial class MainViewModel
                     downloadedPrices = new(path, package);
                 }
                 var pending = new PendingGitHubUpdate(databasePath,
-                    plan.App?.Version ?? ApplicationVersion.ToString(3), downloadedPrices);
+                    plan.App?.Version ?? ApplicationVersion.ToString(3), downloadedPrices,
+                    plan.App is not null && plan.Package is not null ? check.Prices : null);
                 if (executable is not null)
                 {
                     FileOperationProgressText = "Preparando instalação e reinício do programa…";
@@ -118,6 +122,27 @@ public sealed partial class MainViewModel
         if (!string.Equals(Path.GetFullPath(pending.DatabasePath), Path.GetFullPath(_calibrationService.Connections.DatabasePath),
                 StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("O banco selecionado mudou. Consulte novamente as atualizações antes de importar.");
+        if (pending.DeferredPrices is { } deferred)
+        {
+            GitHubUpdateValidation.Validate(deferred.Manifest);
+            if (deferred.Tag != "precos" || pending.PriceUpdate is not null ||
+                GitHubUpdateValidation.ParseVersion(deferred.Manifest.MinimumAppVersion) > ApplicationVersion)
+                throw new InvalidDataException("Atualização de preços pendente incompatível com o programa instalado.");
+            var package = deferred.Manifest.Update;
+            GitHubUpdateService.EnsureSpace(Path.GetDirectoryName(pending.DatabasePath)!, package.ExpandedSize);
+            GitHubUpdateService.EnsureSpace(GitHubAppInstaller.CacheDirectory, checked(package.Download.Size * 2));
+            using var http = new HttpClient(new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(30) })
+                { Timeout = Timeout.InfiniteTimeSpan };
+            var downloadProgress = new Progress<UpdateDownloadProgress>(p =>
+            {
+                FileOperationProgressText = p.Message;
+                IsFileOperationIndeterminate = p.Message.StartsWith("Recompondo", StringComparison.Ordinal);
+                OperationProgress = p.Total > 0 ? 100d * p.Received / p.Total : 0;
+            });
+            var path = await new GitHubUpdateService(http).DownloadAsync(deferred.Tag, package.Download,
+                GitHubAppInstaller.CacheDirectory, downloadProgress, ct);
+            pending = pending with { PriceUpdate = new(path, package), DeferredPrices = null };
+        }
         if (pending.PriceUpdate is { } item)
         {
             var expectedPath = Path.Combine(GitHubAppInstaller.CacheDirectory, item.Package.Download.Sha256.ToLowerInvariant() + ".payload");

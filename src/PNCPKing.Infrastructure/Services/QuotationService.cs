@@ -75,6 +75,10 @@ public sealed class QuotationService(
     public Task DeleteLineAsync(Guid lineId, CancellationToken cancellationToken = default) =>
         repository.DeleteLineAsync(lineId, cancellationToken);
 
+    public Task TransferLineAsync(Guid sourceProjectId, Guid lineId, Guid destinationProjectId,
+        CancellationToken cancellationToken = default) =>
+        repository.TransferLineAsync(sourceProjectId, lineId, destinationProjectId, cancellationToken);
+
     public async Task<QuotationLineAnalysis> CreateLineAsync(
         Guid projectId,
         QuotationLineInput input,

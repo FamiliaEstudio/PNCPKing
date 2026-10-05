@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using PNCPKing.App.Services;
 using PNCPKing.Core.Models;
 using PNCPKing.Infrastructure.Data;
 using PNCPKing.Infrastructure.Services;
@@ -43,6 +44,33 @@ public sealed class GitHubUpdateTests
     private static GitHubUpdateCheck Check(AppUpdateManifest? app, PricesUpdateManifest? prices) => new(
         app is null ? null : new("v" + app.Version, app), prices is null ? null : new("precos", prices),
         "Programa não publicado.", "Preços não publicados.");
+
+    [Fact]
+    public void RestartPreservesApprovedPricesWithoutRequiringADownloadedPackage()
+    {
+        var prices = Prices();
+        var pending = new PendingGitHubUpdate("banco.db", "1.3.0", null, new("precos", prices));
+        var restored = JsonSerializer.Deserialize<PendingGitHubUpdate>(
+            JsonSerializer.Serialize(pending, GitHubUpdateValidation.Json), GitHubUpdateValidation.Json)!;
+        Assert.Null(restored.PriceUpdate);
+        Assert.Equal("precos", restored.DeferredPrices!.Tag);
+        Assert.Equal(prices.MinimumAppVersion, restored.DeferredPrices.Manifest.MinimumAppVersion);
+        Assert.Equal(prices.Update.Manifest.PackageId, restored.DeferredPrices.Manifest.Update.Manifest.PackageId);
+        Assert.Equal(prices.Update.Download.Sha256, restored.DeferredPrices.Manifest.Update.Download.Sha256);
+        GitHubUpdateValidation.Validate(restored.DeferredPrices.Manifest);
+    }
+
+    [Fact]
+    public void PendingUpdatesFromPreviousProgramRemainCompatible()
+    {
+        var pending = new PendingGitHubUpdate("banco.db", "1.3.0", new("cache.payload", Package()));
+        var json = JsonSerializer.SerializeToNode(pending, GitHubUpdateValidation.Json)!;
+        json.AsObject().Remove("deferredPrices");
+        var restored = json.Deserialize<PendingGitHubUpdate>(GitHubUpdateValidation.Json)!;
+        Assert.Null(restored.DeferredPrices);
+        Assert.Equal(pending.PriceUpdate!.Path, restored.PriceUpdate!.Path);
+        Assert.Equal(pending.PriceUpdate.Package.Download.Sha256, restored.PriceUpdate.Package.Download.Sha256);
+    }
 
     [Theory]
     [InlineData("1.2.0", false)]

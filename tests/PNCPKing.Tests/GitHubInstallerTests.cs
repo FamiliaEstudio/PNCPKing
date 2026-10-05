@@ -61,7 +61,14 @@ public sealed class GitHubInstallerTests
                 await parent.WaitForExitAsync(deadline.Token);
                 while (!File.Exists(path + ".result")) await Task.Delay(50, deadline.Token);
             }
-            var result = await File.ReadAllTextAsync(path + ".result");
+            // The file becomes visible before the helper closes its write handle.
+            // Wait for readable content within the same deadline as the handoff.
+            string result;
+            while (true)
+            {
+                try { result = await File.ReadAllTextAsync(path + ".result", deadline.Token); break; }
+                catch (IOException) { await Task.Delay(50, deadline.Token); }
+            }
             if (scenario == "success")
             {
                 Assert.Equal("installed", result);

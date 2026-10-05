@@ -13,6 +13,45 @@ namespace PNCPKing.Tests;
 public sealed class InternetPriceTests
 {
     [Fact]
+    public async Task TransferKeepsInternetEvidenceAndDraftsAfterDeletingSourceProject()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var quotations = new QuotationService(repository, new QuotationAnalyzer(new DateOnly(2026, 7, 25)));
+        var store = new InternetEvidenceStore(database.Directory);
+        var internet = new InternetPriceService(repository, quotations, store);
+        var source = await quotations.CreateProjectAsync("Origem");
+        var destination = await quotations.CreateProjectAsync("Destino");
+        var line = await repository.CreateLineAsync(source.Id, new("Café", 10, "pacote", null, null));
+        var image = await store.SavePngAsync(CreatePng(SKColors.Blue), 640, 360);
+        var now = DateTimeOffset.UtcNow;
+        var draft = new InternetPriceDraft
+        {
+            Id = Guid.NewGuid(), LineId = line.Id, SourceUrl = "https://loja.exemplo.test/cafe",
+            UnitPrice = 100, Description = "Café", SupplierName = "Loja",
+            SupplierTaxId = "11222333000181", PriceImage = image, TaxIdImage = image,
+            CapturedAt = now, CreatedAt = now, UpdatedAt = now
+        };
+        var completed = await internet.CompleteDraftAsync(source.Id, draft, null, "Internet");
+        var pendingDraft = draft with { Id = Guid.NewGuid(), BasketId = completed.Basket.Id };
+        await internet.SaveDraftAsync(pendingDraft);
+        var evidence = await repository.GetInternetPriceEvidenceAsync(line.Id);
+        var drafts = await repository.GetInternetPriceDraftsAsync(line.Id);
+        var references = await repository.GetReferencesAsync(line.Id);
+
+        await quotations.TransferLineAsync(source.Id, line.Id, destination.Id);
+        await repository.DeleteProjectAsync(source.Id);
+
+        var reopened = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        Assert.NotNull(await reopened.GetLineAsync(destination.Id, line.Id));
+        Assert.Equal(references, await reopened.GetReferencesAsync(line.Id));
+        Assert.Equal(evidence[completed.Reference.Id], (await reopened.GetInternetPriceEvidenceAsync(line.Id))[completed.Reference.Id]);
+        Assert.Equal(drafts, await reopened.GetInternetPriceDraftsAsync(line.Id));
+        Assert.Equal(image.Sha256, Assert.Single(await reopened.GetReferencedInternetEvidenceHashesAsync()));
+        Assert.True(await store.VerifyAsync(image));
+    }
+
+    [Fact]
     public async Task InternetPrice_IsManualOnly_PersistsEvidenceAndExportsIncisoIii()
     {
         await using var database = await TestDatabase.CreateAsync();
