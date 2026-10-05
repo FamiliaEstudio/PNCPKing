@@ -125,6 +125,20 @@ public partial class QuotationItemWindow : Window
         }
     }
 
+    private async void TransferItem_Click(object sender, RoutedEventArgs e)
+    {
+        var transferred = false;
+        await RunAsync(async () =>
+        {
+            if (ViewModel.IsBusy || ViewModel.IsSearchBusy)
+                throw new InvalidOperationException("Aguarde o carregamento ou pare a pesquisa antes de transferir o item.");
+            if (ViewModel.Line?.Line is not { } line) return;
+            transferred = await ViewModel.Main.TransferQuotationItemAsync(
+                ViewModel.ProjectId, line.Id, line.EffectiveDisplayName, this).ConfigureAwait(true);
+        }).ConfigureAwait(true);
+        if (transferred) Close();
+    }
+
     private async void EditDocumentDetails_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel.Line?.Line is not { } line) return;

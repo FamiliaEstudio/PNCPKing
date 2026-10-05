@@ -310,6 +310,64 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task TransferLineAsync(Guid sourceProjectId, Guid lineId, Guid destinationProjectId,
+        CancellationToken cancellationToken = default)
+    {
+        if (sourceProjectId == destinationProjectId)
+            throw new ArgumentException("Escolha outro projeto para transferir o item.", nameof(destinationProjectId));
+        await using var writer = await _connections.WorkCoordinator
+            .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = connection.BeginTransaction();
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.Parameters.AddWithValue("$line", lineId.ToString("N"));
+        command.Parameters.AddWithValue("$source", sourceProjectId.ToString("N"));
+        command.Parameters.AddWithValue("$destination", destinationProjectId.ToString("N"));
+        command.CommandText = "SELECT group_id, automation_state FROM quotation_lines WHERE id = $line AND project_id = $source;";
+        string? oldGroup;
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                throw new InvalidOperationException("O item não pertence mais ao projeto de origem.");
+            oldGroup = reader.IsDBNull(0) ? null : reader.GetString(0);
+            if (reader.GetInt32(1) == (int)QuotationAutomationItemState.Running)
+                throw new InvalidOperationException("Pause a automação antes de transferir o item.");
+        }
+        command.CommandText = "SELECT COUNT(*) FROM quotation_projects WHERE id = $destination;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)) != 1)
+            throw new InvalidOperationException("O projeto de destino não existe mais.");
+        command.CommandText = """
+            SELECT COUNT(*) FROM quotation_automation_runs
+            WHERE project_id IN ($source, $destination) AND state = $running;
+            """;
+        command.Parameters.AddWithValue("$running", (int)QuotationAutomationRunState.Running);
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)) > 0)
+            throw new InvalidOperationException("Pause a automação dos projetos antes de transferir o item.");
+        // Keep the line identity: all prices, manual baskets, evidence, catalog selections
+        // and individual search workspaces continue to refer to the same item.
+        command.CommandText = """
+            UPDATE quotation_lines SET project_id = $destination, group_id = NULL,
+                display_order = COALESCE((SELECT MAX(display_order) + 1 FROM quotation_lines WHERE project_id = $destination), 0),
+                automation_run_id = NULL, automation_state = $manual,
+                automation_message = 'Item transferido de outro projeto com suas cotações.',
+                selection_confirmed = CASE WHEN
+                    (SELECT is_medication FROM quotation_projects WHERE id = $source) =
+                    (SELECT is_medication FROM quotation_projects WHERE id = $destination)
+                    THEN selection_confirmed ELSE 0 END
+            WHERE id = $line AND project_id = $source;
+            DELETE FROM quotation_prompt_revalidations WHERE line_id = $line;
+            DELETE FROM quotation_groups WHERE id = $group
+                AND NOT EXISTS(SELECT 1 FROM quotation_lines WHERE group_id = $group);
+            UPDATE quotation_projects SET updated_at = $updated WHERE id IN ($source, $destination);
+            """;
+        command.Parameters.AddWithValue("$manual", (int)QuotationAutomationItemState.Manual);
+        command.Parameters.AddWithValue("$group", DbValue(oldGroup));
+        command.Parameters.AddWithValue("$updated", FormatDateTime(DateTimeOffset.UtcNow));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<QuotationItemSearchWorkspace?> GetWorkspaceAsync(
         Guid lineId,
         ItemSearchPromptSlot slot,

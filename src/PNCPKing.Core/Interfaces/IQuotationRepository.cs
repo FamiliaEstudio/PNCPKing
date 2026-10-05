@@ -31,6 +31,8 @@ public interface IQuotationRepository
         decimal? minimumOrderQuantity, CancellationToken cancellationToken = default);
     Task DeleteProjectAsync(Guid projectId, CancellationToken cancellationToken = default);
     Task DeleteLineAsync(Guid lineId, CancellationToken cancellationToken = default);
+    Task TransferLineAsync(Guid sourceProjectId, Guid lineId, Guid destinationProjectId,
+        CancellationToken cancellationToken = default);
     Task<IReadOnlyList<QuotationLine>> GetLinesAsync(Guid projectId, CancellationToken cancellationToken = default);
     Task<QuotationLine?> GetLineAsync(
         Guid projectId,

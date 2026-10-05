@@ -982,6 +982,28 @@ public sealed partial class MainViewModel
         StatusText = "Cotação excluída.";
     }
 
+    public async Task<bool> TransferQuotationItemAsync(Guid sourceProjectId, Guid lineId, string itemName, Window owner)
+    {
+        if (IsFileBusy || IsPriceBusy || IsDocumentBusy || IsForegroundBusy || IsQuotationAutomationRunning)
+            throw new InvalidOperationException("Conclua a operação atual ou pause a automação antes de transferir o item.");
+        IsFileBusy = true;
+        NotifyCommands();
+        try
+        {
+            var projects = (await _quotationService.GetProjectsAsync().ConfigureAwait(true))
+                .Where(project => project.Id != sourceProjectId).OrderBy(project => project.Name).ToArray();
+            if (projects.Length == 0)
+                throw new InvalidOperationException("Crie outro projeto em Cotações para receber este item.");
+            var window = new QuotationTransferWindow(itemName, projects) { Owner = owner };
+            if (window.ShowDialog() != true || window.Destination is not { } destination) return false;
+            await _quotationService.TransferLineAsync(sourceProjectId, lineId, destination.Id).ConfigureAwait(true);
+            InvalidateQuotationWordReport();
+            StatusText = $"Item transferido para '{destination.Name}' com suas cotações, cestas e evidências.";
+            return true;
+        }
+        finally { IsFileBusy = false; NotifyCommands(); }
+    }
+
     private async Task DeleteQuotationLineAsync()
     {
         var project = SelectedQuotationProject;

@@ -28,7 +28,8 @@ public sealed class GitHubUpdateWindow : Window
         {
             Text = plan.AppStatus + "\n\n" + plan.PricesStatus + "\n\n" +
                 $"Download: {plan.DownloadSize / (1024d * 1024):N1} MiB." +
-                (plan.App is not null ? "\nO programa será fechado e reaberto para instalar a atualização." : "") +
+                (plan.App is not null ? "\nPrimeiro o programa será atualizado e reiniciado." +
+                    (plan.Package is not null ? " Só depois os preços serão baixados e importados automaticamente." : "") : "") +
                 "\nCotações, cestas e configurações serão preservadas.",
             TextWrapping = TextWrapping.Wrap,
         };

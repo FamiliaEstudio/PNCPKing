@@ -1,6 +1,6 @@
 # Atualização pelo GitHub
 
-**Atualizar pelo GitHub** consulta as releases públicas de `FamiliaEstudio/PNCPKing` somente após o clique. A prévia separa o programa do pacote oficial de preços e mostra, com rolagem, as notas de cada versão do programa entre a instalada e a oferecida. Se o histórico estiver indisponível, a prévia avisa e ainda permite atualizar. Se houver executável novo, ele é conferido antes do encerramento e a importação confirmada continua depois da reinicialização sem outro download.
+**Atualizar pelo GitHub** consulta as releases públicas de `FamiliaEstudio/PNCPKing` somente após o clique. A prévia separa o programa do pacote oficial de preços e mostra, com rolagem, as notas de cada versão do programa entre a instalada e a oferecida. Se o histórico estiver indisponível, a prévia avisa e ainda permite atualizar. Se houver executável novo, ele é baixado, conferido e instalado primeiro. Somente depois da reinicialização o novo programa baixa e importa o pacote de preços confirmado na prévia, automaticamente. Uma falha no download dos preços não impede a atualização do programa. Se não houver programa novo, os preços são baixados e importados diretamente.
 
 ## Publicar o programa
 
