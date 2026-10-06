@@ -310,11 +310,19 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task TransferLineAsync(Guid sourceProjectId, Guid lineId, Guid destinationProjectId,
-        CancellationToken cancellationToken = default)
+    public Task TransferLineAsync(Guid sourceProjectId, Guid lineId, Guid destinationProjectId,
+        CancellationToken cancellationToken = default) =>
+        CopyOrTransferLineAsync(sourceProjectId, lineId, destinationProjectId, false, cancellationToken);
+
+    public Task<Guid> CopyLineAsync(Guid sourceProjectId, Guid lineId, Guid destinationProjectId,
+        CancellationToken cancellationToken = default) =>
+        CopyOrTransferLineAsync(sourceProjectId, lineId, destinationProjectId, true, cancellationToken);
+
+    private async Task<Guid> CopyOrTransferLineAsync(Guid sourceProjectId, Guid lineId, Guid destinationProjectId,
+        bool copy, CancellationToken cancellationToken)
     {
         if (sourceProjectId == destinationProjectId)
-            throw new ArgumentException("Escolha outro projeto para transferir o item.", nameof(destinationProjectId));
+            throw new ArgumentException("Escolha outro projeto para transferir ou copiar o item.", nameof(destinationProjectId));
         await using var writer = await _connections.WorkCoordinator
             .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -324,15 +332,13 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
         command.Parameters.AddWithValue("$line", lineId.ToString("N"));
         command.Parameters.AddWithValue("$source", sourceProjectId.ToString("N"));
         command.Parameters.AddWithValue("$destination", destinationProjectId.ToString("N"));
-        command.CommandText = "SELECT group_id, automation_state FROM quotation_lines WHERE id = $line AND project_id = $source;";
-        string? oldGroup;
+        command.CommandText = "SELECT automation_state FROM quotation_lines WHERE id = $line AND project_id = $source;";
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
             if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 throw new InvalidOperationException("O item não pertence mais ao projeto de origem.");
-            oldGroup = reader.IsDBNull(0) ? null : reader.GetString(0);
-            if (reader.GetInt32(1) == (int)QuotationAutomationItemState.Running)
-                throw new InvalidOperationException("Pause a automação antes de transferir o item.");
+            if (reader.GetInt32(0) == (int)QuotationAutomationItemState.Running)
+                throw new InvalidOperationException("Pause a automação antes de transferir ou copiar o item.");
         }
         command.CommandText = "SELECT COUNT(*) FROM quotation_projects WHERE id = $destination;";
         if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)) != 1)
@@ -343,29 +349,95 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
             """;
         command.Parameters.AddWithValue("$running", (int)QuotationAutomationRunState.Running);
         if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)) > 0)
-            throw new InvalidOperationException("Pause a automação dos projetos antes de transferir o item.");
-        // Keep the line identity: all prices, manual baskets, evidence, catalog selections
-        // and individual search workspaces continue to refer to the same item.
-        command.CommandText = """
-            UPDATE quotation_lines SET project_id = $destination, group_id = NULL,
-                display_order = COALESCE((SELECT MAX(display_order) + 1 FROM quotation_lines WHERE project_id = $destination), 0),
-                automation_run_id = NULL, automation_state = $manual,
-                automation_message = 'Item transferido de outro projeto com suas cotações.',
-                selection_confirmed = CASE WHEN
-                    (SELECT is_medication FROM quotation_projects WHERE id = $source) =
-                    (SELECT is_medication FROM quotation_projects WHERE id = $destination)
-                    THEN selection_confirmed ELSE 0 END
-            WHERE id = $line AND project_id = $source;
-            DELETE FROM quotation_prompt_revalidations WHERE line_id = $line;
-            DELETE FROM quotation_groups WHERE id = $group
-                AND NOT EXISTS(SELECT 1 FROM quotation_lines WHERE group_id = $group);
-            UPDATE quotation_projects SET updated_at = $updated WHERE id IN ($source, $destination);
-            """;
+            throw new InvalidOperationException("Pause a automação dos projetos antes de transferir ou copiar o item.");
+
+        var newLineId = Guid.NewGuid();
+        command.Parameters.AddWithValue("$newLine", newLineId.ToString("N"));
         command.Parameters.AddWithValue("$manual", (int)QuotationAutomationItemState.Manual);
-        command.Parameters.AddWithValue("$group", DbValue(oldGroup));
+        command.Parameters.AddWithValue("$message", copy
+            ? "Item copiado de outro projeto com suas cotações."
+            : "Item transferido de outro projeto com suas cotações.");
+        var basketMap = new Dictionary<string, string>(StringComparer.Ordinal);
+        command.CommandText = "SELECT id FROM quotation_manual_baskets WHERE line_id = $line;";
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                basketMap.Add(reader.GetString(0), Guid.NewGuid().ToString("N"));
+
+        // Copy only this item's rows inside SQLite. Images remain shared by hash;
+        // no files or unrelated projects are loaded or duplicated.
+        connection.CreateFunction("pncp_copy_basket_id", (string? id) => id is null ? null : basketMap[id]);
+        connection.CreateFunction("pncp_new_guid", () => Guid.NewGuid().ToString("N"));
+        try
+        {
+            await CloneLineTableAsync(command, "quotation_lines", "id = $line", column => column switch
+            {
+                "id" => "$newLine",
+                "project_id" => "$destination",
+                "group_id" or "automation_run_id" => "NULL",
+                "display_order" => "COALESCE((SELECT MAX(display_order) + 1 FROM quotation_lines WHERE project_id = $destination), 0)",
+                "automation_state" => "$manual",
+                "automation_message" => "$message",
+                "selection_confirmed" => "CASE WHEN (SELECT is_medication FROM quotation_projects WHERE id = $source) = (SELECT is_medication FROM quotation_projects WHERE id = $destination) THEN selection_confirmed ELSE 0 END",
+                "selected_basket_key" => "CASE WHEN selected_basket_key LIKE 'manual:%' THEN 'manual:' || pncp_copy_basket_id(substr(selected_basket_key, 8)) ELSE selected_basket_key END",
+                _ => $"\"{column}\""
+            }, cancellationToken).ConfigureAwait(false);
+
+            // The insert trigger created a default prompt. Replace it with the full history.
+            command.CommandText = "DELETE FROM quotation_line_search_prompts WHERE line_id = $newLine;";
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var table in new[]
+            {
+                "quotation_references", "quotation_manual_baskets", "quotation_manual_basket_references",
+                "quotation_catalog_selections", "quotation_line_search_prompts",
+                "quotation_internet_price_drafts", "quotation_internet_price_evidence",
+                "quotation_item_search_workspaces", "quotation_item_search_hits", "quotation_item_search_failures"
+            })
+            {
+                // Basket membership has an index on basket_id, rather than line_id.
+                var filter = table == "quotation_manual_basket_references"
+                    ? "basket_id IN (SELECT id FROM quotation_manual_baskets WHERE line_id = $line)"
+                    : "line_id = $line";
+                await CloneLineTableAsync(command, table, filter, column => column switch
+                {
+                    "line_id" => "$newLine",
+                    "basket_id" => "pncp_copy_basket_id(basket_id)",
+                    "id" when table == "quotation_manual_baskets" => "pncp_copy_basket_id(id)",
+                    "id" when table == "quotation_internet_price_drafts" => "pncp_new_guid()",
+                    _ => $"\"{column}\""
+                }, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            connection.CreateFunction<string?, string?>("pncp_copy_basket_id", null);
+            connection.CreateFunction("pncp_new_guid", (Func<string>?)null);
+        }
+
+        if (!copy)
+        {
+            command.CommandText = "DELETE FROM quotation_lines WHERE id = $line AND project_id = $source;";
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        command.CommandText = "UPDATE quotation_projects SET updated_at = $updated WHERE id = $destination OR (id = $source AND $copy = 0);";
+        command.Parameters.AddWithValue("$copy", copy ? 1 : 0);
         command.Parameters.AddWithValue("$updated", FormatDateTime(DateTimeOffset.UtcNow));
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return newLineId;
+    }
+
+    private static async Task CloneLineTableAsync(SqliteCommand command, string table, string filter,
+        Func<string, string> projection, CancellationToken cancellationToken)
+    {
+        // Read schema metadata only, then copy rows through the item's existing indexes.
+        command.CommandText = $"PRAGMA table_info(\"{table}\");";
+        var columns = new List<string>();
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                columns.Add(reader.GetString(1));
+        command.CommandText = $"INSERT INTO \"{table}\" ({string.Join(", ", columns.Select(column => $"\"{column}\""))}) " +
+            $"SELECT {string.Join(", ", columns.Select(projection))} FROM \"{table}\" WHERE {filter};";
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<QuotationItemSearchWorkspace?> GetWorkspaceAsync(

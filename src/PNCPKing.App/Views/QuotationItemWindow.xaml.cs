@@ -131,7 +131,7 @@ public partial class QuotationItemWindow : Window
         await RunAsync(async () =>
         {
             if (ViewModel.IsBusy || ViewModel.IsSearchBusy)
-                throw new InvalidOperationException("Aguarde o carregamento ou pare a pesquisa antes de transferir o item.");
+                throw new InvalidOperationException("Aguarde o carregamento ou pare a pesquisa antes de transferir ou copiar o item.");
             if (ViewModel.Line?.Line is not { } line) return;
             transferred = await ViewModel.Main.TransferQuotationItemAsync(
                 ViewModel.ProjectId, line.Id, line.EffectiveDisplayName, this).ConfigureAwait(true);

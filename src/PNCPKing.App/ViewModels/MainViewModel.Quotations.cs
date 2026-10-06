@@ -985,7 +985,7 @@ public sealed partial class MainViewModel
     public async Task<bool> TransferQuotationItemAsync(Guid sourceProjectId, Guid lineId, string itemName, Window owner)
     {
         if (IsFileBusy || IsPriceBusy || IsDocumentBusy || IsForegroundBusy || IsQuotationAutomationRunning)
-            throw new InvalidOperationException("Conclua a operação atual ou pause a automação antes de transferir o item.");
+            throw new InvalidOperationException("Conclua a operação atual ou pause a automação antes de transferir ou copiar o item.");
         IsFileBusy = true;
         NotifyCommands();
         try
@@ -996,10 +996,15 @@ public sealed partial class MainViewModel
                 throw new InvalidOperationException("Crie outro projeto em Cotações para receber este item.");
             var window = new QuotationTransferWindow(itemName, projects) { Owner = owner };
             if (window.ShowDialog() != true || window.Destination is not { } destination) return false;
-            await _quotationService.TransferLineAsync(sourceProjectId, lineId, destination.Id).ConfigureAwait(true);
-            InvalidateQuotationWordReport();
-            StatusText = $"Item transferido para '{destination.Name}' com suas cotações, cestas e evidências.";
-            return true;
+            if (window.Copy)
+                await _quotationService.CopyLineAsync(sourceProjectId, lineId, destination.Id).ConfigureAwait(true);
+            else
+                await _quotationService.TransferLineAsync(sourceProjectId, lineId, destination.Id).ConfigureAwait(true);
+            var selectedProjectId = SelectedQuotationProject?.Id;
+            if (selectedProjectId == destination.Id || (!window.Copy && selectedProjectId == sourceProjectId))
+                await LoadQuotationProjectAsync(selectedProjectId).ConfigureAwait(true);
+            StatusText = $"Item {(window.Copy ? "copiado" : "transferido")} para '{destination.Name}' com suas cotações, cestas e evidências.";
+            return !window.Copy;
         }
         finally { IsFileBusy = false; NotifyCommands(); }
     }

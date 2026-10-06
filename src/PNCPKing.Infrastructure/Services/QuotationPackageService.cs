@@ -432,12 +432,37 @@ public sealed class QuotationPackageService : IQuotationPackageService
                     }
                 }
 
-                var skippedContracts = await InsertPayloadAsync(
-                        connection,
-                        (SqliteTransaction)transaction,
-                        payload,
-                        cancellationToken)
-                    .ConfigureAwait(false);
+                // Let SQLite's existing unique indexes detect collisions during insertion.
+                // The common path needs no preflight queries, especially on slow disks.
+                await using var savepoint = connection.CreateCommand();
+                savepoint.Transaction = (SqliteTransaction)transaction;
+                savepoint.CommandText = "SAVEPOINT quotation_payload;";
+                await savepoint.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                int skippedContracts;
+                try
+                {
+                    skippedContracts = await InsertPayloadAsync(
+                        connection, (SqliteTransaction)transaction, payload, cancellationToken).ConfigureAwait(false);
+                }
+                catch (SqliteException exception) when (
+                    mode != QuotationPackageImportMode.Copy && IsChildIdentityConflict(exception))
+                {
+                    // Legacy transfers can leave package IDs in a different project.
+                    // Undo the partial insert and retry once with fresh child identities,
+                    // keeping the project's identity and all existing local items.
+                    savepoint.CommandText = "ROLLBACK TO quotation_payload;";
+                    await savepoint.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
+                    await RemapAsCopyAsync(payload, projectName, cancellationToken, preserveProjectIdentity: true)
+                        .ConfigureAwait(false);
+                    ValidateRelationships(payload);
+                    QuotationOrganization.ValidateSnapshot(BuildOrganizationReport(payload));
+                    skippedContracts = await InsertPayloadAsync(
+                        connection, (SqliteTransaction)transaction, payload, cancellationToken).ConfigureAwait(false);
+                    warnings.Add("Identificadores internos do pacote que conflitavam com dados locais foram renovados; " +
+                        "os itens existentes em outros projetos foram preservados.");
+                }
+                savepoint.CommandText = "RELEASE quotation_payload;";
+                await savepoint.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 if (skippedContracts > 0)
                 {
                     warnings.Add(
@@ -1167,10 +1192,18 @@ public sealed class QuotationPackageService : IQuotationPackageService
         return new(mappedProject, analyses) { Groups = groups };
     }
 
+    private static bool IsChildIdentityConflict(SqliteException exception) =>
+        exception.SqliteErrorCode == 19 &&
+        exception.SqliteExtendedErrorCode is 1555 or 2067 &&
+        new[] { "quotation_automation_runs", "quotation_groups", "quotation_lines",
+            "quotation_manual_baskets", "quotation_internet_price_drafts" }
+            .Any(table => exception.Message.Contains($"UNIQUE constraint failed: {table}.id", StringComparison.Ordinal));
+
     private async Task<(Guid ProjectId, string ProjectName)> RemapAsCopyAsync(
         JsonObject payload,
         string originalName,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool preserveProjectIdentity = false)
     {
         var originalReport = BuildOrganizationReport(payload);
         var originalOrganization = originalReport.Project.Organization;
@@ -1179,7 +1212,8 @@ public sealed class QuotationPackageService : IQuotationPackageService
         {
             [GetRequiredText(
                 GetRows(payload, "quotation_projects").Single(),
-                "id")] = Guid.NewGuid().ToString("N")
+                "id")] = preserveProjectIdentity
+                    ? GetRequiredText(payload, "projectId") : Guid.NewGuid().ToString("N")
         };
         var runMap = CreateGuidMap(GetRows(payload, "quotation_automation_runs"), "id");
         var lineMap = CreateGuidMap(GetRows(payload, "quotation_lines"), "id");
@@ -1238,12 +1272,15 @@ public sealed class QuotationPackageService : IQuotationPackageService
         }
 
         var newProjectId = Guid.ParseExact(projectMap.Single().Value, "N");
-        var projectName = await ResolveCopyNameAsync(originalName, cancellationToken)
-            .ConfigureAwait(false);
+        var projectName = preserveProjectIdentity ? originalName
+            : await ResolveCopyNameAsync(originalName, cancellationToken).ConfigureAwait(false);
         var project = GetRows(payload, "quotation_projects").Single();
-        project["name"] = projectName;
-        project["created_at"] = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
-        project["updated_at"] = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+        if (!preserveProjectIdentity)
+        {
+            project["name"] = projectName;
+            project["created_at"] = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+            project["updated_at"] = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+        }
         payload["projectId"] = newProjectId.ToString("N");
         if (originalOrganization is not null)
         {

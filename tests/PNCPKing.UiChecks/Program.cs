@@ -1,3 +1,5 @@
+extern alias AppUnderTest;
+
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
@@ -80,6 +82,8 @@ internal static partial class Program
                     Console.WriteLine("Monitor placement: passed");
                     await CheckQuotationGroupsAsync();
                     Console.WriteLine("Quotation groups dialog: passed");
+                    CheckQuotationTransfer();
+                    Console.WriteLine("Quotation transfer/copy dialog: passed");
                     await CheckColumnChooserAsync();
                     Console.WriteLine("Column chooser: passed");
                     await CheckThemeControlsAsync();
@@ -138,6 +142,31 @@ internal static partial class Program
                 "A janela ultrapassou a área útil do monitor.");
         }
         finally { window.Close(); }
+    }
+
+    private static void CheckQuotationTransfer()
+    {
+        var project = new QuotationProject(Guid.NewGuid(), "Destino", DateTimeOffset.Now, DateTimeOffset.Now);
+        foreach (var copy in new[] { false, true })
+        {
+            var window = new AppUnderTest::PNCPKing.App.Views.QuotationTransferWindow("Café", [project]);
+            var panel = (StackPanel)window.Content;
+            var projects = panel.Children.OfType<ComboBox>().Single();
+            var buttons = panel.Children.OfType<StackPanel>().Single().Children.OfType<Button>().ToArray();
+            var transferButton = buttons.Single(button => (string)button.Content == "Transferir");
+            var copyButton = buttons.Single(button => (string)button.Content == "Copiar");
+            Require(!transferButton.IsEnabled && !copyButton.IsEnabled,
+                "Transferir e copiar devem aguardar a escolha do projeto de destino.");
+            window.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                projects.SelectedItem = project;
+                Require(transferButton.IsEnabled && copyButton.IsEnabled,
+                    "Escolher o projeto não habilitou transferência e cópia.");
+                (copy ? copyButton : transferButton).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            }));
+            Require(window.ShowDialog() == true && window.Copy == copy && window.Destination == project,
+                "A janela não entregou a operação e o destino escolhidos.");
+        }
     }
 
     private static async Task CheckQuotationGroupsAsync()

@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.Data.Sqlite;
 using PNCPKing.Core.Models;
 using PNCPKing.Core.Quotations;
 using PNCPKing.Infrastructure.Data;
@@ -13,6 +14,92 @@ namespace PNCPKing.Tests;
 
 public sealed class QuotationPackageTests
 {
+    [Theory]
+    [InlineData(QuotationPackageImportMode.PreserveIdentity, false)]
+    [InlineData(QuotationPackageImportMode.Replace, false)]
+    [InlineData(QuotationPackageImportMode.PreserveIdentity, true)]
+    [InlineData(QuotationPackageImportMode.Replace, true)]
+    public async Task Package_HandlesLegacyTransferredIdsWithoutChangingOtherProjects(
+        QuotationPackageImportMode mode, bool failBeforeCommit)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var project = await repository.CreateProjectAsync("Pacote original");
+        // A row before the collision verifies that the failed insertion is fully undone.
+        var first = await repository.CreateLineAsync(project.Id, new("Primeiro", 1, "un", null, null));
+        var line = await repository.CreateLineAsync(project.Id, new("Café", 10, "pacote", null, null));
+        await repository.SaveSampleAsync(project.Id, line.Id, new("Café", 10, "pacote", null, null),
+            [Reference(line.Id, "a", 90), Reference(line.Id, "b", 100), Reference(line.Id, "c", 110)]);
+        var basket = await repository.SaveManualBasketAsync(line.Id, null, "Escolhida", ["a", "b", "c"]);
+        await repository.SetManualBasketConversionFactorAsync(basket.Id, "a", 2m);
+        await repository.ConfirmBasketAsync(line.Id, basket.Key);
+        var now = DateTimeOffset.UtcNow;
+        var draft = await repository.SaveInternetPriceDraftAsync(new()
+        {
+            Id = Guid.NewGuid(), LineId = line.Id, BasketId = basket.Id,
+            SourceUrl = "https://exemplo.test/cafe", CapturedAt = now, CreatedAt = now, UpdatedAt = now
+        });
+        var packagePath = Path.Combine(database.Directory, "legado.pncpcotacao");
+        var packages = new QuotationPackageService(database.Repository.DatabasePath, database.Directory);
+        await packages.ExportAsync(packagePath, project.Id);
+
+        var otherProject = await repository.CreateProjectAsync("Destino da transferência antiga");
+        // Reproduce the v1.2.21 behavior, which kept the original line/basket/draft IDs.
+        await using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        { DataSource = database.Repository.DatabasePath, ForeignKeys = true }.ToString()))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE quotation_lines SET project_id = $project WHERE id = $line;";
+            command.Parameters.AddWithValue("$project", otherProject.Id.ToString("N"));
+            command.Parameters.AddWithValue("$line", line.Id.ToString("N"));
+            await command.ExecuteNonQueryAsync();
+        }
+        if (mode == QuotationPackageImportMode.PreserveIdentity) await repository.DeleteProjectAsync(project.Id);
+        var beforeProjects = await repository.GetProjectsAsync();
+        var beforeOther = await repository.GetLineAsync(otherProject.Id, line.Id);
+        var beforeReferences = await repository.GetReferencesAsync(line.Id);
+
+        if (failBeforeCommit)
+        {
+            var failing = new QuotationPackageService(database.Repository.DatabasePath, database.Directory,
+                () => throw new IOException("Falha simulada após remapear os IDs."));
+            await Assert.ThrowsAsync<IOException>(() => failing.ImportAsync(packagePath, mode));
+            Assert.Equal(beforeProjects, await repository.GetProjectsAsync());
+            if (mode == QuotationPackageImportMode.Replace)
+                Assert.Equal(first.Id, Assert.Single(await repository.GetLinesAsync(project.Id)).Id);
+            else
+                Assert.DoesNotContain(await repository.GetProjectsAsync(), value => value.Id == project.Id);
+        }
+        else
+        {
+            var imported = await packages.ImportAsync(packagePath, mode);
+            Assert.Equal(project.Id, imported.ProjectId);
+            Assert.Equal(project.Name, imported.ProjectName);
+            Assert.False(imported.ImportedAsCopy);
+            Assert.Contains(imported.Warnings, warning => warning.Contains("Identificadores internos", StringComparison.Ordinal));
+            var restored = await repository.GetLinesAsync(project.Id);
+            Assert.Equal(2, restored.Count);
+            Assert.All(restored, value => Assert.NotEqual(first.Id, value.Id));
+            var restoredLine = restored.Single(value => value.Description == "Café");
+            Assert.NotEqual(line.Id, restoredLine.Id);
+            var restoredBasket = Assert.Single(await repository.GetManualBasketsAsync(restoredLine.Id));
+            Assert.NotEqual(basket.Id, restoredBasket.Id);
+            Assert.Equal(restoredBasket.Key, restoredLine.SelectedBasketKey);
+            Assert.True(restoredLine.SelectionConfirmed);
+            Assert.Equal(2m, restoredBasket.ConversionFactors["a"]);
+            var restoredDraft = Assert.Single(await repository.GetInternetPriceDraftsAsync(restoredLine.Id));
+            Assert.NotEqual(draft.Id, restoredDraft.Id);
+            Assert.Equal(restoredBasket.Id, restoredDraft.BasketId);
+            Assert.Equal(beforeReferences.Select(reference => reference with { LineId = restoredLine.Id }),
+                await repository.GetReferencesAsync(restoredLine.Id));
+        }
+        Assert.Equal(beforeOther, await repository.GetLineAsync(otherProject.Id, line.Id));
+        Assert.Equal(beforeReferences, await repository.GetReferencesAsync(line.Id));
+        Assert.Equal(draft, Assert.Single(await repository.GetInternetPriceDraftsAsync(line.Id)));
+        Assert.Equal(basket.Id, Assert.Single(await repository.GetManualBasketsAsync(line.Id)).Id);
+    }
+
     [Theory]
     [InlineData(false, QuotationPackageImportMode.PreserveIdentity)]
     [InlineData(false, QuotationPackageImportMode.Copy)]

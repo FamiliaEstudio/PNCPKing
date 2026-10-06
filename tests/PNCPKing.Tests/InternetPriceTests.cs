@@ -12,8 +12,10 @@ namespace PNCPKing.Tests;
 
 public sealed class InternetPriceTests
 {
-    [Fact]
-    public async Task TransferKeepsInternetEvidenceAndDraftsAfterDeletingSourceProject()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TransferOrCopyKeepsInternetEvidenceAndDraftsAfterDeletingSourceProject(bool copy)
     {
         await using var database = await TestDatabase.CreateAsync();
         var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
@@ -39,14 +41,29 @@ public sealed class InternetPriceTests
         var drafts = await repository.GetInternetPriceDraftsAsync(line.Id);
         var references = await repository.GetReferencesAsync(line.Id);
 
-        await quotations.TransferLineAsync(source.Id, line.Id, destination.Id);
+        if (copy) await quotations.CopyLineAsync(source.Id, line.Id, destination.Id);
+        else await quotations.TransferLineAsync(source.Id, line.Id, destination.Id);
+        var copiedLine = Assert.Single(await repository.GetLinesAsync(destination.Id));
+        Assert.NotEqual(line.Id, copiedLine.Id);
+        var copiedBasket = Assert.Single(await repository.GetManualBasketsAsync(copiedLine.Id));
+        var copiedDraft = Assert.Single(await repository.GetInternetPriceDraftsAsync(copiedLine.Id));
+        Assert.NotEqual(pendingDraft.Id, copiedDraft.Id);
+        Assert.NotEqual(completed.Basket.Id, copiedBasket.Id);
+        Assert.Equal(drafts.Single() with { Id = copiedDraft.Id, LineId = copiedLine.Id, BasketId = copiedBasket.Id }, copiedDraft);
+        if (copy)
+        {
+            Assert.Equal(drafts, await repository.GetInternetPriceDraftsAsync(line.Id));
+            await repository.DeleteInternetPriceDraftAsync(copiedDraft.Id);
+            Assert.Equal(drafts, await repository.GetInternetPriceDraftsAsync(line.Id));
+        }
         await repository.DeleteProjectAsync(source.Id);
 
         var reopened = new SqliteQuotationRepository(database.Repository.DatabasePath);
-        Assert.NotNull(await reopened.GetLineAsync(destination.Id, line.Id));
-        Assert.Equal(references, await reopened.GetReferencesAsync(line.Id));
-        Assert.Equal(evidence[completed.Reference.Id], (await reopened.GetInternetPriceEvidenceAsync(line.Id))[completed.Reference.Id]);
-        Assert.Equal(drafts, await reopened.GetInternetPriceDraftsAsync(line.Id));
+        Assert.NotNull(await reopened.GetLineAsync(destination.Id, copiedLine.Id));
+        Assert.Equal(references.Select(reference => reference with { LineId = copiedLine.Id }), await reopened.GetReferencesAsync(copiedLine.Id));
+        Assert.Equal(evidence[completed.Reference.Id] with { LineId = copiedLine.Id },
+            (await reopened.GetInternetPriceEvidenceAsync(copiedLine.Id))[completed.Reference.Id]);
+        if (!copy) Assert.Equal(copiedDraft, Assert.Single(await reopened.GetInternetPriceDraftsAsync(copiedLine.Id)));
         Assert.Equal(image.Sha256, Assert.Single(await reopened.GetReferencedInternetEvidenceHashesAsync()));
         Assert.True(await store.VerifyAsync(image));
     }

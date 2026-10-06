@@ -38,8 +38,8 @@
                         ToolTip="Configura ou limpa a quantidade e a unidade do item manual." />
                 <Button Content="Atualizar" Click="Refresh_Click" />
                 <Button Content="CATMAT e mínimo" Click="EditDocumentDetails_Click" />
-                <Button Content="Transferir item…" Click="TransferItem_Click"
-                        ToolTip="Move este item, com todos os preços, cestas e evidências, para outro projeto local." />
+                <Button Content="Transferir ou copiar…" Click="TransferItem_Click"
+                        ToolTip="Transfere ou copia este item, com todos os preços, cestas e evidências, para outro projeto local." />
                 <Button Content="Pausar automação" Click="Pause_Click" />
                 <Button Content="Retomar automação" Click="Resume_Click" />
             </WrapPanel>

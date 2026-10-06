@@ -297,7 +297,10 @@ public sealed class QuotationOrganizationTests
     [InlineData(true, QuotationPackageImportMode.Copy)]
     [InlineData(false, QuotationPackageImportMode.PreserveIdentity)]
     [InlineData(false, QuotationPackageImportMode.Replace)]
-    public async Task PackagePreservesGroupsNumbersAndStaleness(bool stale, QuotationPackageImportMode mode)
+    [InlineData(false, QuotationPackageImportMode.PreserveIdentity, true)]
+    [InlineData(true, QuotationPackageImportMode.PreserveIdentity, true)]
+    [InlineData(false, QuotationPackageImportMode.Replace, true)]
+    public async Task PackagePreservesGroupsNumbersAndStaleness(bool stale, QuotationPackageImportMode mode, bool conflict = false)
     {
         await using var source = await TestDatabase.CreateAsync();
         await using var destination = await TestDatabase.CreateAsync();
@@ -322,6 +325,23 @@ public sealed class QuotationOrganizationTests
         var importer = new QuotationPackageService(destination.Repository.DatabasePath, destination.Directory);
         if (mode == QuotationPackageImportMode.Replace)
             await importer.ImportAsync(path, QuotationPackageImportMode.PreserveIdentity);
+        if (conflict)
+        {
+            var destinationRepo = new SqliteQuotationRepository(destination.Repository.DatabasePath);
+            var existing = await destinationRepo.CreateProjectAsync("Existente");
+            if (mode == QuotationPackageImportMode.Replace)
+            {
+                await using var connection = new SqliteConnection($"Data Source={destination.Repository.DatabasePath}");
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = "UPDATE quotation_lines SET project_id = $project, group_id = NULL WHERE id = $line;";
+                command.Parameters.AddWithValue("$project", existing.Id.ToString("N"));
+                command.Parameters.AddWithValue("$line", line.Id.ToString("N"));
+                await command.ExecuteNonQueryAsync();
+            }
+            else
+                await destinationRepo.SaveSampleAsync(existing.Id, line.Id, new("Conflito legado", 1, "un", null, null), []);
+        }
         var result = await importer.ImportAsync(path, mode);
         var restored = await new QuotationService(new SqliteQuotationRepository(destination.Repository.DatabasePath), new QuotationAnalyzer())
             .GetReportAsync(result.ProjectId);
