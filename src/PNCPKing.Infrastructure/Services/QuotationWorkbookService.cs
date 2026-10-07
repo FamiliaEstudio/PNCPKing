@@ -494,13 +494,13 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
         sheet.Cell(row, 6).Style.NumberFormat.Format = moneyFormat;
         sheet.Cell(row, 11).Style.NumberFormat.Format = moneyFormat;
         sheet.Cell(row, 8).FormulaA1 =
-            $"IF(OR(F{row}=\"\",G{row}=\"\"),\"\",F{row}/G{row}-1)";
+            $"IF(OR(F{row}=\"\",G{row}=\"\",G{row}=0),\"\",F{row}/G{row}-1)";
         sheet.Cell(row, 9).FormulaA1 =
-            $"IF(G{row}=\"\",\"\",IF(H{row}>0.25,\"EXCESSIVO\",\"VÁLIDO\"))";
+            $"IF(H{row}=\"\",\"\",IF(H{row}>0.25,\"EXCESSIVO\",\"VÁLIDO\"))";
         sheet.Cell(row, 10).FormulaA1 =
-            $"IF(G{row}=\"\",\"\",IF(H{row}<-0.25,\"INEXEQUÍVEL\",\"VÁLIDO\"))";
+            $"IF(H{row}=\"\",\"\",IF(H{row}<-0.25,\"INEXEQUÍVEL\",\"VÁLIDO\"))";
         sheet.Cell(row, 11).FormulaA1 =
-            $"IF(F{row}=\"\",\"\",IF(OR(I{row}=\"EXCESSIVO\",J{row}=\"INEXEQUÍVEL\"),\"\",F{row}))";
+            $"IF(OR(F{row}=\"\",F{row}<=0),\"\",IF(OR(I{row}=\"EXCESSIVO\",J{row}=\"INEXEQUÍVEL\"),\"\",F{row}))";
     }
 
     private static void AddPriceConditionalFormatting(
@@ -646,7 +646,7 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
                 sheet.Cell(row, 20).Value = reference.Adequacy.QuantityScore;
                 sheet.Cell(row, 21).Value = reference.Adequacy.ProximityScore;
                 sheet.Cell(row, 22).Value = reference.Adequacy.RecencyScore;
-                sheet.Cell(row, 23).Value = basket.AdoptedPrice;
+                if (basket.AdoptedPrice > 0m) sheet.Cell(row, 23).Value = basket.AdoptedPrice;
                 sheet.Cell(row, 24).Value = basket.MaximumDeviationPercent;
                 sheet.Cell(row, 25).Value = FormatSource(reference.Source);
                 if (Uri.TryCreate(reference.PortalUrl, UriKind.Absolute, out _))

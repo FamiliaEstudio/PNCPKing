@@ -382,12 +382,12 @@ public sealed class QuotationTests
         var analyzer = new QuotationAnalyzer(Today);
         var line = Line("Café torrado", 100m, "pacote");
         var exact = analyzer.Analyze(line, [
-            Reference("a", "c1", "11222333000181", 75m, quantity: 100m),
+            Reference("a", "c1", "11222333000181", 100m, quantity: 100m),
             Reference("b", "c2", "60701190000104", 100m, quantity: 100m),
             Reference("c", "c3", "33000167000101", 125m, quantity: 100m)
         ]);
         var above = analyzer.Analyze(line, [
-            Reference("d", "c4", "11222333000181", 74.99m, quantity: 100m),
+            Reference("d", "c4", "11222333000181", 100m, quantity: 100m),
             Reference("e", "c5", "60701190000104", 100m, quantity: 100m),
             Reference("f", "c6", "33000167000101", 125.01m, quantity: 100m)
         ]);
@@ -400,6 +400,99 @@ public sealed class QuotationTests
         Assert.True(above.Baskets[0].MaximumDeviationPercent > 25m);
         Assert.Equal(QuotationBasketVisualState.AutomaticHighDispersion, above.Baskets[0].VisualState);
         Assert.True(above.Baskets[0].IsValid);
+    }
+
+    [Theory]
+    [InlineData(false, false, 1)]
+    [InlineData(true, false, 1)]
+    [InlineData(false, true, 1)]
+    [InlineData(true, true, 1)]
+    [InlineData(true, false, 2)]
+    [InlineData(true, true, 2)]
+    public async Task HydrometerBasket_UsesTheSameDeviationAsExcel(
+        bool manual, bool medication, int conversionFactor)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var project = new QuotationProject(
+            Guid.NewGuid(), "Hidrômetros", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow)
+        {
+            IsMedication = medication
+        };
+        var line = Line("Hidrômetro blindagem", 0m, "");
+        var divisor = medication ? 100m : 1m;
+        decimal[] prices = [64.90m, 65m, 83.90m];
+        var references = prices.Select((price, index) => Reference(
+            $"hydrometer-{index}", $"contract-{index}", "11222333000181",
+            price / divisor / conversionFactor, "Hidrômetro blindagem")).ToArray();
+        var manualBasket = Manual(line, "Hidrômetros", references.Select(value => value.Id).ToArray()) with
+        {
+            ConversionFactors = references.ToDictionary(value => value.Id, _ => (decimal)conversionFactor)
+        };
+        var analysis = new QuotationAnalyzer(Today).Analyze(
+            line, references, manual ? [manualBasket] : [], project.PriceDecimalPlaces);
+        var basket = Assert.Single(analysis.Baskets, value => value.IsManual == manual);
+        analysis = Confirm(analysis, basket);
+
+        Assert.InRange(basket.MaximumDeviationPercent, 29.1762m, 29.1763m);
+        Assert.Equal(manual ? QuotationBasketVisualState.ManualInvalid :
+            QuotationBasketVisualState.AutomaticHighDispersion, basket.VisualState);
+        Assert.Equal("Resolvido com ressalva", new QuotationLineDisplay(analysis).Status);
+
+        var path = Path.Combine(database.Directory, "hidrometros.xlsx");
+        await new QuotationWorkbookService().ExportAsync(
+            path, new QuotationProjectReport(project, [analysis]), "Responsável");
+        using var workbook = new XLWorkbook(path);
+        var sheet = workbook.Worksheet(1);
+        Assert.Equal(prices.Select(price => price / divisor),
+            sheet.Range("F6:F8").Cells().Select(cell => cell.GetValue<decimal>()));
+        Assert.Equal(64.95m / divisor, sheet.Cell("G8").GetValue<decimal>());
+        Assert.Equal(basket.MaximumDeviationPercent,
+            sheet.Cell("H8").GetValue<decimal>() * 100m, 8);
+        Assert.Equal("EXCESSIVO", sheet.Cell("I8").GetString());
+        Assert.Equal("VÁLIDO", sheet.Cell("I6").GetString());
+        Assert.Equal("VÁLIDO", sheet.Cell("I7").GetString());
+        Assert.Equal(64.95m / divisor, basket.AdoptedPrice);
+        Assert.Equal(basket.AdoptedPrice, sheet.Cell("C9").GetValue<decimal>());
+        Assert.Equal(basket.AdoptedPrice,
+            workbook.Worksheet("Referências").Cell("W4").GetValue<decimal>());
+        Assert.Equal(basket.MaximumDeviationPercent,
+            workbook.Worksheet("Referências").Cell("X4").GetValue<decimal>(), 8);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task BasketDeviation_MatchesExcelAtBothInclusiveLimits(bool lowerLimit, bool medication)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var project = new QuotationProject(
+            Guid.NewGuid(), "Limites", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow)
+        {
+            IsMedication = medication
+        };
+        var divisor = medication ? 100m : 1m;
+        // A média dos demais é 1,005 no limite superior: truncar para 1,00
+        // é necessário para obter exatamente 25%, como na planilha.
+        decimal[] prices = lowerLimit ? [0.75m, 1m, 1m] : [1m, 1.01m, 1.25m];
+        var analysis = new QuotationAnalyzer(Today).Analyze(
+            Line("Café", 1m, "pacote"), prices.Select((price, index) => Reference(
+                $"limit-{index}", $"contract-{index}", "11222333000181", price / divisor)).ToArray(),
+            priceDecimalPlaces: project.PriceDecimalPlaces);
+        var basket = Assert.Single(analysis.Baskets);
+        Assert.Equal(25m, basket.MaximumDeviationPercent);
+        Assert.Equal(QuotationBasketVisualState.AutomaticRegular, basket.VisualState);
+        analysis = Confirm(analysis, basket);
+
+        var path = Path.Combine(database.Directory, "limites.xlsx");
+        await new QuotationWorkbookService().ExportAsync(
+            path, new QuotationProjectReport(project, [analysis]), "Responsável");
+        using var workbook = new XLWorkbook(path);
+        var sheet = workbook.Worksheet(1);
+        Assert.Equal(lowerLimit ? -0.25m : 0.25m,
+            sheet.Cell(lowerLimit ? "H6" : "H8").GetValue<decimal>());
+        Assert.All(sheet.Range("I6:J8").Cells(), cell => Assert.Equal("VÁLIDO", cell.GetString()));
     }
 
     [Fact]
@@ -555,9 +648,9 @@ public sealed class QuotationTests
         Assert.Equal(QuotationAggregationMethod.Median, basket.AggregationMethod);
         Assert.Equal(16.49m, basket.PriceEntries.Single(entry => entry.Reference.Id == "a").EffectiveUnitPrice);
         Assert.Equal(10.00m, basket.PriceEntries.Single(entry => entry.Reference.Id == "c").EffectiveUnitPrice);
-        Assert.Equal(12.17m, basket.AveragePrice);
-        Assert.Equal(10.02m, basket.MedianPrice);
-        Assert.Equal(10.02m, basket.AdoptedPrice);
+        Assert.Equal(10.01m, basket.AveragePrice);
+        Assert.Equal(10.01m, basket.MedianPrice);
+        Assert.Equal(10.01m, basket.AdoptedPrice);
         Assert.Equal(10.99m, originalBasket.PriceEntries.Single(entry => entry.Reference.Id == "a").EffectiveUnitPrice);
         Assert.Equal(10.999m, references[0].UnitPrice);
     }
@@ -814,7 +907,7 @@ public sealed class QuotationTests
         var manual = restored.Baskets.Single(basket => basket.ManualBasketId == first.Basket.Id);
         Assert.Equal(3, manual.References.Count);
         Assert.Equal(QuotationBasketVisualState.ManualInvalid, manual.VisualState);
-        Assert.Contains("permanecem no cálculo", manual.ValidationMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("não entram no valor adotado", manual.ValidationMessage, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(QuotationAggregationMethod.Median, manual.AggregationMethod);
         Assert.Equal(1.5m, manual.PriceEntries.Single(entry =>
             entry.Reference.Id == convertedReferenceId).ConversionFactor);
@@ -1137,10 +1230,10 @@ public sealed class QuotationTests
                 "IF(F6=\"\",\"\",IFERROR(TRUNC(AVERAGE(F7:F8),2),\"\"))",
                 sheet.Cell("G6").FormulaA1);
             Assert.Equal(
-                "IF(OR(F6=\"\",G6=\"\"),\"\",F6/G6-1)",
+                "IF(OR(F6=\"\",G6=\"\",G6=0),\"\",F6/G6-1)",
                 sheet.Cell("H6").FormulaA1);
             Assert.Equal(
-                "IF(F6=\"\",\"\",IF(OR(I6=\"EXCESSIVO\",J6=\"INEXEQUÍVEL\"),\"\",F6))",
+                "IF(OR(F6=\"\",F6<=0),\"\",IF(OR(I6=\"EXCESSIVO\",J6=\"INEXEQUÍVEL\"),\"\",F6))",
                 sheet.Cell("K6").FormulaA1);
             Assert.Equal(
                 "IFERROR(TRUNC(SUM(K6:K8)/COUNTIF(K6:K8,\">0\"),2),\"\")",
@@ -1342,6 +1435,47 @@ public sealed class QuotationTests
     }
 
     [Fact]
+    public async Task Garrafao_PreservesOldHomologationSeparatelyFromRecentPublication()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer(new DateOnly(2026, 10, 7)));
+        var project = await service.CreateProjectAsync("Garrafões Térmicos");
+        var publication = new DateTimeOffset(2026, 1, 16, 9, 29, 4, TimeSpan.FromHours(-3));
+        var homologation = new DateOnly(2025, 10, 7);
+        var row = Row("08142655000106-1-000157/2025", "08236940000196", 54.99m);
+        row = row with
+        {
+            Contract = row.Contract with { PublicationDate = publication },
+            Item = row.Item with { ItemNumber = 58, Description = "Garrafão térmico 5 litros" },
+            Result = row.Result! with { ItemNumber = 58, ResultDate = homologation }
+        };
+        var captured = await service.SaveManualBasketAsync(
+            project.Id, null, new("Garrafão térmico 5 litros", 126m, "unidade", null, null),
+            null, "Garrafão", [row]);
+        await service.ConfirmBasketAsync(captured.Analysis, captured.Basket.Key);
+        Assert.Equal(0m, Assert.Single(captured.Analysis.Baskets).MaximumDeviationPercent);
+        var reference = Assert.Single(await repository.GetReferencesAsync(captured.Analysis.Line.Id));
+        var display = new QuotationPriceDisplayRow(reference, false);
+        Assert.Equal(homologation, display.ResultDate);
+        Assert.Equal(publication, display.PublicationDate);
+        Assert.Equal(54.99m, display.UnitPrice);
+        Assert.Null(new QuotationPriceDisplayRow(reference with { ResultDate = null }, false).ResultDate);
+
+        var reopened = new QuotationService(
+            new SqliteQuotationRepository(database.Repository.DatabasePath),
+            new QuotationAnalyzer(new DateOnly(2026, 10, 7)));
+        var path = Path.Combine(database.Directory, "garrafoes.xlsx");
+        await new QuotationWorkbookService().ExportAsync(
+            path, await reopened.GetReportAsync(project.Id), "Responsável");
+        using var workbook = new XLWorkbook(path);
+        Assert.Equal(homologation.ToDateTime(TimeOnly.MinValue),
+            workbook.Worksheet(1).Cell("E6").GetDateTime());
+        Assert.Equal(homologation.ToDateTime(TimeOnly.MinValue),
+            workbook.Worksheet("Referências").Cell("L2").GetDateTime());
+    }
+
+    [Fact]
     public async Task Workbook_ExportsEachResultDateAndDoesNotInventMissingDates()
     {
         var analyzer = new QuotationAnalyzer(Today);
@@ -1524,6 +1658,7 @@ public sealed class QuotationTests
             Assert.Equal("EXCESSIVO", sheet.Cell("I8").GetString());
             Assert.Equal(string.Empty, sheet.Cell("K8").GetString());
             Assert.Equal(10.01m, sheet.Cell("C9").GetValue<decimal>());
+            Assert.Equal(analysis.SelectedBasket!.AdoptedPrice, sheet.Cell("C9").GetValue<decimal>());
             Assert.Equal("Mediana dos preços válidos", sheet.Cell("B9").GetString());
             Assert.Equal(
                 "IF(COUNTIF(K6:K8,\">0\")=0,\"\",TRUNC(MEDIAN(K6:K8),2))",
@@ -1596,6 +1731,10 @@ public sealed class QuotationTests
                 Assert.Equal(string.Empty, sheet.Cell(address).GetString());
             var expected = (method == QuotationAggregationMethod.Mean ? 92.51m : 89.11m) / divisor;
             Assert.Equal(expected, sheet.Cell("C13").GetValue<decimal>());
+            Assert.Equal(expected, basket.AdoptedPrice);
+            Assert.Equal(expected, new QuotationLineDisplay(analysis).SelectedAveragePrice);
+            Assert.All(workbook.Worksheet("Referências").Range("W2:W8").Cells(),
+                cell => Assert.Equal(expected, cell.GetValue<decimal>()));
         }
         finally
         {
@@ -1641,6 +1780,111 @@ public sealed class QuotationTests
             var directory = Path.GetDirectoryName(path)!;
             if (Directory.Exists(directory)) Directory.Delete(directory, true);
         }
+    }
+
+    [Theory]
+    [InlineData(false, false, QuotationAggregationMethod.Mean)]
+    [InlineData(false, true, QuotationAggregationMethod.Mean)]
+    [InlineData(true, false, QuotationAggregationMethod.Mean)]
+    [InlineData(true, true, QuotationAggregationMethod.Mean)]
+    [InlineData(true, false, QuotationAggregationMethod.Median)]
+    [InlineData(true, true, QuotationAggregationMethod.Median)]
+    public async Task BasketWithoutValidPrices_HasNoAdoptedValueInTheAppOrExcel(
+        bool manual, bool medication, QuotationAggregationMethod method)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var project = new QuotationProject(
+            Guid.NewGuid(), "Sem preços válidos", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow)
+        {
+            IsMedication = medication
+        };
+        var line = Line("Café", 1m, "pacote");
+        decimal[] prices = [10m, 100m, 1000m];
+        var references = prices.Select((price, index) => Reference(
+            $"r{index}", $"c{index}", "11222333000181", price)).ToArray();
+        var manualBasket = Manual(line, "Sem válidos", references.Select(value => value.Id).ToArray()) with
+        {
+            AggregationMethod = method
+        };
+        var analysis = new QuotationAnalyzer(Today).Analyze(
+            line, references, manual ? [manualBasket] : [], project.PriceDecimalPlaces);
+        var basket = Assert.Single(analysis.Baskets, value => value.IsManual == manual);
+        analysis = Confirm(analysis, basket);
+        Assert.Equal(0m, basket.AdoptedPrice);
+        Assert.Null(new QuotationLineDisplay(analysis).SelectedAveragePrice);
+        Assert.Equal("Sem preços válidos", new QuotationBasketDisplay(basket).AdoptedPriceText);
+        Assert.Equal("Sem preços válidos", new QuotationLineDisplay(analysis).Status);
+        Assert.False(basket.IsCheapest);
+        Assert.False(basket.IsMostExpensive);
+
+        var path = Path.Combine(database.Directory, "sem-validos.xlsx");
+        var report = new QuotationProjectReport(project, [analysis]);
+        await new QuotationWorkbookService().ExportAsync(path, report, "Responsável");
+        using var workbook = new XLWorkbook(path);
+        var sheet = workbook.Worksheet(1);
+        Assert.All(sheet.Range("K6:K8").Cells(), cell => Assert.Equal(string.Empty, cell.GetString()));
+        Assert.Equal(string.Empty, sheet.Cell("C9").GetString());
+        Assert.All(workbook.Worksheet("Referências").Range("W2:W4").Cells(), cell => Assert.True(cell.IsEmpty()));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new QuotationWordService()
+            .ExportPriceTableAsync(Path.Combine(database.Directory, "sem-validos.docx"), report));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PricesTruncatedToZero_DoNotBecomeAnAdoptedValueOrAnExcelDivisionError(bool medication)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var project = new QuotationProject(
+            Guid.NewGuid(), "Precisão", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow)
+        {
+            IsMedication = medication
+        };
+        var line = Line("Café", 1m, "pacote");
+        var references = Enumerable.Range(1, 3).Select(index =>
+            Reference($"r{index}", $"c{index}", "11222333000181", 0.0001m)).ToArray();
+        var manual = Manual(line, "Conversão", references.Select(value => value.Id).ToArray()) with
+        {
+            ConversionFactors = references.ToDictionary(value => value.Id, _ => 0.1m),
+            AggregationMethod = QuotationAggregationMethod.Median
+        };
+        var analysis = new QuotationAnalyzer(Today).Analyze(line, references, [manual], project.PriceDecimalPlaces);
+        var basket = Assert.Single(analysis.Baskets, value => value.IsManual);
+        analysis = Confirm(analysis, basket);
+        Assert.Null(new QuotationLineDisplay(analysis).SelectedAveragePrice);
+        var path = Path.Combine(database.Directory, "zero.xlsx");
+        await new QuotationWorkbookService().ExportAsync(
+            path, new QuotationProjectReport(project, [analysis]), "Responsável");
+        using var workbook = new XLWorkbook(path);
+        Assert.All(workbook.Worksheet(1).Range("H6:K8").Cells(),
+            cell => Assert.Equal(string.Empty, cell.GetString()));
+        Assert.Equal(string.Empty, workbook.Worksheet(1).Cell("C9").GetString());
+    }
+
+    [Fact]
+    public async Task SavedHydrometerBasket_ReopensWithTheSameAdoptedValueAsExcel()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var service = new QuotationService(
+            new SqliteQuotationRepository(database.Repository.DatabasePath), new QuotationAnalyzer(Today));
+        var project = await service.CreateProjectAsync("Hidrômetros");
+        var analysis = await service.CaptureSampleAsync(project.Id, null,
+            new("Café", 1m, "pacote", null, null), [
+                Row("c1", "11222333000181", 64.90m),
+                Row("c2", "60701190000104", 65m),
+                Row("c3", "33000167000101", 83.90m)
+            ]);
+        await service.ConfirmBasketAsync(analysis, Assert.Single(analysis.Baskets).Key);
+        var reopened = new QuotationService(
+            new SqliteQuotationRepository(database.Repository.DatabasePath), new QuotationAnalyzer(Today));
+        var report = await reopened.GetReportAsync(project.Id);
+        var selected = Assert.Single(report.Lines).SelectedBasket!;
+        Assert.Equal(64.95m, selected.AdoptedPrice);
+        Assert.Equal(3, selected.References.Count);
+        var path = Path.Combine(database.Directory, "reaberta.xlsx");
+        await new QuotationWorkbookService().ExportAsync(path, report, "Responsável");
+        using var workbook = new XLWorkbook(path);
+        Assert.Equal(selected.AdoptedPrice, workbook.Worksheet(1).Cell("C9").GetValue<decimal>());
     }
 
     [Theory]

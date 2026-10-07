@@ -137,6 +137,9 @@
                                 <DataGridTextColumn Header="Publicação/captura"
                                                     Binding="{Binding PublicationDate, StringFormat=dd/MM/yyyy}"
                                                     Width="125" />
+                                <DataGridTextColumn Header="Homologação/obtenção"
+                                                    Binding="{Binding ResultDate, StringFormat=dd/MM/yyyy}"
+                                                    Width="150" />
                                 <DataGridTextColumn Header="UF" Binding="{Binding Uf}" Width="42" />
                                 <DataGridTextColumn Header="Descrição" Binding="{Binding Description}" Width="320" MinWidth="220" />
                                 <DataGridTextColumn Header="Unidade" Binding="{Binding Unit}" Width="90" />
@@ -315,8 +318,8 @@
                                                     Width="190" Visibility="Collapsed" />
                                 <DataGridTextColumn Header="Município" Binding="{Binding Contract.Municipality}"
                                                     Width="150" Visibility="Collapsed" />
-                                <DataGridTextColumn Header="Resultado" Binding="{Binding ResultDate, StringFormat=dd/MM/yyyy}"
-                                                    Width="90" Visibility="Collapsed" />
+                                <DataGridTextColumn Header="Data de homologação" Binding="{Binding ResultDate, StringFormat=dd/MM/yyyy}"
+                                                    Width="140" Visibility="Collapsed" />
                             </DataGrid.Columns>
                         </DataGrid>
                     </controls:GridReader>

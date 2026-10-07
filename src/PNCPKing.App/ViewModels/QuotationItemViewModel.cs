@@ -516,7 +516,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         ? "Nenhuma cesta selecionada."
         : $"{SelectedBasket.AggregationMethod} {SelectedBasket.AdoptedPriceText} · " +
           $"menor {SelectedBasket.MinimumPriceText} · maior {SelectedBasket.MaximumPriceText} · " +
-          $"desvio máximo {SelectedBasket.MaximumDeviationPercent:N2}% · " +
+          $"desvio máximo em relação aos demais preços {SelectedBasket.MaximumDeviationPercent:N2}% · " +
           $"{SelectedBasket.Status}";
 
     public bool SearchDefinitionChanged =>

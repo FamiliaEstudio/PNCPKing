@@ -7,6 +7,23 @@ namespace PNCPKing.Tests;
 public sealed class UiBindingTests
 {
     [Fact]
+    public void QuotationPrices_ExposeHomologationAndPublicationAsSeparateColumns()
+    {
+        var document = LoadView("QuotationItemWindow.xaml");
+        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        XNamespace xaml = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var grid = Assert.Single(document.Descendants(presentation + "DataGrid"),
+            element => element.Attribute(xaml + "Name")?.Value == "PriceGrid");
+        var columns = grid.Descendants(presentation + "DataGridTextColumn").ToArray();
+        Assert.Contains(columns, column =>
+            column.Attribute("Header")?.Value == "Homologação/obtenção" &&
+            column.Attribute("Binding")?.Value == "{Binding ResultDate, StringFormat=dd/MM/yyyy}");
+        Assert.Contains(columns, column =>
+            column.Attribute("Header")?.Value == "Publicação/captura" &&
+            column.Attribute("Binding")?.Value == "{Binding PublicationDate, StringFormat=dd/MM/yyyy}");
+    }
+
+    [Fact]
     public void GitHubUpdateIsSeparateFromPncpSynchronization()
     {
         var document = LoadView("MainWindow.xaml");

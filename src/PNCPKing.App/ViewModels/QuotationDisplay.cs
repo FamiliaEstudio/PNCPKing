@@ -60,7 +60,9 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis, Quotati
     public string Status => Analysis.CollectedCount == 0
         ? "Aguardando preços"
         : Line.SelectionConfirmed && Analysis.SelectedBasket is { } selected
-        ? selected.IsIncomplete || !selected.IsValid
+        ? selected.AdoptedPrice <= 0m
+            ? "Sem preços válidos"
+            : selected.IsIncomplete || !selected.IsValid || selected.MaximumDeviationPercent > 25m
             ? "Resolvido com ressalva"
             : "Resolvido"
         : Analysis.Baskets.Count == 0
@@ -70,7 +72,9 @@ public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis, Quotati
                 : Line.SelectedBasketKey is not null
                     ? "Escolha anterior inválida"
                     : "Aguardando escolha";
-    public decimal? SelectedAveragePrice => Analysis.SelectedBasket?.AdoptedPrice;
+    public decimal? SelectedAveragePrice => Analysis.SelectedBasket is { AdoptedPrice: > 0m } basket
+        ? basket.AdoptedPrice
+        : null;
     public string SelectedAveragePriceText => SelectedAveragePrice?.ToString($"C{Analysis.PriceDecimalPlaces}") ?? string.Empty;
     public string EstimatedUnitPriceText => EstimatedUnitPrice?.ToString($"C{Analysis.PriceDecimalPlaces}") ?? string.Empty;
     public string AutomationStatus => Line.AutomationState switch
@@ -100,14 +104,16 @@ public sealed class QuotationBasketDisplay(QuotationBasket source, bool wasPrevi
         : "Média";
     public decimal MinimumPrice => Source.MinimumPrice;
     public decimal MaximumPrice => Source.MaximumPrice;
-    public string AdoptedPriceText => AdoptedPrice.ToString($"C{priceDecimalPlaces}");
+    public string AdoptedPriceText => AdoptedPrice > 0m
+        ? AdoptedPrice.ToString($"C{priceDecimalPlaces}")
+        : "Sem preços válidos";
     public string MinimumPriceText => MinimumPrice.ToString($"C{priceDecimalPlaces}");
     public string MaximumPriceText => MaximumPrice.ToString($"C{priceDecimalPlaces}");
     public decimal MaximumDeviationPercent => Source.MaximumDeviationPercent;
     public decimal Score => Source.Score;
     public string Type => Source.IsManual ? "Manual" : "Automática";
     public string Name => Source.IsManual ? Source.Name : string.Empty;
-    public string Status => Source.VisualState switch
+    public string Status => AdoptedPrice <= 0m ? "Sem preços válidos" : Source.VisualState switch
     {
         QuotationBasketVisualState.AutomaticRegular when Source.References.Count == 2 => "Resolvida com ressalva",
         QuotationBasketVisualState.AutomaticRegular when Source.IsIncomplete => "Reduzida",
@@ -205,6 +211,7 @@ public sealed class QuotationPriceDisplayRow(
         ? "Inciso III"
         : "Inciso II";
     public DateTimeOffset? PublicationDate => Source.PublicationDate;
+    public DateOnly? ResultDate => Source.ResultDate;
     public string Uf => Source.Uf;
     public string Description => Source.ItemDescription;
     public string Unit => Source.ItemUnit;

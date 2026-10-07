@@ -420,28 +420,31 @@ public sealed partial class QuotationAnalyzer
 
         var baskets = candidates.Values.ToArray();
         var recommended = baskets
-            .OrderByDescending(basket => basket.Score)
+            .OrderByDescending(basket => basket.AdoptedPrice > 0m)
+            .ThenByDescending(basket => basket.Score)
             .ThenBy(BasketPromptRank)
             .ThenBy(basket => basket.Key, StringComparer.Ordinal)
             .First();
         var cheapest = baskets
+            .Where(basket => basket.AdoptedPrice > 0m)
             .OrderBy(basket => basket.AveragePrice)
             .ThenByDescending(basket => basket.Score)
             .ThenBy(BasketPromptRank)
             .ThenBy(basket => basket.Key, StringComparer.Ordinal)
-            .First();
+            .FirstOrDefault();
         var mostExpensive = baskets
+            .Where(basket => basket.AdoptedPrice > 0m)
             .OrderByDescending(basket => basket.AveragePrice)
             .ThenByDescending(basket => basket.Score)
             .ThenBy(BasketPromptRank)
             .ThenBy(basket => basket.Key, StringComparer.Ordinal)
-            .First();
+            .FirstOrDefault();
         var marked = baskets
             .Select(basket => basket with
             {
                 IsRecommended = basket.Key == recommended.Key,
-                IsCheapest = basket.Key == cheapest.Key,
-                IsMostExpensive = basket.Key == mostExpensive.Key
+                IsCheapest = basket.Key == cheapest?.Key,
+                IsMostExpensive = basket.Key == mostExpensive?.Key
             })
             .OrderByDescending(basket => basket.Score)
             .ThenBy(BasketPromptRank)
@@ -553,28 +556,48 @@ public sealed partial class QuotationAnalyzer
             .ThenBy(entry => entry.Reference.Id, StringComparer.Ordinal)
             .ToArray();
         var ordered = orderedPrices.Select(entry => entry.Reference).ToArray();
-        var average = QuotationMoney.Truncate(
-            orderedPrices.Average(entry => entry.EffectiveUnitPrice), priceDecimalPlaces);
-        var median = CalculateMedian(orderedPrices.Select(entry => entry.EffectiveUnitPrice).ToArray(), priceDecimalPlaces);
+        // O Excel compara cada preço com a média truncada dos demais, excluindo
+        // o próprio preço. Incluir o preço na média reduz artificialmente o desvio.
+        var totalPrice = orderedPrices.Sum(entry => entry.EffectiveUnitPrice);
+        var maximumDeviation = 0m;
+        var validPrices = new List<decimal>(orderedPrices.Length);
+        foreach (var entry in orderedPrices)
+        {
+            var otherPricesAverage = orderedPrices.Length < 2
+                ? 0m
+                : QuotationMoney.Truncate(
+                    (totalPrice - entry.EffectiveUnitPrice) / (orderedPrices.Length - 1),
+                    priceDecimalPlaces);
+            var deviation = otherPricesAverage <= 0m
+                ? 0m
+                : Math.Abs(entry.EffectiveUnitPrice / otherPricesAverage - 1m) * 100m;
+            maximumDeviation = Math.Max(maximumDeviation, deviation);
+            if (entry.EffectiveUnitPrice > 0m && deviation <= 25m)
+                validPrices.Add(entry.EffectiveUnitPrice);
+        }
+
+        // A classificação usa a cesta original em uma única passagem, como as
+        // fórmulas do Excel; só a média/mediana final exclui os preços inválidos.
+        var average = validPrices.Count == 0 ? 0m :
+            QuotationMoney.Truncate(validPrices.Average(), priceDecimalPlaces);
+        var median = validPrices.Count == 0 ? 0m : CalculateMedian(validPrices, priceDecimalPlaces);
         var adopted = aggregationMethod == QuotationAggregationMethod.Median ? median : average;
-        var maximumDeviation = average <= 0
-            ? 0
-            : orderedPrices.Max(entry =>
-                Math.Abs(entry.EffectiveUnitPrice - average) / average * 100m);
         var averageAdequacy = ordered.Average(reference => reference.Adequacy.Total);
         var minimumAdequacy = ordered.Min(reference => reference.Adequacy.Total);
         var cohesion = Math.Clamp(100m * (1m - maximumDeviation / 25m), 0m, 100m);
         var visualState = kind == QuotationBasketKind.Automatic
-            ? maximumDeviation <= 25m
+            ? adopted > 0m && maximumDeviation <= 25m
                 ? QuotationBasketVisualState.AutomaticRegular
                 : QuotationBasketVisualState.AutomaticHighDispersion
             : ordered.Length < 3
                 ? QuotationBasketVisualState.ManualIncomplete
                 : ordered.All(reference => reference.State == QuotationReferenceState.Eligible) &&
-                  maximumDeviation <= 25m
+                  adopted > 0m && maximumDeviation <= 25m
                     ? QuotationBasketVisualState.ManualRegular
                     : QuotationBasketVisualState.ManualInvalid;
-        var validationMessage = visualState switch
+        var validationMessage = adopted <= 0m
+            ? "Nenhum preço válido para calcular a média ou mediana da cesta."
+            : visualState switch
         {
             QuotationBasketVisualState.AutomaticRegular when ordered.Length < requestedSize =>
                 $"Cesta automática reduzida: {ordered.Length:N0} de {requestedSize:N0} preços.",
@@ -652,7 +675,7 @@ public sealed partial class QuotationAnalyzer
         }
 
         return $"Cesta manual com ressalva: {string.Join("; ", reasons)}. " +
-               "Todos os preços escolhidos permanecem no cálculo.";
+               "Preços excessivos ou inexequíveis permanecem na cesta, mas não entram no valor adotado.";
     }
 
     private static (decimal Score, string Explanation) CalculateDescriptionScore(string requested, string found)
