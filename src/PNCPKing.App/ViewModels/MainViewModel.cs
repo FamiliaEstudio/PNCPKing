@@ -609,7 +609,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(progress);
         StartupProgress = progress.Percentage;
-        StartupStatus = $"{progress.Phase} · banco v{progress.PreviousVersion} → v{progress.TargetVersion}\n" +
+        StartupStatus = progress.Phase + (progress.PreviousVersion < 0 ? "" :
+                        $" · banco v{progress.PreviousVersion} → v{progress.TargetVersion}") + "\n" +
                         progress.Message;
         StatusText = progress.Message;
     }
@@ -1345,8 +1346,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        SetStartupPhase("Preparando a janela de dados…");
+        _diagnosticLog.Info("database-startup", "Preparando a janela de dados, sem limpeza física.");
         await ApplyLocalRetentionAsync(compact: false, cancellationToken).ConfigureAwait(true);
-        await LoadSweetCodesAsync().ConfigureAwait(true);
+        SetStartupPhase("Carregando códigos de pesquisa…");
+        _diagnosticLog.Info("database-startup", "Carregando códigos de pesquisa.");
+        await LoadSweetCodesAsync(cancellationToken).ConfigureAwait(true);
     }
 
     public async Task InitializeDeferredAsync(CancellationToken cancellationToken = default)
@@ -1519,9 +1524,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         OnPropertyChanged(nameof(HasSweetCodeSuggestions));
     }
 
-    private async Task LoadSweetCodesAsync()
+    private async Task LoadSweetCodesAsync(CancellationToken cancellationToken = default)
     {
-        _sweetCodeLibrary = await _sweetCodeRepository.LoadAsync().ConfigureAwait(true);
+        _sweetCodeLibrary = await Task.Run(
+            () => _sweetCodeRepository.LoadAsync(cancellationToken), cancellationToken).ConfigureAwait(true);
         _sweetCodeEnabled = _sweetCodeLibrary.Enabled;
         OnPropertyChanged(nameof(SweetCodeEnabled));
         RefreshSweetCodeSuggestions();
