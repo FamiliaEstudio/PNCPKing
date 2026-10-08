@@ -1478,7 +1478,11 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             .ToHashSet(StringComparer.Ordinal) ?? [];
         var selectedPrices = SelectedBasket?.Source.PriceEntries
             .ToDictionary(entry => entry.Reference.Id, StringComparer.Ordinal) ?? [];
-        var markedTotal = selectedPrices.Values.Sum(entry => entry.EffectiveUnitPrice);
+        var marked = selectedPrices.Values.ToArray();
+        var validity = QuotationMoney.EvaluatePriceGroup(
+            marked.Select(entry => entry.EffectiveUnitPrice).ToArray(), Line.Analysis.PriceDecimalPlaces);
+        var validMarkedIds = marked.Where((_, index) => validity[index])
+            .Select(entry => entry.Reference.Id).ToHashSet(StringComparer.Ordinal);
         var selectedId = SelectedPrice?.Id;
         VisibleReferences.Clear();
         foreach (var reference in Line.Analysis.References)
@@ -1502,9 +1506,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                     price?.ConversionFactor ?? 1m,
                     price?.EffectiveUnitPrice,
                     Line.Analysis.PriceDecimalPlaces);
-                row.IsValidInMarkedGroup = inBasket && row.IsHighlightEligible &&
-                    QuotationMoney.EvaluatePrice(row.EffectiveUnitPrice, markedTotal, selectedPrices.Count,
-                        Line.Analysis.PriceDecimalPlaces).IsValid;
+                row.IsValidInMarkedGroup = inBasket && validMarkedIds.Contains(row.Id);
                 VisibleReferences.Add(row);
             }
         }

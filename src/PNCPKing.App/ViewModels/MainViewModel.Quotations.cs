@@ -2490,7 +2490,11 @@ public sealed partial class MainViewModel
             .ToHashSet(StringComparer.Ordinal) ?? [];
         var selectedPrices = SelectedQuotationBasket?.Source.PriceEntries
             .ToDictionary(entry => entry.Reference.Id, StringComparer.Ordinal) ?? [];
-        var markedTotal = selectedPrices.Values.Sum(entry => entry.EffectiveUnitPrice);
+        var marked = selectedPrices.Values.ToArray();
+        var validity = QuotationMoney.EvaluatePriceGroup(
+            marked.Select(entry => entry.EffectiveUnitPrice).ToArray(), SelectedQuotationLine?.Analysis.PriceDecimalPlaces ?? 2);
+        var validMarkedIds = marked.Where((_, index) => validity[index])
+            .Select(entry => entry.Reference.Id).ToHashSet(StringComparer.Ordinal);
         var visibleReferences = SelectedQuotationLine?.Analysis.References
             .Select(reference =>
             {
@@ -2516,9 +2520,7 @@ public sealed partial class MainViewModel
                     price?.ConversionFactor ?? 1m,
                     price?.EffectiveUnitPrice,
                     SelectedQuotationLine.Analysis.PriceDecimalPlaces);
-                row.IsValidInMarkedGroup = value.InBasket && row.IsHighlightEligible &&
-                    QuotationMoney.EvaluatePrice(row.EffectiveUnitPrice, markedTotal, selectedPrices.Count,
-                        SelectedQuotationLine.Analysis.PriceDecimalPlaces).IsValid;
+                row.IsValidInMarkedGroup = value.InBasket && validMarkedIds.Contains(row.Id);
                 return row;
             }) ?? [];
         VisibleQuotationReferences.ReplaceAll(visibleReferences);

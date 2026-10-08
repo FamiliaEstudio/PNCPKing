@@ -23,7 +23,6 @@ public enum ItemPriceAction { Pin, MarkForBasket, Clear }
 public interface IPriceHighlightRow
 {
     decimal? HighlightPrice { get; }
-    bool IsHighlightEligible { get; }
     bool IsMarkedForHighlight { get; }
     bool IsValidInSelection { get; set; }
     bool IsValidInMarkedGroup { get; set; }
@@ -74,7 +73,6 @@ public sealed class ItemSearchDisplayRow : ObservableObject, IPriceHighlightRow
         Source.Result is { IsActive: true, HomologatedUnitValue: > 0 };
 
     public decimal? HighlightPrice => HomologatedUnitValue;
-    public bool IsHighlightEligible => IsBasketEligible;
     public bool IsMarkedForHighlight => IsSelectedForBasket;
     public bool IsValidInSelection
     {

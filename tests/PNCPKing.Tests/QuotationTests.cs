@@ -1174,6 +1174,28 @@ public sealed class QuotationTests
     }
 
     [Fact]
+    public void PriceGroup_RequiresAtLeastThreeValidPrices()
+    {
+        Assert.Empty(QuotationMoney.EvaluatePriceGroup([], 2));
+        Assert.Equal([false], QuotationMoney.EvaluatePriceGroup([100m], 2));
+        Assert.Equal([false, false], QuotationMoney.EvaluatePriceGroup([100m, 100m], 2));
+        Assert.Equal([true, true, true], QuotationMoney.EvaluatePriceGroup([125m, 100m, 100m], 2));
+        Assert.Equal([true, true, true], QuotationMoney.EvaluatePriceGroup([75m, 100m, 100m], 2));
+        Assert.Equal([false, false, false], QuotationMoney.EvaluatePriceGroup([126m, 100m, 100m], 2));
+        Assert.Equal([false, false, false], QuotationMoney.EvaluatePriceGroup([74m, 100m, 100m], 2));
+        Assert.Equal([true, true, true, false], QuotationMoney.EvaluatePriceGroup([100m, 100m, 100m, 150m], 2));
+        Assert.Equal([false, false, false], QuotationMoney.EvaluatePriceGroup([100m, 100m, 0m], 2));
+    }
+
+    [Fact]
+    public void PriceGroup_UsesQuotationPrecisionAndEffectivePrices()
+    {
+        Assert.Equal([true, true, true], QuotationMoney.EvaluatePriceGroup([1.2501m, 1m, 1m], 2));
+        Assert.Equal([false, false, false], QuotationMoney.EvaluatePriceGroup([1.2501m, 1m, 1m], 4));
+        Assert.Equal([true, true, true], QuotationMoney.EvaluatePriceGroup([10m * 10m, 100m, 100m], 2));
+    }
+
+    [Fact]
     public async Task Workbook_UsesDisplayNameAndCatalogCodeInItemTitle()
     {
         var analyzer = new QuotationAnalyzer(Today);

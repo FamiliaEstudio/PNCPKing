@@ -225,7 +225,6 @@ public sealed class QuotationPriceDisplayRow(
     public decimal EffectiveUnitPrice { get; } = effectiveUnitPrice ??
         QuotationMoney.Truncate(source.UnitPrice * conversionFactor, priceDecimalPlaces);
     public decimal? HighlightPrice => EffectiveUnitPrice;
-    public bool IsHighlightEligible => Source.State == QuotationReferenceState.Eligible;
     public bool IsMarkedForHighlight => IsInSelectedBasket;
     public bool IsValidInSelection
     {

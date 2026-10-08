@@ -19,6 +19,24 @@ public static class DecimalScale
 
 public static class QuotationMoney
 {
+    // A price group can be highlighted only when at least three members pass the
+    // same single-pass checks used by the quotation and Excel calculations.
+    public static bool[] EvaluatePriceGroup(IReadOnlyList<decimal> prices, int decimalPlaces)
+    {
+        var validity = new bool[prices.Count];
+        if (prices.Count < 3) return validity;
+        var effectivePrices = prices.Select(price => Truncate(price, decimalPlaces)).ToArray();
+        var total = effectivePrices.Sum();
+        var validCount = 0;
+        for (var index = 0; index < effectivePrices.Length; index++)
+        {
+            validity[index] = EvaluatePrice(effectivePrices[index], total, effectivePrices.Length, decimalPlaces).IsValid;
+            if (validity[index]) validCount++;
+        }
+        if (validCount < 3) Array.Clear(validity);
+        return validity;
+    }
+
     public static (decimal DeviationPercent, bool IsValid) EvaluatePrice(
         decimal effectivePrice, decimal totalPrice, int priceCount, int decimalPlaces)
     {

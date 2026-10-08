@@ -954,10 +954,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     {
         var marked = GetSelectedBasketPrices();
         var decimalPlaces = SelectedQuotationProject?.Source.PriceDecimalPlaces ?? 2;
-        var total = marked.Sum(row => QuotationMoney.Truncate(row.HighlightPrice ?? 0m, decimalPlaces));
-        foreach (var row in marked)
-            row.IsValidInMarkedGroup = row.IsHighlightEligible && QuotationMoney.EvaluatePrice(
-                QuotationMoney.Truncate(row.HighlightPrice ?? 0m, decimalPlaces), total, marked.Count, decimalPlaces).IsValid;
+        var validity = QuotationMoney.EvaluatePriceGroup(
+            marked.Select(row => row.HighlightPrice ?? 0m).ToArray(), decimalPlaces);
+        for (var index = 0; index < marked.Count; index++)
+            marked[index].IsValidInMarkedGroup = validity[index];
     }
 
     public void ApplyItemPriceAction(IReadOnlyList<ItemSearchDisplayRow> rows, ItemPriceAction action)
