@@ -15,7 +15,7 @@ A versão do formato móvel v2 é `1.2.0` e o esquema correspondente é 29.
 
 ## Publicar os preços
 
-No computador exportador, execute **Atualizar** até onde for possível e use **Exportar atualizações PNCP**. A exportação pode ser parcial: contém os dados oficiais já concluídos de hoje e dos nove dias anteriores, mais contratações antigas cujo `global_updated_at` entrou nessa janela. CATMAT/CATSER e dados particulares não entram no arquivo.
+No computador exportador, execute **Atualizar** até onde for possível e use **Exportar atualizações PNCP**. A exportação pode ser parcial: contém os dados oficiais já concluídos de hoje e dos 19 dias anteriores, mais contratações antigas cujo `global_updated_at` entrou nessa janela. CATMAT/CATSER e dados particulares não entram no arquivo.
 
 Prepare a publicação com um único pacote:
 
@@ -23,10 +23,10 @@ Prepare a publicação com um único pacote:
 .\scripts\prepare-github-prices.ps1 `
   -UpdatePackage 'E:\Exportados\PNCP-atualizacoes-20260921.pncpupdate' `
   -OutputDirectory 'E:\Anexos PNCP' `
-  -MinimumAppVersion '1.2.0'
+  -MinimumAppVersion '1.2.24'
 ```
 
-O script aceita somente formato 2, esquema 29, janela exata de dez dias e arquivo menor que 2 GiB. Ele confere o registro de validação do exportador, descritores, tamanhos e SHA-256 dos blocos; não divide um pacote excessivo e não abre o banco real.
+O script aceita somente formato 2, esquema 29, janela exata de 10 ou 20 dias e arquivo menor que 2 GiB. Pacotes de 20 dias exigem o programa 1.2.24 ou posterior; pacotes anteriores de 10 dias continuam compatíveis. Ele confere o registro de validação do exportador, descritores, tamanhos e SHA-256 dos blocos; não divide um pacote excessivo e não abre o banco real. As verificações integrais SQLite são executadas exclusivamente pelo exportador, nunca pelo receptor.
 
 Crie ou atualize a release dedicada com tag **`precos`**, sem marcar **Latest**. Envie o `.pncpupdate` indicado e, por último, `prices-update.json`. O manifesto externo tem `format`, `publishedAt`, `minimumAppVersion`, `schema` e `update`; não possui `base` ou `cumulative`.
 
@@ -41,3 +41,5 @@ O pacote independe da origem, `baseId` ou linhagem do banco e pode ser aplicado 
 Cancelar ou encontrar erro reverte somente o bloco corrente. Blocos anteriores permanecem concluídos. Cotações, cestas, evidências, configurações e CATMAT/CATSER não são alterados. A importação também não consulta o PNCP nem cria pendência de revalidação.
 
 O instalador do programa continua incorporado ao executável. Ele substitui somente o caminho canônico após o encerramento normal e preserva o executável anterior se a troca falhar.
+
+Se uma versão antiga não reconheceu a janela de 20 dias na prévia, a instalação do programa continua disponível. Após esse reinício, o aplicativo atualizado consulta novamente somente o canal de preços e aplica o pacote compatível ao mesmo banco escolhido. Falhas de rede permitem tentar novamente em **Atualizar pelo GitHub**, preservando a atualização do programa e os blocos já concluídos.

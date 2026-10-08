@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$UpdatePackage,
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
-    [string]$MinimumAppVersion = '1.2.0'
+    [string]$MinimumAppVersion = '1.2.24'
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -46,7 +46,11 @@ try {
         [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None)
     $end = [DateTime]::ParseExact([string]$metadata.EndDate, 'yyyy-MM-dd',
         [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None)
-    if (($end - $start).Days -ne 9) { throw 'A janela precisa conter hoje e os nove dias anteriores.' }
+    $windowDays = ($end - $start).Days + 1
+    if ($windowDays -notin @(10, 20)) { throw 'A janela precisa conter exatamente 10 ou 20 dias.' }
+    if ($windowDays -eq 20 -and [Version]$MinimumAppVersion -lt [Version]'1.2.24') {
+        throw 'Pacotes de 20 dias exigem MinimumAppVersion 1.2.24 ou posterior.'
+    }
     if (-not $metadata.GeneratedAt -or -not $metadata.IntegrityValidatedAt -or
         [DateTimeOffset]$metadata.IntegrityValidatedAt -lt [DateTimeOffset]$metadata.GeneratedAt) {
         throw 'O exportador nao registrou a validacao de integridade.'
@@ -55,11 +59,12 @@ try {
     $chunks = @($metadata.Chunks)
     $daily = @($chunks | Where-Object Kind -eq 'publication-day')
     $late = @($chunks | Where-Object Kind -eq 'late-changes')
-    if ($daily.Count -ne 10 -or $late.Count -gt 1 -or $chunks.Count -lt 10 -or $chunks.Count -gt 11) {
-        throw 'O pacote nao possui os dez blocos diarios esperados.'
+    if ($daily.Count -ne $windowDays -or $late.Count -gt 1 -or
+        $chunks.Count -ne ($daily.Count + $late.Count)) {
+        throw 'O pacote nao possui os blocos diarios esperados.'
     }
     $expectedDates = @{}
-    for ($i = 0; $i -lt 10; $i++) { $expectedDates[$start.AddDays($i).ToString('yyyy-MM-dd')] = $true }
+    for ($i = 0; $i -lt $windowDays; $i++) { $expectedDates[$start.AddDays($i).ToString('yyyy-MM-dd')] = $true }
     foreach ($chunk in $daily) {
         if (-not $expectedDates.ContainsKey([string]$chunk.Date)) { throw 'Data diaria duplicada ou fora da janela.' }
         $expectedDates.Remove([string]$chunk.Date)

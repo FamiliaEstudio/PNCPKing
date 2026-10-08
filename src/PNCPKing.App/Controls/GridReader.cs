@@ -11,6 +11,8 @@ using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Threading;
 using PNCPKing.App.Services;
+using PNCPKing.App.ViewModels;
+using PNCPKing.Core.Models;
 
 namespace PNCPKing.App.Controls;
 
@@ -46,10 +48,22 @@ public sealed class GridReader : Grid
     private bool _loaded;
     private bool _copying;
     private Window? _window;
+    private readonly HashSet<IPriceHighlightRow> _highlightedSelection = [];
+    private bool _priceHighlightPending;
 
     public string DescriptionPath { get; set; } = "Description";
     public bool EnableFind { get; set; } = true;
     public bool OpenOnDoubleClick { get; set; } = true;
+    public bool EnablePriceHighlights { get; set; }
+    public static readonly DependencyProperty PriceDecimalPlacesProperty = DependencyProperty.Register(
+        nameof(PriceDecimalPlaces), typeof(int), typeof(GridReader),
+        new PropertyMetadata(2, (sender, _) => ((GridReader)sender).SchedulePriceHighlights()),
+        value => value is 2 or 4);
+    public int PriceDecimalPlaces
+    {
+        get => (int)GetValue(PriceDecimalPlacesProperty);
+        set => SetValue(PriceDecimalPlacesProperty, value);
+    }
     public Action<object>? PinRequested { get; set; }
     public Action<object>? BasketSelectionRequested { get; set; }
     public Action<object>? ClearRequested { get; set; }
@@ -147,6 +161,24 @@ public sealed class GridReader : Grid
             selected.Setters.Add(new Setter(Control.ForegroundProperty,
                 new DynamicResourceExtension(SystemColors.HighlightTextBrushKey)));
             rowStyle.Triggers.Add(selected);
+            if (EnablePriceHighlights)
+            {
+                var marked = new DataTrigger { Binding = new Binding(nameof(IPriceHighlightRow.IsMarkedForHighlight)), Value = true };
+                marked.Setters.Add(new Setter(Control.BackgroundProperty, new DynamicResourceExtension("MarkedPriceBrush")));
+                rowStyle.Triggers.Insert(0, marked);
+                AddPriceHighlight(rowStyle, nameof(IPriceHighlightRow.IsValidInMarkedGroup), false,
+                    "ValidMarkedPriceBrush", "ValidMarkedPriceTextBrush", "ValidMarkedPriceBorderBrush");
+                AddPriceHighlight(rowStyle, nameof(IPriceHighlightRow.IsValidInSelection), true,
+                    "ValidSelectedPriceBrush", "ValidSelectedPriceTextBrush", "ValidSelectedPriceBorderBrush");
+                // Cells must retain the row's color even when selection loses keyboard focus.
+                var cells = new Style(typeof(DataGridCell), value.CellStyle);
+                cells.Setters.Add(new Setter(Control.BackgroundProperty, Brushes.Transparent));
+                cells.Setters.Add(new Setter(Control.ForegroundProperty, new Binding(nameof(Control.Foreground))
+                {
+                    RelativeSource = new RelativeSource(RelativeSourceMode.FindAncestor, typeof(DataGridRow), 1)
+                }));
+                value.CellStyle = cells;
+            }
             value.RowStyle = rowStyle;
             value.PreviewMouseLeftButtonDown += OnLeftDown;
             value.PreviewMouseLeftButtonUp += OnLeftUp;
@@ -161,9 +193,52 @@ public sealed class GridReader : Grid
             {
                 _selectionCount.Text = $"Selecionados: {value.SelectedItems.Count:N0}";
                 if (_openedRow is not null && !ReferenceEquals(_openedRow, value.SelectedItem)) CloseReader();
+                SchedulePriceHighlights();
             };
             Children.Add(value);
         }
+    }
+
+    private static void AddPriceHighlight(Style style, string validityProperty, bool selected,
+        string background, string foreground, string border)
+    {
+        var trigger = new MultiDataTrigger();
+        trigger.Conditions.Add(new Condition(new Binding(validityProperty), true));
+        trigger.Conditions.Add(new Condition(new Binding(nameof(DataGridRow.IsSelected))
+        {
+            RelativeSource = RelativeSource.Self
+        }, selected));
+        if (!selected)
+            trigger.Conditions.Add(new Condition(new Binding(nameof(IPriceHighlightRow.IsMarkedForHighlight)), true));
+        trigger.Setters.Add(new Setter(Control.BackgroundProperty, new DynamicResourceExtension(background)));
+        trigger.Setters.Add(new Setter(Control.ForegroundProperty, new DynamicResourceExtension(foreground)));
+        trigger.Setters.Add(new Setter(Control.BorderBrushProperty, new DynamicResourceExtension(border)));
+        trigger.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(0, 1, 0, 1)));
+        trigger.Setters.Add(new Setter(Control.FontWeightProperty, FontWeights.SemiBold));
+        style.Triggers.Add(trigger);
+    }
+
+    private void SchedulePriceHighlights()
+    {
+        if (!EnablePriceHighlights || !_loaded || _priceHighlightPending) return;
+        _priceHighlightPending = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        {
+            _priceHighlightPending = false;
+            if (!_loaded) return;
+            foreach (var previous in _highlightedSelection) previous.IsValidInSelection = false;
+            _highlightedSelection.Clear();
+            var selected = Table.SelectedItems.OfType<IPriceHighlightRow>()
+                .Where(row => row.IsHighlightEligible && row.HighlightPrice is > 0)
+                .Select(row => (Row: row, Price: QuotationMoney.Truncate(row.HighlightPrice!.Value, PriceDecimalPlaces)))
+                .ToArray();
+            var total = selected.Sum(row => row.Price);
+            foreach (var (row, price) in selected)
+            {
+                row.IsValidInSelection = QuotationMoney.EvaluatePrice(price, total, selected.Length, PriceDecimalPlaces).IsValid;
+                _highlightedSelection.Add(row);
+            }
+        }));
     }
 
     public void OpenFind()
@@ -221,6 +296,7 @@ public sealed class GridReader : Grid
         _window = Window.GetWindow(this);
         if (_window is not null) _window.Deactivated += OnDeactivated;
         ScheduleFind(false);
+        SchedulePriceHighlights();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -230,6 +306,8 @@ public sealed class GridReader : Grid
         ((INotifyCollectionChanged)Table.Items).CollectionChanged -= OnItemsChanged;
         if (_window is not null) _window.Deactivated -= OnDeactivated;
         _window = null;
+        foreach (var row in _highlightedSelection) row.IsValidInSelection = false;
+        _highlightedSelection.Clear();
         CancelGestures();
         CancelFind();
         CloseReader();
@@ -243,6 +321,7 @@ public sealed class GridReader : Grid
         if (e.Action is NotifyCollectionChangedAction.Reset or NotifyCollectionChangedAction.Remove)
             CancelGestures();
         ScheduleFind(false);
+        SchedulePriceHighlights();
     }
 
     private string Description(object row) => GridText.Read(row, DescriptionPath)?.ToString() ?? string.Empty;

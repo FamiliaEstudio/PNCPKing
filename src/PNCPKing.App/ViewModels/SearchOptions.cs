@@ -19,10 +19,22 @@ public sealed record SearchSortOption(string Label, SearchSort Value)
 
 public enum ItemPriceAction { Pin, MarkForBasket, Clear }
 
-public sealed class ItemSearchDisplayRow : ObservableObject
+// The two price row types share only the transient information needed by their grids.
+public interface IPriceHighlightRow
+{
+    decimal? HighlightPrice { get; }
+    bool IsHighlightEligible { get; }
+    bool IsMarkedForHighlight { get; }
+    bool IsValidInSelection { get; set; }
+    bool IsValidInMarkedGroup { get; set; }
+}
+
+public sealed class ItemSearchDisplayRow : ObservableObject, IPriceHighlightRow
 {
     private bool _isPinned;
     private bool _isSelectedForBasket;
+    private bool _isValidInSelection;
+    private bool _isValidInMarkedGroup;
 
     public ItemSearchDisplayRow(ItemSearchRow source)
     {
@@ -61,6 +73,20 @@ public sealed class ItemSearchDisplayRow : ObservableObject
         Source.PriceState == ItemSearchPriceState.Homologated &&
         Source.Result is { IsActive: true, HomologatedUnitValue: > 0 };
 
+    public decimal? HighlightPrice => HomologatedUnitValue;
+    public bool IsHighlightEligible => IsBasketEligible;
+    public bool IsMarkedForHighlight => IsSelectedForBasket;
+    public bool IsValidInSelection
+    {
+        get => _isValidInSelection;
+        set => SetProperty(ref _isValidInSelection, value);
+    }
+    public bool IsValidInMarkedGroup
+    {
+        get => _isValidInMarkedGroup;
+        set => SetProperty(ref _isValidInMarkedGroup, value);
+    }
+
     public bool IsPinned
     {
         get => _isPinned;
@@ -81,6 +107,8 @@ public sealed class ItemSearchDisplayRow : ObservableObject
         {
             if (SetProperty(ref _isSelectedForBasket, value))
             {
+                if (!value) IsValidInMarkedGroup = false;
+                OnPropertyChanged(nameof(IsMarkedForHighlight));
                 OnPropertyChanged(nameof(IsRetained));
                 OnPropertyChanged(nameof(RetentionMarker));
             }

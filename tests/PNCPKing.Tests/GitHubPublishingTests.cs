@@ -36,8 +36,9 @@ public sealed class GitHubPublishingTests
         if (!OperatingSystem.IsWindows()) return;
         await using var source = await TestDatabase.CreateAsync();
         var today = DateOnly.FromDateTime(DateTime.Today);
-        await source.Repository.EnsureCoverageWindowAsync(today.AddDays(-9), today, [6]);
-        await source.Repository.SetCoverageStatusAsync(today.AddDays(-9), today, 6, "ALL", CoverageStatus.Complete, 0);
+        var start = today.AddDays(-(OfficialUpdateService.WindowDays - 1));
+        await source.Repository.EnsureCoverageWindowAsync(start, today, [6]);
+        await source.Repository.SetCoverageStatusAsync(start, today, 6, "ALL", CoverageStatus.Complete, 0);
         var update = Path.Combine(source.Directory, "janela móvel.pncpupdate");
         var exported = await new OfficialUpdateService(source.Repository.DatabasePath).ExportAsync(update);
         var original = await File.ReadAllBytesAsync(update);
@@ -50,6 +51,11 @@ public sealed class GitHubPublishingTests
             await File.ReadAllTextAsync(Path.Combine(output, "prices-update.json")), GitHubUpdateValidation.Json)!;
         GitHubUpdateValidation.Validate(manifest);
         Assert.Equal(exported.PackageId, manifest.Update.Manifest.PackageId);
+        Assert.Equal("1.2.24", manifest.MinimumAppVersion);
+        Assert.Equal(20, manifest.Update.Manifest.Chunks.Count);
+        var incompatible = await RunScriptAsync("prepare-github-prices.ps1",
+            ["-UpdatePackage", update, "-OutputDirectory", output, "-MinimumAppVersion", "1.2.23"]);
+        Assert.NotEqual(0, incompatible.ExitCode);
         var asset = Assert.Single(manifest.Update.Download.Parts);
         await GitHubUpdateService.ValidatePackageAsync(Path.Combine(output, asset.Name), manifest.Update);
         Assert.Equal(original, await File.ReadAllBytesAsync(update));

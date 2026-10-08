@@ -200,9 +200,11 @@ public sealed class QuotationPriceDisplayRow(
     bool isInSelectedBasket,
     decimal conversionFactor = 1m,
     decimal? effectiveUnitPrice = null,
-    int priceDecimalPlaces = 2) : ObservableObject
+    int priceDecimalPlaces = 2) : ObservableObject, IPriceHighlightRow
 {
     private bool _isInSelectedBasket = isInSelectedBasket;
+    private bool _isValidInSelection;
+    private bool _isValidInMarkedGroup;
 
     public QuotationReference Source { get; } = source;
     public QuotationReferenceDisplay ReferenceDisplay => new(Source);
@@ -222,6 +224,19 @@ public sealed class QuotationPriceDisplayRow(
     public decimal ConversionFactor { get; } = conversionFactor;
     public decimal EffectiveUnitPrice { get; } = effectiveUnitPrice ??
         QuotationMoney.Truncate(source.UnitPrice * conversionFactor, priceDecimalPlaces);
+    public decimal? HighlightPrice => EffectiveUnitPrice;
+    public bool IsHighlightEligible => Source.State == QuotationReferenceState.Eligible;
+    public bool IsMarkedForHighlight => IsInSelectedBasket;
+    public bool IsValidInSelection
+    {
+        get => _isValidInSelection;
+        set => SetProperty(ref _isValidInSelection, value);
+    }
+    public bool IsValidInMarkedGroup
+    {
+        get => _isValidInMarkedGroup;
+        set => SetProperty(ref _isValidInMarkedGroup, value);
+    }
     public string EffectiveUnitPriceText => EffectiveUnitPrice.ToString($"C{priceDecimalPlaces}");
     public string State => Source.State switch
     {
@@ -250,6 +265,13 @@ public sealed class QuotationPriceDisplayRow(
     public bool IsInSelectedBasket
     {
         get => _isInSelectedBasket;
-        set => SetProperty(ref _isInSelectedBasket, value);
+        set
+        {
+            if (SetProperty(ref _isInSelectedBasket, value))
+            {
+                if (!value) IsValidInMarkedGroup = false;
+                OnPropertyChanged(nameof(IsMarkedForHighlight));
+            }
+        }
     }
 }

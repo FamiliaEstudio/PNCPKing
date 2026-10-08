@@ -97,6 +97,7 @@ public sealed partial class MainViewModel
             if (SetProperty(ref _selectedQuotationProject, value))
             {
                 OnPropertyChanged(nameof(IsMedicationQuotation));
+                RefreshMarkedPriceHighlights();
                 _ = LoadQuotationProjectAsync(value?.Id);
                 NotifyCommands();
             }
@@ -410,6 +411,7 @@ public sealed partial class MainViewModel
                 return;
             }
 
+            existing.ReturnFocusToOwnerOnClose = false;
             existing.Close();
         }
 
@@ -425,13 +427,14 @@ public sealed partial class MainViewModel
             _dataFolder,
             project.Id,
             line.Line.Id);
+        var owner = Application.Current.MainWindow;
         var window = new QuotationItemWindow(
             viewModel,
             _windowCaptureService,
             _internetEvidenceStore,
             _columnLayouts)
         {
-            Owner = Application.Current.MainWindow
+            Owner = owner
         };
         void RefreshMedicationCommand(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
         {
@@ -451,11 +454,13 @@ public sealed partial class MainViewModel
             {
                 _quotationItemWindow = null;
             }
-            if (_quotationWordReport is null && SelectedQuotationProject is { } selected)
+            if (!_disposed && _quotationWordReport is null && SelectedQuotationProject is { } selected)
                 _ = LoadQuotationProjectAsync(selected.Id);
             ((AsyncRelayCommand)ToggleQuotationMedicationCommand).NotifyCanExecuteChanged();
             ((AsyncRelayCommand)ExportQuotationWordCommand).NotifyCanExecuteChanged();
             ((AsyncRelayCommand)ExportQuotationPriceWordCommand).NotifyCanExecuteChanged();
+            if (window.ReturnFocusToOwnerOnClose)
+                ReturnToMainWindowAfterItemClose(owner);
         };
         _quotationItemWindow = window;
         if (!string.IsNullOrWhiteSpace(referenceId))
@@ -465,6 +470,14 @@ public sealed partial class MainViewModel
 
         window.Show();
     }
+
+    internal void ReturnToMainWindowAfterItemClose(Window owner) =>
+        owner.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (_disposed || _quotationItemWindow is not null || !owner.IsVisible || !owner.IsEnabled) return;
+            if (owner.WindowState == WindowState.Minimized) SystemCommands.RestoreWindow(owner);
+            owner.Activate();
+        }));
 
     private void OpenQuotationSearch(PromptMatchLevel level)
     {
@@ -1303,6 +1316,7 @@ public sealed partial class MainViewModel
     {
         _quotationAutomationCancellation?.Dispose();
         _quotationAutomationCancellation = new CancellationTokenSource();
+        OnPropertyChanged(nameof(IsQuotationAutomationRunning));
         _quotationAutomationCompletion = new TaskCompletionSource<bool>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         IsFileBusy = true;
@@ -1410,6 +1424,7 @@ public sealed partial class MainViewModel
 
         _quotationAutomationCancellation?.Dispose();
         _quotationAutomationCancellation = new CancellationTokenSource();
+        OnPropertyChanged(nameof(IsQuotationAutomationRunning));
         _quotationAutomationCompletion = new TaskCompletionSource<bool>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         var cancellationToken = _quotationAutomationCancellation.Token;
@@ -1643,6 +1658,7 @@ public sealed partial class MainViewModel
         {
             _quotationAutomationCancellation.Dispose();
             _quotationAutomationCancellation = null;
+            OnPropertyChanged(nameof(IsQuotationAutomationRunning));
             _quotationAutomationCompletion?.TrySetResult(true);
             _quotationAutomationCompletion = null;
             SetPriceBusy(false, usesNetwork: false);
@@ -2474,6 +2490,7 @@ public sealed partial class MainViewModel
             .ToHashSet(StringComparer.Ordinal) ?? [];
         var selectedPrices = SelectedQuotationBasket?.Source.PriceEntries
             .ToDictionary(entry => entry.Reference.Id, StringComparer.Ordinal) ?? [];
+        var markedTotal = selectedPrices.Values.Sum(entry => entry.EffectiveUnitPrice);
         var visibleReferences = SelectedQuotationLine?.Analysis.References
             .Select(reference =>
             {
@@ -2493,12 +2510,16 @@ public sealed partial class MainViewModel
             .Select(value =>
             {
                 selectedPrices.TryGetValue(value.Reference.Id, out var price);
-                return new QuotationPriceDisplayRow(
+                var row = new QuotationPriceDisplayRow(
                     value.Reference,
                     value.InBasket,
                     price?.ConversionFactor ?? 1m,
                     price?.EffectiveUnitPrice,
                     SelectedQuotationLine.Analysis.PriceDecimalPlaces);
+                row.IsValidInMarkedGroup = value.InBasket && row.IsHighlightEligible &&
+                    QuotationMoney.EvaluatePrice(row.EffectiveUnitPrice, markedTotal, selectedPrices.Count,
+                        SelectedQuotationLine.Analysis.PriceDecimalPlaces).IsValid;
+                return row;
             }) ?? [];
         VisibleQuotationReferences.ReplaceAll(visibleReferences);
 

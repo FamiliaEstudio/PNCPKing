@@ -8,6 +8,13 @@
     <SolidColorBrush x:Key="BorderBrush" Color="#CBD5E1" />
     <SolidColorBrush x:Key="DividerBrush" Color="#E4EAF2" />
     <SolidColorBrush x:Key="BrandBrush" Color="#0B4FA3" />
+    <SolidColorBrush x:Key="MarkedPriceBrush" Color="#E3F4E5" />
+    <SolidColorBrush x:Key="ValidMarkedPriceBrush" Color="#BCECC5" />
+    <SolidColorBrush x:Key="ValidMarkedPriceTextBrush" Color="#104D23" />
+    <SolidColorBrush x:Key="ValidMarkedPriceBorderBrush" Color="#2EB85C" />
+    <SolidColorBrush x:Key="ValidSelectedPriceBrush" Color="#1874DC" />
+    <SolidColorBrush x:Key="ValidSelectedPriceTextBrush" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="ValidSelectedPriceBorderBrush" Color="#70BBFF" />
     <SolidColorBrush x:Key="BrandHoverBrush" Color="#09458F" />
     <SolidColorBrush x:Key="BrandPressedBrush" Color="#073A78" />
     <SolidColorBrush x:Key="GoldBrush" Color="#D6A000" />

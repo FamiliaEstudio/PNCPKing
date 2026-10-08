@@ -128,6 +128,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         _customStartDate = DataWindow.Start(DateOnly.FromDateTime(DateTime.Today)).ToDateTime(TimeOnly.MinValue);
         _customEndDate = DateTime.Today;
         _main.TimedQuotationProgressChanged += OnTimedProgress;
+        _main.PropertyChanged += OnMainPropertyChanged;
         CatalogKinds =
         [
             _selectedCatalogKind,
@@ -193,7 +194,14 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     }
 
     public bool CanEditRequestedDetails =>
-        Line?.Line.AutomationState == QuotationAutomationItemState.Manual;
+        Line is not null && !_disposed && !IsBusy && !IsSearchBusy &&
+        !_main.IsPriceBusy && !_main.IsQuotationAutomationRunning;
+
+    private void OnMainPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
+    {
+        if (args.PropertyName is nameof(MainViewModel.IsQuotationAutomationRunning) or nameof(MainViewModel.IsPriceBusy))
+            OnPropertyChanged(nameof(CanEditRequestedDetails));
+    }
 
     public string CatalogQuery
     {
@@ -494,7 +502,10 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     public bool IsBusy
     {
         get => _isBusy;
-        private set => SetProperty(ref _isBusy, value);
+        private set
+        {
+            if (SetProperty(ref _isBusy, value)) OnPropertyChanged(nameof(CanEditRequestedDetails));
+        }
     }
 
     private bool _isInteracting;
@@ -509,7 +520,10 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     public bool IsSearchBusy
     {
         get => _isSearchBusy;
-        private set => SetProperty(ref _isSearchBusy, value);
+        private set
+        {
+            if (SetProperty(ref _isSearchBusy, value)) OnPropertyChanged(nameof(CanEditRequestedDetails));
+        }
     }
 
     public string BasketCalculation => SelectedBasket is null
@@ -614,7 +628,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     {
         if (!CanEditRequestedDetails)
         {
-            throw new InvalidOperationException("Somente itens manuais podem ter quantidade e unidade editadas aqui.");
+            throw new InvalidOperationException("Aguarde o carregamento e pause a pesquisa ou a automação antes de editar o item.");
         }
 
         await _quotations.UpdateLineRequestedDetailsAsync(_lineId, quantity, unit)
@@ -1338,6 +1352,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         _disposed = true;
         Interlocked.Increment(ref _searchGeneration);
         _main.TimedQuotationProgressChanged -= OnTimedProgress;
+        _main.PropertyChanged -= OnMainPropertyChanged;
         _searchCancellation?.Cancel();
         _summaryCancellation?.Cancel();
         if (_workspace is not null && !string.IsNullOrWhiteSpace(SearchText))
@@ -1463,6 +1478,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             .ToHashSet(StringComparer.Ordinal) ?? [];
         var selectedPrices = SelectedBasket?.Source.PriceEntries
             .ToDictionary(entry => entry.Reference.Id, StringComparer.Ordinal) ?? [];
+        var markedTotal = selectedPrices.Values.Sum(entry => entry.EffectiveUnitPrice);
         var selectedId = SelectedPrice?.Id;
         VisibleReferences.Clear();
         foreach (var reference in Line.Analysis.References)
@@ -1480,12 +1496,16 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             if (visible)
             {
                 selectedPrices.TryGetValue(reference.Id, out var price);
-                VisibleReferences.Add(new QuotationPriceDisplayRow(
+                var row = new QuotationPriceDisplayRow(
                     reference,
                     inBasket,
                     price?.ConversionFactor ?? 1m,
                     price?.EffectiveUnitPrice,
-                    Line.Analysis.PriceDecimalPlaces));
+                    Line.Analysis.PriceDecimalPlaces);
+                row.IsValidInMarkedGroup = inBasket && row.IsHighlightEligible &&
+                    QuotationMoney.EvaluatePrice(row.EffectiveUnitPrice, markedTotal, selectedPrices.Count,
+                        Line.Analysis.PriceDecimalPlaces).IsValid;
+                VisibleReferences.Add(row);
             }
         }
 

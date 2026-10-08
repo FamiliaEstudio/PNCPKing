@@ -70,11 +70,12 @@ public static class GitHubUpdateValidation
         var m = package.Manifest;
         var download = package.Download;
         if (m is null || m.Format != OfficialUpdateService.CurrentFormat || m.Schema != schema ||
-            !Guid.TryParseExact(m.PackageId, "N", out _) || m.Chunks is not { Count: >= 10 and <= 11 } ||
+            m.Chunks is null ||
             package.ExpandedSize != m.Chunks.Sum(chunk => chunk.ExpandedSize) || package.ExpandedSize <= 0 ||
             download is null || download.Size <= 0 || download.Size >= AssetLimit || !IsHash(download.Sha256) ||
             download.Parts is not { Count: 1 })
             throw new InvalidDataException("Pacote de preços inválido.");
+        OfficialUpdateService.ValidateManifest(m);
         foreach (var part in download.Parts) ValidateFile(part);
         if (download.Parts.Sum(p => p.Size) != download.Size ||
             download.Parts[0].Size != download.Size ||
@@ -102,7 +103,8 @@ public static class GitHubUpdateValidation
             {
                 if (!Completed(prices.Update)) package = prices.Update;
                 pricesStatus = package is null ? "Preços já atualizados neste banco." :
-                    $"Janela móvel de dez dias publicada em {prices.PublishedAt.LocalDateTime:g}. Compatível diretamente com backups.";
+                    $"Janela móvel de {prices.Update.Manifest.EndDate.DayNumber - prices.Update.Manifest.StartDate.DayNumber + 1} dias " +
+                    $"publicada em {prices.PublishedAt.LocalDateTime:g}. Compatível diretamente com backups.";
             }
         }
         return new(app, package, appStatus, pricesStatus);

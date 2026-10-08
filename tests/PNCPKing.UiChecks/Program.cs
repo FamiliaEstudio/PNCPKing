@@ -22,6 +22,22 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args is ["--price-improvements"])
+        {
+            var priceApp = CreateUiApplication();
+            priceApp.Startup += async (_, _) =>
+            {
+                try
+                {
+                    await CheckPriceHighlightsAsync();
+                    await CheckImportedItemEditorAsync();
+                    await CheckItemOwnerFocusAsync();
+                    priceApp.Shutdown();
+                }
+                catch (Exception error) { Console.Error.WriteLine(error); priceApp.Shutdown(1); }
+            };
+            return priceApp.Run();
+        }
         if (args is ["--word", var wordOutputDirectory])
         {
             var wordApp = CreateUiApplication();

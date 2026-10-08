@@ -100,7 +100,7 @@ public sealed partial class MainViewModel
                 var pending = await GitHubAppInstaller.ReadPendingAsync(id, ct);
                 if (ApplicationVersion != GitHubUpdateValidation.ParseVersion(pending.AppVersion))
                     throw new InvalidDataException("A versão instalada não corresponde à atualização pendente.");
-                await ApplyGitHubPricesAsync(pending, ct);
+                await ApplyGitHubPricesAsync(pending, ct, refreshMissingPrices: true);
                 GitHubAppInstaller.Complete(id);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -116,12 +116,27 @@ public sealed partial class MainViewModel
         return _gitHubUpdateTask;
     }
 
-    private async Task ApplyGitHubPricesAsync(PendingGitHubUpdate pending, CancellationToken ct)
+    private async Task ApplyGitHubPricesAsync(PendingGitHubUpdate pending, CancellationToken ct,
+        bool refreshMissingPrices = false)
     {
         var official = new OfficialUpdateService(_calibrationService.Connections);
         if (!string.Equals(Path.GetFullPath(pending.DatabasePath), Path.GetFullPath(_calibrationService.Connections.DatabasePath),
                 StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("O banco selecionado mudou. Consulte novamente as atualizações antes de importar.");
+        if (refreshMissingPrices && pending.PriceUpdate is null && pending.DeferredPrices is null)
+        {
+            FileOperationProgressText = "Programa atualizado. Consultando o pacote de preços…";
+            using var http = new HttpClient(new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(30) })
+                { Timeout = Timeout.InfiniteTimeSpan };
+            var prices = await new GitHubUpdateService(http).GetPricesAfterRestartAsync(ApplicationVersion,
+                SqliteContractRepository.CurrentSchemaVersion, await official.GetTransferStatusAsync(ct), ct);
+            if (prices is null)
+            {
+                StatusText = "Programa atualizado. Preços já atualizados neste banco.";
+                return;
+            }
+            pending = pending with { DeferredPrices = prices };
+        }
         if (pending.DeferredPrices is { } deferred)
         {
             GitHubUpdateValidation.Validate(deferred.Manifest);

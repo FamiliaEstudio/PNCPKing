@@ -18,11 +18,11 @@ public sealed class GitHubUpdateTests
     private static ReleaseFile File(string name, byte[]? bytes = null) => new(name, (bytes ?? Bytes).Length, Hash(bytes ?? Bytes));
     private static OfficialTransferStatus Empty() => new(new Dictionary<string, OfficialImportReceipt>());
 
-    private static OfficialUpdateManifest Manifest()
+    private static OfficialUpdateManifest Manifest(int days = OfficialUpdateService.WindowDays)
     {
         var end = DateOnly.FromDateTime(DateTime.Today);
-        var start = end.AddDays(-9);
-        var chunks = Enumerable.Range(0, 10).Select(index => new OfficialUpdateChunk(
+        var start = end.AddDays(-(days - 1));
+        var chunks = Enumerable.Range(0, days).Select(index => new OfficialUpdateChunk(
             "day:" + start.AddDays(index).ToString("yyyy-MM-dd"), "publication-day",
             "days/" + start.AddDays(index).ToString("yyyy-MM-dd") + ".db", start.AddDays(index),
             4096, Hash(Bytes), Hash(Encoding.UTF8.GetBytes("logical-" + index)), 0, 0, 0, 0, 0, 1)).ToArray();
@@ -30,9 +30,9 @@ public sealed class GitHubUpdateTests
             Guid.NewGuid().ToString("N"), chunks);
     }
 
-    private static PriceUpdatePackage Package()
+    private static PriceUpdatePackage Package(int days = OfficialUpdateService.WindowDays)
     {
-        var manifest = Manifest();
+        var manifest = Manifest(days);
         var file = File("prices.pncpupdate");
         return new(manifest, manifest.Chunks.Sum(chunk => chunk.ExpandedSize),
             new(file.Size, file.Sha256, [file]));
@@ -44,6 +44,62 @@ public sealed class GitHubUpdateTests
     private static GitHubUpdateCheck Check(AppUpdateManifest? app, PricesUpdateManifest? prices) => new(
         app is null ? null : new("v" + app.Version, app), prices is null ? null : new("precos", prices),
         "Programa não publicado.", "Preços não publicados.");
+
+    [Theory]
+    [InlineData(10)]
+    [InlineData(20)]
+    public void PricesAcceptValidatedTenAndTwentyDayWindows(int days)
+    {
+        var prices = Prices() with { Update = Package(days) };
+        GitHubUpdateValidation.Validate(prices);
+        Assert.Contains($"{days} dias", GitHubUpdateValidation.Plan(Check(null, prices), new(1, 2, 24), Schema, Empty()).PricesStatus);
+        var invalid = prices.Update.Manifest with { IntegrityValidatedAt = default };
+        Assert.Throws<InvalidDataException>(() => GitHubUpdateValidation.Validate(prices with
+        {
+            Update = prices.Update with { Manifest = invalid }
+        }));
+    }
+
+    [Fact]
+    public async Task LegacyRestartWithoutPricesQueriesOnlyTheUpdatedPriceChannelAndHonorsReceipts()
+    {
+        var pending = new PendingGitHubUpdate("banco.db", "1.2.24", null);
+        var restored = JsonSerializer.Deserialize<PendingGitHubUpdate>(JsonSerializer.Serialize(pending, GitHubUpdateValidation.Json),
+            GitHubUpdateValidation.Json)!;
+        Assert.Null(restored.PriceUpdate);
+        Assert.Null(restored.DeferredPrices);
+        var prices = Prices() with { MinimumAppVersion = "1.2.24" };
+        var requests = new List<string>();
+        using var handler = new FakeHandler(request =>
+        {
+            requests.Add(request.RequestUri!.AbsolutePath);
+            return PricesResponse(request, prices);
+        });
+        using var client = new HttpClient(handler);
+        var service = new GitHubUpdateService(client);
+        var found = await service.GetPricesAfterRestartAsync(new(1, 2, 24), Schema, Empty());
+        Assert.Equal(20, found!.Manifest.Update.Manifest.Chunks.Count);
+        Assert.DoesNotContain(requests, path => path.EndsWith("/latest", StringComparison.Ordinal));
+        var completed = new OfficialTransferStatus(new Dictionary<string, OfficialImportReceipt>
+        {
+            [prices.Update.Manifest.PackageId] = new("digest", true)
+        });
+        Assert.Null(await service.GetPricesAfterRestartAsync(new(1, 2, 24), Schema, completed));
+    }
+
+    [Fact]
+    public async Task PricesAfterRestartReportNetworkFailureAndCanBeRetried()
+    {
+        var available = false;
+        var prices = Prices();
+        using var handler = new FakeHandler(request => available
+            ? PricesResponse(request, prices) : new(HttpStatusCode.ServiceUnavailable));
+        using var client = new HttpClient(handler);
+        var service = new GitHubUpdateService(client);
+        await Assert.ThrowsAsync<IOException>(() => service.GetPricesAfterRestartAsync(new(1, 2, 24), Schema, Empty()));
+        available = true;
+        Assert.NotNull(await service.GetPricesAfterRestartAsync(new(1, 2, 24), Schema, Empty()));
+    }
 
     [Fact]
     public void RestartPreservesApprovedPricesWithoutRequiringADownloadedPackage()

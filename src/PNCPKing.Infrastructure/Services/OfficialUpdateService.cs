@@ -39,7 +39,7 @@ public sealed record OfficialImportReceipt(string Checksum, bool Completed);
 public sealed record OfficialTransferStatus(IReadOnlyDictionary<string, OfficialImportReceipt> Imports);
 
 /// <summary>
-/// Creates and applies self-contained ten-day official-data packages. Export validates each
+/// Creates twenty-day official-data packages and also accepts existing ten-day packages. Export validates each
 /// completed portion and its SQLite payload; import authenticates extracted bytes and merges
 /// one typed block per transaction.
 /// </summary>
@@ -48,7 +48,7 @@ public sealed class OfficialUpdateService
     public const int CurrentFormat = 2;
     // The v2 official-data payload is unchanged by migrations of local quotations.
     public const int PayloadSchemaVersion = 29;
-    public const int WindowDays = 10;
+    public const int WindowDays = 20;
     private const string DayKind = "publication-day";
     private const string LateKind = "late-changes";
     private const int CompleteCoverage = (int)CoverageStatus.Complete;
@@ -546,25 +546,26 @@ public sealed class OfficialUpdateService
         return (manifest, Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant());
     }
 
-    private static void ValidateManifest(OfficialUpdateManifest manifest, ZipArchive zip)
+    public static void ValidateManifest(OfficialUpdateManifest manifest)
     {
         if (manifest.Format != CurrentFormat || manifest.Schema != PayloadSchemaVersion)
             throw new InvalidDataException("Formato ou esquema do pacote incompatível.");
-        if (manifest.EndDate.DayNumber - manifest.StartDate.DayNumber != WindowDays - 1 ||
+        var windowDays = manifest.EndDate.DayNumber - manifest.StartDate.DayNumber + 1;
+        if (windowDays is not 10 and not WindowDays ||
             !Guid.TryParseExact(manifest.PackageId, "N", out _) || manifest.Chunks is null)
             throw new InvalidDataException("Período ou identidade do pacote inválido.");
         if (manifest.GeneratedAt == default || manifest.IntegrityValidatedAt == default ||
             manifest.IntegrityValidatedAt < manifest.GeneratedAt)
             throw new InvalidDataException("Registro de validação do exportador inválido.");
 
-        var expectedDates = Enumerable.Range(0, WindowDays)
+        var expectedDates = Enumerable.Range(0, windowDays)
             .Select(offset => manifest.StartDate.AddDays(offset)).ToHashSet();
         var daily = manifest.Chunks.Where(chunk => chunk.Kind == DayKind).ToArray();
-        if (daily.Length != WindowDays || daily.Any(chunk => chunk.Date is null) ||
+        if (daily.Length != windowDays || daily.Any(chunk => chunk.Date is null) ||
             !daily.Select(chunk => chunk.Date!.Value).ToHashSet().SetEquals(expectedDates) ||
             manifest.Chunks.Count(chunk => chunk.Kind == LateKind) > 1 ||
             manifest.Chunks.Any(chunk => chunk.Kind is not DayKind and not LateKind))
-            throw new InvalidDataException("A janela do pacote não contém exatamente os dez blocos diários.");
+            throw new InvalidDataException("A janela do pacote deve conter exatamente 10 ou 20 blocos diários.");
 
         var names = new HashSet<string>(StringComparer.Ordinal);
         var keys = new HashSet<string>(StringComparer.Ordinal);
@@ -575,13 +576,22 @@ public sealed class OfficialUpdateService
                 !GitHubUpdateValidation.IsHash(chunk.ContentDigest) || CountRows(chunk) < 0 ||
                 chunk.Entry.Contains("..", StringComparison.Ordinal) || Path.IsPathRooted(chunk.Entry))
                 throw new InvalidDataException("Descritor de bloco inválido.");
+        }
+    }
+
+    private static void ValidateManifest(OfficialUpdateManifest manifest, ZipArchive zip)
+    {
+        ValidateManifest(manifest);
+        foreach (var chunk in manifest.Chunks)
+        {
             var entry = zip.GetEntry(chunk.Entry);
             if (entry is null || entry.Length != chunk.ExpandedSize)
                 throw new InvalidDataException($"Bloco ausente ou com tamanho divergente: {chunk.Key}.");
         }
 
         if (zip.Entries.Count != manifest.Chunks.Count + 1 ||
-            zip.Entries.Any(entry => entry.FullName != "manifest.json" && !names.Contains(entry.FullName)))
+            zip.Entries.Any(entry => entry.FullName != "manifest.json" &&
+                !manifest.Chunks.Any(chunk => chunk.Entry == entry.FullName)))
             throw new InvalidDataException("O pacote contém entradas não declaradas.");
     }
 
@@ -698,15 +708,12 @@ public sealed class OfficialUpdateService
             counts.CommandText = """
                 SELECT (SELECT COUNT(*) FROM accepted_contracts)
                      + (SELECT COUNT(*) FROM accepted_items)
-                     + (SELECT COUNT(*) FROM accepted_results),
-                       (SELECT COUNT(*) FROM incoming.contracts)
-                     + (SELECT COUNT(*) FROM incoming.items)
-                     + (SELECT COUNT(*) FROM incoming.item_results);
+                     + (SELECT COUNT(*) FROM accepted_results);
                 """;
             await using var reader = await counts.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
             var applied = reader.GetInt64(0);
-            var skipped = Math.Max(0, reader.GetInt64(1) - applied);
+            var skipped = Math.Max(0, checked(chunk.Contracts + chunk.Items + chunk.Results) - applied);
 
             command.CommandText = """
                 UPDATE official_update_chunks SET applied=$applied,skipped=$skipped

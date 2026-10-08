@@ -483,7 +483,9 @@
                         <RowDefinition Height="*" />
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
-                    <controls:GridReader x:Name="ItemResultsReader" DescriptionPath="Item.Description">
+                    <controls:GridReader x:Name="ItemResultsReader" DescriptionPath="Item.Description"
+                                         EnablePriceHighlights="True"
+                                         PriceDecimalPlaces="{Binding SelectedQuotationProject.Source.PriceDecimalPlaces, FallbackValue=2}">
                         <DataGrid x:Name="ItemResultsGrid" ItemsSource="{Binding ItemSearchRows}"
                                   SelectedItem="{Binding SelectedItemSearchRow}"
                                   PreviewKeyDown="ItemResultsGrid_PreviewKeyDown"
@@ -888,7 +890,8 @@
                                                    VerticalAlignment="Center" Margin="8,0" />
                                     </WrapPanel>
 
-                                    <controls:GridReader Grid.Row="3">
+                                    <controls:GridReader Grid.Row="3" EnablePriceHighlights="True"
+                                                         PriceDecimalPlaces="{Binding SelectedQuotationLine.Analysis.PriceDecimalPlaces, FallbackValue=2}">
                                         <DataGrid x:Name="SelectedBasketReferencesGrid"
                                                   ItemsSource="{Binding VisibleQuotationReferences}"
                                                   SelectedItem="{Binding SelectedVisibleQuotationReference}" SelectionMode="Extended" SelectionUnit="FullRow"

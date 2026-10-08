@@ -19,6 +19,18 @@ public static class DecimalScale
 
 public static class QuotationMoney
 {
+    public static (decimal DeviationPercent, bool IsValid) EvaluatePrice(
+        decimal effectivePrice, decimal totalPrice, int priceCount, int decimalPlaces)
+    {
+        var otherPricesAverage = priceCount < 2
+            ? 0m
+            : Truncate((totalPrice - effectivePrice) / (priceCount - 1), decimalPlaces);
+        var deviation = otherPricesAverage <= 0m
+            ? 0m
+            : Math.Abs(effectivePrice / otherPricesAverage - 1m) * 100m;
+        return (deviation, effectivePrice > 0m && deviation <= 25m);
+    }
+
     public static decimal TruncateToCents(decimal value) => Truncate(value, 2);
 
     public static decimal Truncate(decimal value, int decimalPlaces)

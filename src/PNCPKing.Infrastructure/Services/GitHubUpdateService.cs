@@ -23,6 +23,23 @@ public sealed class GitHubUpdateService(HttpClient client)
             app.Result.Error ?? "Programa disponível.", prices.Result.Error ?? "Preços disponíveis.");
     }
 
+    public async Task<GitHubUpdateRelease<PricesUpdateManifest>?> GetPricesAfterRestartAsync(
+        Version currentVersion, int currentSchema, OfficialTransferStatus state,
+        CancellationToken cancellationToken = default)
+    {
+        // Older programs can install the new executable while rejecting its larger price window.
+        // Query only the price channel after restart, using the updated package reader.
+        var prices = await ReadChannelAsync<PricesUpdateManifest>("tags/precos", "prices-update.json", cancellationToken)
+            .ConfigureAwait(false);
+        if (prices.Release is null) throw new IOException(prices.Error ?? "Preços indisponíveis.");
+        if (GitHubUpdateValidation.ParseVersion(prices.Release.Manifest.MinimumAppVersion) > currentVersion ||
+            prices.Release.Manifest.Schema > currentSchema)
+            throw new InvalidDataException("Os preços publicados exigem uma versão mais recente do programa.");
+        var plan = GitHubUpdateValidation.Plan(new(null, prices.Release, string.Empty, string.Empty),
+            currentVersion, currentSchema, state);
+        return plan.Package is null ? null : prices.Release;
+    }
+
     public async Task<GitHubReleaseNotes> GetReleaseNotesAsync(
         Version installedVersion, Version offeredVersion, CancellationToken cancellationToken = default)
     {

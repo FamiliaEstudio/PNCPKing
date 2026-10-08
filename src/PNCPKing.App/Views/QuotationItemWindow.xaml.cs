@@ -41,6 +41,7 @@ public partial class QuotationItemWindow : Window
     }
 
     public QuotationItemViewModel ViewModel { get; }
+    internal bool ReturnFocusToOwnerOnClose { get; set; } = true;
 
     public void ShowReferenceDocuments(string referenceId)
     {

@@ -6,7 +6,7 @@ O formato v2 foi desenhado para que o computador receptor, inclusive com HD lent
 
 ## Janela e conteúdo
 
-Cada exportação usa a data local do computador de origem e inclui exatamente hoje e os nove dias anteriores. Há um SQLite tipado por dia de publicação e, quando necessário, um décimo primeiro bloco para contratações publicadas antes da janela mas oficialmente alteradas nela.
+Cada exportação usa a data local do computador de origem e inclui exatamente hoje e os 19 dias anteriores. Há um SQLite tipado por dia de publicação e, quando necessário, um vigésimo primeiro bloco para contratações publicadas antes da janela mas oficialmente alteradas nela. Pacotes anteriores de 10 dias continuam aceitos quando possuem a declaração de validação na origem; outras durações são recusadas.
 
 Cada bloco pode conter contratações já recebidas, snapshots de listas completas de itens, itens dessas listas, snapshots de resultados concluídos, resultados e células de cobertura concluídas. A exportação parcial também leva checkpoints de páginas de publicação diária que já foram gravadas. Listas e resultados vazios são provas completas e atômicas. CATMAT/CATSER, cotações, cestas, evidências, configurações, FTS e estados operacionais particulares não são transportados.
 
@@ -34,6 +34,8 @@ As regras de conciliação são:
 - aplicar checkpoints de publicação parcial sem sobrescrever trabalho já concluído no destino; **Atualizar** retoma as lacunas, listas e resultados restantes.
 
 Gatilhos normais mantêm FTS, estatísticas e índices derivados apenas para registros efetivamente alterados. Cancelamento ou falha reverte o bloco corrente; a retomada ignora os anteriores. Reimportar o mesmo pacote depende apenas do manifesto e dos recibos e não extrai bancos.
+
+As contagens de registros recebidos usadas no relatório vêm do manifesto validado na origem, evitando novas leituras integrais das tabelas anexadas apenas para contagem. A contagem de registros efetivamente aplicados continua calculada dentro da transação.
 
 Pacotes v1 são rejeitados com mensagem explícita e não possuem caminho de adoção.
 

@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using PNCPKing.Core.Models;
 using PNCPKing.Infrastructure.Data;
@@ -10,7 +11,7 @@ namespace PNCPKing.Tests;
 public sealed class OfficialUpdateTests
 {
     private static readonly DateOnly Today = DateOnly.FromDateTime(DateTime.Today);
-    private static readonly DateOnly Start = Today.AddDays(-9);
+    private static readonly DateOnly Start = Today.AddDays(-(OfficialUpdateService.WindowDays - 1));
 
     [Fact]
     public async Task V2ExportsFixedWindowAndLateChangesWithoutCatalogAndImportsIntoIndependentDatabase()
@@ -22,9 +23,15 @@ public sealed class OfficialUpdateTests
         var current = Contract("current", Today, Today);
         var corrected = Contract("corrected", Today.AddDays(-40), Today);
         var unchangedOld = Contract("unchanged-old", Today.AddDays(-40), Today.AddDays(-40));
+        var firstDay = Contract("first-day", Start, Start);
+        var outside = Contract("outside", Start.AddDays(-1), Start.AddDays(-1));
+        var correctedAtStart = Contract("corrected-at-start", Today.AddDays(-40), Start);
         await SaveEmptyListAsync(source, current);
         await SaveEmptyListAsync(source, corrected);
         await SaveEmptyListAsync(source, unchangedOld);
+        await SaveEmptyListAsync(source, firstDay);
+        await SaveEmptyListAsync(source, outside);
+        await SaveEmptyListAsync(source, correctedAtStart);
         await SqlAsync(source, "INSERT INTO catalog_entries(catalog_kind,code,description,search_text) VALUES(1,'123','privado','privado')");
         await SqlAsync(destination, "CREATE TABLE user_test(value TEXT); INSERT INTO user_test VALUES('cotação local')");
 
@@ -35,7 +42,7 @@ public sealed class OfficialUpdateTests
         Assert.Equal(29, manifest.Schema);
         Assert.Equal(Start, manifest.StartDate);
         Assert.Equal(Today, manifest.EndDate);
-        Assert.Equal(10, manifest.Chunks.Count(chunk => chunk.Kind == "publication-day"));
+        Assert.Equal(20, manifest.Chunks.Count(chunk => chunk.Kind == "publication-day"));
         Assert.Single(manifest.Chunks, chunk => chunk.Kind == "late-changes");
         Assert.DoesNotContain(manifest.Chunks, chunk => chunk.Key.Contains("catalog", StringComparison.OrdinalIgnoreCase));
 
@@ -54,6 +61,9 @@ public sealed class OfficialUpdateTests
         Assert.True(result.Applied >= 2);
         Assert.NotNull(await destination.Repository.GetContractAsync("current"));
         Assert.NotNull(await destination.Repository.GetContractAsync("corrected"));
+        Assert.NotNull(await destination.Repository.GetContractAsync("first-day"));
+        Assert.NotNull(await destination.Repository.GetContractAsync("corrected-at-start"));
+        Assert.Null(await destination.Repository.GetContractAsync("outside"));
         Assert.Null(await destination.Repository.GetContractAsync("unchanged-old"));
         Assert.Equal("cotação local", await ScalarAsync(destination, "SELECT value FROM user_test"));
         Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(destination, "SELECT COUNT(*) FROM catalog_entries")));
@@ -208,7 +218,7 @@ public sealed class OfficialUpdateTests
         var overlap = await importer.ImportAsync(second, new InlineProgress(messages.Add));
         Assert.Equal(0, overlap.Applied);
         Assert.DoesNotContain(messages, message => message.StartsWith("Lendo ", StringComparison.Ordinal));
-        Assert.Equal(10L, Convert.ToInt64(await ScalarAsync(destination,
+        Assert.Equal(20L, Convert.ToInt64(await ScalarAsync(destination,
             "SELECT COUNT(*) FROM official_update_chunks WHERE completed=1")));
     }
 
@@ -279,6 +289,62 @@ public sealed class OfficialUpdateTests
         }
         var legacyError = await Assert.ThrowsAsync<InvalidDataException>(() => OfficialUpdateService.ReadManifestAsync(legacy));
         Assert.Contains("v1 incompatível", legacyError.Message);
+    }
+
+    [Fact]
+    public async Task ExistingTenDayPackagesAreAcceptedButMissingOriginValidationIsRejected()
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        await CompleteCoverageAsync(source);
+        await SaveEmptyListAsync(source, Contract("ten-day", Today, Today));
+        var path = Path.Combine(source.Directory, "ten-day.pncpupdate");
+        var manifest = await new OfficialUpdateService(source.Repository.DatabasePath).ExportAsync(path);
+        var start = Today.AddDays(-9);
+        var legacy = manifest with
+        {
+            StartDate = start,
+            Chunks = manifest.Chunks.Where(chunk => chunk.Date >= start || chunk.Kind == "late-changes").ToArray()
+        };
+        using (var zip = ZipFile.Open(path, ZipArchiveMode.Update))
+        {
+            foreach (var chunk in manifest.Chunks.Where(chunk => chunk.Date < start)) zip.GetEntry(chunk.Entry)!.Delete();
+            zip.GetEntry("manifest.json")!.Delete();
+            await using var metadata = zip.CreateEntry("manifest.json").Open();
+            await JsonSerializer.SerializeAsync(metadata, legacy, GitHubUpdateValidation.Json);
+        }
+        Assert.Equal(10, (await OfficialUpdateService.ReadManifestAsync(path)).Manifest.Chunks.Count);
+        var importer = new OfficialUpdateService(destination.Repository.DatabasePath);
+        Assert.True((await importer.ImportAsync(path)).Applied > 0);
+        Assert.NotNull(await destination.Repository.GetContractAsync("ten-day"));
+
+        using (var zip = ZipFile.Open(path, ZipArchiveMode.Update))
+        {
+            zip.GetEntry("manifest.json")!.Delete();
+            await using var metadata = zip.CreateEntry("manifest.json").Open();
+            await JsonSerializer.SerializeAsync(metadata, legacy with { IntegrityValidatedAt = default }, GitHubUpdateValidation.Json);
+        }
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() => importer.ImportAsync(path));
+        Assert.Contains("validação do exportador", error.Message);
+    }
+
+    [Theory]
+    [InlineData(19)]
+    [InlineData(21)]
+    public async Task WindowsOtherThanTenOrTwentyDaysAreRejected(int days)
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await CompleteCoverageAsync(source);
+        var path = Path.Combine(source.Directory, "invalid-window.pncpupdate");
+        var manifest = await new OfficialUpdateService(source.Repository.DatabasePath).ExportAsync(path);
+        Assert.Throws<InvalidDataException>(() => OfficialUpdateService.ValidateManifest(manifest with
+        {
+            StartDate = manifest.EndDate.AddDays(-(days - 1))
+        }));
+        Assert.Throws<InvalidDataException>(() => OfficialUpdateService.ValidateManifest(manifest with
+        {
+            Chunks = manifest.Chunks.Skip(1).ToArray()
+        }));
     }
 
     private static ContractRecord Contract(string id, DateOnly publication, DateOnly updated) =>

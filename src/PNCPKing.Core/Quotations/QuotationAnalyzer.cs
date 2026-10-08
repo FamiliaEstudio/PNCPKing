@@ -563,16 +563,10 @@ public sealed partial class QuotationAnalyzer
         var validPrices = new List<decimal>(orderedPrices.Length);
         foreach (var entry in orderedPrices)
         {
-            var otherPricesAverage = orderedPrices.Length < 2
-                ? 0m
-                : QuotationMoney.Truncate(
-                    (totalPrice - entry.EffectiveUnitPrice) / (orderedPrices.Length - 1),
-                    priceDecimalPlaces);
-            var deviation = otherPricesAverage <= 0m
-                ? 0m
-                : Math.Abs(entry.EffectiveUnitPrice / otherPricesAverage - 1m) * 100m;
-            maximumDeviation = Math.Max(maximumDeviation, deviation);
-            if (entry.EffectiveUnitPrice > 0m && deviation <= 25m)
+            var evaluation = QuotationMoney.EvaluatePrice(
+                entry.EffectiveUnitPrice, totalPrice, orderedPrices.Length, priceDecimalPlaces);
+            maximumDeviation = Math.Max(maximumDeviation, evaluation.DeviationPercent);
+            if (evaluation.IsValid)
                 validPrices.Add(entry.EffectiveUnitPrice);
         }
 

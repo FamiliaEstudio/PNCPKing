@@ -508,7 +508,7 @@ public sealed class UiBindingTests
     }
 
     [Fact]
-    public void QuotationItemWindow_ExposesManualRequestedDetailsEditorAndPromptSlots()
+    public void QuotationItemWindow_ExposesRequestedDetailsEditorAndPromptSlots()
     {
         var document = LoadView("QuotationItemWindow.xaml");
         XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";

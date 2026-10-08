@@ -25,6 +25,8 @@ O programa mostra CATMAT e quantidade mínima na prévia. Erros de preenchimento
 
 ## Edição dos valores
 
+Use **Editar dados** na janela do item para alterar ou limpar quantidade e unidade, inclusive de itens importados do Excel. A quantidade deve ser inteira positiva ou ficar vazia. Pause pesquisas e automação antes de editar. Preços, cestas, evidências e pesquisas são preservados; alterações efetivas exigem reconfirmar a cesta e, havendo grupos, reorganizar os itens antes de exportar. Salvar os mesmos valores mantém a confirmação.
+
 Na janela de qualquer item, inclusive importado, use **CATMAT e mínimo**. O CATMAT informado tem prioridade no Word; limpar esse campo permite usar o CATMAT já vinculado pela busca do catálogo. O vínculo existente não é apagado. Sem código informado ou CATMAT vinculado, a célula ficará vazia; um vínculo CATSER não preencherá a coluna CATMAT.
 
 A quantidade mínima importada em J é um valor fixo. Uma edição posterior substitui esse valor. Limpar o campo permite que o percentual da próxima exportação volte a ser aplicado. Essas alterações preservam cestas confirmadas e a organização dos itens.

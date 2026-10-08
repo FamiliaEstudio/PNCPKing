@@ -950,6 +950,16 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             .Where(row => row.IsSelectedForBasket)
             .ToArray();
 
+    private void RefreshMarkedPriceHighlights()
+    {
+        var marked = GetSelectedBasketPrices();
+        var decimalPlaces = SelectedQuotationProject?.Source.PriceDecimalPlaces ?? 2;
+        var total = marked.Sum(row => QuotationMoney.Truncate(row.HighlightPrice ?? 0m, decimalPlaces));
+        foreach (var row in marked)
+            row.IsValidInMarkedGroup = row.IsHighlightEligible && QuotationMoney.EvaluatePrice(
+                QuotationMoney.Truncate(row.HighlightPrice ?? 0m, decimalPlaces), total, marked.Count, decimalPlaces).IsValid;
+    }
+
     public void ApplyItemPriceAction(IReadOnlyList<ItemSearchDisplayRow> rows, ItemPriceAction action)
     {
         var toFront = new HashSet<ItemSearchDisplayRow>();
@@ -981,6 +991,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 (row.IsRetained || _currentItemResultKeys.Contains(RowKey(row)))))
             .ToArray();
         if (!ItemSearchRows.SequenceEqual(replacement)) ItemSearchRows.ReplaceAll(replacement);
+        RefreshMarkedPriceHighlights();
         OnPropertyChanged(nameof(SelectedBasketPriceCount));
         OnPropertyChanged(nameof(HasSelectedBasketPrices));
         OnPropertyChanged(nameof(ManualBasketButtonText));
@@ -2867,6 +2878,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             _retainedItemRows.Remove(key);
         }
 
+        RefreshMarkedPriceHighlights();
         OnPropertyChanged(nameof(SelectedBasketPriceCount));
         OnPropertyChanged(nameof(HasSelectedBasketPrices));
         OnPropertyChanged(nameof(ManualBasketButtonText));
@@ -2898,6 +2910,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             }
         }
 
+        RefreshMarkedPriceHighlights();
         OnPropertyChanged(nameof(SelectedBasketPriceCount));
         OnPropertyChanged(nameof(HasSelectedBasketPrices));
         OnPropertyChanged(nameof(ManualBasketButtonText));

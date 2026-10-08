@@ -27,7 +27,7 @@ public partial class NewQuotationItemWindow : Window
             : string.Empty;
         UnitTextBox.Text = line.RequestedUnit;
         FooterTextBlock.Text =
-            "Preços, cestas, pesquisas, catálogo e nome do item serão preservados.";
+            "Preços, cestas, pesquisas, catálogo e nome do item serão preservados. Se os dados mudarem, reconfirme a cesta.";
         AcceptButton.Content = "Salvar alterações";
         QuantityTextBox.Focus();
         QuantityTextBox.SelectAll();

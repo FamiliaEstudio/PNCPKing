@@ -9,7 +9,7 @@ namespace PNCPKing.Tests;
 public sealed class OfficialUpdatePerformanceTests
 {
     [Fact]
-    public async Task TenDayPackageBenchmarkRecordsSizeExtractionsWritesAndRepeatedManifestOnlyCost()
+    public async Task TwentyDayPackageBenchmarkRecordsSizeExtractionsWritesAndRepeatedManifestOnlyCost()
     {
         var report = Environment.GetEnvironmentVariable("PNCPKING_UPDATE_REPORT");
         if (string.IsNullOrWhiteSpace(report)) return;
@@ -18,12 +18,12 @@ public sealed class OfficialUpdatePerformanceTests
         await using var destination = await TestDatabase.CreateAsync();
         const int population = 20_000;
         var today = DateOnly.FromDateTime(DateTime.Today);
-        var start = today.AddDays(-9);
+        var start = today.AddDays(-(OfficialUpdateService.WindowDays - 1));
         await source.Repository.EnsureCoverageWindowAsync(start, today, [6]);
         await source.Repository.SetCoverageStatusAsync(start, today, 6, "ALL", CoverageStatus.Complete, 0);
         var contracts = Enumerable.Range(1, population)
             .Select(index => PriceCacheTests.RecentContract($"benchmark-{index:000000}",
-                today.AddDays(-(index % 10)), index % 27 + 1) with { PurchaseSequence = index })
+                today.AddDays(-(index % OfficialUpdateService.WindowDays)), index % 27 + 1) with { PurchaseSequence = index })
             .ToArray();
         await source.Repository.UpsertContractsAsync(contracts);
         await using (var connection = new SqliteConnection($"Data Source={source.Repository.DatabasePath};Pooling=False"))
@@ -55,6 +55,7 @@ public sealed class OfficialUpdatePerformanceTests
         var repeatedImportMs = watch.Elapsed.TotalMilliseconds;
 
         Assert.Equal(population, imported.Applied);
+        Assert.Equal(20, manifest.Chunks.Count);
         Assert.Equal(0, repeated.Applied);
         Assert.Equal(manifest.Chunks.Count, firstProgress.Extractions);
         Assert.Equal(0, repeatProgress.Extractions);

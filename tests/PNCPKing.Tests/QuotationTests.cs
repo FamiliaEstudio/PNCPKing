@@ -1050,13 +1050,34 @@ public sealed class QuotationTests
         Assert.Equal("CATMAT 123456", after.CatalogSelection?.Label);
     }
 
-    [Fact]
-    public async Task RequestedDetails_UpdatePreservesItemDataAndInvalidatesConfirmationOnlyWhenChanged()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RequestedDetails_UpdatePreservesItemDataAndInvalidatesConfirmationOnlyWhenChanged(bool imported)
     {
         await using var database = await TestDatabase.CreateAsync();
         var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
         var project = await repository.CreateProjectAsync("Dados opcionais");
         var lineId = Guid.NewGuid();
+        if (imported)
+        {
+            var path = Path.Combine(database.Directory, "entrada.xlsx");
+            using (var workbook = new XLWorkbook())
+            {
+                var sheet = workbook.Worksheets.Add("Itens");
+                sheet.Cell(1, 1).Value = "café";
+                sheet.Cell(1, 2).Value = "Café torrado";
+                sheet.Cell(1, 3).Value = 10;
+                sheet.Cell(1, 4).Value = "pacote";
+                sheet.Cell(1, 7).Value = 1;
+                workbook.SaveAs(path);
+            }
+            var document = await new QuotationWorkbookImportService().ReadAsync(path);
+            await repository.CreateAutomationRunAsync(project.Id, Path.Combine(database.Directory, "saida.xlsx"),
+                "Responsável", SearchGeoFilter.All, Today.AddDays(-19), Today, document.Items, AdequacyWeights.Default);
+            lineId = Assert.Single(await repository.GetLinesAsync(project.Id)).Id;
+            await repository.UpdateAutomationItemStateAsync(lineId, QuotationAutomationItemState.Completed, "Concluído");
+        }
         await repository.SaveSampleAsync(
             project.Id,
             lineId,
@@ -1089,6 +1110,8 @@ public sealed class QuotationTests
         Assert.Equal(confirmed.SampleVersion, cleared.SampleVersion);
         Assert.Equal(confirmed.SearchText, cleared.SearchText);
         Assert.Equal(confirmed.PromptSet, cleared.PromptSet);
+        Assert.Equal(confirmed.AutomationRunId, cleared.AutomationRunId);
+        Assert.Equal(confirmed.AutomationState, cleared.AutomationState);
         Assert.Equal("Café premium", cleared.DisplayName);
         Assert.Equal("CATMAT 123456", cleared.CatalogSelection?.Label);
         Assert.Equal(3, (await repository.GetReferencesAsync(lineId)).Count);
@@ -1107,6 +1130,47 @@ public sealed class QuotationTests
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
             service.UpdateLineRequestedDetailsAsync(lineId, -1m, "caixa"));
         Assert.Equal(25m, Assert.Single(await repository.GetLinesAsync(project.Id)).RequestedQuantity);
+        if (imported)
+        {
+            var reopened = new QuotationService(new SqliteQuotationRepository(database.Repository.DatabasePath), new QuotationAnalyzer(Today));
+            await repository.ConfirmBasketAsync(lineId, completed.SelectedBasketKey!);
+            var report = await reopened.GetReportAsync(project.Id);
+            Assert.Equal(25m, Assert.Single(report.Lines).Line.RequestedQuantity);
+            Assert.Equal("caixa", Assert.Single(report.Lines).Line.RequestedUnit);
+            var path = Path.Combine(database.Directory, "editado.docx");
+            await new QuotationWordService().ExportAsync(path, report, new());
+            using var document = DocumentFormat.OpenXml.Packaging.WordprocessingDocument.Open(path, false);
+            var table = Assert.Single(document.MainDocumentPart!.Document.Body!.Elements<DocumentFormat.OpenXml.Wordprocessing.Table>());
+            var cells = table.Elements<DocumentFormat.OpenXml.Wordprocessing.TableRow>().Last()
+                .Elements<DocumentFormat.OpenXml.Wordprocessing.TableCell>().Select(cell => cell.InnerText).ToArray();
+            Assert.Contains("caixa", cells);
+            Assert.Contains("25", cells);
+        }
+    }
+
+    [Theory]
+    [InlineData(125, 325, 3, true)]
+    [InlineData(126, 326, 3, false)]
+    [InlineData(75, 275, 3, true)]
+    [InlineData(74, 274, 3, false)]
+    [InlineData(0, 200, 3, false)]
+    [InlineData(100, 100, 1, true)]
+    public void PriceEvaluation_UsesBothInclusiveChecksAndTheExistingSinglePriceRule(
+        int price, int total, int count, bool valid)
+    {
+        Assert.Equal(valid, QuotationMoney.EvaluatePrice(price, total, count, 2).IsValid);
+    }
+
+    [Fact]
+    public void PriceEvaluation_UsesEffectiveConvertedPricesAndMedicationPrecision()
+    {
+        var normal = QuotationMoney.Truncate(1.2501m, 2);
+        var medication = QuotationMoney.Truncate(1.2501m, 4);
+        Assert.True(QuotationMoney.EvaluatePrice(normal, normal + 2m, 3, 2).IsValid);
+        Assert.False(QuotationMoney.EvaluatePrice(medication, medication + 2m, 3, 4).IsValid);
+        var converted = QuotationMoney.Truncate(10m * 10m, 2);
+        Assert.True(QuotationMoney.EvaluatePrice(converted, 300m, 3, 2).IsValid);
+        Assert.False(QuotationMoney.EvaluatePrice(10m, 210m, 3, 2).IsValid);
     }
 
     [Fact]

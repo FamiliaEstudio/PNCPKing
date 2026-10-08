@@ -35,7 +35,7 @@
                         ToolTip="F2 — altera somente o nome visível, sem recalcular pesquisas ou preços." />
                 <Button Content="Editar dados" Click="EditItemDetails_Click"
                         IsEnabled="{Binding CanEditRequestedDetails}"
-                        ToolTip="Configura ou limpa a quantidade e a unidade do item manual." />
+                        ToolTip="Configura ou limpa quantidade e unidade, inclusive de itens importados. Pause pesquisas ou automação antes de editar." />
                 <Button Content="Atualizar" Click="Refresh_Click" />
                 <Button Content="CATMAT e mínimo" Click="EditDocumentDetails_Click" />
                 <Button Content="Transferir ou copiar…" Click="TransferItem_Click"
@@ -101,7 +101,8 @@
                         </WrapPanel>
                     </StackPanel>
 
-                    <controls:GridReader Grid.Row="2">
+                    <controls:GridReader Grid.Row="2" EnablePriceHighlights="True"
+                                         PriceDecimalPlaces="{Binding Line.Analysis.PriceDecimalPlaces, FallbackValue=2}">
                         <DataGrid x:Name="PriceGrid"
                                   ItemsSource="{Binding VisibleReferences}"
                                   SelectedItem="{Binding SelectedPrice}"
@@ -274,7 +275,8 @@
                                      Value="{Binding SearchProgress, Mode=OneWay}" VerticalAlignment="Center" />
                     </Grid>
 
-                    <controls:GridReader Grid.Row="5">
+                    <controls:GridReader Grid.Row="5" EnablePriceHighlights="True"
+                                         PriceDecimalPlaces="{Binding Line.Analysis.PriceDecimalPlaces, FallbackValue=2}">
                         <DataGrid x:Name="SearchResultsGrid"
                                   ItemsSource="{Binding SearchRows}"
                                   SelectedItem="{Binding SelectedSearchRow}"
