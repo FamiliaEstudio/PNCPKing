@@ -28,7 +28,9 @@ Prepare a publicação com um único pacote:
 
 O script aceita somente formato 2, esquema 29, janela exata de 10 ou 20 dias e arquivo menor que 2 GiB. Pacotes de 20 dias exigem o programa 1.2.24 ou posterior; pacotes anteriores de 10 dias continuam compatíveis. Ele confere o registro de validação do exportador, descritores, tamanhos e SHA-256 dos blocos; não divide um pacote excessivo e não abre o banco real. As verificações integrais SQLite são executadas exclusivamente pelo exportador, nunca pelo receptor.
 
-Crie ou atualize a release dedicada com tag **`precos`**, sem marcar **Latest**. Envie o `.pncpupdate` indicado e, por último, `prices-update.json`. O manifesto externo tem `format`, `publishedAt`, `minimumAppVersion`, `schema` e `update`; não possui `base` ou `cumulative`.
+A partir da 1.2.27, o publicador mantém dois manifestos na mesma release: `prices-update-v2.json` aponta para o pacote original completo; `prices-update.json` aponta para um pacote compatível de 10 dias. Quando a origem tem 20 dias, o segundo arquivo contém os últimos 10 blocos diários e o bloco de alterações antigas, se houver, copiados sem alterar os dados SQLite, hashes, digests ou a declaração de validação na origem. O arquivo compatível tem uma identidade e um SHA-256 externos próprios. Quando a origem tem 10 dias, os dois manifestos apontam para o mesmo pacote. O leitor atualizado prefere o manifesto atual e aceita publicações anteriores que tenham somente o manifesto legado.
+
+Crie ou atualize a release dedicada com tag **`precos`**, sem marcar **Latest**. Envie todos os `.pncpupdate` gerados, depois `prices-update-v2.json` e, por último, `prices-update.json`. Preserve os anexos existentes para permitir retomadas já aprovadas. Os dois manifestos externos têm `format`, `publishedAt`, `minimumAppVersion`, `schema` e `update`; não possuem `base` ou `cumulative`.
 
 O corpo da release de preços também deve conter um resumo breve em português, informando o período e o conteúdo atualizado.
 
@@ -44,4 +46,6 @@ Cancelar ou encontrar erro reverte somente o bloco corrente. Blocos anteriores p
 
 O instalador do programa continua incorporado ao executável. Ele substitui somente o caminho canônico após o encerramento normal e preserva o executável anterior se a troca falhar.
 
-Se uma versão antiga não reconheceu a janela de 20 dias na prévia, a instalação do programa continua disponível. Após esse reinício, o aplicativo atualizado consulta novamente somente o canal de preços e aplica o pacote compatível ao mesmo banco escolhido. Falhas de rede permitem tentar novamente em **Atualizar pelo GitHub**, preservando a atualização do programa e os blocos já concluídos.
+A versão 1.2.23 rejeita manifestos com mais de 11 blocos antes de exibir a prévia. Por isso, alterar somente o programa novo não recupera uma instalação antiga bloqueada: o manifesto público `prices-update.json` precisa descrever o pacote real de 10 dias. Depois de instalar a 1.2.27, o aplicativo consulta novamente o manifesto atual e aplica a janela completa ao mesmo banco escolhido, quando os preços foram selecionados. Falhas de formato, esquema, pacote ou anexos são apresentadas no canal correspondente sem bloquear o outro. Falhas de rede permitem tentar novamente em **Atualizar pelo GitHub**, preservando a atualização do programa e os blocos já concluídos.
+
+Para reparar a publicação de preços existente junto a uma release do programa, inclua `[price-compat]` além de `[release]` no commit. Depois da compilação e dos testes, o fluxo baixa o pacote já publicado, confere seu SHA-256, prepara os anexos compatíveis e atualiza a release `precos`, preservando o arquivo completo original.
