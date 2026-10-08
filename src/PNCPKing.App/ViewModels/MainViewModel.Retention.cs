@@ -35,7 +35,8 @@ public sealed partial class MainViewModel
         // Startup only advances the logical 11-month window. Physical deletion is
         // intentionally deferred so old mechanical disks never pay the cleanup cost
         // before the UI becomes usable.
-        _lastRetentionDate = await repository.PrepareRetentionWindowAsync(today, cancellationToken).ConfigureAwait(true);
+        _lastRetentionDate = await Task.Run(
+            () => repository.PrepareRetentionWindowAsync(today, cancellationToken), cancellationToken).ConfigureAwait(true);
         MaintenanceActivityText = _lastRetentionDate == today
             ? "Janela de 11 meses atualizada."
             : "Janela de 11 meses atualizada; limpeza física aguardando ociosidade.";
@@ -65,6 +66,7 @@ public sealed partial class MainViewModel
             return;
 
         _retentionRunning = true;
+        await using var slice = _maintenanceCoordinator.BeginSlice(_startupCancellation.Token, decision.SliceDuration);
         try
         {
             // Keep each physical delete deliberately small. The next idle tick resumes
@@ -72,17 +74,35 @@ public sealed partial class MainViewModel
             // giant startup transaction.
             var batchSize = decision.Resources.Pressure == SystemResourcePressure.Constrained ? 25 : 75;
             var today = DateOnly.FromDateTime(DateTime.Today);
-            var result = await repository.MaintainRetentionAsync(
-                today,
-                compact: false,
-                cancellationToken: _startupCancellation.Token,
-                contractBatchSize: batchSize).ConfigureAwait(true);
-
-            if (result.Applied)
+            // Microsoft.Data.Sqlite's Async methods execute SQL synchronously.
+            // Run the entire database operation off the dispatcher, including invalidation.
+            var result = await Task.Run(async () =>
             {
-                await _itemSearchService.InvalidateAsync(_startupCancellation.Token).ConfigureAwait(true);
-                await _transientItemSearchService.InvalidateAsync(_startupCancellation.Token).ConfigureAwait(true);
-            }
+                DataRetentionResult retention;
+                try
+                {
+                    retention = await repository.MaintainRetentionAsync(
+                        today,
+                        compact: false,
+                        cancellationToken: slice.Token,
+                        contractBatchSize: batchSize).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (slice.Token.IsCancellationRequested)
+                {
+                    // Cancellation can arrive after COMMIT while remaining rows are checked.
+                    // Discard stale sessions whether the last delete committed or rolled back.
+                    await _itemSearchService.InvalidateAsync(_startupCancellation.Token).ConfigureAwait(false);
+                    await _transientItemSearchService.InvalidateAsync(_startupCancellation.Token).ConfigureAwait(false);
+                    throw;
+                }
+                if (retention.Applied)
+                {
+                    // A committed delete must invalidate sessions even if the idle slice just expired.
+                    await _itemSearchService.InvalidateAsync(_startupCancellation.Token).ConfigureAwait(false);
+                    await _transientItemSearchService.InvalidateAsync(_startupCancellation.Token).ConfigureAwait(false);
+                }
+                return retention;
+            }, slice.Token).ConfigureAwait(true);
 
             _diagnosticLog.Info("retention", result.Message);
             MaintenanceActivityText = result.Message;
@@ -97,16 +117,24 @@ public sealed partial class MainViewModel
                 _lastRetentionDate = today;
                 _nextRetentionAttempt = DateTimeOffset.MinValue;
                 var quotationRepository = new SqliteQuotationRepository(repository.DatabasePath);
-                var hashes = await quotationRepository.GetReferencedInternetEvidenceHashesAsync(_startupCancellation.Token)
-                    .ConfigureAwait(true);
-                await _internetEvidenceStore.DeleteOrphansAsync(hashes, _startupCancellation.Token).ConfigureAwait(true);
+                await Task.Run(async () =>
+                {
+                    var hashes = await quotationRepository.GetReferencedInternetEvidenceHashesAsync(slice.Token)
+                        .ConfigureAwait(false);
+                    await _internetEvidenceStore.DeleteOrphansAsync(hashes, slice.Token).ConfigureAwait(false);
+                }, slice.Token).ConfigureAwait(true);
                 await RefreshDatasetSummaryAsync().ConfigureAwait(true);
                 await RefreshCoverageAsync().ConfigureAwait(true);
                 await RefreshPriceCacheProgressAsync().ConfigureAwait(true);
                 await RefreshNationalPriceIndexProgressAsync().ConfigureAwait(true);
             }
         }
-        catch (OperationCanceledException) when (_disposed || _startupCancellation.IsCancellationRequested) { }
+        catch (OperationCanceledException) when (slice.Token.IsCancellationRequested)
+        {
+            _nextRetentionAttempt = DateTimeOffset.UtcNow.Add(decision.RetryDelay);
+            MaintenanceActivityText = "Limpeza pausada; continuação na próxima ociosidade.";
+            _diagnosticLog.Info("retention", "Fatia de limpeza interrompida; lotes confirmados preservados.");
+        }
         catch (Exception exception)
         {
             _nextRetentionAttempt = DateTimeOffset.UtcNow.AddMinutes(1);

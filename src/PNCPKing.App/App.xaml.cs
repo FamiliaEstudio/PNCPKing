@@ -375,9 +375,9 @@ public partial class App : Application
             // window. Keep the application alive when it closes, then restore
             // normal shutdown behavior once the real main window is visible.
             ShutdownMode = ShutdownMode.OnMainWindowClose;
-            viewModel.SetStartupPhase("Preparando e migrando o banco de dados…");
-            var initializationProgress = new Progress<DatabaseInitializationProgress>(
-                viewModel.SetStartupProgress);
+            viewModel.SetStartupPhase("Abrindo e verificando o banco de dados…");
+            var initializationProgress = new DatabaseStartupProgress(_diagnosticLog,
+                new Progress<DatabaseInitializationProgress>(viewModel.SetStartupProgress));
             DatabaseInitializationResult initialization;
             using (var databaseSpan = _performanceTelemetry.Begin("startup", "database-initialize"))
             {
@@ -500,6 +500,19 @@ public partial class App : Application
                 Interlocked.Exchange(ref _uiErrorDialogOpen, 0);
             }
         });
+    }
+
+    // Persist the phase on the database worker before posting the UI update.
+    // A slow recovery must leave a useful log even if the application is closed mid-step.
+    private sealed class DatabaseStartupProgress(
+        AppDiagnosticLog log,
+        IProgress<DatabaseInitializationProgress> uiProgress) : IProgress<DatabaseInitializationProgress>
+    {
+        public void Report(DatabaseInitializationProgress value)
+        {
+            log.Info("database-startup", $"Fase={value.Phase}; progresso={value.Percentage}; {value.Message}");
+            uiProgress.Report(value);
+        }
     }
 
     private static bool HasAnotherPncpKingProcess()

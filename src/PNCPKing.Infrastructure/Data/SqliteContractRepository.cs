@@ -40,12 +40,33 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
         CancellationToken cancellationToken = default,
         IProgress<DatabaseInitializationProgress>? progress = null)
     {
+        try
+        {
+            return await InitializeCoreAsync(cancellationToken, progress).ConfigureAwait(false);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("Inicialização cancelada; a migração em andamento foi revertida.", exception, cancellationToken);
+        }
+    }
+
+    private async Task<DatabaseInitializationResult> InitializeCoreAsync(
+        CancellationToken cancellationToken,
+        IProgress<DatabaseInitializationProgress>? progress)
+    {
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
+        ReportInitialization(progress, -1, 0, "Aguardando acesso ao banco",
+            "Aguardando operações anteriores antes de abrir o banco de dados…");
         await using var writer = await _connections.WorkCoordinator
             .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken)
             .ConfigureAwait(false);
+        ReportInitialization(progress, -1, 1, "Abrindo o banco de dados",
+            "Abrindo o SQLite; transações interrompidas podem exigir recuperação automática do WAL…");
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        using var interruption = SqliteConnectionFactory.InterruptOnCancellation(connection, cancellationToken);
+        ReportInitialization(progress, -1, 2, "Configurando o banco de dados",
+            "Preparando o modo de gravação do SQLite…");
         await using (var databasePragmas = connection.CreateCommand())
         {
             databasePragmas.CommandText = "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=1000;";
@@ -53,6 +74,8 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
         }
         await using (var bootstrap = connection.CreateCommand())
         {
+            ReportInitialization(progress, -1, 3, "Lendo a versão do banco",
+                "Verificando a versão interna para executar somente as migrações pendentes…");
             bootstrap.CommandText = "CREATE TABLE IF NOT EXISTS schema_info(id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL);";
             await bootstrap.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -68,6 +91,9 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
         }
 
         var previousVersion = version;
+        void ReportMigration(int target) => ReportInitialization(progress, previousVersion,
+            5 + target * 90 / CurrentSchemaVersion, $"Migrando esquema v{version} → v{target}",
+            "A migração é transacional; somente as etapas confirmadas são preservadas ao cancelar.");
         ReportInitialization(
             progress,
             previousVersion,
@@ -85,6 +111,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 1)
         {
+            ReportMigration(1);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
             migration.Transaction = (SqliteTransaction)transaction;
@@ -101,6 +128,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 2)
         {
+            ReportMigration(2);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
             migration.Transaction = (SqliteTransaction)transaction;
@@ -122,6 +150,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 3)
         {
+            ReportMigration(3);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await MigrateLegacySyncStateAsync(
                     connection,
@@ -139,6 +168,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 4)
         {
+            ReportMigration(4);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
             migration.Transaction = (SqliteTransaction)transaction;
@@ -155,6 +185,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 5)
         {
+            ReportMigration(5);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
             migration.Transaction = (SqliteTransaction)transaction;
@@ -171,6 +202,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 6)
         {
+            ReportMigration(6);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
             migration.Transaction = (SqliteTransaction)transaction;
@@ -187,6 +219,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 7)
         {
+            ReportMigration(7);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
             migration.Transaction = (SqliteTransaction)transaction;
@@ -203,6 +236,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 8)
         {
+            ReportMigration(8);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
             migration.Transaction = (SqliteTransaction)transaction;
@@ -219,6 +253,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 9)
         {
+            ReportMigration(9);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await ApplySchemaV9Async(
                 connection,
@@ -235,6 +270,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 10)
         {
+            ReportMigration(10);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await ApplySchemaV10Async(
                 connection,
@@ -251,6 +287,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 11)
         {
+            ReportMigration(11);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await ApplySchemaV11Async(
                 connection,
@@ -267,6 +304,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 12)
         {
+            ReportMigration(12);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await ApplySchemaV12Async(
                 connection,
@@ -283,6 +321,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 13)
         {
+            ReportMigration(13);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await ApplySchemaV13Async(
                 connection,
@@ -299,6 +338,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 14)
         {
+            ReportMigration(14);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await ApplySchemaV14Async(
                 connection,
@@ -315,6 +355,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 15)
         {
+            ReportMigration(15);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
             migration.Transaction = (SqliteTransaction)transaction;
@@ -331,6 +372,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 16)
         {
+            ReportMigration(16);
             EnsureMigrationSpace();
             using var span = _performance.Begin("startup", "schema-v16");
             await using (var migrationPragmas = connection.CreateCommand())
@@ -358,6 +400,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 17)
         {
+            ReportMigration(17);
             using var span = _performance.Begin("startup", "schema-v17");
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
@@ -376,6 +419,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 18)
         {
+            ReportMigration(18);
             EnsureMigrationSpace();
             using var span = _performance.Begin("startup", "schema-v18");
             ReportInitialization(
@@ -425,6 +469,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 19)
         {
+            ReportMigration(19);
             using var span = _performance.Begin("startup", "schema-v19");
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await ApplySchemaV19Async(
@@ -444,6 +489,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 20)
         {
+            ReportMigration(20);
             using var span = _performance.Begin("startup", "schema-v20");
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             if (!await HasColumnAsync(
@@ -471,6 +517,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 21)
         {
+            ReportMigration(21);
             using var span = _performance.Begin("startup", "schema-v21");
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             if (!await HasColumnAsync(
@@ -516,6 +563,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 22)
         {
+            ReportMigration(22);
             using var span = _performance.Begin("startup", "schema-v22");
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
@@ -534,6 +582,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 23)
         {
+            ReportMigration(23);
             using var span = _performance.Begin("startup", "schema-v23");
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
@@ -552,6 +601,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 24)
         {
+            ReportMigration(24);
             using var span = _performance.Begin("startup", "schema-v24");
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             if (!await HasColumnAsync(
@@ -610,6 +660,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 25)
         {
+            ReportMigration(25);
             EnsureMigrationSpace();
             using var span = _performance.Begin("startup", "schema-v25");
             ReportInitialization(
@@ -661,6 +712,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 26)
         {
+            ReportMigration(26);
             EnsureMigrationSpace();
             using var span = _performance.Begin("startup", "schema-v26");
             ReportInitialization(
@@ -698,6 +750,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 27)
         {
+            ReportMigration(27);
             await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
             migration.Transaction = transaction;
@@ -713,6 +766,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 28)
         {
+            ReportMigration(28);
             await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await ApplySchemaV28Async(connection, transaction, cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
@@ -721,6 +775,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 29)
         {
+            ReportMigration(29);
             await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await ApplySchemaV29Async(connection, transaction, cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
@@ -729,6 +784,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 30)
         {
+            ReportMigration(30);
             await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
             migration.Transaction = transaction;
@@ -746,6 +802,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 31)
         {
+            ReportMigration(31);
             await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
             migration.Transaction = transaction;
@@ -763,6 +820,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 32)
         {
+            ReportMigration(32);
             await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
             migration.Transaction = transaction;
@@ -801,6 +859,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 33)
         {
+            ReportMigration(33);
             await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await using var migration = connection.CreateCommand();
             migration.Transaction = transaction;
@@ -825,6 +884,7 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
 
         if (version < 34)
         {
+            ReportMigration(34);
             await using var transaction = connection.BeginTransaction();
             await using var migration = connection.CreateCommand();
             migration.Transaction = transaction;
