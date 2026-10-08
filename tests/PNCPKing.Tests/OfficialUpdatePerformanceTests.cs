@@ -10,7 +10,7 @@ namespace PNCPKing.Tests;
 public sealed class OfficialUpdatePerformanceTests
 {
     [Fact]
-    public async Task SmallImportDoesNotScanUnrelatedLocalItemsAndResults()
+    public async Task SmallImportDoesNotScanUnrelatedLocalContractsItemsAndResults()
     {
         await using var source = await TestDatabase.CreateAsync();
         await using var small = await TestDatabase.CreateAsync();
@@ -31,6 +31,12 @@ public sealed class OfficialUpdatePerformanceTests
             await using var command = connection.CreateCommand();
             command.CommandText = """
                 WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM numbers WHERE n<10000)
+                INSERT INTO contracts(pncp_id,cnpj,purchase_year,purchase_sequence,modality_id,
+                                      publication_date,global_updated_at)
+                SELECT 'unrelated-' || n,c.cnpj,c.purchase_year,n,c.modality_id,c.publication_date,c.global_updated_at
+                  FROM numbers CROSS JOIN contracts c WHERE c.pncp_id='unrelated';
+                UPDATE dataset_statistics SET contract_count=contract_count+10000 WHERE id=1;
+                WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM numbers WHERE n<10000)
                 INSERT INTO items(contract_id,item_number,description,has_result,hydration_status)
                 SELECT 'unrelated',n,'Preço antigo',1,2 FROM numbers;
                 INSERT INTO item_results(contract_id,item_number,result_sequence,supplier_name,unit_value_scaled)
@@ -47,8 +53,7 @@ public sealed class OfficialUpdatePerformanceTests
         Assert.True(largeConnections.Steps <= smallConnections.Steps + 10000,
             $"Import SQL grew from {smallConnections.Steps:N0} to {largeConnections.Steps:N0} steps for unrelated rows.");
         Assert.Single((await large.Repository.GetCachedItemResultsAsync(contract.PncpId, 1))!.Results);
-        Assert.Equal(10001, (await large.Repository.GetCountsAsync()).Item2);
-        Assert.Equal(10001, (await large.Repository.GetCountsAsync()).Item3);
+        Assert.Equal((10002, 10001, 10001), await large.Repository.GetCountsAsync());
     }
 
     [Fact]

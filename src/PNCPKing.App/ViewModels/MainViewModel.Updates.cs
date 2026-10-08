@@ -63,7 +63,7 @@ public sealed partial class MainViewModel
         {
             _maintenanceCoordinator.NotifyVisibleActivity();
             IsFileOperationIndeterminate = true;
-            var progress = new Progress<string>(s => FileOperationProgressText = s);
+            var progress = OfficialImportProgress();
             var service = new OfficialUpdateService(_calibrationService.Connections);
             try
             {
@@ -72,14 +72,21 @@ public sealed partial class MainViewModel
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
+                _diagnosticLog.Info("official-update", "Importação interrompida; lotes confirmados preservados.");
                 StatusText = "Importação interrompida; lotes concluídos preservados. Reimporte o pacote para continuar.";
             }
             finally
             {
-                await RefreshAfterOfficialImportAsync();
+                if (!_disposed) await RefreshAfterOfficialImportAsync();
             }
         });
     }
+
+    private IProgress<string> OfficialImportProgress() => new Progress<string>(message =>
+    {
+        FileOperationProgressText = message;
+        _diagnosticLog.Info("official-update", message);
+    });
 
     private async Task RefreshAfterOfficialImportAsync()
     {

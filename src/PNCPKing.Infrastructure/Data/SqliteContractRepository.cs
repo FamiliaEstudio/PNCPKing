@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed partial class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 33;
+    public const int CurrentSchemaVersion = 34;
 
     private const string GeographicGroupExpression = "CASE WHEN c.geo_layer = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -880,6 +880,46 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
             await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             version = 33;
+        }
+
+        if (version < 34)
+        {
+            ReportMigration(34);
+            await using var transaction = connection.BeginTransaction();
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = transaction;
+            foreach (var (name, definition) in new[]
+            {
+                ("last_contract_id", "TEXT"),
+                ("processed_contracts", "INTEGER NOT NULL DEFAULT 0")
+            })
+            {
+                if (await HasColumnAsync(connection, transaction, "official_update_chunks", name, cancellationToken)
+                        .ConfigureAwait(false)) continue;
+                migration.CommandText = $"ALTER TABLE official_update_chunks ADD COLUMN {name} {definition};";
+                await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            // Changing only these triggers does not rebuild or scan the existing FTS indexes.
+            migration.CommandText = """
+                DROP TRIGGER IF EXISTS contracts_fts_update;
+                CREATE TRIGGER contracts_fts_update AFTER UPDATE OF search_text ON contracts
+                WHEN old.search_text IS NOT new.search_text BEGIN
+                    INSERT INTO contracts_fts(contracts_fts,rowid,search_text)
+                    VALUES('delete',old.rowid,old.search_text);
+                    INSERT INTO contracts_fts(rowid,search_text) VALUES(new.rowid,new.search_text);
+                END;
+                DROP TRIGGER IF EXISTS items_fts_update;
+                CREATE TRIGGER items_fts_update AFTER UPDATE OF search_text ON items
+                WHEN old.search_text IS NOT new.search_text BEGIN
+                    INSERT INTO items_fts(items_fts,rowid,search_text)
+                    VALUES('delete',old.rowid,old.search_text);
+                    INSERT INTO items_fts(rowid,search_text) VALUES(new.rowid,new.search_text);
+                END;
+                UPDATE schema_info SET version=34 WHERE id=1;
+                """;
+            await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 34;
         }
 
         stopwatch.Stop();

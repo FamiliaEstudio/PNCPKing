@@ -119,7 +119,7 @@ public sealed class QuotationDocumentDetailsTests
             await command.ExecuteNonQueryAsync();
         }
         var migrated = await database.Repository.InitializeAsync();
-        Assert.Equal([33], migrated.AppliedMigrations);
+        Assert.Equal([33, 34], migrated.AppliedMigrations);
         var saved = (await repo.GetLineAsync(project.Id, line.Id))!;
         Assert.Equal(100, saved.RequestedQuantity);
         Assert.Empty(saved.CatmatCodeOverride);

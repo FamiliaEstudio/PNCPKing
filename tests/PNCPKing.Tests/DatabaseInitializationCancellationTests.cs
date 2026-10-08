@@ -27,18 +27,27 @@ public sealed class DatabaseInitializationCancellationTests
         Assert.Empty(reopened.AppliedMigrations);
     }
 
-    [Fact]
-    public async Task NativeSqlCancellation_RollsBackMigrationAndPreservesQuotationBeforeRetry()
+    [Theory]
+    [InlineData(33)]
+    [InlineData(34)]
+    public async Task NativeSqlCancellation_RollsBackMigrationAndPreservesQuotationBeforeRetry(int targetVersion)
     {
         await using var database = await TestDatabase.CreateAsync();
         var quotations = new SqliteQuotationRepository(database.Repository.DatabasePath);
         var project = await quotations.CreateProjectAsync("Cotação preservada na migração");
-        await ExecuteAsync(database.Repository.DatabasePath, """
+        var resetSchema = targetVersion == 33 ? """
             ALTER TABLE quotation_lines DROP COLUMN catmat_code_override;
             ALTER TABLE quotation_lines DROP COLUMN minimum_order_quantity_scaled;
-            UPDATE schema_info SET version=32 WHERE id=1;
+            """ : """
+            ALTER TABLE official_update_chunks DROP COLUMN last_contract_id;
+            ALTER TABLE official_update_chunks DROP COLUMN processed_contracts;
+            """;
+        var table = targetVersion == 33 ? "quotation_lines" : "official_update_chunks";
+        var column = targetVersion == 33 ? "catmat_code_override" : "last_contract_id";
+        await ExecuteAsync(database.Repository.DatabasePath, resetSchema + $$"""
+            UPDATE schema_info SET version={{targetVersion - 1}} WHERE id=1;
             CREATE TRIGGER cancel_migration BEFORE UPDATE OF version ON schema_info
-            WHEN NEW.version=33 BEGIN
+            WHEN NEW.version={{targetVersion}} BEGIN
                 SELECT (WITH RECURSIVE n(x) AS (
                     VALUES(cancel_now()) UNION ALL SELECT x+1 FROM n WHERE x<100000000
                 ) SELECT SUM(x) FROM n);
@@ -54,13 +63,13 @@ public sealed class DatabaseInitializationCancellationTests
             cancellation.Token, new InlineProgress(phases.Add)));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation.WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.True(cancellation.IsCancellationRequested);
-        Assert.Contains(phases, phase => phase.Phase == "Migrando esquema v32 → v33");
+        Assert.Contains(phases, phase => phase.Phase == $"Migrando esquema v{targetVersion - 1} → v{targetVersion}");
         await using (var connection = await new SqliteConnectionFactory(database.Repository.DatabasePath).OpenAsync())
         {
             await using var check = connection.CreateCommand();
             check.CommandText = "SELECT version FROM schema_info WHERE id=1;";
-            Assert.Equal(32L, Convert.ToInt64(await check.ExecuteScalarAsync()));
-            check.CommandText = "SELECT COUNT(*) FROM pragma_table_info('quotation_lines') WHERE name='catmat_code_override';";
+            Assert.Equal((long)targetVersion - 1, Convert.ToInt64(await check.ExecuteScalarAsync()));
+            check.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name='{column}';";
             Assert.Equal(0L, Convert.ToInt64(await check.ExecuteScalarAsync()));
             check.CommandText = "DROP TRIGGER cancel_migration;";
             await check.ExecuteNonQueryAsync();

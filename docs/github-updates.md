@@ -42,7 +42,7 @@ O pacote independe da origem, `baseId` ou linhagem do banco e pode ser aplicado 
 
 A partir da versão 1.2.26, uma exportação concluída também registra o pacote no banco de origem, evitando que ele baixe e reimporte o próprio pacote. Exportações anteriores e bancos que receberam os dados por sincronização podem precisar de uma primeira conciliação; ter os dados não equivale a já ter o recibo desse pacote.
 
-Cancelar ou encontrar erro reverte somente o bloco corrente. Blocos anteriores permanecem concluídos. Cotações, cestas, evidências, configurações e CATMAT/CATSER não são alterados. A importação também não consulta o PNCP nem cria pendência de revalidação.
+A partir da versão 1.2.28, cada bloco é conciliado em pequenos lotes de contratações, mantendo os itens e resultados da mesma contratação na mesma transação. O cursor de retomada é gravado junto com cada lote confirmado. Cancelar, fechar o programa ou encontrar erro reverte somente o lote corrente; os lotes anteriores do mesmo bloco permanecem concluídos. A retomada confere e extrai novamente o bloco recebido, mas continua a conciliação depois da última contratação confirmada. A cobertura e o recibo de conclusão do bloco só são confirmados quando todos os lotes terminaram. O progresso e a duração de cada lote são exibidos na tela e registrados no log. Dados, resultados e textos de pesquisa iguais não são regravados. Cotações, cestas, evidências, configurações e CATMAT/CATSER não são alterados. A importação também não consulta o PNCP nem cria pendência de revalidação.
 
 O instalador do programa continua incorporado ao executável. Ele substitui somente o caminho canônico após o encerramento normal e preserva o executável anterior se a troca falhar.
 

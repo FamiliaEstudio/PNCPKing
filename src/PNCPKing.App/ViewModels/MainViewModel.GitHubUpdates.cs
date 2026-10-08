@@ -96,6 +96,7 @@ public sealed partial class MainViewModel
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
+                _diagnosticLog.Info("github-update", "Atualização interrompida; lotes confirmados preservados.");
                 StatusText = "Atualização interrompida. Partes verificadas e lotes importados foram preservados; clique novamente para continuar.";
             }
         });
@@ -116,6 +117,7 @@ public sealed partial class MainViewModel
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
+                _diagnosticLog.Info("github-update", "Importação após reinício interrompida; lotes confirmados preservados.");
                 StatusText = "Programa atualizado. Importação interrompida; lotes concluídos preservados. Use Atualizar pelo GitHub para continuar.";
             }
             catch (Exception e) when (!AsyncCommandRuntime.IsCritical(e))
@@ -181,10 +183,11 @@ public sealed partial class MainViewModel
         }
         if (pending.PriceUpdate is null) { StatusText = "Programa atualizado com sucesso."; return; }
         IsFileOperationIndeterminate = true;
-        var progress = new Progress<string>(s => FileOperationProgressText = s);
+        var progress = OfficialImportProgress();
         try
         {
             var downloaded = pending.PriceUpdate!;
+            _diagnosticLog.Info("official-update", $"Importação iniciada: banco={pending.DatabasePath}; pacote={downloaded.Package.Manifest.PackageId}.");
             var result = await Task.Run(() => official.ImportAsync(downloaded.Path, progress, ct), ct);
             StatusText = $"Atualização concluída. Registros aplicados: {result.Applied:N0}; preservados: {result.Skipped:N0}.";
             File.Delete(downloaded.Path);
