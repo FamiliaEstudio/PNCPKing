@@ -1128,7 +1128,8 @@ public sealed class BackupService(
                     INSERT INTO items_fts(items_fts, rowid, search_text)
                     VALUES('delete', old.rowid, old.search_text);
                 END;
-                CREATE TRIGGER items_fts_update AFTER UPDATE OF search_text ON items BEGIN
+                CREATE TRIGGER items_fts_update AFTER UPDATE OF search_text ON items
+                WHEN old.search_text IS NOT new.search_text BEGIN
                     INSERT INTO items_fts(items_fts, rowid, search_text)
                     VALUES('delete', old.rowid, old.search_text);
                     INSERT INTO items_fts(rowid, search_text) VALUES(new.rowid, new.search_text);

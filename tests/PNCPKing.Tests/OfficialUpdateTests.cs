@@ -378,6 +378,141 @@ public sealed class OfficialUpdateTests
         }));
     }
 
+    [Fact]
+    public async Task CancelledLateChangesResumeCommittedContractBatchesAfterReopening()
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        await SaveLatePricesAsync(source, 70);
+        var quotation = await new SqliteQuotationRepository(destination.Repository.DatabasePath)
+            .CreateProjectAsync("Cotação particular");
+        var path = Path.Combine(source.Directory, "large-late.pncpupdate");
+        var manifest = await new OfficialUpdateService(source.Repository.DatabasePath).ExportAsync(path);
+        using var cancellation = new CancellationTokenSource();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new OfficialUpdateService(destination.Repository.DatabasePath).ImportAsync(path,
+                new InlineProgress(message =>
+                {
+                    if (message.StartsWith("Lote confirmado em late-changes:", StringComparison.Ordinal))
+                        cancellation.Cancel();
+                }), cancellation.Token));
+
+        var committed = Convert.ToInt64(await ScalarAsync(destination,
+            "SELECT processed_contracts FROM official_update_chunks WHERE chunk_key='late-changes'"));
+        Assert.InRange(committed, 1, 69);
+        Assert.Equal(committed, Convert.ToInt64(await ScalarAsync(destination, "SELECT COUNT(*) FROM contracts")));
+        Assert.Equal(committed, Convert.ToInt64(await ScalarAsync(destination, "SELECT COUNT(*) FROM items")));
+        Assert.Equal(committed, Convert.ToInt64(await ScalarAsync(destination, "SELECT COUNT(*) FROM item_results")));
+        Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(destination,
+            "SELECT completed FROM official_update_chunks WHERE chunk_key='late-changes'")));
+        Assert.False((await new OfficialUpdateService(destination.Repository.DatabasePath).GetTransferStatusAsync())
+            .Imports[manifest.PackageId].Completed);
+
+        SqliteConnection.ClearAllPools();
+        var messages = new List<string>();
+        await new OfficialUpdateService(destination.Repository.DatabasePath).ImportAsync(path, new InlineProgress(messages.Add));
+        Assert.Contains(messages, message => message.StartsWith("Retomando late-changes:", StringComparison.Ordinal));
+        Assert.Equal(70L, Convert.ToInt64(await ScalarAsync(destination, "SELECT COUNT(*) FROM item_results")));
+        Assert.Equal(70L, Convert.ToInt64(await ScalarAsync(destination,
+            "SELECT COUNT(*) FROM items WHERE hydration_status=2")));
+        Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(destination,
+            "SELECT completed FROM official_update_chunks WHERE chunk_key='late-changes'")));
+        Assert.Equal(quotation.Id, Assert.Single(await new SqliteQuotationRepository(destination.Repository.DatabasePath)
+            .GetProjectsAsync()).Id);
+    }
+
+    [Fact]
+    public async Task FailureInsideLaterBatchRollsBackItsChildrenAndKeepsEarlierCursor()
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        await SaveLatePricesAsync(source, 70);
+        var path = Path.Combine(source.Directory, "failure-late.pncpupdate");
+        await new OfficialUpdateService(source.Repository.DatabasePath).ExportAsync(path);
+        await SqlAsync(destination, """
+            CREATE TRIGGER reject_test_result BEFORE INSERT ON item_results
+            WHEN new.contract_id='late-040' BEGIN SELECT RAISE(ABORT,'falha simulada'); END;
+            """);
+        await Assert.ThrowsAsync<SqliteException>(() =>
+            new OfficialUpdateService(destination.Repository.DatabasePath).ImportAsync(path));
+        Assert.Equal(32L, Convert.ToInt64(await ScalarAsync(destination, "SELECT COUNT(*) FROM contracts")));
+        Assert.Equal(32L, Convert.ToInt64(await ScalarAsync(destination, "SELECT COUNT(*) FROM items")));
+        Assert.Equal(32L, Convert.ToInt64(await ScalarAsync(destination, "SELECT COUNT(*) FROM item_results")));
+        Assert.Equal(32L, Convert.ToInt64(await ScalarAsync(destination,
+            "SELECT processed_contracts FROM official_update_chunks WHERE chunk_key='late-changes'")));
+        await SqlAsync(destination, "DROP TRIGGER reject_test_result;");
+        await new OfficialUpdateService(destination.Repository.DatabasePath).ImportAsync(path);
+        Assert.Equal(70L, Convert.ToInt64(await ScalarAsync(destination, "SELECT COUNT(*) FROM item_results")));
+    }
+
+    [Fact]
+    public async Task EqualOfficialDataWithoutReceiptsIsReconciledWithoutRewritingItemsOrResults()
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        await SaveLatePricesAsync(source, 1);
+        await SaveLatePricesAsync(destination, 1);
+        await SqlAsync(destination, """
+            CREATE TABLE import_write_audit(event TEXT);
+            CREATE TRIGGER audit_item_update AFTER UPDATE ON items BEGIN INSERT INTO import_write_audit VALUES('item'); END;
+            CREATE TRIGGER audit_result_insert AFTER INSERT ON item_results BEGIN INSERT INTO import_write_audit VALUES('insert'); END;
+            CREATE TRIGGER audit_result_delete AFTER DELETE ON item_results BEGIN INSERT INTO import_write_audit VALUES('delete'); END;
+            CREATE TRIGGER audit_snapshot_update AFTER UPDATE ON contract_item_snapshots BEGIN INSERT INTO import_write_audit VALUES('snapshot'); END;
+            """);
+        var path = Path.Combine(source.Directory, "equal.pncpupdate");
+        await new OfficialUpdateService(source.Repository.DatabasePath).ExportAsync(path);
+        var imported = await new OfficialUpdateService(destination.Repository.DatabasePath).ImportAsync(path);
+        Assert.Equal(0, imported.Applied);
+        Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(destination, "SELECT COUNT(*) FROM import_write_audit")));
+    }
+
+    [Fact]
+    public async Task NewParentVersionPreservesEqualItemTextAndPricesWhileRefreshingProof()
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        await SaveLatePricesAsync(source, 1);
+        await SaveLatePricesAsync(destination, 1);
+        await SqlAsync(source, """
+            UPDATE contracts SET global_updated_at=date('now') || 'T13:00:00.0000000+00:00';
+            INSERT INTO contract_item_snapshots(contract_id,fetched_at,item_count,source_global_updated_at)
+            SELECT pncp_id,global_updated_at,1,global_updated_at FROM contracts;
+            UPDATE items SET hydration_status=2;
+            UPDATE official_result_snapshots SET parent_version=(SELECT global_updated_at FROM contracts WHERE pncp_id=contract_id);
+            """);
+        await SqlAsync(destination, """
+            CREATE TABLE import_write_audit(event TEXT);
+            CREATE TRIGGER audit_item_text AFTER UPDATE OF search_text ON items BEGIN INSERT INTO import_write_audit VALUES('text'); END;
+            CREATE TRIGGER audit_result_insert AFTER INSERT ON item_results BEGIN INSERT INTO import_write_audit VALUES('insert'); END;
+            CREATE TRIGGER audit_result_delete AFTER DELETE ON item_results BEGIN INSERT INTO import_write_audit VALUES('delete'); END;
+            """);
+        var beforeIndex = await ScalarAsync(destination,
+            "SELECT group_concat(hex(block),'|') FROM (SELECT block FROM contracts_fts_data ORDER BY id)");
+        var path = Path.Combine(source.Directory, "new-parent.pncpupdate");
+        await new OfficialUpdateService(source.Repository.DatabasePath).ExportAsync(path);
+        await new OfficialUpdateService(destination.Repository.DatabasePath).ImportAsync(path);
+        Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(destination, "SELECT COUNT(*) FROM import_write_audit")));
+        Assert.Equal(beforeIndex, await ScalarAsync(destination,
+            "SELECT group_concat(hex(block),'|') FROM (SELECT block FROM contracts_fts_data ORDER BY id)"));
+        Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(destination, """
+            SELECT COUNT(*) FROM official_result_snapshots s JOIN contracts c ON c.pncp_id=s.contract_id
+             WHERE s.parent_version=c.global_updated_at;
+            """)));
+        Assert.Equal(ItemHydrationStatus.Complete, (await destination.Repository.GetItemAsync("late-000", 1))!.HydrationStatus);
+    }
+
+    private static async Task SaveLatePricesAsync(TestDatabase database, int count)
+    {
+        var contracts = Enumerable.Range(0, count)
+            .Select(index => Contract($"late-{index:000}", Today.AddDays(-40), Today)).ToArray();
+        await database.Repository.UpsertContractsAsync(contracts);
+        foreach (var contract in contracts)
+        {
+            await database.Repository.UpsertItemsAsync(contract.PncpId, [PriceCacheTests.Item(contract, 1)], false);
+            await database.Repository.ReplaceItemResultsAsync(contract.PncpId, 1, [PriceCacheTests.Result(contract, 1, 1, true)]);
+        }
+    }
+
     private static ContractRecord Contract(string id, DateOnly publication, DateOnly updated) =>
         PriceCacheTests.RecentContract(id, publication, id.Sum(character => character) % 27 + 1) with
         {

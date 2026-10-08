@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.IO.Compression;
 using System.Security.Cryptography;
@@ -41,7 +42,7 @@ public sealed record OfficialTransferStatus(IReadOnlyDictionary<string, Official
 /// <summary>
 /// Creates twenty-day official-data packages and also accepts existing ten-day packages. Export validates each
 /// completed portion and its SQLite payload; import authenticates extracted bytes and merges
-/// one typed block per transaction.
+/// small contract batches per transaction, with durable cursors for interrupted imports.
 /// </summary>
 public sealed class OfficialUpdateService
 {
@@ -233,7 +234,7 @@ public sealed class OfficialUpdateService
                 progress?.Report($"Lendo {chunk.Key}…");
                 await ExtractAndHashAsync(packagePath, chunk, temporary, cancellationToken).ConfigureAwait(false);
                 progress?.Report($"Aplicando {chunk.Key}…");
-                var result = await ApplyChunkAsync(temporary, manifest.PackageId, chunk, cancellationToken)
+                var result = await ApplyChunkAsync(temporary, manifest.PackageId, chunk, progress, cancellationToken)
                     .ConfigureAwait(false);
                 applied += result.Applied;
                 skipped += result.Skipped;
@@ -671,10 +672,8 @@ public sealed class OfficialUpdateService
     }
 
     private async Task<OfficialUpdateResult> ApplyChunkAsync(string payloadPath, string packageId,
-        OfficialUpdateChunk chunk, CancellationToken cancellationToken)
+        OfficialUpdateChunk chunk, IProgress<string>? progress, CancellationToken cancellationToken)
     {
-        await using var lease = await _connections.WorkCoordinator
-            .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken).ConfigureAwait(false);
         await using var destination = await _connections.OpenAsync(cancellationToken).ConfigureAwait(false);
         using var interruption = SqliteConnectionFactory.InterruptOnCancellation(destination, cancellationToken);
         await using (var attach = destination.CreateCommand())
@@ -686,25 +685,150 @@ public sealed class OfficialUpdateService
 
         try
         {
-            await using var transaction = destination.BeginTransaction();
-            await using var command = destination.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = MergeSql;
-            command.Parameters.AddWithValue("$package", packageId);
-            command.Parameters.AddWithValue("$key", chunk.Key);
-            command.Parameters.AddWithValue("$digest", chunk.ContentDigest);
-            command.Parameters.AddWithValue("$sha", chunk.Sha256);
-            command.Parameters.AddWithValue("$complete", CompleteItem);
-            command.Parameters.AddWithValue("$coverageComplete", CompleteCoverage);
-            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
-            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-
-            await using (var hasCheckpoints = destination.CreateCommand())
+            string? after = null;
+            long processed = 0, applied = 0, skipped = 0;
+            await using (var receipt = destination.CreateCommand())
             {
-                hasCheckpoints.Transaction = transaction;
-                hasCheckpoints.CommandText = "SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name='publication_checkpoints')";
-                if (Convert.ToInt64(await hasCheckpoints.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
-                        CultureInfo.InvariantCulture) != 0)
+                receipt.CommandText = """
+                    SELECT last_contract_id,processed_contracts,applied,skipped
+                      FROM official_update_chunks WHERE chunk_key=$key AND content_digest=$digest;
+                    """;
+                receipt.Parameters.AddWithValue("$key", chunk.Key);
+                receipt.Parameters.AddWithValue("$digest", chunk.ContentDigest);
+                await using var reader = await receipt.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    after = reader.IsDBNull(0) ? null : reader.GetString(0);
+                    processed = reader.GetInt64(1);
+                    applied = reader.GetInt64(2);
+                    skipped = reader.GetInt64(3);
+                }
+            }
+            if (processed > 0)
+                progress?.Report($"Retomando {chunk.Key}: {processed:N0}/{chunk.Contracts:N0} contratações já confirmadas.");
+
+            await using (var setup = destination.CreateCommand())
+            {
+                setup.CommandText = "CREATE TEMP TABLE batch_contracts(pncp_id TEXT PRIMARY KEY) WITHOUT ROWID;";
+                await setup.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            var batchSize = 32;
+            var chunkWatch = Stopwatch.StartNew();
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var batch = new List<string>();
+                long itemCount = 0;
+                await using (var selection = destination.CreateCommand())
+                {
+                    selection.CommandText = """
+                        SELECT n.pncp_id,COALESCE(s.item_count,0)
+                          FROM incoming.contracts n LEFT JOIN incoming.item_snapshots s ON s.contract_id=n.pncp_id
+                         WHERE n.pncp_id>$after ORDER BY n.pncp_id LIMIT $limit;
+                        """;
+                    selection.Parameters.AddWithValue("$after", after ?? "");
+                    selection.Parameters.AddWithValue("$limit", batchSize);
+                    await using var reader = await selection.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                    while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        var items = reader.GetInt64(1);
+                        // A contract and all its children always stay in the same transaction.
+                        if (batch.Count > 0 && itemCount + items > 2000) break;
+                        batch.Add(reader.GetString(0));
+                        itemCount += items;
+                    }
+                }
+                if (batch.Count == 0) break;
+
+                progress?.Report($"Aguardando acesso ao banco para {chunk.Key}: {processed:N0}/{chunk.Contracts:N0} contratações.");
+                await using (var lease = await _connections.WorkCoordinator
+                    .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken).ConfigureAwait(false))
+                {
+                    var batchWatch = Stopwatch.StartNew();
+                    await using var transaction = destination.BeginTransaction();
+                    await using var command = destination.CreateCommand();
+                    command.Transaction = transaction;
+                    command.CommandText = "DELETE FROM batch_contracts;";
+                    await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                    command.CommandText = "INSERT INTO batch_contracts VALUES($id);";
+                    var id = command.Parameters.Add("$id", SqliteType.Text);
+                    foreach (var contract in batch)
+                    {
+                        id.Value = contract;
+                        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                    command.Parameters.Clear();
+                    progress?.Report($"Aplicando {chunk.Key}: lote de {batch.Count:N0} contratações, {itemCount:N0} itens; {processed:N0}/{chunk.Contracts:N0} confirmadas.");
+                    command.CommandText = MergeSql;
+                    command.Parameters.AddWithValue("$complete", CompleteItem);
+                    command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+                    await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                    command.CommandText = """
+                        SELECT (SELECT COUNT(*) FROM accepted_contracts)
+                             + (SELECT COUNT(*) FROM accepted_items)
+                             + (SELECT COUNT(*) FROM accepted_results),
+                               (SELECT COUNT(*) FROM batch_contracts)
+                             + (SELECT COUNT(*) FROM batch_contracts b CROSS JOIN incoming.items i ON i.contract_id=b.pncp_id)
+                             + (SELECT COUNT(*) FROM batch_contracts b CROSS JOIN incoming.item_results r ON r.contract_id=b.pncp_id);
+                        """;
+                    long batchApplied, batchSkipped;
+                    await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+                        batchApplied = reader.GetInt64(0);
+                        batchSkipped = Math.Max(0, reader.GetInt64(1) - batchApplied);
+                    }
+                    command.CommandText = """
+                        INSERT INTO official_update_chunks(chunk_key,content_digest,sha256,package_id,completed,
+                            imported_at,last_contract_id,processed_contracts,applied,skipped)
+                        VALUES($key,$digest,$sha,$package,0,$now,$last,$processed,$applied,$skipped)
+                        ON CONFLICT(chunk_key,content_digest) DO UPDATE SET package_id=excluded.package_id,
+                            imported_at=excluded.imported_at,last_contract_id=excluded.last_contract_id,
+                            processed_contracts=excluded.processed_contracts,applied=excluded.applied,skipped=excluded.skipped;
+                        """;
+                    command.Parameters.AddWithValue("$key", chunk.Key);
+                    command.Parameters.AddWithValue("$digest", chunk.ContentDigest);
+                    command.Parameters.AddWithValue("$sha", chunk.Sha256);
+                    command.Parameters.AddWithValue("$package", packageId);
+                    command.Parameters.AddWithValue("$last", batch[^1]);
+                    command.Parameters.AddWithValue("$processed", processed + batch.Count);
+                    command.Parameters.AddWithValue("$applied", applied + batchApplied);
+                    command.Parameters.AddWithValue("$skipped", skipped + batchSkipped);
+                    await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                    await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                    after = batch[^1];
+                    processed += batch.Count;
+                    applied += batchApplied;
+                    skipped += batchSkipped;
+                    progress?.Report($"Lote confirmado em {chunk.Key}: {processed:N0}/{chunk.Contracts:N0} contratações; " +
+                        $"{batchWatch.Elapsed.TotalSeconds:N1}s no lote; {chunkWatch.Elapsed.TotalSeconds:N1}s nesta execução.");
+                    // Aim for short commits on HDDs, without inflating cache or memory usage.
+                    if (batchWatch.Elapsed > TimeSpan.FromSeconds(2)) batchSize = Math.Max(1, batchSize / 2);
+                    else if (batchWatch.Elapsed < TimeSpan.FromMilliseconds(500)) batchSize = Math.Min(128, batchSize * 2);
+                }
+                // Release the writer between batches so visible reads and cancellation can proceed.
+                await Task.Yield();
+            }
+
+            progress?.Report($"Finalizando {chunk.Key}: cobertura e recibo do bloco…");
+            await using (var lease = await _connections.WorkCoordinator
+                .EnterWriterAsync(SqliteWorkPriority.Background, cancellationToken).ConfigureAwait(false))
+            {
+                await using var transaction = destination.BeginTransaction();
+                await using var command = destination.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = FinishChunkSql;
+                command.Parameters.AddWithValue("$key", chunk.Key);
+                command.Parameters.AddWithValue("$digest", chunk.ContentDigest);
+                command.Parameters.AddWithValue("$sha", chunk.Sha256);
+                command.Parameters.AddWithValue("$package", packageId);
+                command.Parameters.AddWithValue("$coverageComplete", CompleteCoverage);
+                command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+                command.Parameters.AddWithValue("$applied", applied);
+                command.Parameters.AddWithValue("$skipped", skipped);
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                command.CommandText = "SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name='publication_checkpoints')";
+                if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
                 {
                     command.CommandText = MergePublicationCheckpointsSql;
                     command.Parameters.AddWithValue("$coveragePartial", (int)CoverageStatus.Partial);
@@ -712,38 +836,19 @@ public sealed class OfficialUpdateService
                     command.Parameters.AddWithValue("$checkpointPartial", (int)SyncPartitionStatus.Partial);
                     await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 }
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             }
-
-            await using var counts = destination.CreateCommand();
-            counts.Transaction = transaction;
-            counts.CommandText = """
-                SELECT (SELECT COUNT(*) FROM accepted_contracts)
-                     + (SELECT COUNT(*) FROM accepted_items)
-                     + (SELECT COUNT(*) FROM accepted_results);
-                """;
-            await using var reader = await counts.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-            var applied = reader.GetInt64(0);
-            var skipped = Math.Max(0, checked(chunk.Contracts + chunk.Items + chunk.Results) - applied);
-
-            command.CommandText = """
-                UPDATE official_update_chunks SET applied=$applied,skipped=$skipped
-                 WHERE chunk_key=$key AND content_digest=$digest;
-                """;
-            command.Parameters.AddWithValue("$applied", applied);
-            command.Parameters.AddWithValue("$skipped", skipped);
-            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new(applied, skipped, 0);
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
         {
-            throw new OperationCanceledException("Importação interrompida; o bloco atual foi revertido.", exception, cancellationToken);
+            throw new OperationCanceledException("Importação interrompida; somente o lote corrente foi revertido.", exception, cancellationToken);
         }
         finally
         {
+            interruption.Dispose();
             await using var detach = destination.CreateCommand();
-            detach.CommandText = "DETACH DATABASE incoming";
+            detach.CommandText = "DETACH DATABASE incoming; DROP TABLE IF EXISTS temp.batch_contracts;";
             await detach.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
         }
     }
@@ -756,7 +861,8 @@ public sealed class OfficialUpdateService
         CREATE TEMP TABLE accepted_contracts(pncp_id TEXT PRIMARY KEY,is_new INTEGER NOT NULL) WITHOUT ROWID;
         INSERT INTO accepted_contracts
         SELECT n.pncp_id,d.pncp_id IS NULL
-          FROM incoming.contracts n LEFT JOIN contracts d ON d.pncp_id=n.pncp_id
+          FROM batch_contracts b CROSS JOIN incoming.contracts n ON n.pncp_id=b.pncp_id
+          LEFT JOIN contracts d ON d.pncp_id=n.pncp_id
          WHERE d.pncp_id IS NULL OR (
              n.global_updated_at IS NOT NULL AND d.global_updated_at IS NOT NULL
              AND julianday(n.global_updated_at)>julianday(d.global_updated_at));
@@ -770,7 +876,7 @@ public sealed class OfficialUpdateService
                n.organization,n.unit,n.municipality,n.uf,n.modality_id,n.modality_name,n.status,n.publication_date,
                n.global_updated_at,n.total_homologated_scaled,n.search_text,n.municipality_ibge_code,
                n.distance_from_ribeirao_km,n.municipality_distance_rank,n.state_proximity_rank,n.geo_layer,n.random_order_key
-          FROM incoming.contracts n JOIN accepted_contracts a ON a.pncp_id=n.pncp_id
+          FROM accepted_contracts a CROSS JOIN incoming.contracts n ON n.pncp_id=a.pncp_id
          WHERE 1=1
         ON CONFLICT(pncp_id) DO UPDATE SET
             cnpj=excluded.cnpj,purchase_year=excluded.purchase_year,purchase_sequence=excluded.purchase_sequence,
@@ -786,12 +892,12 @@ public sealed class OfficialUpdateService
 
         UPDATE dataset_statistics
            SET contract_count=contract_count+(SELECT COUNT(*) FROM accepted_contracts WHERE is_new=1),updated_at=$now
-         WHERE id=1;
+         WHERE id=1 AND EXISTS(SELECT 1 FROM accepted_contracts WHERE is_new=1);
 
         CREATE TEMP TABLE accepted_lists(contract_id TEXT PRIMARY KEY,replace_all INTEGER NOT NULL) WITHOUT ROWID;
         INSERT INTO accepted_lists
         SELECT s.contract_id,COALESCE(a.pncp_id IS NOT NULL,0)
-          FROM incoming.item_snapshots s
+          FROM batch_contracts b CROSS JOIN incoming.item_snapshots s ON s.contract_id=b.pncp_id
           JOIN contracts d ON d.pncp_id=s.contract_id AND d.global_updated_at IS s.parent_version
           LEFT JOIN accepted_contracts a ON a.pncp_id=s.contract_id
           LEFT JOIN contract_item_snapshots old ON old.contract_id=s.contract_id
@@ -808,11 +914,19 @@ public sealed class OfficialUpdateService
             PRIMARY KEY(contract_id,item_number)) WITHOUT ROWID;
         INSERT INTO accepted_items
         SELECT n.contract_id,n.item_number
-          FROM incoming.items n JOIN accepted_lists l ON l.contract_id=n.contract_id
+          FROM accepted_lists l CROSS JOIN incoming.items n ON n.contract_id=l.contract_id
           LEFT JOIN items d ON d.contract_id=n.contract_id AND d.item_number=n.item_number
-         WHERE l.replace_all=1 OR d.contract_id IS NULL OR (
+         WHERE (l.replace_all=1 OR d.contract_id IS NULL OR (
              n.source_updated_at IS NOT NULL AND d.source_updated_at IS NOT NULL
-             AND julianday(n.source_updated_at)>julianday(d.source_updated_at));
+             AND julianday(n.source_updated_at)>julianday(d.source_updated_at)))
+           AND (d.contract_id IS NULL OR
+                n.description IS NOT d.description OR n.unit IS NOT d.unit OR n.status IS NOT d.status
+                OR n.has_result IS NOT d.has_result OR n.source_updated_at IS NOT d.source_updated_at
+                OR n.search_text IS NOT d.search_text OR n.requested_quantity_scaled IS NOT d.requested_quantity_scaled
+                OR n.additional_information IS NOT d.additional_information OR n.item_category IS NOT d.item_category
+                OR n.ncm_nbs_code IS NOT d.ncm_nbs_code OR n.ncm_nbs_description IS NOT d.ncm_nbs_description
+                OR n.catalog_code IS NOT d.catalog_code OR n.catalog_name IS NOT d.catalog_name
+                OR n.catalog_category IS NOT d.catalog_category);
 
         INSERT INTO items(contract_id,item_number,description,unit,status,has_result,source_updated_at,hydration_status,
             last_error,cache_updated_at,search_text,requested_quantity_scaled,additional_information,item_category,
@@ -821,8 +935,8 @@ public sealed class OfficialUpdateService
                CASE WHEN n.has_result=1 THEN 4 ELSE $complete END,NULL,NULL,n.search_text,n.requested_quantity_scaled,
                n.additional_information,n.item_category,n.ncm_nbs_code,n.ncm_nbs_description,n.catalog_code,
                n.catalog_name,n.catalog_category
-          FROM incoming.items n JOIN accepted_items a
-            ON a.contract_id=n.contract_id AND a.item_number=n.item_number
+          FROM accepted_items a CROSS JOIN incoming.items n
+            ON n.contract_id=a.contract_id AND n.item_number=a.item_number
          WHERE 1=1
         ON CONFLICT(contract_id,item_number) DO UPDATE SET
             description=excluded.description,unit=excluded.unit,status=excluded.status,has_result=excluded.has_result,
@@ -833,17 +947,19 @@ public sealed class OfficialUpdateService
             catalog_code=excluded.catalog_code,catalog_name=excluded.catalog_name,catalog_category=excluded.catalog_category;
 
         INSERT INTO contract_item_snapshots(contract_id,fetched_at,item_count,source_global_updated_at)
-        SELECT s.contract_id,$now,s.item_count,s.parent_version FROM incoming.item_snapshots s
-        JOIN accepted_lists l ON l.contract_id=s.contract_id
+        SELECT s.contract_id,$now,s.item_count,s.parent_version FROM accepted_lists l
+        CROSS JOIN incoming.item_snapshots s ON s.contract_id=l.contract_id
         WHERE (SELECT COUNT(*) FROM items i WHERE i.contract_id=s.contract_id)=s.item_count
         ON CONFLICT(contract_id) DO UPDATE SET fetched_at=excluded.fetched_at,item_count=excluded.item_count,
-            source_global_updated_at=excluded.source_global_updated_at;
+            source_global_updated_at=excluded.source_global_updated_at
+        WHERE contract_item_snapshots.item_count IS NOT excluded.item_count
+           OR contract_item_snapshots.source_global_updated_at IS NOT excluded.source_global_updated_at;
 
         CREATE TEMP TABLE accepted_results(contract_id TEXT NOT NULL,item_number INTEGER NOT NULL,
-            PRIMARY KEY(contract_id,item_number)) WITHOUT ROWID;
-        INSERT INTO accepted_results
+            replace_results INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(contract_id,item_number)) WITHOUT ROWID;
+        INSERT INTO accepted_results(contract_id,item_number)
         SELECT s.contract_id,s.item_number
-          FROM incoming.result_snapshots s
+          FROM batch_contracts b CROSS JOIN incoming.result_snapshots s ON s.contract_id=b.pncp_id
           JOIN contracts c ON c.pncp_id=s.contract_id AND c.global_updated_at IS s.parent_version
           JOIN items i ON i.contract_id=s.contract_id AND i.item_number=s.item_number
                       AND i.source_updated_at IS s.item_version
@@ -851,41 +967,80 @@ public sealed class OfficialUpdateService
           LEFT JOIN official_result_snapshots old
                  ON old.contract_id=s.contract_id AND old.item_number=s.item_number
          WHERE ai.contract_id IS NOT NULL
+            OR s.contract_id IN(SELECT pncp_id FROM accepted_contracts)
             OR (old.contract_id IS NULL AND (SELECT COUNT(*) FROM item_results r
                  WHERE r.contract_id=s.contract_id AND r.item_number=s.item_number)<=s.result_count)
             OR (old.parent_version IS s.parent_version AND old.item_version IS s.item_version
                 AND old.result_count=s.result_count);
 
+        -- Compare only results belonging to this small batch. Equal snapshots need no writes.
+        UPDATE accepted_results SET replace_results=1
+         WHERE (SELECT COUNT(*) FROM item_results d
+                 WHERE d.contract_id=accepted_results.contract_id AND d.item_number=accepted_results.item_number)
+             <> (SELECT s.result_count FROM incoming.result_snapshots s
+                 WHERE s.contract_id=accepted_results.contract_id AND s.item_number=accepted_results.item_number)
+            OR EXISTS(SELECT 1 FROM incoming.item_results n
+                LEFT JOIN item_results d ON d.contract_id=n.contract_id AND d.item_number=n.item_number
+                                        AND d.result_sequence=n.result_sequence
+                WHERE n.contract_id=accepted_results.contract_id AND n.item_number=accepted_results.item_number
+                  AND (d.contract_id IS NULL OR n.supplier_tax_id IS NOT d.supplier_tax_id
+                    OR n.supplier_name IS NOT d.supplier_name OR n.quantity_scaled IS NOT d.quantity_scaled
+                    OR n.unit_value_scaled IS NOT d.unit_value_scaled OR n.total_value_scaled IS NOT d.total_value_scaled
+                    OR n.result_date IS NOT d.result_date OR n.result_status_id IS NOT d.result_status_id
+                    OR n.result_status_name IS NOT d.result_status_name OR n.supplier_type IS NOT d.supplier_type
+                    OR n.supplier_municipality IS NOT d.supplier_municipality OR n.supplier_uf IS NOT d.supplier_uf));
+
+        DELETE FROM accepted_results
+         WHERE replace_results=0
+           AND EXISTS(SELECT 1 FROM official_result_snapshots d JOIN incoming.result_snapshots n
+                         ON n.contract_id=d.contract_id AND n.item_number=d.item_number
+                       WHERE d.contract_id=accepted_results.contract_id AND d.item_number=accepted_results.item_number
+                         AND d.parent_version IS n.parent_version AND d.item_version IS n.item_version
+                         AND d.result_count=n.result_count)
+           AND EXISTS(SELECT 1 FROM items i
+                       WHERE i.contract_id=accepted_results.contract_id AND i.item_number=accepted_results.item_number
+                         AND i.hydration_status=$complete AND i.last_error IS NULL);
+
         DELETE FROM item_results
-         WHERE (contract_id,item_number) IN(SELECT contract_id,item_number FROM accepted_results);
+         WHERE (contract_id,item_number) IN(
+             SELECT contract_id,item_number FROM accepted_results WHERE replace_results=1);
         INSERT INTO item_results(contract_id,item_number,result_sequence,supplier_tax_id,supplier_name,quantity_scaled,
             unit_value_scaled,total_value_scaled,result_date,result_status_id,result_status_name,supplier_type,
             supplier_municipality,supplier_uf)
         SELECT r.contract_id,r.item_number,r.result_sequence,r.supplier_tax_id,r.supplier_name,r.quantity_scaled,
                r.unit_value_scaled,r.total_value_scaled,r.result_date,r.result_status_id,r.result_status_name,
                r.supplier_type,r.supplier_municipality,r.supplier_uf
-          FROM incoming.item_results r JOIN accepted_results a
-            ON a.contract_id=r.contract_id AND a.item_number=r.item_number;
+          FROM accepted_results a CROSS JOIN incoming.item_results r
+            ON r.contract_id=a.contract_id AND r.item_number=a.item_number
+         WHERE a.replace_results=1;
         UPDATE items SET hydration_status=$complete,last_error=NULL,cache_updated_at=$now
-         WHERE (contract_id,item_number) IN(SELECT contract_id,item_number FROM accepted_results);
+         WHERE (contract_id,item_number) IN(SELECT contract_id,item_number FROM accepted_results)
+           AND (hydration_status<>$complete OR last_error IS NOT NULL OR
+                (contract_id,item_number) IN(SELECT contract_id,item_number FROM accepted_results WHERE replace_results=1));
         INSERT INTO official_result_snapshots(contract_id,item_number,parent_version,item_version,result_count)
         SELECT s.contract_id,s.item_number,s.parent_version,s.item_version,s.result_count
-          FROM incoming.result_snapshots s JOIN accepted_results a
-            ON a.contract_id=s.contract_id AND a.item_number=s.item_number
+          FROM accepted_results a CROSS JOIN incoming.result_snapshots s
+            ON s.contract_id=a.contract_id AND s.item_number=a.item_number
          WHERE 1=1
         ON CONFLICT(contract_id,item_number) DO UPDATE SET parent_version=excluded.parent_version,
-            item_version=excluded.item_version,result_count=excluded.result_count;
+            item_version=excluded.item_version,result_count=excluded.result_count
+        WHERE official_result_snapshots.parent_version IS NOT excluded.parent_version
+           OR official_result_snapshots.item_version IS NOT excluded.item_version
+           OR official_result_snapshots.result_count IS NOT excluded.result_count;
 
+        """;
+
+    private const string FinishChunkSql = """
         INSERT INTO coverage_day_modalities(coverage_date,modality_id,uf,status,records_count,updated_at,last_error)
         SELECT coverage_date,modality_id,uf,$coverageComplete,records_count,$now,NULL FROM incoming.coverage
          WHERE 1=1
         ON CONFLICT(coverage_date,modality_id,uf) DO UPDATE SET status=$coverageComplete,
             records_count=excluded.records_count,updated_at=excluded.updated_at,last_error=NULL;
 
-        INSERT INTO official_update_chunks(chunk_key,content_digest,sha256,package_id,completed,imported_at)
-        VALUES($key,$digest,$sha,$package,1,$now)
+        INSERT INTO official_update_chunks(chunk_key,content_digest,sha256,package_id,completed,imported_at,applied,skipped)
+        VALUES($key,$digest,$sha,$package,1,$now,$applied,$skipped)
         ON CONFLICT(chunk_key,content_digest) DO UPDATE SET sha256=excluded.sha256,package_id=excluded.package_id,
-            completed=1,imported_at=excluded.imported_at;
+            completed=1,imported_at=excluded.imported_at,applied=$applied,skipped=$skipped;
         """;
 
     private const string MergePublicationCheckpointsSql = """
