@@ -1002,8 +1002,9 @@ public sealed class OfficialUpdateService
                          AND i.hydration_status=$complete AND i.last_error IS NULL);
 
         DELETE FROM item_results
-         WHERE (contract_id,item_number) IN(
-             SELECT contract_id,item_number FROM accepted_results WHERE replace_results=1);
+         WHERE rowid IN(SELECT d.rowid FROM accepted_results a CROSS JOIN item_results d
+                        ON d.contract_id=a.contract_id AND d.item_number=a.item_number
+                       WHERE a.replace_results=1);
         INSERT INTO item_results(contract_id,item_number,result_sequence,supplier_tax_id,supplier_name,quantity_scaled,
             unit_value_scaled,total_value_scaled,result_date,result_status_id,result_status_name,supplier_type,
             supplier_municipality,supplier_uf)
@@ -1014,9 +1015,9 @@ public sealed class OfficialUpdateService
             ON r.contract_id=a.contract_id AND r.item_number=a.item_number
          WHERE a.replace_results=1;
         UPDATE items SET hydration_status=$complete,last_error=NULL,cache_updated_at=$now
-         WHERE (contract_id,item_number) IN(SELECT contract_id,item_number FROM accepted_results)
-           AND (hydration_status<>$complete OR last_error IS NOT NULL OR
-                (contract_id,item_number) IN(SELECT contract_id,item_number FROM accepted_results WHERE replace_results=1));
+         WHERE rowid IN(SELECT i.rowid FROM accepted_results a CROSS JOIN items i
+                        ON i.contract_id=a.contract_id AND i.item_number=a.item_number
+                       WHERE i.hydration_status<>$complete OR i.last_error IS NOT NULL OR a.replace_results=1);
         INSERT INTO official_result_snapshots(contract_id,item_number,parent_version,item_version,result_count)
         SELECT s.contract_id,s.item_number,s.parent_version,s.item_version,s.result_count
           FROM accepted_results a CROSS JOIN incoming.result_snapshots s

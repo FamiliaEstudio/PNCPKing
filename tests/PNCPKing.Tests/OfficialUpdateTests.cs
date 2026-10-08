@@ -478,7 +478,9 @@ public sealed class OfficialUpdateTests
             INSERT INTO contract_item_snapshots(contract_id,fetched_at,item_count,source_global_updated_at)
             SELECT pncp_id,global_updated_at,1,global_updated_at FROM contracts;
             UPDATE items SET hydration_status=2;
-            UPDATE official_result_snapshots SET parent_version=(SELECT global_updated_at FROM contracts WHERE pncp_id=contract_id);
+            INSERT INTO official_result_snapshots(contract_id,item_number,parent_version,item_version,result_count)
+            SELECT i.contract_id,i.item_number,c.global_updated_at,i.source_updated_at,1
+              FROM items i JOIN contracts c ON c.pncp_id=i.contract_id;
             """);
         await SqlAsync(destination, """
             CREATE TABLE import_write_audit(event TEXT);
