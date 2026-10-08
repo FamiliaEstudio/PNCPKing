@@ -18,11 +18,15 @@ A exportação apenas empacota dados já salvos e pode ocorrer com o dia atual o
 
 O arquivo final é recusado atomicamente se atingir 2 GiB.
 
+Depois da exportação concluída, o banco de origem registra o mesmo recibo de pacote usado na importação, dispensando sua própria reimportação. Esse registro ocorre após liberar a leitura da exportação e não regrava dados oficiais.
+
 ## Importação
 
 O esquema 29 remove a linhagem cumulativa e cria somente recibos pequenos de pacotes e blocos; a migração não reescreve as tabelas volumosas. Qualquer banco ou backup com esquema compatível pode receber imediatamente um pacote v2.
 
 Para cada bloco sem recibo concluído, o receptor extrai uma única vez e calcula o SHA-256 durante essa leitura. Em seguida anexa o SQLite tipado em modo somente leitura e aplica uma transação. Não executa `integrity_check`, validação JSON, varredura semântica prévia, retenção, `VACUUM` ou consulta ao PNCP.
+
+O progresso separa **Lendo** (extração e hash) de **Aplicando** (conciliação e gravação). A remoção de resultados substituídos e a conclusão dos itens usam suas chaves compostas e índices, limitando o acesso às chaves do bloco e evitando varrer as tabelas locais inteiras em cada dia.
 
 As regras de conciliação são:
 
@@ -41,4 +45,4 @@ Pacotes v1 são rejeitados com mensagem explícita e não possuem caminho de ado
 
 ## Benchmark
 
-`OfficialUpdatePerformanceTests` registra, quando `PNCPKING_UPDATE_REPORT` é definido, tamanho compactado e expandido, quantidade de extrações, bytes acrescentados ao banco e durações da exportação, primeira importação e reimportação. A repetição exige zero extrações.
+`OfficialUpdatePerformanceTests` registra, quando `PNCPKING_UPDATE_REPORT` é definido, tamanho compactado e expandido, quantidade de extrações, bytes acrescentados ao banco e durações da exportação, primeira importação e reimportação. O cenário inclui 20 mil contratações, 40 mil itens e 80 mil resultados. A repetição exige zero extrações. Um teste separado conta instruções SQLite e exige que acrescentar 10 mil itens e resultados locais fora do pacote não provoque trabalho proporcional ao tamanho dessas tabelas.

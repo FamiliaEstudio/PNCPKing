@@ -1,6 +1,6 @@
 # Atualização pelo GitHub
 
-**Atualizar pelo GitHub** consulta as releases públicas de `FamiliaEstudio/PNCPKing` somente após o clique. A prévia separa o programa do pacote oficial de preços e mostra, com rolagem, as notas de cada versão do programa entre a instalada e a oferecida. Se o histórico estiver indisponível, a prévia avisa e ainda permite atualizar. Se houver executável novo, ele é baixado, conferido e instalado primeiro. Somente depois da reinicialização o novo programa baixa e importa o pacote de preços confirmado na prévia, automaticamente. Uma falha no download dos preços não impede a atualização do programa. Se não houver programa novo, os preços são baixados e importados diretamente.
+**Atualizar pelo GitHub** consulta as releases públicas de `FamiliaEstudio/PNCPKing` somente após o clique. A prévia permite escolher **Atualizar o programa**, **Atualizar os preços** ou ambos, e mostra, com rolagem, as notas de cada versão do programa entre a instalada e a oferecida. Opções sem atualização disponível ficam desabilitadas. Se um pacote exigir uma versão mais recente, os preços só podem ser selecionados junto com o programa. Se o histórico estiver indisponível, a prévia avisa e ainda permite atualizar. Quando selecionado, o executável novo é baixado, conferido e instalado primeiro. Somente depois da reinicialização o novo programa baixa e importa os preços também selecionados na prévia. Escolher somente o programa não inicia a etapa de preços após o reinício. Uma falha no download dos preços não impede a atualização do programa. Selecionar somente os preços faz a importação diretamente, sem reiniciar.
 
 ## Publicar o programa
 
@@ -37,6 +37,8 @@ O download calcula o SHA-256 externo enquanto grava o arquivo. A importação co
 ## Preservação e retomada
 
 O pacote independe da origem, `baseId` ou linhagem do banco e pode ser aplicado diretamente depois da restauração de um backup compatível. Recibos ficam no banco selecionado. Blocos já concluídos, inclusive de outra janela móvel com o mesmo digest, são ignorados antes da extração.
+
+A partir da versão 1.2.26, uma exportação concluída também registra o pacote no banco de origem, evitando que ele baixe e reimporte o próprio pacote. Exportações anteriores e bancos que receberam os dados por sincronização podem precisar de uma primeira conciliação; ter os dados não equivale a já ter o recibo desse pacote.
 
 Cancelar ou encontrar erro reverte somente o bloco corrente. Blocos anteriores permanecem concluídos. Cotações, cestas, evidências, configurações e CATMAT/CATSER não são alterados. A importação também não consulta o PNCP nem cria pendência de revalidação.
 

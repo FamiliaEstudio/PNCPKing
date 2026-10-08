@@ -195,6 +195,30 @@ public sealed class OfficialUpdateTests
     }
 
     [Fact]
+    public async Task ExportingDatabaseRecognizesItsOwnValidatedPackageWithoutExtractingOrApplyingIt()
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await CompleteCoverageAsync(source);
+        var contract = Contract("exported-price", Today, Today);
+        await source.Repository.UpsertContractsAsync([contract]);
+        await source.Repository.UpsertItemsAsync(contract.PncpId, [PriceCacheTests.Item(contract, 1)], false);
+        await source.Repository.ReplaceItemResultsAsync(contract.PncpId, 1,
+            [PriceCacheTests.Result(contract, 1, 1, true)]);
+        await SaveEmptyListAsync(source, Contract("exported-late", Today.AddDays(-40), Today));
+        var updates = new OfficialUpdateService(source.Repository.DatabasePath);
+        var path = Path.Combine(source.Directory, "origin.pncpupdate");
+        var manifest = await updates.ExportAsync(path);
+
+        Assert.True((await updates.GetTransferStatusAsync()).Imports[manifest.PackageId].Completed);
+        var messages = new List<string>();
+        var result = await updates.ImportAsync(path, new InlineProgress(messages.Add));
+        Assert.Equal(0, result.Applied);
+        Assert.Single(messages);
+        Assert.Contains("já foi importado integralmente", messages[0]);
+        Assert.Single((await source.Repository.GetCachedItemResultsAsync(contract.PncpId, 1))!.Results);
+    }
+
+    [Fact]
     public async Task ReimportAndOverlappingUnchangedWindowUseReceiptsWithoutExtraction()
     {
         await using var source = await TestDatabase.CreateAsync();
@@ -205,7 +229,14 @@ public sealed class OfficialUpdateTests
         var importer = new OfficialUpdateService(destination.Repository.DatabasePath);
         var first = Path.Combine(source.Directory, "first.pncpupdate");
         await exporter.ExportAsync(first);
-        await importer.ImportAsync(first);
+        var initialMessages = new List<string>();
+        await importer.ImportAsync(first, new InlineProgress(initialMessages.Add));
+        foreach (var chunk in (await OfficialUpdateService.ReadManifestAsync(first)).Manifest.Chunks)
+        {
+            var reading = initialMessages.IndexOf($"Lendo {chunk.Key}…");
+            var applying = initialMessages.IndexOf($"Aplicando {chunk.Key}…");
+            Assert.True(reading >= 0 && applying > reading);
+        }
 
         var messages = new List<string>();
         var repeated = await importer.ImportAsync(first, new InlineProgress(messages.Add));

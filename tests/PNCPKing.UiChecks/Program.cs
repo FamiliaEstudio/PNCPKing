@@ -102,6 +102,8 @@ internal static partial class Program
                     Console.WriteLine("Quotation transfer/copy dialog: passed");
                     await CheckColumnChooserAsync();
                     Console.WriteLine("Column chooser: passed");
+                    CheckGitHubUpdateDialog();
+                    Console.WriteLine("GitHub update choices: passed");
                     await CheckThemeControlsAsync();
                     Console.WriteLine("Theme controls: passed");
                     layoutApp.Shutdown();
@@ -274,10 +276,15 @@ internal static partial class Program
 
     private static object CheckGitHubUpdateDialog()
     {
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var manifest = new OfficialUpdateManifest(2, 29, today.AddDays(-19), today,
+            DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, Guid.NewGuid().ToString("N"), []);
+        var priceFile = new ReleaseFile("prices.pncpupdate", 2048, new string('b', 64));
+        var prices = new PriceUpdatePackage(manifest, 4096, new(priceFile.Size, priceFile.Sha256, [priceFile]));
         var plan = new GitHubUpdatePlan(
             new AppUpdateManifest(1, "1.2.4", "win-x64", SqliteContractRepository.CurrentSchemaVersion,
                 new ReleaseFile("PNCPKing.exe", 1024, new string('a', 64))),
-            null, "Nova versão disponível.", "Preços em dia.");
+            prices, "Nova versão disponível.", "Preços disponíveis.");
         var notes = new GitHubReleaseNotes(
             [new("1.2.4", string.Join('\n', Enumerable.Repeat("Melhoria de cotação em várias telas.", 100)))], null);
         var window = new PNCPKing.App.Views.GitHubUpdateWindow(plan, notes);
@@ -292,6 +299,21 @@ internal static partial class Program
             var update = buttons.Single(b => Equals(b.Content, "Atualizar agora"));
             Require(update.IsEnabled, "A atualização disponível não habilitou o botão.");
             Require(buttons.Any(b => b.IsCancel), "A prévia precisa permitir cancelar.");
+            var choices = VisualChildren(window).OfType<CheckBox>().ToArray();
+            var programChoice = choices.Single(value => Equals(value.Content, "Atualizar o programa"));
+            var pricesChoice = choices.Single(value => Equals(value.Content, "Atualizar os preços"));
+            Require(window.UpdateProgram && window.UpdatePrices, "As duas atualizações disponíveis devem vir selecionadas.");
+            programChoice.IsChecked = false;
+            Require(!window.UpdateProgram && window.UpdatePrices && update.IsEnabled,
+                "Não foi possível escolher somente os preços.");
+            pricesChoice.IsChecked = false;
+            Require(!update.IsEnabled, "Nenhuma escolha deve impedir a atualização.");
+            programChoice.IsChecked = true;
+            Require(window.UpdateProgram && !window.UpdatePrices && update.IsEnabled,
+                "Não foi possível escolher somente o programa.");
+            pricesChoice.IsChecked = true;
+            Require(window.UpdateProgram && window.UpdatePrices && update.IsEnabled,
+                "Não foi possível escolher as duas atualizações.");
             foreach (var (width, height) in new[] { (380d, 280d), (660d, 520d), (900d, 700d) })
             {
                 window.Width = width;
@@ -305,7 +327,32 @@ internal static partial class Program
                     Require(bounds.Bottom <= window.ActualHeight, "Botão fora da janela de atualização.");
                 }
             }
-            return new { passed = true, appUpdateAvailable = true, cancelAvailable = true, window.ActualHeight };
+            var dependent = new PNCPKing.App.Views.GitHubUpdateWindow(plan, notes, pricesRequireProgramUpdate: true);
+            try
+            {
+                dependent.Show();
+                var dependentChoices = VisualChildren(dependent).OfType<CheckBox>().ToArray();
+                var dependentProgram = dependentChoices.Single(value => Equals(value.Content, "Atualizar o programa"));
+                var dependentPrices = dependentChoices.Single(value => Equals(value.Content, "Atualizar os preços"));
+                dependentProgram.IsChecked = false;
+                Require(!dependentPrices.IsEnabled && !dependent.UpdatePrices,
+                    "Um pacote incompatível exige atualizar o programa antes dos preços.");
+                dependentProgram.IsChecked = true;
+                dependentPrices.IsChecked = true;
+                Require(dependent.UpdateProgram && dependent.UpdatePrices,
+                    "A dependência impediu selecionar programa e preços juntos.");
+            }
+            finally { dependent.Close(); }
+            var priceOnly = new PNCPKing.App.Views.GitHubUpdateWindow(plan with { App = null });
+            try
+            {
+                priceOnly.Show();
+                Require(!priceOnly.UpdateProgram && priceOnly.UpdatePrices,
+                    "Preços disponíveis precisam funcionar sem uma nova versão do programa.");
+            }
+            finally { priceOnly.Close(); }
+            return new { passed = true, programOnly = true, pricesOnly = true, both = true,
+                compatibilityRequired = true, cancelAvailable = true, window.ActualHeight };
         }
         finally { window.Close(); }
     }

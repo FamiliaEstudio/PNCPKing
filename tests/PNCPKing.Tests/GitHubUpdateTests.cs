@@ -117,13 +117,28 @@ public sealed class GitHubUpdateTests
     }
 
     [Fact]
+    public void ProgramOnlyChoiceSurvivesRestartWithoutEnablingAutomaticPrices()
+    {
+        var pending = new PendingGitHubUpdate("banco-escolhido.db", "1.3.0", null,
+            UpdatePricesAfterRestart: false);
+        var restored = JsonSerializer.Deserialize<PendingGitHubUpdate>(
+            JsonSerializer.Serialize(pending, GitHubUpdateValidation.Json), GitHubUpdateValidation.Json)!;
+        Assert.Equal(pending.DatabasePath, restored.DatabasePath);
+        Assert.False(restored.UpdatePricesAfterRestart);
+        Assert.Null(restored.PriceUpdate);
+        Assert.Null(restored.DeferredPrices);
+    }
+
+    [Fact]
     public void PendingUpdatesFromPreviousProgramRemainCompatible()
     {
         var pending = new PendingGitHubUpdate("banco.db", "1.3.0", new("cache.payload", Package()));
         var json = JsonSerializer.SerializeToNode(pending, GitHubUpdateValidation.Json)!;
         json.AsObject().Remove("deferredPrices");
+        json.AsObject().Remove("updatePricesAfterRestart");
         var restored = json.Deserialize<PendingGitHubUpdate>(GitHubUpdateValidation.Json)!;
         Assert.Null(restored.DeferredPrices);
+        Assert.True(restored.UpdatePricesAfterRestart);
         Assert.Equal(pending.PriceUpdate!.Path, restored.PriceUpdate!.Path);
         Assert.Equal(pending.PriceUpdate.Package.Download.Sha256, restored.PriceUpdate.Package.Download.Sha256);
     }

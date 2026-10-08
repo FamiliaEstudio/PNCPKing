@@ -36,9 +36,19 @@ public sealed partial class MainViewModel
                     await downloads.GetReleaseNotesAsync(ApplicationVersion,
                         GitHubUpdateValidation.ParseVersion(plan.App.Version), ct);
                 ct.ThrowIfCancellationRequested();
-                var preview = new GitHubUpdateWindow(plan, notes) { Owner = Application.Current.MainWindow };
+                var pricesRequireProgramUpdate = check.Prices is { } availablePrices &&
+                    (GitHubUpdateValidation.ParseVersion(availablePrices.Manifest.MinimumAppVersion) > ApplicationVersion ||
+                     availablePrices.Manifest.Schema > SqliteContractRepository.CurrentSchemaVersion);
+                var preview = new GitHubUpdateWindow(plan, notes, pricesRequireProgramUpdate)
+                    { Owner = Application.Current.MainWindow };
                 if (preview.ShowDialog() != true) return;
                 ct.ThrowIfCancellationRequested();
+                plan = plan with
+                {
+                    App = preview.UpdateProgram ? plan.App : null,
+                    Package = preview.UpdatePrices ? plan.Package : null
+                };
+                if (!plan.HasUpdates) return;
                 if (plan.App is not null) GitHubAppInstaller.CheckDestination();
                 var databasePath = _calibrationService.Connections.DatabasePath;
                 if (plan.App is null && plan.Package is { } pricePackage)
@@ -72,7 +82,8 @@ public sealed partial class MainViewModel
                 }
                 var pending = new PendingGitHubUpdate(databasePath,
                     plan.App?.Version ?? ApplicationVersion.ToString(3), downloadedPrices,
-                    plan.App is not null && plan.Package is not null ? check.Prices : null);
+                    plan.App is not null && plan.Package is not null ? check.Prices : null,
+                    UpdatePricesAfterRestart: preview.UpdatePrices);
                 if (executable is not null)
                 {
                     FileOperationProgressText = "Preparando instalação e reinício do programa…";
@@ -100,7 +111,7 @@ public sealed partial class MainViewModel
                 var pending = await GitHubAppInstaller.ReadPendingAsync(id, ct);
                 if (ApplicationVersion != GitHubUpdateValidation.ParseVersion(pending.AppVersion))
                     throw new InvalidDataException("A versão instalada não corresponde à atualização pendente.");
-                await ApplyGitHubPricesAsync(pending, ct, refreshMissingPrices: true);
+                await ApplyGitHubPricesAsync(pending, ct, refreshMissingPrices: pending.UpdatePricesAfterRestart);
                 GitHubAppInstaller.Complete(id);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)

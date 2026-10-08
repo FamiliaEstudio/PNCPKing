@@ -108,64 +108,74 @@ public sealed class OfficialUpdateService
 
         try
         {
-            var chunks = new List<OfficialUpdateChunk>(WindowDays + 1);
-            await using var readerLease = await _connections.WorkCoordinator
-                .EnterReaderAsync(SqliteWorkPriority.Background, cancellationToken).ConfigureAwait(false);
-            await using var source = await _connections.OpenAsync(cancellationToken).ConfigureAwait(false);
-            using var sourceInterruption = SqliteConnectionFactory.InterruptOnCancellation(source, cancellationToken);
-            await using var snapshot = source.BeginTransaction(deferred: true);
-
-            for (var date = startDate; date <= endDate; date = date.AddDays(1))
+            OfficialUpdateManifest manifest;
             {
-                progress?.Report($"Validando e empacotando {date:dd/MM/yyyy}…");
-                var key = "day:" + FormatDate(date);
-                var payloadPath = Path.Combine(workDirectory, FormatDate(date) + ".db");
-                chunks.Add(await BuildChunkAsync(source, snapshot, payloadPath, key, DayKind, date,
-                    startDate, endDate, cancellationToken).ConfigureAwait(false));
-            }
+                var chunks = new List<OfficialUpdateChunk>(WindowDays + 1);
+                await using var readerLease = await _connections.WorkCoordinator
+                    .EnterReaderAsync(SqliteWorkPriority.Background, cancellationToken).ConfigureAwait(false);
+                await using var source = await _connections.OpenAsync(cancellationToken).ConfigureAwait(false);
+                using var sourceInterruption = SqliteConnectionFactory.InterruptOnCancellation(source, cancellationToken);
+                await using var snapshot = source.BeginTransaction(deferred: true);
 
-            progress?.Report("Validando contratações antigas alteradas na janela…");
-            var latePath = Path.Combine(workDirectory, "late-changes.db");
-            var late = await BuildChunkAsync(source, snapshot, latePath, LateKind, LateKind, null,
-                startDate, endDate, cancellationToken).ConfigureAwait(false);
-            if (late.Contracts > 0) chunks.Add(late);
-            else DeleteTemporary(latePath);
-
-            var validatedAt = DateTimeOffset.UtcNow;
-            var manifest = new OfficialUpdateManifest(
-                CurrentFormat,
-                PayloadSchemaVersion,
-                startDate,
-                endDate,
-                validatedAt,
-                validatedAt,
-                Guid.NewGuid().ToString("N"),
-                chunks);
-
-            await using (var output = new FileStream(archivePath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
-                             1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
-            using (var zip = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
-            {
-                await using (var metadata = zip.CreateEntry("manifest.json", CompressionLevel.SmallestSize).Open())
-                    await JsonSerializer.SerializeAsync(metadata, manifest, Json, cancellationToken).ConfigureAwait(false);
-
-                foreach (var chunk in chunks)
+                for (var date = startDate; date <= endDate; date = date.AddDays(1))
                 {
-                    var entry = zip.CreateEntry(chunk.Entry, CompressionLevel.SmallestSize);
-                    await using var destination = entry.Open();
-                    await using var input = new FileStream(Path.Combine(workDirectory, Path.GetFileName(chunk.Entry)),
-                        FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024,
-                        FileOptions.Asynchronous | FileOptions.SequentialScan);
-                    await input.CopyToAsync(destination, cancellationToken).ConfigureAwait(false);
+                    progress?.Report($"Validando e empacotando {date:dd/MM/yyyy}…");
+                    var key = "day:" + FormatDate(date);
+                    var payloadPath = Path.Combine(workDirectory, FormatDate(date) + ".db");
+                    chunks.Add(await BuildChunkAsync(source, snapshot, payloadPath, key, DayKind, date,
+                        startDate, endDate, cancellationToken).ConfigureAwait(false));
                 }
+
+                progress?.Report("Validando contratações antigas alteradas na janela…");
+                var latePath = Path.Combine(workDirectory, "late-changes.db");
+                var late = await BuildChunkAsync(source, snapshot, latePath, LateKind, LateKind, null,
+                    startDate, endDate, cancellationToken).ConfigureAwait(false);
+                if (late.Contracts > 0) chunks.Add(late);
+                else DeleteTemporary(latePath);
+
+                var validatedAt = DateTimeOffset.UtcNow;
+                manifest = new OfficialUpdateManifest(
+                    CurrentFormat,
+                    PayloadSchemaVersion,
+                    startDate,
+                    endDate,
+                    validatedAt,
+                    validatedAt,
+                    Guid.NewGuid().ToString("N"),
+                    chunks);
+
+                await using (var output = new FileStream(archivePath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                                 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+                using (var zip = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
+                {
+                    await using (var metadata = zip.CreateEntry("manifest.json", CompressionLevel.SmallestSize).Open())
+                        await JsonSerializer.SerializeAsync(metadata, manifest, Json, cancellationToken).ConfigureAwait(false);
+
+                    foreach (var chunk in chunks)
+                    {
+                        var entry = zip.CreateEntry(chunk.Entry, CompressionLevel.SmallestSize);
+                        await using var destination = entry.Open();
+                        await using var input = new FileStream(Path.Combine(workDirectory, Path.GetFileName(chunk.Entry)),
+                            FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024,
+                            FileOptions.Asynchronous | FileOptions.SequentialScan);
+                        await input.CopyToAsync(destination, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                if (new FileInfo(archivePath).Length >= GitHubUpdateValidation.AssetLimit)
+                    throw new InvalidOperationException("A atualização resultou em 2 GiB ou mais e foi recusada.");
+
+                File.Move(archivePath, outputPath, overwrite: true);
             }
-
-            cancellationToken.ThrowIfCancellationRequested();
-            if (new FileInfo(archivePath).Length >= GitHubUpdateValidation.AssetLimit)
-                throw new InvalidOperationException("A atualização resultou em 2 GiB ou mais e foi recusada.");
-
-            File.Move(archivePath, outputPath, overwrite: true);
-            progress?.Report($"Atualização v2 exportada: {startDate:dd/MM/yyyy} a {endDate:dd/MM/yyyy}, {chunks.Count} blocos.");
+            // The validated package already exists in its source database. Record the
+            // same receipt used by import, after releasing the export's reader lease.
+            var digest = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(manifest, Json)))
+                .ToLowerInvariant();
+            await RegisterPackageAsync(manifest.PackageId, digest, cancellationToken).ConfigureAwait(false);
+            await CompletePackageAsync(manifest.PackageId, 0, manifest.Chunks.Sum(CountRows), cancellationToken)
+                .ConfigureAwait(false);
+            progress?.Report($"Atualização v2 exportada: {startDate:dd/MM/yyyy} a {endDate:dd/MM/yyyy}, {manifest.Chunks.Count} blocos.");
             return manifest;
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode == 9 && cancellationToken.IsCancellationRequested)
@@ -222,6 +232,7 @@ public sealed class OfficialUpdateService
             {
                 progress?.Report($"Lendo {chunk.Key}…");
                 await ExtractAndHashAsync(packagePath, chunk, temporary, cancellationToken).ConfigureAwait(false);
+                progress?.Report($"Aplicando {chunk.Key}…");
                 var result = await ApplyChunkAsync(temporary, manifest.PackageId, chunk, cancellationToken)
                     .ConfigureAwait(false);
                 applied += result.Applied;
@@ -845,8 +856,8 @@ public sealed class OfficialUpdateService
             OR (old.parent_version IS s.parent_version AND old.item_version IS s.item_version
                 AND old.result_count=s.result_count);
 
-        DELETE FROM item_results WHERE EXISTS(SELECT 1 FROM accepted_results a
-            WHERE a.contract_id=item_results.contract_id AND a.item_number=item_results.item_number);
+        DELETE FROM item_results
+         WHERE (contract_id,item_number) IN(SELECT contract_id,item_number FROM accepted_results);
         INSERT INTO item_results(contract_id,item_number,result_sequence,supplier_tax_id,supplier_name,quantity_scaled,
             unit_value_scaled,total_value_scaled,result_date,result_status_id,result_status_name,supplier_type,
             supplier_municipality,supplier_uf)
@@ -856,8 +867,7 @@ public sealed class OfficialUpdateService
           FROM incoming.item_results r JOIN accepted_results a
             ON a.contract_id=r.contract_id AND a.item_number=r.item_number;
         UPDATE items SET hydration_status=$complete,last_error=NULL,cache_updated_at=$now
-         WHERE EXISTS(SELECT 1 FROM accepted_results a
-            WHERE a.contract_id=items.contract_id AND a.item_number=items.item_number);
+         WHERE (contract_id,item_number) IN(SELECT contract_id,item_number FROM accepted_results);
         INSERT INTO official_result_snapshots(contract_id,item_number,parent_version,item_version,result_count)
         SELECT s.contract_id,s.item_number,s.parent_version,s.item_version,s.result_count
           FROM incoming.result_snapshots s JOIN accepted_results a
