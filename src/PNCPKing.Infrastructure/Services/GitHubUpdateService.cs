@@ -13,6 +13,8 @@ public sealed class GitHubUpdateService(HttpClient client)
     public const string Repository = "FamiliaEstudio/PNCPKing";
     private const int MetadataLimit = 1024 * 1024;
     private const int ReleaseNotesPageLimit = 4 * 1024 * 1024;
+    // Keep prices-update.json readable by programs whose package window is ten days.
+    private const string CurrentPricesManifest = "prices-update-v2.json";
 
     public async Task<GitHubUpdateCheck> CheckAsync(CancellationToken cancellationToken = default)
     {
@@ -100,6 +102,9 @@ public sealed class GitHubUpdateService(HttpClient client)
             if (release.Assets.Any(a => a is null)) throw new InvalidDataException("Lista de anexos inválida.");
             if (typeof(T) == typeof(PricesUpdateManifest) && release.Tag != "precos")
                 throw new InvalidDataException("Tag dos preços inválida.");
+            if (typeof(T) == typeof(PricesUpdateManifest) &&
+                release.Assets.Any(a => a.Name == CurrentPricesManifest))
+                manifestName = CurrentPricesManifest;
             var metadata = release.Assets.SingleOrDefault(a => a.Name == manifestName)
                 ?? throw new InvalidDataException($"Falta o arquivo {manifestName} na release.");
             if (metadata.Size <= 0 || metadata.Size > MetadataLimit) throw new InvalidDataException("Manifesto excede o tamanho permitido.");
@@ -129,7 +134,7 @@ public sealed class GitHubUpdateService(HttpClient client)
             }
             return (new(release.Tag, manifest), null);
         }
-        catch (Exception e) when (e is HttpRequestException or IOException or JsonException or InvalidOperationException or
+        catch (Exception e) when (e is HttpRequestException or IOException or InvalidDataException or JsonException or InvalidOperationException or
             OverflowException || e is OperationCanceledException && !ct.IsCancellationRequested)
         {
             return (null, $"{label} indisponíveis: {e.Message}");

@@ -257,6 +257,76 @@ public sealed class GitHubUpdateTests
         Assert.Contains("nenhuma publicação", check.AppStatus);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InvalidPricesDoNotBlockAValidProgramUpdate(bool invalidPackage)
+    {
+        var app = App();
+        var prices = invalidPackage
+            ? Prices() with { Update = Package() with { ExpandedSize = 1 } }
+            : Prices() with { Schema = 999 };
+        using var client = new HttpClient(new FakeHandler(request =>
+            request.RequestUri!.AbsolutePath.EndsWith("/latest", StringComparison.Ordinal)
+                ? Json(new { tag_name = "v" + app.Version, draft = false, prerelease = false,
+                    assets = new[] { Asset(File("app-update.json")), Asset(app.File) } })
+                : request.RequestUri.AbsolutePath.EndsWith("/app-update.json", StringComparison.Ordinal)
+                    ? Json(app) : PricesResponse(request, prices)));
+
+        var check = await new GitHubUpdateService(client).CheckAsync();
+        var plan = GitHubUpdateValidation.Plan(check, new(1, 2, 23), Schema, Empty());
+
+        Assert.Equal(app, plan.App);
+        Assert.Null(check.Prices);
+        Assert.Null(plan.Package);
+        Assert.Contains("Preços indisponíveis", plan.PricesStatus);
+    }
+
+    [Fact]
+    public async Task InvalidProgramDoesNotBlockValidPrices()
+    {
+        var app = App() with { Platform = "unsupported" };
+        var prices = Prices();
+        using var client = new HttpClient(new FakeHandler(request =>
+            request.RequestUri!.AbsolutePath.EndsWith("/latest", StringComparison.Ordinal)
+                ? Json(new { tag_name = "v" + app.Version, draft = false, prerelease = false,
+                    assets = new[] { Asset(File("app-update.json")), Asset(app.File) } })
+                : request.RequestUri.AbsolutePath.EndsWith("/app-update.json", StringComparison.Ordinal)
+                    ? Json(app) : PricesResponse(request, prices)));
+
+        var check = await new GitHubUpdateService(client).CheckAsync();
+
+        Assert.Null(check.App);
+        Assert.Contains("Programa indisponíveis", check.AppStatus);
+        Assert.Equal(prices.Update.Manifest.PackageId, check.Prices!.Manifest.Update.Manifest.PackageId);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CurrentReaderPrefersTheFullWindowAndSupportsLegacyOnlyReleases(bool publishCurrent)
+    {
+        var legacy = Prices() with { Update = Package(10) };
+        var current = Prices() with { MinimumAppVersion = "1.2.24" };
+        var requested = new List<string>();
+        using var client = new HttpClient(new FakeHandler(request =>
+        {
+            requested.Add(request.RequestUri!.AbsolutePath);
+            return request.RequestUri.AbsolutePath.EndsWith("/latest", StringComparison.Ordinal)
+                ? new(HttpStatusCode.NotFound)
+                : PricesResponse(request, legacy, publishCurrent ? current : null);
+        }));
+
+        var check = await new GitHubUpdateService(client).CheckAsync();
+        var found = await new GitHubUpdateService(client).GetPricesAfterRestartAsync(new(1, 2, 27), Schema, Empty());
+
+        Assert.Equal(publishCurrent ? current.Update.Manifest.PackageId : legacy.Update.Manifest.PackageId,
+            check.Prices!.Manifest.Update.Manifest.PackageId);
+        Assert.Equal(publishCurrent ? 20 : 10, found!.Manifest.Update.Manifest.Chunks.Count);
+        Assert.Contains(requested, path => path.EndsWith(publishCurrent ? "/prices-update-v2.json" : "/prices-update.json",
+            StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task ReleaseNotes_IncludeEveryStableIntermediateVersionAcrossPages()
     {
@@ -340,7 +410,8 @@ public sealed class GitHubUpdateTests
         Content = new StringContent(JsonSerializer.Serialize(value, GitHubUpdateValidation.Json))
     };
 
-    private static HttpResponseMessage PricesResponse(HttpRequestMessage request, PricesUpdateManifest prices) =>
+    private static HttpResponseMessage PricesResponse(HttpRequestMessage request, PricesUpdateManifest prices,
+        PricesUpdateManifest? current = null) =>
         request.RequestUri!.AbsolutePath.EndsWith("/precos", StringComparison.Ordinal)
             ? Json(new
             {
@@ -348,8 +419,10 @@ public sealed class GitHubUpdateTests
                 draft = false,
                 prerelease = false,
                 assets = new[] { Asset(File("prices-update.json")), Asset(prices.Update.Download.Parts[0]) }
+                    .Concat(current is null ? [] : new[] { Asset(File("prices-update-v2.json")) })
             })
-            : Json(prices);
+            : Json(request.RequestUri.AbsolutePath.EndsWith("/prices-update-v2.json", StringComparison.Ordinal)
+                ? current! : prices);
 
     private sealed class FakeHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
     {

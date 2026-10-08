@@ -18,6 +18,29 @@ function Get-Sha256Hex([string]$Path) {
     }
 }
 
+function Write-PriceManifest([string]$PackagePath, $Metadata, [string]$ManifestName, [string]$MinimumVersion) {
+    $size = (Get-Item -LiteralPath $PackagePath).Length
+    if ($size -le 0 -or $size -ge 2GB) { throw 'O pacote publicado precisa ser menor que 2 GiB.' }
+    $hash = Get-Sha256Hex $PackagePath
+    $file = [ordered]@{ name = [IO.Path]::GetFileName($PackagePath); size = $size; sha256 = $hash }
+    [long]$expanded = 0
+    foreach ($chunk in $Metadata.Chunks) { $expanded += [long]$chunk.ExpandedSize }
+    $manifest = [ordered]@{
+        format = 2
+        publishedAt = [DateTimeOffset]::UtcNow.ToString('o')
+        minimumAppVersion = $MinimumVersion
+        schema = 29
+        update = [ordered]@{
+            manifest = $Metadata
+            expandedSize = $expanded
+            download = [ordered]@{ size = $size; sha256 = $hash; parts = @($file) }
+        }
+    }
+    $path = Join-Path $output $ManifestName
+    [IO.File]::WriteAllText(($path + '.partial'), ($manifest | ConvertTo-Json -Depth 16), (New-Object Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath ($path + '.partial') -Destination $path -Force
+}
+
 if ($MinimumAppVersion -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
     throw 'MinimumAppVersion deve usar X.Y.Z.'
 }
@@ -104,21 +127,44 @@ $name = 'precos-' + $metadata.PackageId + '.pncpupdate'
 $target = Join-Path $output $name
 [IO.File]::Copy($source, ($target + '.partial'), $true)
 Move-Item -LiteralPath ($target + '.partial') -Destination $target -Force
-$hash = Get-Sha256Hex $target
-$file = [ordered]@{ name = $name; size = $sourceSize; sha256 = $hash }
-$package = [ordered]@{
-    manifest = $metadata
-    expandedSize = $expandedSize
-    download = [ordered]@{ size = $sourceSize; sha256 = $hash; parts = @($file) }
+if ($windowDays -eq 20) {
+    Write-PriceManifest $target $metadata 'prices-update-v2.json' $MinimumAppVersion
+
+    # Repackage validated, unchanged chunks; never open or revalidate a SQLite database.
+    # The public legacy manifest must describe a real ten-day archive, including its own identity/hash.
+    $legacy = $metadata | ConvertTo-Json -Depth 16 | ConvertFrom-Json
+    $legacy.StartDate = $end.AddDays(-9).ToString('yyyy-MM-dd')
+    $legacy.PackageId = [Guid]::NewGuid().ToString('N')
+    $legacy.Chunks = @($chunks | Where-Object {
+        $_.Kind -eq 'late-changes' -or
+        ($_.Kind -eq 'publication-day' -and [string]$_.Date -ge [string]$legacy.StartDate)
+    })
+    $legacyTarget = Join-Path $output ('precos-' + $legacy.PackageId + '.pncpupdate')
+    $partial = $legacyTarget + '.partial'
+    try {
+        $inputZip = [IO.Compression.ZipFile]::OpenRead($target)
+        try {
+            $outputZip = [IO.Compression.ZipFile]::Open($partial, [IO.Compression.ZipArchiveMode]::Create)
+            try {
+                foreach ($chunk in $legacy.Chunks) {
+                    $entry = $outputZip.CreateEntry([string]$chunk.Entry, [IO.Compression.CompressionLevel]::Optimal)
+                    $inputStream = $inputZip.GetEntry([string]$chunk.Entry).Open()
+                    try {
+                        $outputStream = $entry.Open()
+                        try { $inputStream.CopyTo($outputStream) } finally { $outputStream.Dispose() }
+                    } finally { $inputStream.Dispose() }
+                }
+                $entry = $outputZip.CreateEntry('manifest.json')
+                $writer = New-Object IO.StreamWriter($entry.Open(), (New-Object Text.UTF8Encoding($false)))
+                try { $writer.Write(($legacy | ConvertTo-Json -Depth 16)) } finally { $writer.Dispose() }
+            } finally { $outputZip.Dispose() }
+        } finally { $inputZip.Dispose() }
+        Move-Item -LiteralPath $partial -Destination $legacyTarget -Force
+    } finally { if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force } }
+    Write-PriceManifest $legacyTarget $legacy 'prices-update.json' '1.2.0'
+} else {
+    Write-PriceManifest $target $metadata 'prices-update.json' $MinimumAppVersion
+    # Also refresh the current manifest so republishing a ten-day source cannot leave it stale.
+    Write-PriceManifest $target $metadata 'prices-update-v2.json' $MinimumAppVersion
 }
-$manifest = [ordered]@{
-    format = 2
-    publishedAt = [DateTimeOffset]::UtcNow.ToString('o')
-    minimumAppVersion = $MinimumAppVersion
-    schema = 29
-    update = $package
-}
-$manifestPath = Join-Path $output 'prices-update.json'
-[IO.File]::WriteAllText(($manifestPath + '.partial'), ($manifest | ConvertTo-Json -Depth 16), (New-Object Text.UTF8Encoding($false)))
-Move-Item -LiteralPath ($manifestPath + '.partial') -Destination $manifestPath -Force
-Write-Host "Pacote movel v2 preparado em $output. Publique o .pncpupdate e prices-update.json na release precos."
+Write-Host "Pacotes preparados em $output. Publique os .pncpupdate e os dois prices-update*.json na release precos."

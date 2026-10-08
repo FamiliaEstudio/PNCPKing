@@ -134,7 +134,9 @@ public sealed partial class MainViewModel
         if (!string.Equals(Path.GetFullPath(pending.DatabasePath), Path.GetFullPath(_calibrationService.Connections.DatabasePath),
                 StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("O banco selecionado mudou. Consulte novamente as atualizações antes de importar.");
-        if (refreshMissingPrices && pending.PriceUpdate is null && pending.DeferredPrices is null)
+        // A legacy updater may have approved the ten-day compatibility manifest.
+        // After installing, resolve the full window with the updated reader.
+        if (refreshMissingPrices && pending.PriceUpdate is null)
         {
             FileOperationProgressText = "Programa atualizado. Consultando o pacote de preços…";
             using var http = new HttpClient(new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(30) })
