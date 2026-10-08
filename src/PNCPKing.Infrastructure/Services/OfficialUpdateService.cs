@@ -960,8 +960,8 @@ public sealed class OfficialUpdateService
         INSERT INTO accepted_results(contract_id,item_number)
         SELECT s.contract_id,s.item_number
           FROM batch_contracts b CROSS JOIN incoming.result_snapshots s ON s.contract_id=b.pncp_id
-          JOIN contracts c ON c.pncp_id=s.contract_id AND c.global_updated_at IS s.parent_version
-          JOIN items i ON i.contract_id=s.contract_id AND i.item_number=s.item_number
+          CROSS JOIN contracts c ON c.pncp_id=s.contract_id AND c.global_updated_at IS s.parent_version
+          CROSS JOIN items i ON i.contract_id=s.contract_id AND i.item_number=s.item_number
                       AND i.source_updated_at IS s.item_version
           LEFT JOIN accepted_items ai ON ai.contract_id=s.contract_id AND ai.item_number=s.item_number
           LEFT JOIN official_result_snapshots old
