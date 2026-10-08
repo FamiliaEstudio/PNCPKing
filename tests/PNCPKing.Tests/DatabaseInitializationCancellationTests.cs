@@ -38,7 +38,11 @@ public sealed class DatabaseInitializationCancellationTests
             ALTER TABLE quotation_lines DROP COLUMN minimum_order_quantity_scaled;
             UPDATE schema_info SET version=32 WHERE id=1;
             CREATE TRIGGER cancel_migration BEFORE UPDATE OF version ON schema_info
-            WHEN NEW.version=33 BEGIN SELECT cancel_now(); END;
+            WHEN NEW.version=33 BEGIN
+                SELECT (WITH RECURSIVE n(x) AS (
+                    VALUES(cancel_now()) UNION ALL SELECT x+1 FROM n WHERE x<100000000
+                ) SELECT SUM(x) FROM n);
+            END;
             """);
         using var cancellation = new CancellationTokenSource();
         var connections = new CancellingConnections(
@@ -46,8 +50,9 @@ public sealed class DatabaseInitializationCancellationTests
         var repository = new SqliteContractRepository(connections);
         var phases = new List<DatabaseInitializationProgress>();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => repository.InitializeAsync(
+        var operation = Task.Run(() => repository.InitializeAsync(
             cancellation.Token, new InlineProgress(phases.Add)));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation.WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.True(cancellation.IsCancellationRequested);
         Assert.Contains(phases, phase => phase.Phase == "Migrando esquema v32 → v33");
         await using (var connection = await new SqliteConnectionFactory(database.Repository.DatabasePath).OpenAsync())
