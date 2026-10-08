@@ -898,7 +898,7 @@ public sealed class OfficialUpdateService
         INSERT INTO accepted_lists
         SELECT s.contract_id,COALESCE(a.pncp_id IS NOT NULL,0)
           FROM batch_contracts b CROSS JOIN incoming.item_snapshots s ON s.contract_id=b.pncp_id
-          JOIN contracts d ON d.pncp_id=s.contract_id AND d.global_updated_at IS s.parent_version
+          CROSS JOIN contracts d ON d.pncp_id=s.contract_id AND d.global_updated_at IS s.parent_version
           LEFT JOIN accepted_contracts a ON a.pncp_id=s.contract_id
           LEFT JOIN contract_item_snapshots old ON old.contract_id=s.contract_id
          WHERE a.pncp_id IS NOT NULL
