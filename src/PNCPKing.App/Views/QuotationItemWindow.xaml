@@ -117,8 +117,8 @@
                                     <MenuItem Header="Ver páginas relevantes" Click="PriceRelevantPages_Click" />
                                     <Separator />
                                     <MenuItem Header="Adicionar/retirar da cesta" Click="PriceToggleBasket_Click" />
-                                    <MenuItem Header="Definir fator de conversão" Click="PriceFactor_Click" />
-                                    <MenuItem Header="Restaurar fator para 1" Click="PriceResetFactor_Click" />
+                                    <MenuItem Header="Dividir preço por" Click="PriceFactor_Click" />
+                                    <MenuItem Header="Restaurar preço original" Click="PriceResetFactor_Click" />
                                     <MenuItem Header="Editar preço da internet" Click="EditInternetReference_Click" />
                                     <MenuItem Header="Excluir preço da internet" Click="DeleteInternetReference_Click" />
                                 </ContextMenu>
@@ -144,11 +144,11 @@
                                 <DataGridTextColumn Header="UF" Binding="{Binding Uf}" Width="42" />
                                 <DataGridTextColumn Header="Descrição" Binding="{Binding Description}" Width="320" MinWidth="220" />
                                 <DataGridTextColumn Header="Unidade" Binding="{Binding Unit}" Width="90" />
-                                <DataGridTextColumn Header="Quantidade" Binding="{Binding Quantity, StringFormat=N4}" Width="105" />
+                                <DataGridTextColumn Header="Quantidade" Binding="{Binding Quantity, StringFormat='#,##0.####'}" Width="105" />
                                 <DataGridTextColumn Header="CNPJ/NI" Binding="{Binding SupplierTaxId}" Width="145" />
                                 <DataGridTextColumn Header="Empresa" Binding="{Binding SupplierName}" Width="210" />
                                 <DataGridTextColumn Header="Preço PNCP" Binding="{Binding UnitPrice, StringFormat=C4}" Width="115" />
-                                <DataGridTextColumn Header="Fator" Binding="{Binding ConversionFactor, StringFormat=N6}" Width="85" />
+                                <DataGridTextColumn Header="Divisor" Binding="{Binding PriceDivisorText}" Width="85" />
                                 <DataGridTextColumn Header="Preço efetivo" Binding="{Binding EffectiveUnitPriceText}" SortMemberPath="EffectiveUnitPrice" Width="125" />
                                 <DataGridTextColumn Header="Situação" Binding="{Binding State}" Width="90" />
                                 <DataGridTemplateColumn Header="Ações" Width="82"
@@ -298,7 +298,7 @@
                                 <DataGridTextColumn Header="UF" Binding="{Binding Uf}" Width="45" />
                                 <DataGridTextColumn Header="Descrição" Binding="{Binding Description}" Width="*" MinWidth="320" />
                                 <DataGridTextColumn Header="Unidade" Binding="{Binding Unit}" Width="90" />
-                                <DataGridTextColumn Header="Quantidade" Binding="{Binding HomologatedQuantity, StringFormat=N4}" Width="105" />
+                                <DataGridTextColumn Header="Quantidade" Binding="{Binding HomologatedQuantity, StringFormat='#,##0.####'}" Width="105" />
                                 <DataGridTextColumn Header="CNPJ/NI" Binding="{Binding SupplierTaxId}" Width="145" />
                                 <DataGridTextColumn Header="Empresa" Binding="{Binding Supplier}" Width="190" />
                                 <DataGridTextColumn Header="Unitário homologado" Binding="{Binding HomologatedUnitValue, StringFormat=C4}" Width="145" />

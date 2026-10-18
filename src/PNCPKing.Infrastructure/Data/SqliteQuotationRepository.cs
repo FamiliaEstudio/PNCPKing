@@ -19,6 +19,35 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
         _connections = connections ?? throw new ArgumentNullException(nameof(connections));
     }
 
+    internal const string PriceDivisorsTable = "quotation_manual_price_divisors";
+
+    internal static async Task<bool> HasPriceDivisorsTableAsync(SqliteConnection connection,
+        SqliteTransaction? transaction, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'quotation_manual_price_divisors';";
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
+    }
+
+    internal static async Task EnsurePriceDivisorsTableAsync(SqliteConnection connection,
+        SqliteTransaction transaction, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            CREATE TABLE IF NOT EXISTS quotation_manual_price_divisors(
+                basket_id TEXT NOT NULL,
+                reference_id TEXT NOT NULL,
+                price_divisor_millionths INTEGER NOT NULL CHECK(price_divisor_millionths > 0),
+                PRIMARY KEY(basket_id, reference_id),
+                FOREIGN KEY(basket_id, reference_id)
+                    REFERENCES quotation_manual_basket_references(basket_id, reference_id) ON DELETE CASCADE
+            );
+            """;
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<QuotationProject>> GetProjectsAsync(CancellationToken cancellationToken = default)
     {
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -387,14 +416,15 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             foreach (var table in new[]
             {
-                "quotation_references", "quotation_manual_baskets", "quotation_manual_basket_references",
+                "quotation_references", "quotation_manual_baskets", "quotation_manual_basket_references", PriceDivisorsTable,
                 "quotation_catalog_selections", "quotation_line_search_prompts",
                 "quotation_internet_price_drafts", "quotation_internet_price_evidence",
                 "quotation_item_search_workspaces", "quotation_item_search_hits", "quotation_item_search_failures"
             })
             {
-                // Basket membership has an index on basket_id, rather than line_id.
-                var filter = table == "quotation_manual_basket_references"
+                if (table == PriceDivisorsTable && !await HasPriceDivisorsTableAsync(connection, (SqliteTransaction)transaction, cancellationToken).ConfigureAwait(false)) continue;
+                // Basket membership and divisors use their existing basket_id indexes.
+                var filter = table is "quotation_manual_basket_references" or PriceDivisorsTable
                     ? "basket_id IN (SELECT id FROM quotation_manual_baskets WHERE line_id = $line)"
                     : "line_id = $line";
                 await CloneLineTableAsync(command, table, filter, column => column switch
@@ -828,25 +858,29 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
             }
         }
 
+        var hasDivisors = await HasPriceDivisorsTableAsync(connection, null, cancellationToken).ConfigureAwait(false);
         var result = new List<QuotationManualBasket>(baskets.Count);
         foreach (var basket in baskets)
         {
             await using var references = connection.CreateCommand();
-            references.CommandText = """
-                SELECT reference_id, conversion_factor_millionths
-                  FROM quotation_manual_basket_references
-                 WHERE basket_id = $basketId
-                 ORDER BY display_order, reference_id;
+            references.CommandText = $"""
+                SELECT m.reference_id, m.conversion_factor_millionths, {(hasDivisors ? "d.price_divisor_millionths" : "NULL")}
+                  FROM quotation_manual_basket_references m
+                  {(hasDivisors ? "LEFT JOIN quotation_manual_price_divisors d ON d.basket_id = m.basket_id AND d.reference_id = m.reference_id" : "")}
+                 WHERE m.basket_id = $basketId
+                 ORDER BY m.display_order, m.reference_id;
                 """;
             references.Parameters.AddWithValue("$basketId", basket.Id.ToString("N"));
             var referenceIds = new List<string>();
             var conversionFactors = new Dictionary<string, decimal>(StringComparer.Ordinal);
+            var priceDivisors = new Dictionary<string, decimal>(StringComparer.Ordinal);
             await using var reader = await references.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
                 var referenceId = reader.GetString(0);
                 referenceIds.Add(referenceId);
                 conversionFactors[referenceId] = reader.GetInt64(1) / 1_000_000m;
+                if (!reader.IsDBNull(2)) priceDivisors[referenceId] = reader.GetInt64(2) / 1_000_000m;
             }
 
             result.Add(new QuotationManualBasket
@@ -857,6 +891,7 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
                 ReferenceIds = referenceIds,
                 AggregationMethod = basket.AggregationMethod,
                 ConversionFactors = conversionFactors,
+                PriceDivisors = priceDivisors,
                 DisplayOrder = basket.DisplayOrder,
                 CreatedAt = basket.CreatedAt,
                 UpdatedAt = basket.UpdatedAt
@@ -1055,7 +1090,9 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
             .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        var hasDivisors = await HasPriceDivisorsTableAsync(connection, (SqliteTransaction)transaction, cancellationToken).ConfigureAwait(false);
         var existingFactors = new Dictionary<string, long>(StringComparer.Ordinal);
+        var existingDivisors = new Dictionary<string, long>(StringComparer.Ordinal);
         if (basketId is not null)
         {
             await using var ownership = connection.CreateCommand();
@@ -1070,16 +1107,18 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
 
             await using var factors = connection.CreateCommand();
             factors.Transaction = (SqliteTransaction)transaction;
-            factors.CommandText = """
-                SELECT reference_id, conversion_factor_millionths
-                  FROM quotation_manual_basket_references
-                 WHERE basket_id = $id;
+            factors.CommandText = $"""
+                SELECT m.reference_id, m.conversion_factor_millionths, {(hasDivisors ? "d.price_divisor_millionths" : "NULL")}
+                  FROM quotation_manual_basket_references m
+                  {(hasDivisors ? "LEFT JOIN quotation_manual_price_divisors d ON d.basket_id = m.basket_id AND d.reference_id = m.reference_id" : "")}
+                 WHERE m.basket_id = $id;
                 """;
             factors.Parameters.AddWithValue("$id", id.ToString("N"));
             await using var factorReader = await factors.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await factorReader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
                 existingFactors[factorReader.GetString(0)] = factorReader.GetInt64(1);
+                if (!factorReader.IsDBNull(2)) existingDivisors[factorReader.GetString(0)] = factorReader.GetInt64(2);
             }
         }
 
@@ -1147,11 +1186,14 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
                     basket_id, line_id, reference_id, display_order, conversion_factor_millionths)
                 VALUES($basketId, $lineId, $referenceId, $displayOrder, $conversionFactor);
                 """;
+            if (hasDivisors)
+                insert.CommandText += " INSERT INTO quotation_manual_price_divisors(basket_id, reference_id, price_divisor_millionths) SELECT $basketId, $referenceId, $priceDivisor WHERE $priceDivisor IS NOT NULL;";
             insert.Parameters.Add("$basketId", SqliteType.Text);
             insert.Parameters.Add("$lineId", SqliteType.Text);
             insert.Parameters.Add("$referenceId", SqliteType.Text);
             insert.Parameters.Add("$displayOrder", SqliteType.Integer);
             insert.Parameters.Add("$conversionFactor", SqliteType.Integer);
+            if (hasDivisors) insert.Parameters.Add("$priceDivisor", SqliteType.Integer);
             for (var index = 0; index < uniqueReferenceIds.Length; index++)
             {
                 insert.Parameters["$basketId"].Value = id.ToString("N");
@@ -1160,6 +1202,9 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
                 insert.Parameters["$displayOrder"].Value = index;
                 insert.Parameters["$conversionFactor"].Value =
                     existingFactors.GetValueOrDefault(uniqueReferenceIds[index], 1_000_000L);
+                if (hasDivisors)
+                    insert.Parameters["$priceDivisor"].Value = existingDivisors.TryGetValue(uniqueReferenceIds[index], out var divisor)
+                        ? divisor : DBNull.Value;
                 await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
         }
@@ -1298,14 +1343,28 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task SetManualBasketConversionFactorAsync(
+    public Task SetManualBasketConversionFactorAsync(
         Guid basketId,
         string referenceId,
         decimal conversionFactor,
+        CancellationToken cancellationToken = default) =>
+        SetManualBasketConversionAsync(basketId, referenceId, ScaleConversionFactor(conversionFactor), null, cancellationToken);
+
+    public Task SetManualBasketPriceDivisorAsync(
+        Guid basketId,
+        string referenceId,
+        decimal priceDivisor,
         CancellationToken cancellationToken = default)
     {
+        QuotationMoney.ValidatePriceDivisor(priceDivisor);
+        return SetManualBasketConversionAsync(basketId, referenceId, 1_000_000,
+            checked((long)(priceDivisor * 1_000_000m)), cancellationToken);
+    }
+
+    private async Task SetManualBasketConversionAsync(
+        Guid basketId, string referenceId, long scaledFactor, long? scaledDivisor, CancellationToken cancellationToken)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(referenceId);
-        var scaledFactor = ScaleConversionFactor(conversionFactor);
         await using var writer = await _connections.WorkCoordinator
             .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -1330,6 +1389,21 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
             {
                 throw new InvalidOperationException("O preço não pertence à cesta manual selecionada.");
             }
+        }
+
+        if (scaledDivisor is not null)
+            await EnsurePriceDivisorsTableAsync(connection, (SqliteTransaction)transaction, cancellationToken).ConfigureAwait(false);
+        if (scaledDivisor is not null || await HasPriceDivisorsTableAsync(connection, (SqliteTransaction)transaction, cancellationToken).ConfigureAwait(false))
+        {
+            await using var divisor = connection.CreateCommand();
+            divisor.Transaction = (SqliteTransaction)transaction;
+            divisor.CommandText = scaledDivisor is null
+                ? "DELETE FROM quotation_manual_price_divisors WHERE basket_id = $basketId AND reference_id = $referenceId;"
+                : "INSERT INTO quotation_manual_price_divisors(basket_id, reference_id, price_divisor_millionths) VALUES($basketId, $referenceId, $divisor) ON CONFLICT(basket_id, reference_id) DO UPDATE SET price_divisor_millionths = excluded.price_divisor_millionths;";
+            divisor.Parameters.AddWithValue("$basketId", basketId.ToString("N"));
+            divisor.Parameters.AddWithValue("$referenceId", referenceId);
+            if (scaledDivisor is not null) divisor.Parameters.AddWithValue("$divisor", scaledDivisor.Value);
+            await divisor.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
         await using (var updated = connection.CreateCommand())

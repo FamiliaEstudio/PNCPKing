@@ -13,7 +13,7 @@ public sealed class BackupService(
     IContractRepository repository,
     IPerformanceTelemetry? performance = null)
 {
-    private const int CurrentArchiveFormatVersion = 3;
+    private const int CurrentArchiveFormatVersion = 4;
     private const long Fat32MaximumFileBytes = 4L * 1024 * 1024 * 1024 - 1;
     private const long ImportSafetyReserveBytes = 1L * 1024 * 1024 * 1024;
     private const long ArchiveSafetyReserveBytes = 64L * 1024 * 1024;
@@ -299,7 +299,8 @@ public sealed class BackupService(
                 var manifest = new DatasetManifest
                 {
                     ArchiveFormatVersion = profile == BackupProfile.FullWithoutQuotations
-                        ? CurrentArchiveFormatVersion : 2,
+                        ? 3 : await HasSnapshotPriceDivisorsAsync(snapshotPath, cancellationToken).ConfigureAwait(false)
+                            ? CurrentArchiveFormatVersion : 2,
                     SchemaVersion = SqliteContractRepository.CurrentSchemaVersion,
                     AppVersion = typeof(BackupService).Assembly.GetName().Version?.ToString() ?? "1.0.0",
                     StartDate = snapshotMetadata.StartDate,
@@ -968,6 +969,22 @@ public sealed class BackupService(
         await source.OpenAsync(cancellationToken).ConfigureAwait(false);
         await destination.OpenAsync(cancellationToken).ConfigureAwait(false);
         source.BackupDatabase(destination);
+    }
+
+    private static async Task<bool> HasSnapshotPriceDivisorsAsync(
+        string databasePath, CancellationToken cancellationToken)
+    {
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath, Mode = SqliteOpenMode.ReadOnly, Pooling = false
+        }.ToString();
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        if (!await SqliteQuotationRepository.HasPriceDivisorsTableAsync(connection, null, cancellationToken).ConfigureAwait(false))
+            return false;
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT 1 FROM quotation_manual_price_divisors LIMIT 1;";
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
     }
 
     private static async Task RemoveSnapshotQuotationsAsync(

@@ -510,6 +510,13 @@ public sealed class QuotationService(
             conversionFactor,
             cancellationToken);
 
+    public Task SetManualBasketPriceDivisorAsync(
+        Guid basketId,
+        string referenceId,
+        decimal priceDivisor,
+        CancellationToken cancellationToken = default) =>
+        repository.SetManualBasketPriceDivisorAsync(basketId, referenceId, priceDivisor, cancellationToken);
+
     public async Task<QuotationManualBasket> AddManualBasketReferenceAsync(
         Guid lineId,
         Guid basketId,
@@ -616,12 +623,26 @@ public sealed class QuotationService(
         var effectiveName = string.IsNullOrWhiteSpace(name)
             ? NextManualBasketName(manualBaskets)
             : name.Trim();
-        return await repository.SaveManualBasketAsync(
+        var copy = await repository.SaveManualBasketAsync(
             analysis.Line.Id,
             null,
             effectiveName,
             references,
             cancellationToken).ConfigureAwait(false);
+        if (source.IsManual)
+        {
+            await repository.SetManualBasketAggregationMethodAsync(copy.Id, source.AggregationMethod, cancellationToken).ConfigureAwait(false);
+            foreach (var entry in source.PriceEntries.Where(entry => references.Contains(entry.Reference.Id)))
+            {
+                if (entry.PriceDivisor is { } divisor)
+                    await repository.SetManualBasketPriceDivisorAsync(copy.Id, entry.Reference.Id, divisor, cancellationToken).ConfigureAwait(false);
+                else if (entry.ConversionFactor != 1m)
+                    await repository.SetManualBasketConversionFactorAsync(copy.Id, entry.Reference.Id, entry.ConversionFactor, cancellationToken).ConfigureAwait(false);
+            }
+            copy = (await repository.GetManualBasketsAsync(analysis.Line.Id, cancellationToken).ConfigureAwait(false))
+                .Single(basket => basket.Id == copy.Id);
+        }
+        return copy;
     }
 
     private static string NextManualBasketName(IReadOnlyList<QuotationManualBasket> baskets)

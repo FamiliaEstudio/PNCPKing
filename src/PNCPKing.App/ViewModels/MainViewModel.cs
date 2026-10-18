@@ -1745,6 +1745,13 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 return;
             }
 
+            if (LoadAllPrices && HasMoreStoredPriceRows)
+            {
+                activePriceCancellation.Token.ThrowIfCancellationRequested();
+                await LoadNextItemPageAsync().ConfigureAwait(true);
+                if (searchGeneration != Volatile.Read(ref _contractSearchGeneration)) return;
+            }
+
             if (revalidateStalePrices && !IsCompoundSearch)
             {
                 await RevalidateStalePricesAsync(
@@ -2170,12 +2177,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 await ReloadLocalPricesAtomicallyAsync(cancellationToken).ConfigureAwait(true);
                 if (_localPricesNeedRefresh) return;
             }
-            var loadedRows = await LoadNextStoredPricePageAsync(cancellationToken)
-                .ConfigureAwait(true);
-            await _itemResultBuffer.FlushAsync().ConfigureAwait(true);
-            ItemSearchSummary = IsCompoundSearch ? BuildCompoundSummary(loadedRows) :
-                $"{BuildLocalSearchSummary()} Mais {loadedRows:N0} preço(s) entregue(s) dos resultados salvos; " +
-                "nenhuma chamada de rede foi feita.";
+            await LoadStoredPricePagesAsync(cancellationToken).ConfigureAwait(true);
         }
         catch (OperationCanceledException)
         {

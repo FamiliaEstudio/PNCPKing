@@ -10,6 +10,35 @@ public sealed partial class MainViewModel
     private MainSearchLocalSequence? _localSearchSequence;
     private int _activeCompoundPart;
     private int _compoundReadGeneration;
+    private bool _loadAllPrices;
+
+    public bool LoadAllPrices
+    {
+        get => _loadAllPrices;
+        set => SetProperty(ref _loadAllPrices, value);
+    }
+
+    private async Task LoadStoredPricePagesAsync(CancellationToken cancellationToken)
+    {
+        var generation = Volatile.Read(ref _contractSearchGeneration);
+        var dataVersion = _localPriceDataVersion;
+        do
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var loadedRows = await LoadNextStoredPricePageAsync(cancellationToken).ConfigureAwait(true);
+            await _itemResultBuffer.FlushAsync().ConfigureAwait(true);
+            if (generation != Volatile.Read(ref _contractSearchGeneration) || dataVersion != _localPriceDataVersion) return;
+            ItemSearchSummary = IsCompoundSearch ? BuildCompoundSummary(loadedRows) :
+                $"{BuildLocalSearchSummary()} Mais {loadedRows:N0} preço(s) entregue(s) dos resultados salvos; " +
+                "nenhuma chamada de rede foi feita.";
+            StatusText = ItemSearchSummary;
+            // Finish the current page, then give input (Stop/uncheck) a turn before the next one.
+            await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Background);
+        }
+        while (LoadAllPrices && HasMoreStoredPriceRows && !cancellationToken.IsCancellationRequested &&
+               generation == Volatile.Read(ref _contractSearchGeneration) && dataVersion == _localPriceDataVersion);
+        cancellationToken.ThrowIfCancellationRequested();
+    }
 
     public bool IsCompoundSearch => _localSearchSequence is not null;
     public string MainSearchApiHint => "Pesquisa de preços somente no banco local.";

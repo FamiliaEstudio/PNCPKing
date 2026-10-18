@@ -79,4 +79,22 @@ public static class QuotationMoney
                 nameof(value));
         }
     }
+
+    public static void ValidatePriceDivisor(decimal value)
+    {
+        if (value <= 0)
+            throw new ArgumentOutOfRangeException(nameof(value), "O divisor deve ser maior que zero.");
+        if (value > long.MaxValue / 1_000_000m)
+            throw new ArgumentOutOfRangeException(nameof(value), "O divisor é grande demais.");
+        var scaled = value * 1_000_000m;
+        if (scaled != decimal.Truncate(scaled))
+            throw new ArgumentException("O divisor deve ter no máximo seis casas decimais.", nameof(value));
+    }
+
+    public static decimal EffectivePrice(decimal price, decimal factor, decimal? divisor, int decimalPlaces)
+    {
+        if (divisor is { } value) ValidatePriceDivisor(value);
+        else ValidateConversionFactor(factor);
+        return Truncate(divisor is { } divideBy ? price / divideBy : checked(price * factor), decimalPlaces);
+    }
 }

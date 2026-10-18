@@ -342,27 +342,8 @@ public partial class QuotationItemWindow : Window
         await RunAsync(() => ViewModel.SetReferenceMembershipAsync(row, include)).ConfigureAwait(true);
     }
 
-    private async void ConfirmBasket_Click(object sender, RoutedEventArgs e)
-    {
-        var basket = ViewModel.SelectedBasket?.Source;
-        if (basket is null)
-        {
-            return;
-        }
-
-        if (basket.IsManual && !basket.IsValid &&
-            MessageBox.Show(
-                this,
-                $"{basket.ValidationMessage}\n\nConfirmar mesmo com esta ressalva?",
-                "Confirmar cesta",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning) != MessageBoxResult.Yes)
-        {
-            return;
-        }
-
+    private async void ConfirmBasket_Click(object sender, RoutedEventArgs e) =>
         await RunAsync(ViewModel.ConfirmSelectedBasketAsync).ConfigureAwait(true);
-    }
 
     private async void UseMean_Click(object sender, RoutedEventArgs e) =>
         await RunAsync(() => ViewModel.SetAggregationMethodAsync(
@@ -377,15 +358,15 @@ public partial class QuotationItemWindow : Window
         var row = ViewModel.SelectedPrice;
         if (row is null || !row.IsInSelectedBasket)
         {
-            MessageBox.Show(this, "Selecione um preço da cesta atual.", "Fator de conversão",
+            MessageBox.Show(this, "Selecione um preço da cesta atual.", "Dividir preço por",
                 MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
         var prompt = new TextPromptWindow(
-            "Fator de conversão",
-            "Fator positivo, com até seis casas decimais:",
-            row.ConversionFactor.ToString("0.######", CultureInfo.CurrentCulture))
+            "Dividir preço por",
+            row.PriceDivisorPrompt,
+            row.PriceDivisorInput)
         {
             Owner = this
         };
@@ -394,21 +375,21 @@ public partial class QuotationItemWindow : Window
             return;
         }
 
-        if (!decimal.TryParse(prompt.Value, NumberStyles.Number, CultureInfo.CurrentCulture, out var factor))
+        if (!decimal.TryParse(prompt.Value, NumberStyles.Number, CultureInfo.CurrentCulture, out var divisor))
         {
-            MessageBox.Show(this, "O fator de conversão não é válido.", "Fator de conversão",
+            MessageBox.Show(this, "O divisor não é válido.", "Dividir preço por",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
-        await RunAsync(() => ViewModel.SetConversionFactorAsync(row, factor)).ConfigureAwait(true);
+        await RunAsync(() => ViewModel.SetPriceDivisorAsync(row, divisor)).ConfigureAwait(true);
     }
 
     private async void PriceResetFactor_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel.SelectedPrice is { } row)
         {
-            await RunAsync(() => ViewModel.SetConversionFactorAsync(row, 1m)).ConfigureAwait(true);
+            await RunAsync(() => ViewModel.SetPriceDivisorAsync(row, 1m)).ConfigureAwait(true);
         }
     }
 

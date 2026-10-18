@@ -373,6 +373,7 @@ public sealed record QuotationBasketPrice
 {
     public required QuotationReference Reference { get; init; }
     public decimal ConversionFactor { get; init; } = 1m;
+    public decimal? PriceDivisor { get; init; }
     public required decimal EffectiveUnitPrice { get; init; }
 }
 
@@ -399,6 +400,8 @@ public sealed record QuotationManualBasket
     public required IReadOnlyList<string> ReferenceIds { get; init; }
     public QuotationAggregationMethod AggregationMethod { get; init; } = QuotationAggregationMethod.Mean;
     public IReadOnlyDictionary<string, decimal> ConversionFactors { get; init; } =
+        new Dictionary<string, decimal>(StringComparer.Ordinal);
+    public IReadOnlyDictionary<string, decimal> PriceDivisors { get; init; } =
         new Dictionary<string, decimal>(StringComparer.Ordinal);
     public int DisplayOrder { get; init; }
     public DateTimeOffset CreatedAt { get; init; }

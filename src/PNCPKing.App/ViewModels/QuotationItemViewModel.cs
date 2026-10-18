@@ -959,6 +959,12 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         VisibleReferences.Clear();
     }
 
+    private async Task ReloadSavedManualBasketAsync(string basketKey)
+    {
+        await _main.ConfirmManualBasketAfterSaveAsync(_projectId, _lineId, basketKey).ConfigureAwait(true);
+        await LoadAsync(basketKey).ConfigureAwait(true);
+    }
+
     public async Task AddSearchRowsAsync(IReadOnlyList<ItemSearchDisplayRow> rows)
     {
         if (Line is null || rows.Count == 0)
@@ -995,7 +1001,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             basket?.Id,
             basket?.Name ?? NextManualName(),
             valid).ConfigureAwait(true);
-        await LoadAsync(saved.Basket.Key).ConfigureAwait(true);
+        await ReloadSavedManualBasketAsync(saved.Basket.Key).ConfigureAwait(true);
     }
 
     public async Task SetReferenceMembershipAsync(
@@ -1044,7 +1050,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                 .ConfigureAwait(true);
         }
 
-        await LoadAsync($"manual:{basket.Id:N}").ConfigureAwait(true);
+        await ReloadSavedManualBasketAsync(basket.Key).ConfigureAwait(true);
     }
 
     public async Task RemoveSelectedReferenceAsync()
@@ -1060,7 +1066,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             await _quotations.RemoveManualBasketReferenceAsync(
                 basketId,
                 SelectedPrice.Id).ConfigureAwait(true);
-            await LoadAsync().ConfigureAwait(true);
+            await ReloadSavedManualBasketAsync(SelectedBasket.Key).ConfigureAwait(true);
             return;
         }
 
@@ -1068,7 +1074,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             Line.Analysis,
             SelectedBasket.Source,
             excludedReferenceId: SelectedPrice.Id).ConfigureAwait(true);
-        await LoadAsync($"manual:{copied.Id:N}").ConfigureAwait(true);
+        await ReloadSavedManualBasketAsync(copied.Key).ConfigureAwait(true);
     }
 
     public async Task ConfirmSelectedBasketAsync()
@@ -1078,10 +1084,9 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        await _quotations.ConfirmBasketAsync(
-            Line.Analysis,
-            SelectedBasket.Key).ConfigureAwait(true);
-        await LoadAsync(SelectedBasket.Key).ConfigureAwait(true);
+        var key = SelectedBasket.Key;
+        if (await _main.ConfirmBasketWithWarningAsync(Line.Analysis, key).ConfigureAwait(true))
+            await LoadAsync(key).ConfigureAwait(true);
     }
 
     public async Task SetAggregationMethodAsync(QuotationAggregationMethod aggregationMethod)
@@ -1101,10 +1106,16 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         await _quotations.SetManualBasketAggregationMethodAsync(
             basket.Id,
             aggregationMethod).ConfigureAwait(true);
-        await LoadAsync(basket.Key).ConfigureAwait(true);
+        await ReloadSavedManualBasketAsync(basket.Key).ConfigureAwait(true);
     }
 
-    public async Task SetConversionFactorAsync(QuotationPriceDisplayRow row, decimal conversionFactor)
+    public Task SetConversionFactorAsync(QuotationPriceDisplayRow row, decimal conversionFactor) =>
+        SetPriceConversionAsync(row, conversionFactor, null);
+
+    public Task SetPriceDivisorAsync(QuotationPriceDisplayRow row, decimal divisor) =>
+        SetPriceConversionAsync(row, 1m, divisor);
+
+    private async Task SetPriceConversionAsync(QuotationPriceDisplayRow row, decimal conversionFactor, decimal? divisor)
     {
         ArgumentNullException.ThrowIfNull(row);
         if (Line is null || SelectedBasket is null || !row.IsInSelectedBasket)
@@ -1112,13 +1123,14 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             throw new InvalidOperationException("Selecione um preço que pertença à cesta atual.");
         }
 
+        _ = QuotationMoney.EffectivePrice(row.UnitPrice, conversionFactor, divisor, Line.Analysis.PriceDecimalPlaces);
         var basket = await EnsureManualBasketAsync(copyAutomatic: true).ConfigureAwait(true)
                      ?? throw new InvalidOperationException("Não foi possível criar a cesta manual.");
-        await _quotations.SetManualBasketConversionFactorAsync(
-            basket.Id,
-            row.Id,
-            conversionFactor).ConfigureAwait(true);
-        await LoadAsync(basket.Key).ConfigureAwait(true);
+        if (divisor is { } divideBy)
+            await _quotations.SetManualBasketPriceDivisorAsync(basket.Id, row.Id, divideBy).ConfigureAwait(true);
+        else
+            await _quotations.SetManualBasketConversionFactorAsync(basket.Id, row.Id, conversionFactor).ConfigureAwait(true);
+        await ReloadSavedManualBasketAsync(basket.Key).ConfigureAwait(true);
         SelectedPrice = VisibleReferences.FirstOrDefault(value => value.Id == row.Id);
     }
 
@@ -1164,7 +1176,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             draft,
             basketId,
             basketName).ConfigureAwait(true);
-        await LoadAsync(result.Basket.Key).ConfigureAwait(true);
+        await ReloadSavedManualBasketAsync(result.Basket.Key).ConfigureAwait(true);
     }
 
     public async Task DeleteSelectedDraftAsync()
@@ -1185,10 +1197,12 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
+        var manualKey = SelectedBasket?.Source.IsManual == true ? SelectedBasket.Key : null;
         await _internetPrices.DeleteInternetReferenceAsync(
             _lineId,
             SelectedPrice.Id).ConfigureAwait(true);
-        await LoadAsync().ConfigureAwait(true);
+        if (manualKey is not null) await ReloadSavedManualBasketAsync(manualKey).ConfigureAwait(true);
+        else await LoadAsync().ConfigureAwait(true);
     }
 
     public async Task<InternetPriceEvidence> GetSelectedInternetEvidenceAsync()
@@ -1505,7 +1519,8 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                     inBasket,
                     price?.ConversionFactor ?? 1m,
                     price?.EffectiveUnitPrice,
-                    Line.Analysis.PriceDecimalPlaces);
+                    Line.Analysis.PriceDecimalPlaces,
+                    price?.PriceDivisor);
                 row.IsValidInMarkedGroup = inBasket && validMarkedIds.Contains(row.Id);
                 VisibleReferences.Add(row);
             }

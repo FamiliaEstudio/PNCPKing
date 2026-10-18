@@ -1,6 +1,7 @@
 extern alias AppUnderTest;
 
 using System.Reflection;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows.Threading;
 using PNCPKing.Core.Interfaces;
@@ -50,6 +51,7 @@ internal static partial class Program
             SetSearchField(vm, "_queryText", text);
             SetSearchField(vm, "_activeCompoundPart", 0);
             SetSearchField(vm, "_localPriceRowsLoaded", 0);
+            SetSearchField(vm, "_localPricesNeedRefresh", false);
             CallSearch(vm, "ResetCurrentItemRows");
         }
         async Task Load(CancellationToken token = default) =>
@@ -136,6 +138,78 @@ internal static partial class Program
             proxy.BeforePage = null;
             await Load();
             Require(rows.Count == 50 && rows.All(row => row.Description == "açúcar cristal"), "A nova pesquisa usou critérios anteriores.");
+            // The automatic mode must issue exactly the same reads as repeated manual pages.
+            async Task LoadPages(CancellationToken token = default) =>
+                await (Task)CallSearch(vm, "LoadStoredPricePagesAsync", token)!;
+            foreach (var text in new[] { "café + açúcar", "café + café + açúcar", "inexistente + café + açúcar" })
+            {
+                Start(text);
+                proxy.ReadCalls.Clear();
+                vm.LoadAllPrices = false;
+                do { await LoadPages(); } while ((bool)typeof(SearchVm).GetProperty("HasMoreStoredPriceRows", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(vm)!);
+                var expectedCalls = proxy.ReadCalls.ToArray();
+                var expectedRows = rows.Select(row => Key(row.Source)).ToArray();
+                Start(text);
+                proxy.ReadCalls.Clear();
+                vm.LoadAllPrices = true;
+                await LoadPages();
+                Require(proxy.ReadCalls.SequenceEqual(expectedCalls), "Carregar tudo alterou as consultas, cursores, ordem ou tamanho das páginas.");
+                Require(rows.Select(row => Key(row.Source)).SequenceEqual(expectedRows), "Carregar tudo alterou os resultados ou parou numa página sobreposta.");
+            }
+            Start("café + açúcar");
+            proxy.ReadCalls.Clear();
+            vm.LoadAllPrices = true;
+            proxy.AfterRow = count => { if (count == 3) vm.LoadAllPrices = false; };
+            await LoadPages();
+            Require(rows.Count == 50 && proxy.ReadCalls.Count == 1, "Desmarcar deve concluir somente a página atual.");
+            proxy.AfterRow = null;
+            vm.LoadAllPrices = true;
+            await LoadPages();
+            Require(rows.Count == 130, "Retomar não concluiu os trechos restantes.");
+
+            Start("café + açúcar");
+            using var allCancellation = new CancellationTokenSource();
+            proxy.AfterRow = count => { if (count == 3) allCancellation.Cancel(); };
+            try { await LoadPages(allCancellation.Token); throw new InvalidOperationException("Carregar tudo ignorou cancelamento."); }
+            catch (OperationCanceledException) { }
+            proxy.AfterRow = null;
+            await LoadPages();
+            Require(rows.Count == 130 && rows.Select(row => Key(row.Source)).Distinct().Count() == 130,
+                "A retomada automática perdeu ou duplicou preços.");
+
+            Start("café + açúcar");
+            proxy.ReadCalls.Clear();
+            proxy.BeforePage = () => throw new IOException("Falha simulada de leitura");
+            try { await LoadPages(); throw new InvalidOperationException("A falha deveria interromper o carregamento."); }
+            catch (IOException) { }
+            Require(proxy.ReadCalls.Count == 1, "A falha iniciou outra página.");
+            proxy.BeforePage = null;
+
+            // Single-term search keeps the same existing reader as well.
+            Start("café");
+            SetSearchField(vm, "_localSearchSequence", null!);
+            SetSearchField(vm, "_localPricePage", 0);
+            SetSearchField(vm, "_localPriceCursor", null!);
+            SetSearchField(vm, "_hasMoreLocalPriceRows", true);
+            vm.LoadAllPrices = true;
+            await LoadPages();
+            Require(rows.Count == 65, "Carregar tudo não concluiu a busca simples.");
+
+            // A replacement search cannot be drained by the old automatic loop.
+            Start("café + açúcar");
+            entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            proxy.ReadCalls.Clear();
+            proxy.BeforePage = async () => { entered.TrySetResult(); await release.Task; };
+            pending = LoadPages();
+            await entered.Task;
+            Start("açúcar + café");
+            SetSearchField(vm, "_contractSearchGeneration", 2);
+            release.SetResult();
+            await pending;
+            proxy.BeforePage = null;
+            Require(rows.Count == 0 && proxy.ReadCalls.Count == 1, "Uma sequência antiga carregou a nova pesquisa.");
+            Console.WriteLine("Load all: same reads, bounded pages, overlap, single/compound search, uncheck, cancellation, errors and stale responses passed.");
             Console.WriteLine("Main search: passed (alternation, deduplication, identity, cancellation, invalidation, stale responses, no network services)");
         }
         finally { ((IDisposable)buffer).Dispose(); }
@@ -150,6 +224,7 @@ internal static partial class Program
     {
         public ItemSearchRow[] Rows = [];
         public int Calls;
+        public List<string> ReadCalls = [];
         public Action<int>? AfterRow;
         public Func<Task>? BeforePage;
         protected override object? Invoke(MethodInfo? method, object?[]? args)
@@ -165,6 +240,7 @@ internal static partial class Program
         {
             Require(size == 50 && order == PriceCacheLocalReadOrder.Discovery, "A pesquisa alterou o contrato do leitor atual.");
             Calls++;
+            ReadCalls.Add($"{expression.OriginalText}|{cursor}|{size}|{order}|{minimum}|{maximum}");
             if (BeforePage is not null) await BeforePage();
             var matches = Rows.Where(row => expression.MatchesItem(row.Item.Description, row.Item.Unit) &&
                 (minimum is null || row.HomologatedUnitValue >= minimum) &&

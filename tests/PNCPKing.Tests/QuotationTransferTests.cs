@@ -35,6 +35,7 @@ public sealed class QuotationTransferTests
             }).ToArray());
         var basket = await repository.SaveManualBasketAsync(lineId, null, "Escolhidos", ["preco-1", "preco-2", "preco-3"]);
         await repository.SetManualBasketConversionFactorAsync(basket.Id, "preco-1", 2);
+        await repository.SetManualBasketPriceDivisorAsync(basket.Id, "preco-2", 3);
         await repository.ConfirmBasketAsync(lineId, "manual:" + basket.Id.ToString("N"));
         await repository.RenameLineDisplayNameAsync(lineId, "Café para transferência");
         await repository.UpdateLineDocumentDetailsAsync(lineId, "123456", 2);
@@ -101,6 +102,7 @@ public sealed class QuotationTransferTests
         var restoredBasket = Assert.Single(await reopened.GetManualBasketsAsync(moved.Id));
         Assert.Equal(movedBasket.Id, restoredBasket.Id);
         Assert.Equal(2m, restoredBasket.ConversionFactors["preco-1"]);
+        Assert.Equal(3m, restoredBasket.PriceDivisors["preco-2"]);
         var imported = await packages.ImportAsync(packagePath, QuotationPackageImportMode.PreserveIdentity);
         Assert.DoesNotContain(imported.Warnings, warning => warning.Contains("Identificadores internos", StringComparison.Ordinal));
         Assert.NotNull(await repository.GetLineAsync(source.Id, lineId));

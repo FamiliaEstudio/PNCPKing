@@ -16,7 +16,7 @@ public sealed class QuotationPackageService : IQuotationPackageService
 {
     private const string PackageExtension = ".pncpcotacao";
     private const string PackageKind = "PNCPKing.QuotationPackage";
-    private const int FormatVersion = 1;
+    private const int FormatVersion = 2;
     private const int MinimumCompatibleDatabaseSchemaVersion = 12;
     private const string ManifestEntryName = "manifest.json";
     private const string DataEntryName = "quotation.json";
@@ -86,6 +86,16 @@ public sealed class QuotationPackageService : IQuotationPackageService
               JOIN quotation_lines l ON l.id = m.line_id
              WHERE l.project_id = $projectId
              ORDER BY m.basket_id, m.display_order, m.reference_id;
+            """,
+            ["basket_id", "reference_id"]),
+        new(
+            SqliteQuotationRepository.PriceDivisorsTable,
+            """
+            SELECT d.* FROM quotation_manual_price_divisors d
+              JOIN quotation_manual_baskets b ON b.id = d.basket_id
+              JOIN quotation_lines l ON l.id = b.line_id
+             WHERE l.project_id = $projectId
+             ORDER BY d.basket_id, d.reference_id;
             """,
             ["basket_id", "reference_id"]),
         new(
@@ -547,6 +557,9 @@ public sealed class QuotationPackageService : IQuotationPackageService
         var tables = new JsonObject();
         foreach (var definition in TableDefinitions)
         {
+            if (definition.Name == SqliteQuotationRepository.PriceDivisorsTable &&
+                !await SqliteQuotationRepository.HasPriceDivisorsTableAsync(connection, (SqliteTransaction)transaction, cancellationToken).ConfigureAwait(false))
+                continue;
             tables[definition.Name] = await ReadRowsAsync(
                     connection,
                     (SqliteTransaction)transaction,
@@ -556,6 +569,8 @@ public sealed class QuotationPackageService : IQuotationPackageService
                 .ConfigureAwait(false);
         }
 
+        if (tables[SqliteQuotationRepository.PriceDivisorsTable] is JsonArray { Count: 0 })
+            tables.Remove(SqliteQuotationRepository.PriceDivisorsTable);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         var projectRows = GetRowsFromTables(tables, "quotation_projects");
         if (projectRows.Count != 1)
@@ -566,7 +581,7 @@ public sealed class QuotationPackageService : IQuotationPackageService
         var projectName = GetRequiredText(projectRows[0], "name");
         var payload = new JsonObject
         {
-            ["formatVersion"] = FormatVersion,
+            ["formatVersion"] = tables.ContainsKey(SqliteQuotationRepository.PriceDivisorsTable) ? FormatVersion : 1,
             ["basketAlgorithmVersion"] = QuotationAnalyzer.BasketAlgorithmVersion,
             ["projectId"] = projectId.ToString("N"),
             ["tables"] = tables
@@ -585,7 +600,7 @@ public sealed class QuotationPackageService : IQuotationPackageService
         return new QuotationPackageManifest
         {
             Kind = PackageKind,
-            FormatVersion = FormatVersion,
+            FormatVersion = checked((int)GetRequiredLong(payload, "formatVersion")),
             BasketAlgorithmVersion = QuotationAnalyzer.BasketAlgorithmVersion,
             DatabaseSchemaVersion = SqliteContractRepository.CurrentSchemaVersion,
             AppVersion = typeof(QuotationPackageService).Assembly.GetName().Version?.ToString() ?? "1.0.0",
@@ -720,7 +735,9 @@ public sealed class QuotationPackageService : IQuotationPackageService
         QuotationPackageManifest? manifest,
         CancellationToken cancellationToken)
     {
-        if (GetRequiredLong(payload, "formatVersion") != FormatVersion ||
+        var formatVersion = GetRequiredLong(payload, "formatVersion");
+        if (formatVersion is < 1 or > FormatVersion ||
+            (manifest is not null && formatVersion != manifest.FormatVersion) ||
             GetRequiredLong(payload, "basketAlgorithmVersion") !=
             QuotationAnalyzer.BasketAlgorithmVersion)
         {
@@ -732,6 +749,7 @@ public sealed class QuotationPackageService : IQuotationPackageService
                      ?? throw new InvalidDataException(
                          "O pacote não contém as tabelas da cotação.");
         var compatibleDefinitions = TableDefinitions.Where(definition =>
+            !(formatVersion == 1 && definition.Name == SqliteQuotationRepository.PriceDivisorsTable) &&
             !(manifest is { DatabaseSchemaVersion: < 14 } && definition.Name == "quotation_catalog_selections") &&
             !(manifest is { DatabaseSchemaVersion: < 32 } && definition.Name == "quotation_groups")).ToArray();
         var expectedNames = compatibleDefinitions
@@ -748,11 +766,9 @@ public sealed class QuotationPackageService : IQuotationPackageService
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         foreach (var definition in compatibleDefinitions)
         {
-            var columns = await ReadTableColumnsAsync(
-                    connection,
-                    definition.Name,
-                    cancellationToken)
-                .ConfigureAwait(false);
+            IEnumerable<string> columns = definition.Name == SqliteQuotationRepository.PriceDivisorsTable
+                ? new[] { "basket_id", "reference_id", "price_divisor_millionths" }
+                : await ReadTableColumnsAsync(connection, definition.Name, cancellationToken).ConfigureAwait(false);
             var compatibleColumns = columns.ToHashSet(StringComparer.Ordinal);
             if (manifest?.DatabaseSchemaVersion < 33 && definition.Name == "quotation_lines")
             {
@@ -1007,6 +1023,17 @@ public sealed class QuotationPackageService : IQuotationPackageService
             }
         }
 
+        var basketMembers = GetRows(payload, "quotation_manual_basket_references")
+            .Select(member => Composite(GetRequiredText(member, "basket_id"), GetRequiredText(member, "reference_id")))
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var divisor in GetOptionalRows(payload, SqliteQuotationRepository.PriceDivisorsTable))
+        {
+            EnsureContains(basketMembers, Composite(GetRequiredText(divisor, "basket_id"), GetRequiredText(divisor, "reference_id")),
+                "Um divisor aponta para um preço ausente da cesta.");
+            if (GetRequiredLong(divisor, "price_divisor_millionths") <= 0)
+                throw new InvalidDataException("Uma cesta manual possui divisor inválido.");
+        }
+
         foreach (var prompt in GetRows(payload, "quotation_line_search_prompts"))
         {
             EnsureContains(
@@ -1123,6 +1150,11 @@ public sealed class QuotationPackageService : IQuotationPackageService
                                : 1_000_000) / 1_000_000m,
                     StringComparer.Ordinal),
                 StringComparer.Ordinal);
+        var divisors = GetOptionalRows(payload, SqliteQuotationRepository.PriceDivisorsTable)
+            .GroupBy(row => GetRequiredText(row, "basket_id"), StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => (IReadOnlyDictionary<string, decimal>)group.ToDictionary(
+                row => GetRequiredText(row, "reference_id"), row => GetRequiredLong(row, "price_divisor_millionths") / 1_000_000m,
+                StringComparer.Ordinal), StringComparer.Ordinal);
         var baskets = GetRows(payload, "quotation_manual_baskets")
             .GroupBy(row => GetRequiredText(row, "line_id"), StringComparer.Ordinal)
             .ToDictionary(
@@ -1145,7 +1177,8 @@ public sealed class QuotationPackageService : IQuotationPackageService
                         ReferenceIds = members.GetValueOrDefault(id.ToString("N"), []),
                         ConversionFactors = conversionFactors.GetValueOrDefault(
                             id.ToString("N"),
-                            new Dictionary<string, decimal>(StringComparer.Ordinal))
+                            new Dictionary<string, decimal>(StringComparer.Ordinal)),
+                        PriceDivisors = divisors.GetValueOrDefault(id.ToString("N"), new Dictionary<string, decimal>(StringComparer.Ordinal))
                     };
                 }).ToArray(),
                 StringComparer.Ordinal);
@@ -1239,6 +1272,7 @@ public sealed class QuotationPackageService : IQuotationPackageService
         Remap(GetRows(payload, "quotation_manual_baskets"), "id", basketMap);
         Remap(GetRows(payload, "quotation_manual_baskets"), "line_id", lineMap);
         Remap(GetRows(payload, "quotation_manual_basket_references"), "basket_id", basketMap);
+        Remap(GetOptionalRows(payload, SqliteQuotationRepository.PriceDivisorsTable), "basket_id", basketMap);
         Remap(GetRows(payload, "quotation_manual_basket_references"), "line_id", lineMap);
         Remap(GetRows(payload, "quotation_line_search_prompts"), "line_id", lineMap);
         Remap(GetRows(payload, "quotation_contract_search_prompts"), "run_id", runMap);
@@ -1448,6 +1482,11 @@ public sealed class QuotationPackageService : IQuotationPackageService
         var skippedContracts = 0;
         foreach (var definition in TableDefinitions)
         {
+            if (definition.Name == SqliteQuotationRepository.PriceDivisorsTable)
+            {
+                if (GetOptionalRows(payload, definition.Name).Count == 0) continue;
+                await SqliteQuotationRepository.EnsurePriceDivisorsTableAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+            }
             if (string.Equals(
                     definition.Name,
                     "quotation_line_search_prompts",
@@ -1877,7 +1916,7 @@ public sealed class QuotationPackageService : IQuotationPackageService
     private static void ValidateManifest(QuotationPackageManifest manifest)
     {
         if (!string.Equals(manifest.Kind, PackageKind, StringComparison.Ordinal) ||
-            manifest.FormatVersion != FormatVersion)
+            manifest.FormatVersion is < 1 or > FormatVersion)
         {
             throw new InvalidDataException(
                 "O arquivo não é um pacote de cotação PNCP King compatível.");

@@ -170,7 +170,7 @@
                             <DataGridTextColumn Header="Nº" Binding="{Binding SourceNumber}" IsReadOnly="True" Width="55" />
                             <DataGridTextColumn Header="Páginas" Binding="{Binding Pages}" IsReadOnly="True" Width="80" />
                             <DataGridTextColumn Header="Descrição" Binding="{Binding Description}" Width="260" />
-                            <DataGridTextColumn Header="Quantidade" Binding="{Binding Quantity}" Width="90" />
+                            <DataGridTextColumn Header="Quantidade" Binding="{Binding Quantity, StringFormat='#,##0.####'}" Width="90" />
                             <DataGridTextColumn Header="Unidade" Binding="{Binding Unit}" Width="90" />
                             <DataGridTextColumn Header="Estimativa unitária" Binding="{Binding EstimatedUnitPrice}" Width="115" />
                             <DataGridTextColumn Header="Estimativa total" Binding="{Binding EstimatedTotalPrice}" Width="115" />

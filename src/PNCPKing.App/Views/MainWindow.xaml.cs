@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using PNCPKing.App.Services;
@@ -34,6 +35,9 @@ public partial class MainWindow : Window
         _guardMasterService = guardMasterService;
         InitializeComponent();
         DataContext = viewModel;
+        QueryTextBox.CommandBindings.Add(new CommandBinding(EditingCommands.ToggleInsert,
+            (_, e) => e.Handled = true,
+            (_, e) => { e.CanExecute = true; e.Handled = true; }));
         _viewModel.PropertyChanged += ViewModel_PropertyChanged;
         Closed += (_, _) => _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
         MonitorAwareWindowBehavior.Attach(this);
@@ -215,6 +219,14 @@ public partial class MainWindow : Window
 
     private void QueryTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Key == Key.Enter && Keyboard.Modifiers == ModifierKeys.None)
+        {
+            e.Handled = true;
+            if (!e.IsRepeat && _viewModel.SearchCommand.CanExecute(null))
+                _viewModel.SearchCommand.Execute(null);
+            return;
+        }
+
         if (!SweetCodePopup.IsOpen || SweetCodeList.Items.Count == 0)
         {
             return;
@@ -278,6 +290,13 @@ public partial class MainWindow : Window
     {
         if (e.Handled || e.IsRepeat || Keyboard.Modifiers != ModifierKeys.None ||
             e.OriginalSource is not (DataGrid or DataGridRow or DataGridCell)) return;
+
+        if (e.Key == Key.Enter && _viewModel.SelectedBasketPriceCount > 0 && !_viewModel.IsFileBusy)
+        {
+            e.Handled = true;
+            CreateManualBasket_Click(sender, e);
+            return;
+        }
 
         var action = e.Key switch
         {
@@ -421,15 +440,15 @@ public partial class MainWindow : Window
         var row = _viewModel.SelectedVisibleQuotationReference;
         if (row is null || !row.IsInSelectedBasket)
         {
-            MessageBox.Show(this, "Selecione um preço da cesta atual.", "Fator de conversão",
+            MessageBox.Show(this, "Selecione um preço da cesta atual.", "Dividir preço por",
                 MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
         var prompt = new TextPromptWindow(
-            "Fator de conversão",
-            "Fator positivo, com até seis casas decimais:",
-            row.ConversionFactor.ToString("0.######", CultureInfo.CurrentCulture))
+            "Dividir preço por",
+            row.PriceDivisorPrompt,
+            row.PriceDivisorInput)
         {
             Owner = this
         };
@@ -438,28 +457,28 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!decimal.TryParse(prompt.Value, NumberStyles.Number, CultureInfo.CurrentCulture, out var factor))
+        if (!decimal.TryParse(prompt.Value, NumberStyles.Number, CultureInfo.CurrentCulture, out var divisor))
         {
-            MessageBox.Show(this, "O fator de conversão não é válido.", "Fator de conversão",
+            MessageBox.Show(this, "O divisor não é válido.", "Dividir preço por",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
-        await SetMainConversionFactorAsync(factor).ConfigureAwait(true);
+        await SetMainPriceDivisorAsync(divisor).ConfigureAwait(true);
     }
 
     private async void MainReferenceResetFactor_Click(object sender, RoutedEventArgs e) =>
-        await SetMainConversionFactorAsync(1m).ConfigureAwait(true);
+        await SetMainPriceDivisorAsync(1m).ConfigureAwait(true);
 
-    private async Task SetMainConversionFactorAsync(decimal factor)
+    private async Task SetMainPriceDivisorAsync(decimal divisor)
     {
         try
         {
-            await _viewModel.SetSelectedReferenceConversionFactorAsync(factor).ConfigureAwait(true);
+            await _viewModel.SetSelectedReferencePriceDivisorAsync(divisor).ConfigureAwait(true);
         }
         catch (Exception exception)
         {
-            MessageBox.Show(this, exception.Message, "Fator de conversão", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, exception.Message, "Dividir preço por", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 

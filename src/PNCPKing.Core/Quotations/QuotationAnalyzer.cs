@@ -520,7 +520,8 @@ public sealed partial class QuotationAnalyzer
                 requestedSize: 3,
                 manual.AggregationMethod,
                 manual.ConversionFactors,
-                priceDecimalPlaces));
+                priceDecimalPlaces,
+                manual.PriceDivisors));
         }
 
         return result;
@@ -534,7 +535,8 @@ public sealed partial class QuotationAnalyzer
         int requestedSize,
         QuotationAggregationMethod aggregationMethod,
         IReadOnlyDictionary<string, decimal>? conversionFactors,
-        int priceDecimalPlaces)
+        int priceDecimalPlaces,
+        IReadOnlyDictionary<string, decimal>? priceDivisors = null)
     {
         var orderedPrices = references
             .Select(reference =>
@@ -543,13 +545,14 @@ public sealed partial class QuotationAnalyzer
                              conversionFactors.TryGetValue(reference.Id, out var configured)
                     ? configured
                     : 1m;
-                QuotationMoney.ValidateConversionFactor(factor);
+                decimal? divisor = priceDivisors is not null && priceDivisors.TryGetValue(reference.Id, out var configuredDivisor)
+                    ? configuredDivisor : null;
                 return new QuotationBasketPrice
                 {
                     Reference = reference,
                     ConversionFactor = factor,
-                    EffectiveUnitPrice = QuotationMoney.Truncate(
-                        checked(reference.UnitPrice * factor), priceDecimalPlaces)
+                    PriceDivisor = divisor,
+                    EffectiveUnitPrice = QuotationMoney.EffectivePrice(reference.UnitPrice, factor, divisor, priceDecimalPlaces)
                 };
             })
             .OrderBy(entry => entry.EffectiveUnitPrice)

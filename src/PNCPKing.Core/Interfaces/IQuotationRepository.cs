@@ -78,6 +78,11 @@ public interface IQuotationRepository
         string referenceId,
         decimal conversionFactor,
         CancellationToken cancellationToken = default);
+    Task SetManualBasketPriceDivisorAsync(
+        Guid basketId,
+        string referenceId,
+        decimal priceDivisor,
+        CancellationToken cancellationToken = default);
     Task DeleteManualBasketAsync(Guid basketId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<InternetPriceDraft>> GetInternetPriceDraftsAsync(
         Guid lineId,

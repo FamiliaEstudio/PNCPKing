@@ -22,6 +22,16 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args is ["--usability"])
+        {
+            var usabilityApp = CreateUiApplication();
+            usabilityApp.Startup += async (_, _) =>
+            {
+                try { await CheckUsabilityAsync(); usabilityApp.Shutdown(); }
+                catch (Exception error) { Console.Error.WriteLine(error); usabilityApp.Shutdown(1); }
+            };
+            return usabilityApp.Run();
+        }
         if (args is ["--price-improvements"])
         {
             var priceApp = CreateUiApplication();

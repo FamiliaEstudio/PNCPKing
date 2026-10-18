@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using PNCPKing.Core.Models;
 
 namespace PNCPKing.App.Views;
@@ -19,6 +20,19 @@ public partial class ManualBasketWindow : Window
         string maximumPrice)
     {
         InitializeComponent();
+        var openingEnterHeld = Keyboard.IsKeyDown(Key.Enter);
+        PreviewKeyDown += (_, e) =>
+        {
+            if (openingEnterHeld && e.Key == Key.Enter) e.Handled = true;
+        };
+        PreviewKeyUp += (_, e) =>
+        {
+            if (e.Key == Key.Enter && openingEnterHeld)
+            {
+                openingEnterHeld = false;
+                e.Handled = true;
+            }
+        };
         _analysesByProject = analysesByProject;
         _suggestedDescription = suggestedDescription;
         ProjectComboBox.ItemsSource = projects;
@@ -56,7 +70,7 @@ public partial class ManualBasketWindow : Window
             var line = analysis.Line;
             DescriptionTextBox.Text = line.Description;
             QuantityTextBox.Text = line.RequestedQuantity > 0
-                ? line.RequestedQuantity.ToString("N4", CultureInfo.CurrentCulture)
+                ? line.RequestedQuantity.ToString("#,##0.####", CultureInfo.CurrentCulture)
                 : string.Empty;
             UnitTextBox.Text = line.RequestedUnit;
             MinimumPriceTextBox.Text = line.MinimumUnitPrice?.ToString("N4", CultureInfo.CurrentCulture) ?? string.Empty;

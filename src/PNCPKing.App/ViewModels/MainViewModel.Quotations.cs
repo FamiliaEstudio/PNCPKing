@@ -1760,7 +1760,7 @@ public sealed partial class MainViewModel
                     validRows.Select(row => row.Source).ToArray())
                 .ConfigureAwait(true);
             await RefreshQuotationProjectsAsync(projectId).ConfigureAwait(true);
-            await LoadQuotationProjectAsync(projectId, saved.Analysis.Line.Id).ConfigureAwait(true);
+            await ReloadSavedManualBasketAsync(projectId.Value, saved.Analysis.Line.Id, saved.Basket.Key).ConfigureAwait(true);
             SelectedResultsWorkspace = ResultsWorkspace.Quotations;
             StatusText =
                 $"Cesta manual \"{saved.Basket.Name}\" salva com " +
@@ -1902,32 +1902,54 @@ public sealed partial class MainViewModel
             return;
         }
 
-        if (basket.Source.IsManual &&
-            basket.Source.VisualState is QuotationBasketVisualState.ManualIncomplete or
-                QuotationBasketVisualState.ManualInvalid)
-        {
-            var answer = MessageBox.Show(
-                $"{basket.Source.ValidationMessage}\n\n" +
-                "A cesta poderá ser exportada, e a planilha registrará esta ressalva. Deseja confirmar?",
-                "Confirmar cesta manual com ressalva",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning);
-            if (answer != MessageBoxResult.Yes)
-            {
-                return;
-            }
-        }
-
         try
         {
-            await _quotationService.ConfirmBasketAsync(line.Analysis, basket.Key).ConfigureAwait(true);
+            if (!await ConfirmBasketWithWarningAsync(line.Analysis, basket.Key).ConfigureAwait(true)) return;
             await LoadQuotationProjectAsync(project.Id, line.Line.Id).ConfigureAwait(true);
+            SelectQuotationBasket(basket.Key);
             StatusText = $"Cesta confirmada para {line.Line.EffectiveDisplayName}.";
         }
         catch (Exception exception)
         {
             MessageBox.Show(exception.Message, "Confirmar cesta", MessageBoxButton.OK, MessageBoxImage.Error);
         }
+    }
+
+    internal async Task<bool> ConfirmBasketWithWarningAsync(QuotationLineAnalysis analysis, string basketKey)
+    {
+        var basket = analysis.Baskets.FirstOrDefault(value => value.Key == basketKey);
+        if (basket is null) return false;
+        if (basket.IsManual && !basket.IsValid &&
+            MessageBox.Show($"{basket.ValidationMessage}\n\n" +
+                "A cesta poderá ser exportada, e a planilha registrará esta ressalva. Deseja confirmar?",
+                "Confirmar cesta manual com ressalva", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            return false;
+        await _quotationService.ConfirmBasketAsync(analysis, basketKey).ConfigureAwait(true);
+        return true;
+    }
+
+    internal async Task ConfirmManualBasketAfterSaveAsync(Guid projectId, Guid lineId, string basketKey)
+    {
+        var analysis = await _quotationService.GetAnalysisAsync(projectId, lineId).ConfigureAwait(true);
+        if (analysis?.Baskets.FirstOrDefault(value => value.Key == basketKey) is { IsManual: true })
+            await ConfirmBasketWithWarningAsync(analysis, basketKey).ConfigureAwait(true);
+    }
+
+    private async Task ReloadSavedManualBasketAsync(Guid projectId, Guid lineId, string basketKey)
+    {
+        await ConfirmManualBasketAfterSaveAsync(projectId, lineId, basketKey).ConfigureAwait(true);
+        await LoadQuotationProjectAsync(projectId, lineId).ConfigureAwait(true);
+        SelectQuotationBasket(basketKey);
+    }
+
+    private void SelectQuotationBasket(string basketKey)
+    {
+        var baskets = SelectedQuotationLine?.Analysis.Baskets;
+        if (baskets is null) return;
+        var index = baskets.ToList().FindIndex(value => value.Key == basketKey);
+        if (index < 0) return;
+        ChangeQuotationBasketPage(index / QuotationBasketPageSize + 1);
+        SelectedQuotationBasket = QuotationBaskets.FirstOrDefault(value => value.Key == basketKey);
     }
 
     public async Task SetSelectedBasketAggregationMethodAsync(
@@ -1958,12 +1980,16 @@ public sealed partial class MainViewModel
         await _quotationService.SetManualBasketAggregationMethodAsync(
             manualId.Value,
             aggregationMethod).ConfigureAwait(true);
-        await LoadQuotationProjectAsync(project.Id, line.Line.Id).ConfigureAwait(true);
-        SelectedQuotationBasket = QuotationBaskets.FirstOrDefault(value =>
-            value.Key == $"manual:{manualId.Value:N}");
+        await ReloadSavedManualBasketAsync(project.Id, line.Line.Id, $"manual:{manualId.Value:N}").ConfigureAwait(true);
     }
 
-    public async Task SetSelectedReferenceConversionFactorAsync(decimal conversionFactor)
+    public Task SetSelectedReferenceConversionFactorAsync(decimal conversionFactor) =>
+        SetSelectedReferenceConversionAsync(conversionFactor, null);
+
+    public Task SetSelectedReferencePriceDivisorAsync(decimal divisor) =>
+        SetSelectedReferenceConversionAsync(1m, divisor);
+
+    private async Task SetSelectedReferenceConversionAsync(decimal conversionFactor, decimal? divisor)
     {
         var line = SelectedQuotationLine;
         var selected = SelectedQuotationBasket;
@@ -1974,6 +2000,7 @@ public sealed partial class MainViewModel
             throw new InvalidOperationException("Selecione um preço que pertença à cesta atual.");
         }
 
+        _ = QuotationMoney.EffectivePrice(row.UnitPrice, conversionFactor, divisor, line.Analysis.PriceDecimalPlaces);
         Guid manualId;
         if (selected.Source.IsManual && selected.Source.ManualBasketId is { } basketId)
         {
@@ -1987,13 +2014,11 @@ public sealed partial class MainViewModel
             manualId = copied.Id;
         }
 
-        await _quotationService.SetManualBasketConversionFactorAsync(
-            manualId,
-            row.Id,
-            conversionFactor).ConfigureAwait(true);
-        await LoadQuotationProjectAsync(project.Id, line.Line.Id).ConfigureAwait(true);
-        SelectedQuotationBasket = QuotationBaskets.FirstOrDefault(value =>
-            value.Key == $"manual:{manualId:N}");
+        if (divisor is { } divideBy)
+            await _quotationService.SetManualBasketPriceDivisorAsync(manualId, row.Id, divideBy).ConfigureAwait(true);
+        else
+            await _quotationService.SetManualBasketConversionFactorAsync(manualId, row.Id, conversionFactor).ConfigureAwait(true);
+        await ReloadSavedManualBasketAsync(project.Id, line.Line.Id, $"manual:{manualId:N}").ConfigureAwait(true);
         SelectedVisibleQuotationReference = VisibleQuotationReferences.FirstOrDefault(value =>
             value.Id == row.Id);
     }
@@ -2065,7 +2090,7 @@ public sealed partial class MainViewModel
                 basket.ManualBasketId.Value,
                 reference.Id)
             .ConfigureAwait(true);
-        await LoadQuotationProjectAsync(project.Id, line.Line.Id).ConfigureAwait(true);
+        await ReloadSavedManualBasketAsync(project.Id, line.Line.Id, basket.Key).ConfigureAwait(true);
         StatusText = "Referência removida da cesta manual.";
     }
 
@@ -2476,10 +2501,7 @@ public sealed partial class MainViewModel
             preferredBasketKey = basket.Key;
         }
 
-        await LoadQuotationProjectAsync(project.Id, line.Line.Id).ConfigureAwait(true);
-        SelectedQuotationBasket = QuotationBaskets.FirstOrDefault(value =>
-                                      value.Key == preferredBasketKey) ??
-                                  SelectedQuotationBasket;
+        await ReloadSavedManualBasketAsync(project.Id, line.Line.Id, preferredBasketKey).ConfigureAwait(true);
     }
 
     private void RebuildVisibleQuotationReferences()
@@ -2519,7 +2541,8 @@ public sealed partial class MainViewModel
                     value.InBasket,
                     price?.ConversionFactor ?? 1m,
                     price?.EffectiveUnitPrice,
-                    SelectedQuotationLine.Analysis.PriceDecimalPlaces);
+                    SelectedQuotationLine.Analysis.PriceDecimalPlaces,
+                    price?.PriceDivisor);
                 row.IsValidInMarkedGroup = value.InBasket && validMarkedIds.Contains(row.Id);
                 return row;
             }) ?? [];

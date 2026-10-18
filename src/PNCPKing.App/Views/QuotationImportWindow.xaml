@@ -25,7 +25,7 @@
                     <DataGridTextColumn Header="Linha" Binding="{Binding SourceRow}" Width="55" />
                     <DataGridTextColumn Header="Pesquisa" Binding="{Binding SearchText}" Width="310" />
                     <DataGridTextColumn Header="Descrição de saída" Binding="{Binding OutputDescription}" Width="200" />
-                    <DataGridTextColumn Header="Quantidade" Binding="{Binding Quantity, StringFormat=N4}" Width="100" />
+                    <DataGridTextColumn Header="Quantidade" Binding="{Binding Quantity, StringFormat='#,##0.####'}" Width="100" />
                     <DataGridTextColumn Header="Unidade" Binding="{Binding Unit}" Width="120" />
                     <DataGridTextColumn Header="Mínimo" Binding="{Binding MinimumUnitPrice, StringFormat=C4}" Width="100" />
                     <DataGridTextColumn Header="Máximo" Binding="{Binding MaximumUnitPrice, StringFormat=C4}" Width="100" />

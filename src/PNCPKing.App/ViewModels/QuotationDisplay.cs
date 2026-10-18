@@ -200,7 +200,8 @@ public sealed class QuotationPriceDisplayRow(
     bool isInSelectedBasket,
     decimal conversionFactor = 1m,
     decimal? effectiveUnitPrice = null,
-    int priceDecimalPlaces = 2) : ObservableObject, IPriceHighlightRow
+    int priceDecimalPlaces = 2,
+    decimal? priceDivisor = null) : ObservableObject, IPriceHighlightRow
 {
     private bool _isInSelectedBasket = isInSelectedBasket;
     private bool _isValidInSelection;
@@ -222,8 +223,27 @@ public sealed class QuotationPriceDisplayRow(
     public string SupplierName => Source.SupplierName;
     public decimal UnitPrice => Source.UnitPrice;
     public decimal ConversionFactor { get; } = conversionFactor;
+    public decimal? PriceDivisor { get; } = priceDivisor;
+    public string PriceDivisorInput
+    {
+        get
+        {
+            if (PriceDivisor is { } divisor) return divisor.ToString("0.######");
+            if (ConversionFactor <= 0) return string.Empty;
+            var inverse = 1m / ConversionFactor;
+            if (inverse <= 0 || inverse > long.MaxValue / 1_000_000m ||
+                inverse * 1_000_000m != decimal.Truncate(inverse * 1_000_000m) ||
+                inverse * ConversionFactor != 1m) return string.Empty;
+            return inverse.ToString("0.######");
+        }
+    }
+    public string PriceDivisorText => PriceDivisorInput.Length > 0 ? PriceDivisorInput : $"Legado × {ConversionFactor:0.######}";
+    public string PriceDivisorPrompt => PriceDivisorInput.Length > 0
+        ? "Dividir o preço original por (positivo, até seis casas decimais):"
+        : $"Conversão existente: multiplicar por {ConversionFactor:0.######}. " +
+          "Informe um novo divisor positivo (até seis casas decimais) ou cancele para preservar o cálculo.";
     public decimal EffectiveUnitPrice { get; } = effectiveUnitPrice ??
-        QuotationMoney.Truncate(source.UnitPrice * conversionFactor, priceDecimalPlaces);
+        QuotationMoney.EffectivePrice(source.UnitPrice, conversionFactor, priceDivisor, priceDecimalPlaces);
     public decimal? HighlightPrice => EffectiveUnitPrice;
     public bool IsMarkedForHighlight => IsInSelectedBasket;
     public bool IsValidInSelection
