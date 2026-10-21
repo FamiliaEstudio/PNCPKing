@@ -28,11 +28,19 @@ public sealed class QuotationService(
         CancellationToken cancellationToken = default) => repository.SaveGroupsAsync(projectId, groups, cancellationToken);
 
     public Task OrganizeProjectAsync(Guid projectId, CancellationToken cancellationToken = default) =>
+        OrganizeProjectAsync(projectId, new QuotationOrganizationOptions(), cancellationToken);
+
+    public Task OrganizeProjectAsync(Guid projectId, QuotationOrganizationOptions options,
+        CancellationToken cancellationToken = default) =>
         repository.SaveOrganizationAsync(projectId, async token =>
         {
             var report = await GetReportAsync(projectId, token).ConfigureAwait(false);
-            return QuotationOrganization.Calculate(report.Project, report.Lines, report.Groups);
-        }, cancellationToken);
+            var lines = options.RemoveItemNumberPrefixes
+                ? report.Lines.Select(value => value with { Line = QuotationOrganization.RemoveItemNumberPrefix(value.Line) }).ToArray()
+                : report.Lines;
+            return QuotationOrganization.Calculate(report.Project with { IgnoreItemNumberPrefix = options.IgnoreItemNumberPrefix },
+                lines, report.Groups);
+        }, cancellationToken, options);
 
     public Task SetProjectAlphabeticalOrderAsync(Guid projectId, CancellationToken cancellationToken = default) =>
         repository.SetProjectAlphabeticalOrderAsync(projectId, cancellationToken);

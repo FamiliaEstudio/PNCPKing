@@ -13,7 +13,7 @@ public interface IQuotationRepository
     Task SaveGroupsAsync(Guid projectId, IReadOnlyList<QuotationGroup> groups, CancellationToken cancellationToken = default);
     Task SaveOrganizationAsync(Guid projectId,
         Func<CancellationToken, Task<QuotationOrganizationSnapshot>> calculate,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default, QuotationOrganizationOptions? options = null);
     Task RenameLineDisplayNameAsync(
         Guid lineId,
         string displayName,

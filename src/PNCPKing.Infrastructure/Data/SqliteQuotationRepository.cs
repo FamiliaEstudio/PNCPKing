@@ -3111,16 +3111,22 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
         }
     }
 
-    private static QuotationProject ReadProject(SqliteDataReader reader) => new(
-        Guid.ParseExact(reader.GetString(0), "N"),
-        reader.GetString(1),
-        ParseDateTime(reader.GetString(2)),
-        ParseDateTime(reader.GetString(3)))
+    private static QuotationProject ReadProject(SqliteDataReader reader)
     {
-        IsMedication = reader.GetInt32(4) != 0,
-        SortItemsAlphabetically = reader.GetInt32(5) != 0,
-        Organization = QuotationOrganizationSnapshot.FromJson(reader.IsDBNull(6) ? null : reader.GetString(6))
-    };
+        var organization = QuotationOrganizationSnapshot.FromJson(reader.IsDBNull(6) ? null : reader.GetString(6));
+        // Alphabetical preferences share the existing JSON field without creating a quota snapshot or migrating the database.
+        return new(
+            Guid.ParseExact(reader.GetString(0), "N"),
+            reader.GetString(1),
+            ParseDateTime(reader.GetString(2)),
+            ParseDateTime(reader.GetString(3)))
+        {
+            IsMedication = reader.GetInt32(4) != 0,
+            SortItemsAlphabetically = reader.GetInt32(5) != 0,
+            IgnoreItemNumberPrefix = organization?.IgnoreItemNumberPrefix ?? false,
+            Organization = organization is { AlphabeticalOnly: true } ? null : organization
+        };
+    }
 
     private static QuotationAutomationRun ReadAutomationRun(SqliteDataReader reader)
     {

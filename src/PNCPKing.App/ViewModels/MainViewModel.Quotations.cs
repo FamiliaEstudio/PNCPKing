@@ -897,14 +897,21 @@ public sealed partial class MainViewModel
     {
         var project = SelectedQuotationProject;
         if (project is null) return;
+        var window = new QuotationOrganizationWindow(project.Source) { Owner = Application.Current.MainWindow };
+        if (window.ShowDialog() != true) return;
+        var options = window.Options;
         var lineId = SelectedQuotationLine?.Line.Id;
         IsFileBusy = true;
         NotifyCommands();
         try
         {
-            await _quotationService.OrganizeProjectAsync(project.Id).ConfigureAwait(true);
+            await Task.Run(() => _quotationService.OrganizeProjectAsync(project.Id, options)).ConfigureAwait(true);
             await LoadQuotationProjectAsync(project.Id, lineId).ConfigureAwait(true);
-            StatusText = "Itens organizados por grupos e cotas; numeração aplicada às telas e exportações.";
+            StatusText = options.AlphabeticalOnly
+                ? "Todos os itens do projeto foram organizados em ordem alfabética."
+                : "Itens organizados por grupos e cotas; numeração aplicada às telas e exportações.";
+            if (options.RemoveItemNumberPrefixes)
+                StatusText += " Prefixos manuais removidos dos nomes de todos os itens do projeto.";
         }
         catch (Exception exception)
         {

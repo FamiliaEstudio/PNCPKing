@@ -87,6 +87,7 @@ public sealed record QuotationProject(
 {
     public bool IsMedication { get; init; }
     public bool SortItemsAlphabetically { get; init; }
+    public bool IgnoreItemNumberPrefix { get; init; }
     public QuotationOrganizationSnapshot? Organization { get; init; }
     public int PriceDecimalPlaces => IsMedication ? 4 : 2;
 }

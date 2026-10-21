@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using PNCPKing.Core.Models;
+using PNCPKing.Core.Quotations;
 
 namespace PNCPKing.Infrastructure.Data;
 
@@ -72,18 +73,41 @@ public sealed partial class SqliteQuotationRepository
 
     public async Task SaveOrganizationAsync(Guid projectId,
         Func<CancellationToken, Task<QuotationOrganizationSnapshot>> calculate,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, QuotationOrganizationOptions? options = null)
     {
         await using var writer = await _connections.WorkCoordinator.EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = connection.BeginTransaction();
         // Calculate under the write lock, before any mutation, so every read sees the same committed inputs.
-        var snapshot = await calculate(cancellationToken).ConfigureAwait(false);
+        options ??= new();
+        var snapshot = options.AlphabeticalOnly
+            ? new QuotationOrganizationSnapshot { AlphabeticalOnly = true, IgnoreItemNumberPrefix = options.IgnoreItemNumberPrefix }
+            : await calculate(cancellationToken).ConfigureAwait(false);
+        if (options.RemoveItemNumberPrefixes)
+        {
+            // Update every project item in the same transaction as the order. Never change search descriptions or baskets.
+            var lines = await GetLinesAsync(projectId, cancellationToken).ConfigureAwait(false);
+            await using var rename = connection.CreateCommand();
+            rename.Transaction = transaction;
+            rename.CommandText = "UPDATE quotation_lines SET display_name = $name WHERE id = $line AND project_id = $project;";
+            rename.Parameters.AddWithValue("$project", projectId.ToString("N"));
+            rename.Parameters.Add("$line", SqliteType.Text);
+            rename.Parameters.Add("$name", SqliteType.Text);
+            foreach (var line in lines)
+            {
+                var cleaned = QuotationOrganization.RemoveItemNumberPrefix(line);
+                if (cleaned == line) continue;
+                rename.Parameters["$line"].Value = line.Id.ToString("N");
+                rename.Parameters["$name"].Value = cleaned.DisplayName;
+                await rename.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "UPDATE quotation_projects SET organization_json = $json, updated_at = $updated WHERE id = $id;";
+        command.CommandText = "UPDATE quotation_projects SET organization_json = $json, sort_items_alphabetically = $alphabetical, updated_at = $updated WHERE id = $id;";
         command.Parameters.AddWithValue("$id", projectId.ToString("N"));
         command.Parameters.AddWithValue("$json", snapshot.ToJson());
+        command.Parameters.AddWithValue("$alphabetical", options.AlphabeticalOnly ? 1 : 0);
         command.Parameters.AddWithValue("$updated", FormatDateTime(DateTimeOffset.UtcNow));
         if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
             throw new InvalidOperationException("A cotação não existe mais.");

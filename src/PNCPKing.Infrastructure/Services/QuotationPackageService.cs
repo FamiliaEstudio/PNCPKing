@@ -1209,12 +1209,14 @@ public sealed class QuotationPackageService : IQuotationPackageService
                     "pela versão atual do cálculo.");
             }
         }
+        var organization = QuotationOrganizationSnapshot.FromJson(project.ContainsKey("organization_json") ? GetOptionalText(project, "organization_json") : null);
         var mappedProject = new QuotationProject(ParseGuid(GetRequiredText(project, "id"), "projeto"),
             GetRequiredText(project, "name"), ParseDateTime(GetRequiredText(project, "created_at")),
             ParseDateTime(GetRequiredText(project, "updated_at")))
         {
             IsMedication = priceDecimalPlaces == 4,
-            Organization = QuotationOrganizationSnapshot.FromJson(project.ContainsKey("organization_json") ? GetOptionalText(project, "organization_json") : null)
+            IgnoreItemNumberPrefix = organization?.IgnoreItemNumberPrefix ?? false,
+            Organization = organization is { AlphabeticalOnly: true } ? null : organization
         };
         var groups = GetOptionalRows(payload, "quotation_groups").Select(row =>
         {

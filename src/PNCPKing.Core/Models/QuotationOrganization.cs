@@ -16,6 +16,8 @@ public sealed record QuotationPosition(
 public sealed record QuotationOrganizationSnapshot
 {
     public int Version { get; init; } = 1;
+    public bool AlphabeticalOnly { get; init; }
+    public bool IgnoreItemNumberPrefix { get; init; }
     public DateTimeOffset AppliedAt { get; init; } = DateTimeOffset.UtcNow;
     public string Signature { get; init; } = string.Empty;
     public IReadOnlyList<QuotationResultGroup> Groups { get; init; } = [];
@@ -44,6 +46,11 @@ public sealed record QuotationOrganizationSnapshot
         : JsonSerializer.Deserialize<QuotationOrganizationSnapshot>(json)
           ?? throw new InvalidDataException("A organização salva é inválida.");
 }
+
+public sealed record QuotationOrganizationOptions(
+    bool AlphabeticalOnly = false,
+    bool IgnoreItemNumberPrefix = false,
+    bool RemoveItemNumberPrefixes = false);
 
 public static class QuotationQuantity
 {

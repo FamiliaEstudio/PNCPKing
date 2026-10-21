@@ -9,6 +9,168 @@ namespace PNCPKing.Tests;
 
 public sealed class QuotationOrganizationTests
 {
+    [Theory]
+    [InlineData("Item 1 Água", "Água")]
+    [InlineData("item 1 Água", "Água")]
+    [InlineData("item 01 Água", "Água")]
+    [InlineData("Item 01 - Água", "Água")]
+    [InlineData("Item 1 - Água", "Água")]
+    [InlineData("Item 3-Água", "Água")]
+    [InlineData("  ITEM 003 – Álcool 70% 500 mL", "Álcool 70% 500 mL")]
+    [InlineData("Item 4— Água", "Água")]
+    [InlineData("Água", "Água")]
+    [InlineData("Água - Item 1", "Água - Item 1")]
+    [InlineData("Item para limpeza", "Item para limpeza")]
+    [InlineData("Item 1", "Item 1")]
+    [InlineData("Item 04 -", "Item 04 -")]
+    [InlineData("Item 04 -  ", "Item 04 -  ")]
+    [InlineData("Item 1A - Água", "Item 1A - Água")]
+    [InlineData("Item 1,5 L de água", "Item 1,5 L de água")]
+    [InlineData("Item 1.5 L de água", "Item 1.5 L de água")]
+    public void RemovesOnlyTheInitialManualItemNumberWhenANameRemains(string name, string expected) =>
+        Assert.Equal(expected, QuotationOrganization.WithoutItemNumberPrefix(name));
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AlphabeticalOptionsWorkWithoutQuantityUnitOrBasketsAndPersistInPackages(bool removePrefixes)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer());
+        var project = await repository.CreateProjectAsync("Ordenar sem preenchimento");
+        var zebra = await repository.CreateLineAsync(project.Id, new("Item 1 - Zebra", 0, "", null, null));
+        var water = await repository.CreateLineAsync(project.Id, new("item 02 - Água", 0, "", null, null));
+        var banana = await repository.CreateLineAsync(project.Id, new("Descrição técnica da banana", 0, "", null, null));
+        await repository.RenameLineDisplayNameAsync(banana.Id, "ITEM 03 - Banana");
+        var emptyName = await repository.CreateLineAsync(project.Id, new("Item 04 -", 0, "", null, null));
+        var otherProject = await repository.CreateProjectAsync("Outro projeto");
+        var other = await repository.CreateLineAsync(otherProject.Id, new("Item 1 - Intocado", 0, "", null, null));
+        var before = await repository.GetLinesAsync(project.Id);
+
+        await service.OrganizeProjectAsync(project.Id, new QuotationOrganizationOptions(true, true, removePrefixes));
+        service = new(new SqliteQuotationRepository(database.Repository.DatabasePath), new QuotationAnalyzer());
+        var report = await service.GetReportAsync(project.Id);
+        Assert.True(report.Project.SortItemsAlphabetically);
+        Assert.True(report.Project.IgnoreItemNumberPrefix);
+        Assert.Null(report.Project.Organization);
+        Assert.False(report.OrganizationIsStale);
+        Assert.Equal([water.Id, banana.Id, emptyName.Id, zebra.Id], report.Lines.Select(value => value.Line.Id));
+        Assert.All(report.Lines, value =>
+        {
+            Assert.Equal(0, value.Line.RequestedQuantity);
+            Assert.Equal("", value.Line.RequestedUnit);
+            Assert.Empty(value.Baskets);
+            Assert.Equal(before.Single(line => line.Id == value.Line.Id).Description, value.Line.Description);
+        });
+        Assert.Equal(removePrefixes ? "Banana" : "ITEM 03 - Banana",
+            report.Lines.Single(value => value.Line.Id == banana.Id).Line.EffectiveDisplayName);
+        Assert.Equal(before.Select(line => (line.Id, line.DisplayOrder)),
+            (await repository.GetLinesAsync(project.Id)).Select(line => (line.Id, line.DisplayOrder)));
+        Assert.Equal(other, await repository.GetLineAsync(otherProject.Id, other.Id));
+
+        var xlsx = Path.Combine(database.Directory, "ordem-sem-quantidades.xlsx");
+        await new QuotationWorkbookService().ExportAsync(xlsx, report, "Responsável");
+        using (var workbook = new XLWorkbook(xlsx))
+        {
+            var titles = workbook.Worksheet(1).Column(2).CellsUsed().Select(cell => cell.GetString())
+                .Where(text => text.StartsWith("Item ", StringComparison.Ordinal)).ToArray();
+            Assert.Equal(report.Lines.Select((value, index) => $"Item {index + 1} - {value.Line.EffectiveDisplayName}"), titles);
+        }
+
+        var package = Path.Combine(database.Directory, "ordem.pncpcotacao");
+        await new QuotationPackageService(database.Repository.DatabasePath, database.Directory).ExportAsync(package, project.Id);
+        var copied = await new QuotationPackageService(destination.Repository.DatabasePath, destination.Directory)
+            .ImportAsync(package, QuotationPackageImportMode.Copy);
+        var restoredService = new QuotationService(new SqliteQuotationRepository(destination.Repository.DatabasePath), new QuotationAnalyzer());
+        var restored = await restoredService.GetReportAsync(copied.ProjectId);
+        Assert.True(restored.Project.IgnoreItemNumberPrefix);
+        Assert.True(restored.Project.SortItemsAlphabetically);
+        Assert.Null(restored.Project.Organization);
+        Assert.Equal(report.Lines.Select(value => value.Line.EffectiveDisplayName), restored.Lines.Select(value => value.Line.EffectiveDisplayName));
+        var added = await restoredService.CreateLineAsync(copied.ProjectId, new("Item 99 - Abacate", 0, "", null, null));
+        Assert.Equal(added.Line.Id, (await restoredService.GetReportAsync(copied.ProjectId)).Lines[0].Line.Id);
+
+        // Turning the ignore option off restores ordering by the complete visible names.
+        await service.OrganizeProjectAsync(project.Id, new QuotationOrganizationOptions(true));
+        report = await service.GetReportAsync(project.Id);
+        Assert.False(report.Project.IgnoreItemNumberPrefix);
+        Assert.Equal(QuotationOrganization.Alphabetical(report.Lines).Select(value => value.Line.Id),
+            report.Lines.Select(value => value.Line.Id));
+    }
+
+    [Fact]
+    public void IgnoringNumbersOrdersGroupMembersAndGroupsByTheActualName()
+    {
+        var project = Project() with { IgnoreItemNumberPrefix = true };
+        var first = Guid.NewGuid(); var second = Guid.NewGuid();
+        var water = Item(project, "Item 20 - Água", 8, 6000, first);
+        var zebra = Item(project, "Item 1 - Zebra", 8, 6000, first);
+        var banana = Item(project, "Item 02 - Banana", 8, 12000, second);
+        var looseZebra = Item(project, "Item 03 - Zebra", 1, 1);
+        var looseWater = Item(project, "Item 04 - Água", 1, 1);
+        var report = Apply(project, [zebra, banana, water, looseZebra, looseWater],
+            new(first, project.Id, "Primeiro", [zebra.Line.Id, water.Line.Id]),
+            new(second, project.Id, "Segundo", [banana.Line.Id]));
+        Assert.Equal([first, first, second, second], report.Project.Organization!.Groups.Select(group => group.SourceGroupId));
+        Assert.Equal([water.Line.Id, zebra.Line.Id, water.Line.Id, zebra.Line.Id, banana.Line.Id, banana.Line.Id,
+            looseWater.Line.Id, looseZebra.Line.Id], report.Project.Organization.Positions.Select(position => position.LineId));
+        Assert.Equal("Item 20 - Água", report.Lines[0].Line.EffectiveDisplayName);
+    }
+
+    [Fact]
+    public async Task BatchRemovalIsAtomicKeepsBasketsAndAllowsReturningFromQuotasToSimpleOrder()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer());
+        var project = await repository.CreateProjectAsync("Limpar projeto");
+        var zebra = await AddConfirmedAsync(repository, service, project, "Item 1 - Zebra", 8, 12000);
+        var water = await AddConfirmedAsync(repository, service, project, "item 02 - Água", 8, 12000);
+        await repository.SaveGroupsAsync(project.Id, [new(Guid.NewGuid(), project.Id, "Grupo", [zebra.Id, water.Id])]);
+        var before = await service.GetReportAsync(project.Id);
+        await repository.UpdateLineRequestedDetailsAsync(water.Id, 0, "");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.OrganizeProjectAsync(project.Id, new QuotationOrganizationOptions(false, true, true)));
+        Assert.Equal("Item 1 - Zebra", (await repository.GetLineAsync(project.Id, zebra.Id))!.EffectiveDisplayName);
+        Assert.Equal("item 02 - Água", (await repository.GetLineAsync(project.Id, water.Id))!.EffectiveDisplayName);
+        Assert.Null((await service.GetReportAsync(project.Id)).Project.Organization);
+
+        await repository.UpdateLineRequestedDetailsAsync(water.Id, 8, "unidade");
+        var current = await service.GetAnalysesAsync(project.Id);
+        var waterAnalysis = current.Single(value => value.Line.Id == water.Id);
+        await repository.ConfirmBasketAsync(water.Id, waterAnalysis.Baskets[0].Key);
+        await service.OrganizeProjectAsync(project.Id, new QuotationOrganizationOptions(false, true, true));
+        var report = await service.GetReportAsync(project.Id);
+        Assert.False(report.OrganizationIsStale);
+        Assert.Equal(["Água", "Zebra"], report.Lines.Select(value => value.Line.EffectiveDisplayName));
+        QuotationOrganization.ValidateSnapshot(report);
+        foreach (var value in report.Lines)
+        {
+            var original = before.Lines.Single(old => old.Line.Id == value.Line.Id);
+            Assert.Equal(original.Line.Description, value.Line.Description);
+            Assert.Equal(original.SelectedBasket!.AdoptedPrice, value.SelectedBasket!.AdoptedPrice);
+            Assert.Equal(original.SelectedBasket.References.Select(reference => reference.Id),
+                value.SelectedBasket.References.Select(reference => reference.Id));
+        }
+        var package = Path.Combine(database.Directory, "cotas.pncpcotacao");
+        await new QuotationPackageService(database.Repository.DatabasePath, database.Directory).ExportAsync(package, project.Id);
+        var copied = await new QuotationPackageService(destination.Repository.DatabasePath, destination.Directory)
+            .ImportAsync(package, QuotationPackageImportMode.Copy);
+        var restored = await new QuotationService(new SqliteQuotationRepository(destination.Repository.DatabasePath), new QuotationAnalyzer())
+            .GetReportAsync(copied.ProjectId);
+        Assert.True(restored.Project.IgnoreItemNumberPrefix);
+        Assert.False(restored.OrganizationIsStale);
+        QuotationOrganization.ValidateSnapshot(restored);
+
+        await service.OrganizeProjectAsync(project.Id, new QuotationOrganizationOptions(true, true));
+        report = await service.GetReportAsync(project.Id);
+        Assert.Null(report.Project.Organization);
+        Assert.Single(report.Groups);
+        report.ValidateExport();
+    }
+
     private static QuotationProject Project(bool medication = false) =>
         new(Guid.NewGuid(), "Organização", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow) { IsMedication = medication };
 

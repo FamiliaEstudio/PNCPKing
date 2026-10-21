@@ -147,7 +147,9 @@ Na janela do item, **Transferir ou copiar…** permite escolher outro projeto lo
 
 ### Organização de grupos e cotas
 
-Na janela **Gerenciar grupos e visualizar cotas**, confira a prévia e salve os grupos. Use **Organizar Itens** para aplicar a organização. Quando houver cota, a quantidade reservada é calculada por item: 25% da quantidade total original, arredondando sempre para baixo. A principal recebe o restante, com o mesmo preço unitário nas duas parcelas, preservando a quantidade e o valor totais do item.
+Em **Organizar Itens**, escolha **Somente ordem alfabética** para ordenar todo o projeto mesmo com quantidade e unidade em branco ou sem cestas confirmadas. Essa opção substitui a numeração de cotas anterior e preserva os grupos cadastrados. Marque **Ignorar “Item + número”** para ordenar pelo nome que vem depois de prefixos como “Item 1”, “item 01”, “Item 01 -” ou “Item 3-”, sem mudar os nomes. A opção **Apagar “Item + número”** remove esses prefixos iniciais dos nomes de **todos os itens do projeto de uma vez**, mantendo as descrições técnicas, preços e cestas. A numeração automática “Item 1 -”, “Item 2 -” etc. continua sendo gerada na planilha Excel. Nomes sem esse prefixo ou sem descrição após o número são preservados.
+
+Na janela **Gerenciar grupos e visualizar cotas**, confira a prévia e salve os grupos. Em **Organizar Itens**, escolha **Organizar por grupos e cotas** para aplicar essa organização; nesse modo, informe quantidades inteiras positivas e confirme as cestas. As opções de ignorar e apagar prefixos também estão disponíveis. Quando houver cota, a quantidade reservada é calculada por item: 25% da quantidade total original, arredondando sempre para baixo. A principal recebe o restante, com o mesmo preço unitário nas duas parcelas, preservando a quantidade e o valor totais do item.
 
 | Quantidade original | Principal | Reservada |
 | --- | --- | --- |

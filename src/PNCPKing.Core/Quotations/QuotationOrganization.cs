@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using PNCPKing.Core.Models;
 
 namespace PNCPKing.Core.Quotations;
@@ -9,9 +10,28 @@ public static class QuotationOrganization
 {
     private static readonly StringComparer NameComparer =
         StringComparer.Create(CultureInfo.GetCultureInfo("pt-BR"), ignoreCase: true);
+    private static readonly Regex ItemNumberPrefix = new(
+        @"^\s*item\s+[0-9]+(?:\s*[-–—]\s*|\s+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
-    public static IOrderedEnumerable<QuotationLineAnalysis> Alphabetical(IEnumerable<QuotationLineAnalysis> lines) =>
-        lines.OrderBy(value => value.Line.EffectiveDisplayName.Trim(), NameComparer)
+    public static string WithoutItemNumberPrefix(string name)
+    {
+        var match = ItemNumberPrefix.Match(name);
+        var remainder = name[match.Length..].Trim();
+        return match.Success && remainder.Length > 0 ? remainder : name;
+    }
+
+    public static QuotationLine RemoveItemNumberPrefix(QuotationLine line)
+    {
+        var name = WithoutItemNumberPrefix(line.EffectiveDisplayName);
+        return name == line.EffectiveDisplayName ? line : line with { DisplayName = name };
+    }
+
+    private static string SortName(QuotationLine line, bool ignoreItemNumberPrefix) =>
+        (ignoreItemNumberPrefix ? WithoutItemNumberPrefix(line.EffectiveDisplayName) : line.EffectiveDisplayName).Trim();
+
+    public static IOrderedEnumerable<QuotationLineAnalysis> Alphabetical(IEnumerable<QuotationLineAnalysis> lines,
+        bool ignoreItemNumberPrefix = false) =>
+        lines.OrderBy(value => SortName(value.Line, ignoreItemNumberPrefix), NameComparer)
             .ThenBy(value => value.Line.DisplayOrder).ThenBy(value => value.Line.Id);
 
     public static string Signature(QuotationProject project, IReadOnlyList<QuotationLineAnalysis> lines,
@@ -19,7 +39,8 @@ public static class QuotationOrganization
     {
         var input = new
         {
-            Version = 1, project.IsMedication,
+            // Keep the exact signature of previously saved organizations when the option is off.
+            Version = project.IgnoreItemNumberPrefix ? 2 : 1, project.IsMedication,
             Groups = groups.OrderBy(group => group.Id).Select(group => new
             {
                 group.Id, group.Name, Members = group.LineIds.Order().ToArray()
@@ -70,12 +91,12 @@ public static class QuotationOrganization
         var organizedGroups = groups.Select(group => new
         {
             Source = group,
-            Lines = Alphabetical(group.LineIds.Select(id => byId[id])).ToArray()
+            Lines = Alphabetical(group.LineIds.Select(id => byId[id]), project.IgnoreItemNumberPrefix).ToArray()
         }).Select(group => new
         {
             group.Source, group.Lines,
             HasQuota = group.Lines.Sum(Total) > 80_000m && group.Lines.Any(value => Reserved(value) > 0)
-        }).OrderBy(group => group.Lines[0].Line.EffectiveDisplayName.Trim(), NameComparer)
+        }).OrderBy(group => SortName(group.Lines[0].Line, project.IgnoreItemNumberPrefix), NameComparer)
             .ThenBy(group => group.Lines[0].Line.DisplayOrder).ThenBy(group => group.Lines[0].Line.Id).ToArray();
         var resultGroups = new List<QuotationResultGroup>();
         var positions = new List<QuotationPosition>();
@@ -101,7 +122,7 @@ public static class QuotationOrganization
                     Add(value, reserve, QuotationQuotaKind.Reserved, Reserved(value));
             }
         }
-        var individuals = Alphabetical(lines.Where(value => value.Line.GroupId is null)).ToArray();
+        var individuals = Alphabetical(lines.Where(value => value.Line.GroupId is null), project.IgnoreItemNumberPrefix).ToArray();
         bool HasQuota(QuotationLineAnalysis value) => Total(value) > 80_000m && Reserved(value) > 0;
         foreach (var value in individuals.Where(HasQuota))
         {
@@ -110,14 +131,15 @@ public static class QuotationOrganization
         }
         foreach (var value in individuals.Where(value => !HasQuota(value)))
             Add(value, null, QuotationQuotaKind.None, value.Line.RequestedQuantity);
-        return new() { Signature = Signature(project, lines, groups), Groups = resultGroups, Positions = positions };
+        return new() { Signature = Signature(project, lines, groups), Groups = resultGroups, Positions = positions,
+            IgnoreItemNumberPrefix = project.IgnoreItemNumberPrefix };
     }
 
     public static IReadOnlyList<QuotationLineAnalysis> Order(QuotationProject project,
         IReadOnlyList<QuotationLineAnalysis> lines)
     {
         if (project.Organization is not { } organization)
-            return project.SortItemsAlphabetically ? Alphabetical(lines).ToArray() : lines;
+            return project.SortItemsAlphabetically ? Alphabetical(lines, project.IgnoreItemNumberPrefix).ToArray() : lines;
         var numbers = organization.Positions.GroupBy(position => position.LineId)
             .ToDictionary(group => group.Key, group => group.Min(position => position.Number));
         return lines.OrderBy(value => numbers.GetValueOrDefault(value.Line.Id, int.MaxValue))

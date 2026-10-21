@@ -110,6 +110,8 @@ internal static partial class Program
                     Console.WriteLine("Quotation groups dialog: passed");
                     CheckQuotationTransfer();
                     Console.WriteLine("Quotation transfer/copy dialog: passed");
+                    CheckQuotationOrganization();
+                    Console.WriteLine("Quotation organization options: passed");
                     await CheckColumnChooserAsync();
                     Console.WriteLine("Column chooser: passed");
                     CheckGitHubUpdateDialog();
@@ -170,6 +172,35 @@ internal static partial class Program
                 "A janela ultrapassou a área útil do monitor.");
         }
         finally { window.Close(); }
+    }
+
+    private static void CheckQuotationOrganization()
+    {
+        var project = new QuotationProject(Guid.NewGuid(), "Projeto de teste", DateTimeOffset.Now, DateTimeOffset.Now)
+            { IgnoreItemNumberPrefix = true };
+        var window = new AppUnderTest::PNCPKing.App.Views.QuotationOrganizationWindow(project);
+        var root = (DockPanel)window.Content;
+        var panel = (StackPanel)root.Children.OfType<ScrollViewer>().Single().Content;
+        var modes = panel.Children.OfType<RadioButton>().ToArray();
+        var options = panel.Children.OfType<CheckBox>().ToArray();
+        Require(window.Options.AlphabeticalOnly && window.Options.IgnoreItemNumberPrefix && !window.Options.RemoveItemNumberPrefixes,
+            "A organização simples deve estar disponível e preservar a preferência de ignorar prefixos.");
+        window.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            window.Width = 380;
+            window.Height = 420;
+            window.SizeToContent = SizeToContent.Manual;
+            window.UpdateLayout();
+            Require(root.ActualWidth > 0 && root.ActualHeight > 0, "A janela de organização não tem conteúdo visível.");
+            modes[1].IsChecked = true;
+            options[1].IsChecked = true;
+            Require(!window.Options.AlphabeticalOnly && window.Options.IgnoreItemNumberPrefix && window.Options.RemoveItemNumberPrefixes,
+                "As opções de grupos/cotas e limpeza de todos os itens não foram capturadas.");
+            var apply = root.Children.OfType<StackPanel>().Single().Children.OfType<Button>().Single(button => button.IsDefault);
+            Require(apply.IsVisible && apply.ActualHeight > 0, "O botão de aplicar não está visível na janela reduzida.");
+            apply.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        }));
+        Require(window.ShowDialog() == true, "A janela não aplicou as opções escolhidas.");
     }
 
     private static void CheckQuotationTransfer()
