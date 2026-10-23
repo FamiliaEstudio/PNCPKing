@@ -443,11 +443,6 @@ public sealed class QuotationWorkbookService : IQuotationWorkbookService
             return supplierName;
         }
 
-        if (TryFormatLocation(reference.SupplierMunicipality, reference.SupplierUf, out var supplierLocation))
-        {
-            return $"{supplierName} ({supplierLocation})";
-        }
-
         return TryFormatLocation(reference.Municipality, reference.Uf, out var buyerLocation)
             ? $"{supplierName} ({buyerLocation})"
             : supplierName;

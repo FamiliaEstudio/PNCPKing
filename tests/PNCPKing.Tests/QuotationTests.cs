@@ -1398,12 +1398,12 @@ public sealed class QuotationTests
     }
 
     [Fact]
-    public async Task Workbook_FormatsSupplierOrBuyerLocationAndExpandsLongSupplierRows()
+    public async Task Workbook_UsesBuyerLocationAndExpandsLongSupplierRows()
     {
         var analyzer = new QuotationAnalyzer(Today);
         var project = new QuotationProject(
             Guid.NewGuid(),
-            "Localidade do fornecedor",
+            "Localidade do órgão comprador",
             DateTimeOffset.UtcNow,
             DateTimeOffset.UtcNow);
         var line = Line("Café torrado", 100m, "pacote");
@@ -1415,16 +1415,21 @@ public sealed class QuotationTests
             {
                 SupplierName = longSupplierName,
                 SupplierMunicipality = "Ribeirão Preto",
-                SupplierUf = "sp"
+                SupplierUf = "sp",
+                Municipality = "Patrocínio Paulista",
+                Uf = "SP"
             },
             Reference("missing", "c2", "60701190000104", 100m) with
             {
-                SupplierMunicipality = "Sertãozinho"
+                SupplierMunicipality = "Sertãozinho",
+                SupplierUf = "SP",
+                Municipality = "Uberaba",
+                Uf = "MG"
             },
             Reference("invalid", "c3", "33000167000101", 110m) with
             {
                 SupplierMunicipality = "Franca",
-                SupplierUf = "XX",
+                SupplierUf = "SP",
                 Municipality = string.Empty,
                 Uf = "XX"
             }
@@ -1445,11 +1450,11 @@ public sealed class QuotationTests
             using var workbook = new XLWorkbook(path);
             Assert.Equal(2, workbook.Worksheets.Count);
             var sheet = workbook.Worksheet(1);
-            var expectedComplete = $"{longSupplierName} (Ribeirão Preto/SP)";
-            const string expectedBuyerFallback = "Fornecedor missing (Ribeirão Preto/SP)";
+            var expectedComplete = $"{longSupplierName} (Patrocínio Paulista/SP)";
+            const string expectedOtherState = "Fornecedor missing (Uberaba/MG)";
             var supplierCells = sheet.Range("B6:B8").Cells().ToArray();
             Assert.Contains(supplierCells, cell => cell.GetString() == expectedComplete);
-            Assert.Contains(supplierCells, cell => cell.GetString() == expectedBuyerFallback);
+            Assert.Contains(supplierCells, cell => cell.GetString() == expectedOtherState);
             Assert.Contains(supplierCells, cell => cell.GetString() == "Fornecedor invalid");
             var longSupplierCell = supplierCells.Single(cell => cell.GetString() == expectedComplete);
             Assert.True(longSupplierCell.Style.Alignment.WrapText);
