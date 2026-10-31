@@ -20,6 +20,7 @@ internal static partial class Program
 {
     private static Application CreateUiApplication()
     {
+        System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(AppUnderTest::PNCPKing.App.App).TypeHandle);
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         // Exercise the compiled production theme without starting App.OnStartup or opening user data.
         app.Resources.MergedDictionaries.Add(new ResourceDictionary
@@ -108,6 +109,32 @@ internal static partial class Program
         await File.WriteAllTextAsync(Path.Combine(outputDirectory, "appearance.json"),
             JsonSerializer.Serialize(reports, new JsonSerializerOptions { WriteIndented = true }));
         Console.WriteLine($"Appearance: {reports.Count} layouts rendered using synthetic data.");
+    }
+
+    private static async Task CheckBrazilianFormattingAsync()
+    {
+        var previousCulture = System.Globalization.CultureInfo.CurrentCulture;
+        System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.GetCultureInfo("en-US");
+        var row = new { Quantity = 1234.5m, Price = 1234.5678m };
+        var grid = new DataGrid { AutoGenerateColumns = false, ItemsSource = new[] { row } };
+        var quantity = new DataGridTextColumn { Binding = new System.Windows.Data.Binding("Quantity") { StringFormat = "#,##0.####" } };
+        var price = new DataGridTextColumn { Binding = new System.Windows.Data.Binding("Price") { StringFormat = "C4" } };
+        grid.Columns.Add(quantity);
+        grid.Columns.Add(price);
+        var window = new Window { Content = grid, Width = 500, Height = 200 };
+        try
+        {
+            window.Show();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Require(((TextBlock)quantity.GetCellContent(row)).Text == "1.234,5", "A quantidade não usa os separadores brasileiros.");
+            Require(((TextBlock)price.GetCellContent(row)).Text.Replace('\u00a0', ' ') == "R$ 1.234,5678",
+                "O valor não usa reais e separadores brasileiros.");
+        }
+        finally
+        {
+            window.Close();
+            System.Globalization.CultureInfo.CurrentCulture = previousCulture;
+        }
     }
 
     private static async Task CheckThemeControlsAsync()

@@ -136,6 +136,8 @@ Os preços ocupam uma linha compacta. Dê duplo clique para ler o descritivo no 
 
 Use **Cotações → Exportar/Importar → Exportar Tabela 9.1 em Word** para gerar a tabela de preços editável conforme o modelo fornecido. Ela utiliza o preço adotado da cesta selecionada e confirmada de cada item, com duas casas decimais para itens comuns e quatro para medicamentos, sem arredondamento. O total é o unitário exibido multiplicado pela quantidade da linha ou cota. Grupos, números e quantidades seguem a organização vigente; sem grupos, a coluna de grupo é removida. Confirme as cestas pendentes e atualize a organização, quando necessário, antes de exportar.
 
+Acima da tabela 9.1, o documento informa o custo estimado total da contratação, com o valor numérico e por extenso em negrito. O parágrafo soma os totais das linhas exportadas e trunca somente o resultado final para duas casas decimais, mantendo as quatro casas na tabela de medicamentos.
+
 Para cotar medicamentos, marque **Cotações → Cotação de medicamentos — 4 casas decimais**. A opção fica salva por projeto e aplica quatro casas aos preços efetivos, às cestas, ao Excel e à Tabela 9.1 em Word, incluindo conversões, médias e medianas. Casas excedentes são truncadas. Ao alterar a opção, reconfirme as cestas escolhidas. As demais cotações continuam com duas casas nos valores efetivos; os preços PNCP originais permanecem preservados.
 Na janela do item, **Transferir ou copiar…** permite escolher outro projeto local e mover ou copiar o item com todos os preços, cestas, evidências e dados. **Transferir** remove o item da origem; **Copiar** preserva o original. Pause a automação antes da operação. O item recebe uma nova identidade no destino e entra como item solto, sem vínculo com a automação anterior. As imagens existentes são compartilhadas, sem duplicar arquivos. Se os projetos já estiverem organizados, aplique **Organizar Itens** novamente nos projetos alterados. Ao mudar entre projeto comum e de medicamentos, reconfirme a cesta para aplicar a precisão do destino. Pacotes antigos com identidades conflitantes são importados com novos IDs internos, preservando os itens locais e a identidade da cotação.
 
@@ -153,14 +155,16 @@ Na janela **Gerenciar grupos e visualizar cotas**, confira a prévia e salve os 
 
 | Quantidade original | Principal | Reservada |
 | --- | --- | --- |
-| 1, 2 ou 3 | Toda a quantidade | Nenhuma |
+| 1, 2 ou 3 | Sem cota; quantidade integral | Nenhuma |
 | 4 | 3 | 1 |
 | 5 | 4 | 1 |
 | 7 | 6 | 1 |
 | 8 | 6 | 2 |
 | 100 | 75 | 25 |
 
-Itens com 1, 2 ou 3 unidades não recebem uma segunda posição nem um número na reservada, mesmo em grupos com outros itens que tenham reserva. A prévia informa: “Reserva zero: permanece integralmente na principal”. Se todos os itens do grupo tiverem reserva zero, não é criado um grupo reservado vazio; a organização mantém um único grupo, identificado como **Sem cota**.
+Itens com 1, 2 ou 3 unidades são separados dos grupos que teriam cotas: quando sai apenas um item, ele passa à sequência dos itens individuais; quando saem vários do mesmo grupo, eles formam um grupo separado **Sem cota**. O grupo restante é reavaliado pelo limite existente de R$ 80.000,00: até esse valor, fica sem cotas. Os resultados seguem a ordenação habitual de grupos e itens, preservando quantidades e valores totais. Grupos que já não teriam cotas, inclusive os compostos somente de pequenas quantidades, permanecem juntos. Organizações antigas afetadas por essa mudança precisam de **Organizar Itens** novamente antes da exportação.
+
+As tabelas usam o padrão brasileiro para valores e quantidades, como **R$ 1.234,56** e **1.234** unidades. Nas tabelas Word 1.1 e 9.1, os nomes dos itens com cotas recebem **- Cota Principal** ou **- Cota Reservada**, conforme a linha.
 
 ## PNCP Guard
 

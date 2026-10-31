@@ -32,7 +32,8 @@ public sealed class QuotationGroupsWindow : Window
         Content = root;
         var intro = new TextBlock { Text = "Selecione itens com Ctrl/Shift para criar um agrupamento ou atribuí-los ao agrupamento escolhido. " +
             "Quando houver cota, a reserva é de até 25% da quantidade total original de cada item, arredondada para baixo; " +
-            "o restante fica na principal. Itens com 1, 2 ou 3 unidades permanecem inteiros na principal. " +
+            "o restante fica na principal. Itens com 1, 2 ou 3 unidades saem do grupo com cotas: " +
+            "um fica individual; vários formam um grupo separado. O limite de R$ 80 mil é reavaliado nos grupos resultantes. " +
             "Cada cota principal e reservada terá seu próprio número de grupo. A prévia só é aplicada por Organizar Itens.",
             TextWrapping = TextWrapping.Wrap, Margin = new(4, 4, 4, 10) };
         DockPanel.SetDock(intro, Dock.Top); root.Children.Add(intro);
@@ -60,10 +61,10 @@ public sealed class QuotationGroupsWindow : Window
         AddColumn("Agrupamento", nameof(ItemRow.GroupName), 140);
         AddColumn("Números", nameof(ItemRow.Numbers), 80);
         AddColumn("Grupos resultantes", nameof(ItemRow.ResultGroups), 240);
-        AddColumn("Qtd. total", nameof(ItemRow.Quantity), 80);
-        AddColumn("Qtd. principal", nameof(ItemRow.PrincipalQuantity), 95);
+        AddColumn("Qtd. total", nameof(ItemRow.Quantity), 80, "#,##0.####");
+        AddColumn("Qtd. principal", nameof(ItemRow.PrincipalQuantity), 95, "#,##0.####");
         AddColumn("Valor principal", nameof(ItemRow.PrincipalValue), 130);
-        AddColumn("Qtd. reservada", nameof(ItemRow.ReservedQuantity), 95);
+        AddColumn("Qtd. reservada", nameof(ItemRow.ReservedQuantity), 95, "#,##0.####");
         AddColumn("Valor reservado", nameof(ItemRow.ReservedValue), 130);
         AddColumn("Observação", nameof(ItemRow.Note), 220);
         root.Children.Add(_items);
@@ -88,8 +89,8 @@ public sealed class QuotationGroupsWindow : Window
         panel.Children.Add(button);
     }
 
-    private void AddColumn(string name, string binding, double width) =>
-        _items.Columns.Add(new DataGridTextColumn { Header = name, Binding = new Binding(binding), Width = width });
+    private void AddColumn(string name, string binding, double width, string? format = null) =>
+        _items.Columns.Add(new DataGridTextColumn { Header = name, Binding = new Binding(binding) { StringFormat = format }, Width = width });
 
     private ItemRow[] Selected() => _items.SelectedItems.Cast<ItemRow>().ToArray();
 
@@ -180,7 +181,9 @@ public sealed class QuotationGroupsWindow : Window
             PrincipalQuantity = main?.Quantity; ReservedQuantity = preview is null ? null : reserve?.Quantity ?? 0;
             PrincipalValue = main?.TotalPrice.ToString($"C{decimals}") ?? string.Empty;
             ReservedValue = preview is null ? string.Empty : (reserve?.TotalPrice ?? 0).ToString($"C{decimals}");
-            Note = preview is not null && Quantity < 4 ? "Reserva zero: permanece integralmente na principal" : string.Empty;
+            Note = preview is not null && Quantity < 4
+                ? main?.ResultGroupId is null ? "Reserva zero: item individual sem cota" : "Reserva zero: quantidade integral em grupo sem cota"
+                : string.Empty;
             OnPropertyChanged(string.Empty);
         }
     }

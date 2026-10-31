@@ -116,6 +116,8 @@ internal static partial class Program
                     Console.WriteLine("Column chooser: passed");
                     CheckGitHubUpdateDialog();
                     Console.WriteLine("GitHub update choices: passed");
+                    await CheckBrazilianFormattingAsync();
+                    Console.WriteLine("Brazilian currency and quantity formatting: passed");
                     await CheckThemeControlsAsync();
                     Console.WriteLine("Theme controls: passed");
                     layoutApp.Shutdown();
@@ -234,7 +236,7 @@ internal static partial class Program
         int[] quantities = [1, 2, 3, 4, 5, 7, 8, 100];
         decimal[] principal = [1, 2, 3, 3, 4, 6, 6, 75];
         decimal[] reserved = [0, 0, 0, 1, 1, 1, 2, 25];
-        string[] numbers = ["1", "2", "3", "4 e 9", "5 e 10", "6 e 11", "7 e 12", "8 e 13"];
+        string[] numbers = ["11", "12", "13", "1 e 6", "2 e 7", "3 e 8", "4 e 9", "5 e 10"];
         var basket = new QuotationBasket { Key = "chosen", References = [], AveragePrice = 90000.12m,
             MinimumPrice = 90000.12m, MaximumPrice = 90000.12m, MaximumDeviationPercent = 0, Score = 100 };
         var analyses = quantities.Select(quantity => new QuotationLineAnalysis(new QuotationLine
@@ -271,8 +273,8 @@ internal static partial class Program
                         item.ReservedValue == (reserved[index] * 90000.12m).ToString("C2"),
                     "Os valores da prévia não correspondem às quantidades de cada cota.");
                 if (item.Quantity < 4)
-                    Require(item.ResultGroups == "Grupo 1 — Principal" &&
-                            item.Note == "Reserva zero: permanece integralmente na principal",
+                    Require(item.ResultGroups == "Grupo 3 — Sem cota" &&
+                            item.Note == "Reserva zero: quantidade integral em grupo sem cota",
                         "O item de quantidade pequena foi incluído na reservada ou perdeu sua observação.");
             }
             var remove = actions.Children.OfType<Button>().Single(button => (string)button.Content == "Excluir grupo");

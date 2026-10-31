@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Markup;
 using System.Windows.Threading;
 using PNCPKing.App.Services;
 using PNCPKing.App.ViewModels;
@@ -18,6 +19,16 @@ namespace PNCPKing.App;
 
 public partial class App : Application
 {
+    static App()
+    {
+        var culture = CultureInfo.GetCultureInfo("pt-BR");
+        CultureInfo.DefaultThreadCurrentCulture = culture;
+        CultureInfo.DefaultThreadCurrentUICulture = culture;
+        // WPF bindings use the target element's Language, independently of thread culture.
+        var language = XmlLanguage.GetLanguage(culture.IetfLanguageTag);
+        FrameworkElement.LanguageProperty.OverrideMetadata(typeof(FrameworkElement), new FrameworkPropertyMetadata(language));
+    }
+
     private Mutex? _instanceMutex;
     private AppDiagnosticLog? _diagnosticLog;
     private AppPerformanceTelemetry? _performanceTelemetry;
@@ -53,10 +64,6 @@ public partial class App : Application
         };
         TaskScheduler.UnobservedTaskException += (_, args) =>
             _diagnosticLog.Error("task", "Exceção não observada em tarefa de fundo.", args.Exception);
-
-        var culture = CultureInfo.GetCultureInfo("pt-BR");
-        CultureInfo.DefaultThreadCurrentCulture = culture;
-        CultureInfo.DefaultThreadCurrentUICulture = culture;
 
         try
         {

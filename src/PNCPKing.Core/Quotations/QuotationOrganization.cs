@@ -37,10 +37,16 @@ public static class QuotationOrganization
     public static string Signature(QuotationProject project, IReadOnlyList<QuotationLineAnalysis> lines,
         IReadOnlyList<QuotationGroup> groups)
     {
+        // Only mixed groups affected by the new quota rule invalidate previously saved organizations.
+        var separatesSmallItems = lines.Where(value => value.Line.GroupId is not null)
+            .GroupBy(value => value.Line.GroupId).Any(group =>
+                group.Any(value => value.Line.RequestedQuantity is > 0 and < 4) &&
+                group.Any(value => value.Line.RequestedQuantity >= 4) &&
+                group.Sum(value => value.Line.RequestedQuantity * QuotationMoney.Truncate(
+                    value.SelectedBasket?.AdoptedPrice ?? 0, project.PriceDecimalPlaces)) > 80_000m);
         var input = new
         {
-            // Keep the exact signature of previously saved organizations when the option is off.
-            Version = project.IgnoreItemNumberPrefix ? 2 : 1, project.IsMedication,
+            Version = (project.IgnoreItemNumberPrefix ? 2 : 1) + (separatesSmallItems ? 2 : 0), project.IsMedication,
             Groups = groups.OrderBy(group => group.Id).Select(group => new
             {
                 group.Id, group.Name, Members = group.LineIds.Order().ToArray()
@@ -88,11 +94,22 @@ public static class QuotationOrganization
             value.SelectedBasket!.AdoptedPrice, project.PriceDecimalPlaces);
         decimal Total(QuotationLineAnalysis value) => checked(value.Line.RequestedQuantity * Price(value));
         static decimal Reserved(QuotationLineAnalysis value) => decimal.Floor(value.Line.RequestedQuantity / 4m);
-        var organizedGroups = groups.Select(group => new
+        var groupParts = new List<(QuotationGroup Source, QuotationLineAnalysis[] Lines)>();
+        var individualLines = lines.Where(value => value.Line.GroupId is null).ToList();
+        foreach (var group in groups)
         {
-            Source = group,
-            Lines = Alphabetical(group.LineIds.Select(id => byId[id]), project.IgnoreItemNumberPrefix).ToArray()
-        }).Select(group => new
+            var groupLines = Alphabetical(group.LineIds.Select(id => byId[id]), project.IgnoreItemNumberPrefix).ToArray();
+            var small = groupLines.Where(value => Reserved(value) == 0).ToArray();
+            if (small.Length > 0 && small.Length < groupLines.Length && groupLines.Sum(Total) > 80_000m)
+            {
+                groupParts.Add((group, groupLines.Where(value => Reserved(value) > 0).ToArray()));
+                if (small.Length == 1) individualLines.Add(small[0]);
+                else groupParts.Add((group, small));
+            }
+            else groupParts.Add((group, groupLines));
+        }
+        // Reapply the existing threshold and ordering to each resulting group and individual item.
+        var organizedGroups = groupParts.Select(group => new
         {
             group.Source, group.Lines,
             HasQuota = group.Lines.Sum(Total) > 80_000m && group.Lines.Any(value => Reserved(value) > 0)
@@ -122,7 +139,7 @@ public static class QuotationOrganization
                     Add(value, reserve, QuotationQuotaKind.Reserved, Reserved(value));
             }
         }
-        var individuals = Alphabetical(lines.Where(value => value.Line.GroupId is null), project.IgnoreItemNumberPrefix).ToArray();
+        var individuals = Alphabetical(individualLines, project.IgnoreItemNumberPrefix).ToArray();
         bool HasQuota(QuotationLineAnalysis value) => Total(value) > 80_000m && Reserved(value) > 0;
         foreach (var value in individuals.Where(HasQuota))
         {

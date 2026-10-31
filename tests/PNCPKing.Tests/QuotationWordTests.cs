@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Validation;
 using DocumentFormat.OpenXml.Wordprocessing;
@@ -88,7 +89,11 @@ public sealed class QuotationWordTests(ITestOutputHelper output) : IDisposable
                 rows[0].Elements<TableCell>().TakeLast(4).Select(cell => cell.InnerText));
             Assert.DoesNotContain("especificação detalhada", body.InnerText);
         }
-        else Assert.Equal("16", specification.Descendants<Run>().Last().RunProperties!.FontSize!.Val!.Value);
+        else
+        {
+            Assert.Equal("16", specification.Descendants<Run>().Last().RunProperties!.FontSize!.Val!.Value);
+            Assert.DoesNotContain("9.1. O custo estimado", body.InnerText);
+        }
         if (grouped)
         {
             Assert.Equal("Grupo 1", rows[1].Elements<TableCell>().First().InnerText);
@@ -265,6 +270,115 @@ public sealed class QuotationWordTests(ITestOutputHelper output) : IDisposable
         using var doc = WordprocessingDocument.Open(path, false);
         Assert.Equal(["Zinco", "Água"], doc.MainDocumentPart!.Document.Descendants<TableRow>().Skip(1)
             .Select(row => row.Elements<TableCell>().ElementAt(1).InnerText));
+    }
+
+    [Theory]
+    [InlineData("0.001", "zero reais")]
+    [InlineData("0.01", "um centavo")]
+    [InlineData("0.02", "dois centavos")]
+    [InlineData("1", "um real")]
+    [InlineData("1.01", "um real e um centavo")]
+    [InlineData("19.99", "dezenove reais e noventa e nove centavos")]
+    [InlineData("21.42", "vinte e um reais e quarenta e dois centavos")]
+    [InlineData("100", "cem reais")]
+    [InlineData("101.11", "cento e um reais e onze centavos")]
+    [InlineData("999.98", "novecentos e noventa e nove reais e noventa e oito centavos")]
+    [InlineData("1000", "mil reais")]
+    [InlineData("1001", "mil e um reais")]
+    [InlineData("1100", "mil e cem reais")]
+    [InlineData("1101", "mil cento e um reais")]
+    [InlineData("2000", "dois mil reais")]
+    [InlineData("1000000", "um milhão de reais")]
+    [InlineData("1000000.01", "um milhão de reais e um centavo")]
+    [InlineData("1000001", "um milhão e um reais")]
+    [InlineData("1200000", "um milhão e duzentos mil reais")]
+    [InlineData("2000000", "dois milhões de reais")]
+    [InlineData("1234567.89", "um milhão duzentos e trinta e quatro mil quinhentos e sessenta e sete reais e oitenta e nove centavos")]
+    [InlineData("1000000000", "um bilhão de reais")]
+    [InlineData("1000000000000", "um trilhão de reais")]
+    public async Task PriceIntroductionHasExactTextWordsAndBoldBeforeTheTable(string price, string words)
+    {
+        var project = Project();
+        var value = decimal.Parse(price, CultureInfo.InvariantCulture);
+        var path = await Export(new(project, [Item(project, quantity: 1, price: value)]), includePrices: true);
+        using var doc = WordprocessingDocument.Open(path, false);
+        Validate(doc);
+        var table = Assert.Single(doc.MainDocumentPart!.Document.Body!.Elements<Table>());
+        var introduction = Assert.IsType<Paragraph>(table.PreviousSibling());
+        var amount = "R$ " + QuotationMoney.Truncate(value, 2).ToString("N2", CultureInfo.GetCultureInfo("pt-BR"));
+        Assert.Equal($"9.1. O custo estimado total da contratação é de {amount} ({words}), conforme custos unitários apostos na tabela abaixo.",
+            introduction.InnerText);
+        var runs = introduction.Elements<Run>().ToArray();
+        Assert.Equal([false, true, false], runs.Select(run => run.RunProperties!.Bold!.Val!.Value));
+        Assert.Equal($"{amount} ({words}),", runs[1].InnerText);
+        Assert.NotNull(introduction.ParagraphProperties!.KeepNext);
+    }
+
+    [Theory]
+    [InlineData(false, "101.015,35", "cento e um mil e quinze reais e trinta e cinco centavos", "101015.35")]
+    [InlineData(true, "101.015,71", "cento e um mil e quinze reais e setenta e um centavos", "101015.7143")]
+    public async Task PriceIntroductionSumsQuotaRowsAndTruncatesOnlyTheFinalTotal(
+        bool medication, string amount, string words, string exactTotal)
+    {
+        var project = Project() with { IsMedication = medication };
+        var groupId = Guid.NewGuid();
+        var large = Item(project, quantity: 101, price: 1000.12349m, group: groupId);
+        var small = Item(project, "Zinco", quantity: 1, price: 1.23999m, group: groupId);
+        var individual = Item(project, "Água", quantity: 2, price: 1.00559m);
+        QuotationLineAnalysis[] lines = [large, small, individual];
+        QuotationGroup[] groups = [new(groupId, project.Id, "Grupo", [large.Line.Id, small.Line.Id])];
+        project = project with { Organization = QuotationOrganization.Calculate(project, lines, groups) };
+        var path = await Export(new(project, lines) { Groups = groups }, includePrices: true);
+        using var doc = WordprocessingDocument.Open(path, false);
+        Validate(doc);
+        var table = Assert.Single(doc.MainDocumentPart!.Document.Body!.Elements<Table>());
+        var introduction = Assert.IsType<Paragraph>(table.PreviousSibling());
+        Assert.Equal($"R$ {amount} ({words}),", introduction.Elements<Run>().ElementAt(1).InnerText);
+        var totals = table.Elements<TableRow>().Skip(1).Select(row => decimal.Parse(row.Elements<TableCell>().Last().InnerText,
+            NumberStyles.Currency, CultureInfo.GetCultureInfo("pt-BR"))).ToArray();
+        Assert.Equal(4, totals.Length);
+        Assert.Equal(decimal.Parse(exactTotal, CultureInfo.InvariantCulture), totals.Sum());
+        if (medication) Assert.Contains(2.0110m, totals);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task QuotaSuffixFollowsTheNameAndSmallItemsHaveNoSuffix(bool includePrices, bool grouped)
+    {
+        var project = Project();
+        Guid? groupId = grouped ? Guid.NewGuid() : null;
+        var item = Item(project, quantity: 101, price: 1000, group: groupId);
+        var small = Item(project, "Zinco", quantity: 3, group: groupId);
+        QuotationGroup[] groups = groupId is { } id ? [new(id, project.Id, "Grupo", [item.Line.Id, small.Line.Id])] : [];
+        project = project with { Organization = QuotationOrganization.Calculate(project, [item, small], groups) };
+        var path = await Export(new(project, [item, small]) { Groups = groups }, includePrices: includePrices);
+        using var doc = WordprocessingDocument.Open(path, false);
+        Validate(doc);
+        var names = doc.MainDocumentPart!.Document.Descendants<TableRow>().Skip(1)
+            .Select(row => row.Elements<TableCell>().ElementAt(grouped ? 2 : 1)
+                .Elements<Paragraph>().First().Elements<Run>().First().InnerText).ToArray();
+        Assert.Equal(["Café Premium - Cota Principal", "Café Premium - Cota Reservada", "Zinco"], names);
+        Assert.Equal("Café Premium", item.Line.EffectiveDisplayName);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ThousandsUseBrazilianSeparatorsForQuantitiesAndPrices(bool includePrices)
+    {
+        var project = Project();
+        var path = await Export(new(project, [Item(project, quantity: 12345, price: 1234.56m)]),
+            new() { IsPriceRegistration = true, MinimumOrderPercentage = 10 }, includePrices);
+        using var doc = WordprocessingDocument.Open(path, false);
+        var cells = doc.MainDocumentPart!.Document.Descendants<TableRow>().ElementAt(1)
+            .Elements<TableCell>().Select(cell => cell.InnerText).ToArray();
+        Assert.Equal("12.345", cells[includePrices ? 3 : 4]);
+        if (includePrices)
+            Assert.Equal(["R$ 1.234,56", "R$ 15.240.643,20"], cells.TakeLast(2));
+        else Assert.Equal("1.235", cells[^1]);
     }
 
     [Theory]

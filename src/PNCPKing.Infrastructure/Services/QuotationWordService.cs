@@ -110,6 +110,7 @@ public sealed class QuotationWordService : IQuotationWordService
             ConfigureColumns(header, columns, widths);
             table.Append(header);
 
+            var estimatedTotal = 0m;
             Guid? previousGroup = null;
             foreach (var position in positions)
             {
@@ -129,14 +130,22 @@ public sealed class QuotationWordService : IQuotationWordService
                 }
                 previousGroup = position.ResultGroupId;
                 SetText(cells[1], position.Number.ToString(CultureInfo.InvariantCulture));
-                SetText(cells[2], line.EffectiveDisplayName, includePrices ? null : options.DescriptionSentence, bold: true);
+                var name = line.EffectiveDisplayName + (position.Kind switch
+                {
+                    QuotationQuotaKind.Principal => " - Cota Principal",
+                    QuotationQuotaKind.Reserved => " - Cota Reservada",
+                    _ => string.Empty
+                });
+                SetText(cells[2], name, includePrices ? null : options.DescriptionSentence, bold: true);
                 if (includePrices)
                 {
                     var unitPrice = prices[position.LineId];
+                    var totalPrice = checked(unitPrice * position.Quantity);
+                    estimatedTotal = checked(estimatedTotal + totalPrice);
                     SetText(cells[3], line.RequestedUnit);
-                    SetText(cells[4], position.Quantity.ToString("0", CultureInfo.InvariantCulture));
+                    SetText(cells[4], position.Quantity.ToString("N0", MoneyCulture));
                     SetText(cells[5], FormatMoney(unitPrice, report.Project.PriceDecimalPlaces));
-                    SetText(cells[6], FormatMoney(checked(unitPrice * position.Quantity), report.Project.PriceDecimalPlaces));
+                    SetText(cells[6], FormatMoney(totalPrice, report.Project.PriceDecimalPlaces));
                 }
                 else
                 {
@@ -145,12 +154,24 @@ public sealed class QuotationWordService : IQuotationWordService
                         : line.CatalogSelection is { Kind: CatalogKind.Catmat } selection ? selection.Code : string.Empty;
                     SetText(cells[3], catmat);
                     SetText(cells[4], line.RequestedUnit);
-                    SetText(cells[5], position.Quantity.ToString("0", CultureInfo.InvariantCulture));
+                    SetText(cells[5], position.Quantity.ToString("N0", MoneyCulture));
                     SetText(cells[6], options.IsPriceRegistration
-                        ? minimums[position.LineId].ToString("0", CultureInfo.InvariantCulture) : string.Empty);
+                        ? minimums[position.LineId].ToString("N0", MoneyCulture) : string.Empty);
                 }
                 ConfigureColumns(row, columns, widths);
                 table.Append(row);
+            }
+            if (includePrices)
+            {
+                // Sum the exported quotas at their existing precision, then truncate only the introductory total.
+                estimatedTotal = QuotationMoney.Truncate(estimatedTotal, 2);
+                var introduction = table.PreviousSibling<Paragraph>()!;
+                introduction.RemoveAllChildren<Run>();
+                introduction.ParagraphProperties!.KeepNext = new KeepNext();
+                introduction.Append(
+                    TextRun("9.1. O custo estimado total da contratação é de ", false, "22"),
+                    TextRun($"{FormatMoney(estimatedTotal, 2)} ({MoneyInWords(estimatedTotal)}),", true, "22"),
+                    TextRun(" conforme custos unitários apostos na tabela abaixo.", false, "22"));
             }
             document.MainDocumentPart.Document.Save();
         }
@@ -204,6 +225,60 @@ public sealed class QuotationWordService : IQuotationWordService
 
     private static string FormatMoney(decimal value, int decimalPlaces) =>
         "R$ " + QuotationMoney.Truncate(value, decimalPlaces).ToString($"N{decimalPlaces}", MoneyCulture);
+
+    private static string MoneyInWords(decimal value)
+    {
+        var reais = decimal.Truncate(value);
+        var cents = (int)((value - reais) * 100m);
+        var parts = new List<string>(2);
+        if (reais > 0)
+            parts.Add(NumberInWords(reais) + (reais == 1 ? " real" : reais % 1_000_000 == 0 ? " de reais" : " reais"));
+        if (cents > 0)
+            parts.Add(NumberInWords(cents) + (cents == 1 ? " centavo" : " centavos"));
+        return parts.Count == 0 ? "zero reais" : string.Join(" e ", parts);
+    }
+
+    private static string NumberInWords(decimal value)
+    {
+        static string UnderThousand(int number)
+        {
+            if (number < 20) return number switch
+            {
+                0 => "zero", 1 => "um", 2 => "dois", 3 => "três", 4 => "quatro", 5 => "cinco",
+                6 => "seis", 7 => "sete", 8 => "oito", 9 => "nove", 10 => "dez", 11 => "onze",
+                12 => "doze", 13 => "treze", 14 => "quatorze", 15 => "quinze", 16 => "dezesseis",
+                17 => "dezessete", 18 => "dezoito", _ => "dezenove"
+            };
+            if (number == 100) return "cem";
+            var remainder = number < 100 ? number % 10 : number % 100;
+            var prefix = number < 100 ? (number / 10) switch
+            {
+                2 => "vinte", 3 => "trinta", 4 => "quarenta", 5 => "cinquenta",
+                6 => "sessenta", 7 => "setenta", 8 => "oitenta", _ => "noventa"
+            } : (number / 100) switch
+            {
+                1 => "cento", 2 => "duzentos", 3 => "trezentos", 4 => "quatrocentos", 5 => "quinhentos",
+                6 => "seiscentos", 7 => "setecentos", 8 => "oitocentos", _ => "novecentos"
+            };
+            return prefix + (remainder == 0 ? string.Empty : " e " + UnderThousand(remainder));
+        }
+
+        // Decimal totals can span up to ten groups of three digits.
+        string[] scales = ["", "", "milh", "bilh", "trilh", "quadrilh", "quintilh", "sextilh", "setilh", "octilh"];
+        var parts = new List<(int Number, string Text)>();
+        for (var scale = 0; value > 0; scale++, value = decimal.Truncate(value / 1000m))
+        {
+            var number = (int)(value % 1000m);
+            if (number == 0) continue;
+            var text = UnderThousand(number);
+            if (scale == 1) text = number == 1 ? "mil" : text + " mil";
+            else if (scale > 1) text += " " + scales[scale] + (number == 1 ? "ão" : "ões");
+            parts.Add((number, text));
+        }
+        parts.Reverse();
+        return string.Concat(parts.Select((part, index) => (index == 0 ? string.Empty :
+            index == parts.Count - 1 && (part.Number < 100 || part.Number % 100 == 0) ? " e " : " ") + part.Text));
+    }
 
     private static void SetText(TableCell cell, string text, string? description = null, bool bold = false)
     {
