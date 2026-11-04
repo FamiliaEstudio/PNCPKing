@@ -87,9 +87,9 @@ public sealed class QuotationBasketCopyTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.CopyBasketReferenceAsync(stale, source.Key, destination.Key, "a"));
         Assert.DoesNotContain("a", (await repo.GetManualBasketsAsync(lineId)).Single(value => value.Id == destination.Id).ReferenceIds);
         var fresh = (await service.GetAnalysisAsync(project.Id, lineId))!;
-        var from = fresh.Baskets.Single(value => value.Key == source.Key);
+        var sourceBasket = fresh.Baskets.Single(value => value.Key == source.Key);
         var to = fresh.Baskets.Single(value => value.Key == destination.Key);
-        var foreign = from with { References = from.References.Select(value => value with { LineId = Guid.NewGuid() }).ToArray() };
+        var foreign = sourceBasket with { References = sourceBasket.References.Select(value => value with { LineId = Guid.NewGuid() }).ToArray() };
         await Assert.ThrowsAsync<InvalidOperationException>(() => repo.SaveBasketReferenceCopyAsync(fresh.Line, foreign, to, "a", "Cópia"));
         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.CopyBasketReferenceAsync(fresh, source.Key, destination.Key, "a", cancelled.Token));

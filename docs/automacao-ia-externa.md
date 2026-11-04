@@ -78,7 +78,7 @@ Documentos podem ser obtidos pelos comandos de evidências depois da seleção. 
 - Um leitor do banco, páginas limitadas e comandos preparados na inserção. Sem migração do esquema 33, novos índices ou mudanças no SQL da pesquisa.
 - Candidatos e checkpoints em arquivo auxiliar junto ao ZIP. Depois de exportação durável concluída, o auxiliar é removido; em pausa/falha, é preservado.
 - Memória limitada por páginas e lotes; interface recebe contadores agregados a cada 150 ms.
-- Inserção de candidatos em lotes de 100 e transações por item. Cancelar desfaz o item em processamento; itens concluídos permanecem disponíveis, sem duplicação na repetição.
+- Inserção de candidatos em lotes de 100 e transações por item. Cancelar desfaz a transação em andamento; candidatos e itens já gravados permanecem disponíveis, sem duplicação na repetição. A faixa só muda junto com uma cesta válida.
 - Visão geral compacta, cálculo em segundo plano com progresso e candidatos completos somente do item selecionado. Interromper o cálculo não apaga os preços importados.
 - Use **Retomar automação** após pausar/fechar. Se a base mudar, somente o item incompleto reinicia; itens concluídos conservam suas capturas datadas.
 - Mudanças na especificação/filtros exigem nova coleta; a ampliação de faixa autorizada usa o mecanismo específico acima. Atualizações e outras operações concorrentes devem terminar antes da coleta.
