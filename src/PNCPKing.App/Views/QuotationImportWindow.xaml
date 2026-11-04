@@ -25,6 +25,7 @@
                     <DataGridTextColumn Header="Linha" Binding="{Binding SourceRow}" Width="55" />
                     <DataGridTextColumn Header="Pesquisa" Binding="{Binding SearchText}" Width="310" />
                     <DataGridTextColumn Header="Descrição de saída" Binding="{Binding OutputDescription}" Width="200" />
+                    <DataGridTextColumn x:Name="FullDescriptionColumn" Header="Descritivo completo" Binding="{Binding FullDescription}" Width="300" />
                     <DataGridTextColumn Header="Quantidade" Binding="{Binding Quantity, StringFormat='#,##0.####'}" Width="100" />
                     <DataGridTextColumn Header="Unidade" Binding="{Binding Unit}" Width="120" />
                     <DataGridTextColumn Header="Mínimo" Binding="{Binding MinimumUnitPrice, StringFormat=C4}" Width="100" />
@@ -62,7 +63,7 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <TextBlock Text="Excel simplificado de saída" VerticalAlignment="Center" />
+            <TextBlock x:Name="OutputLabel" Text="Excel simplificado de saída" VerticalAlignment="Center" />
             <TextBox x:Name="OutputPathTextBox" Grid.Column="1" IsReadOnly="True" />
             <Button Grid.Column="2" Content="Escolher…" Click="BrowseOutput_Click" />
         </Grid>

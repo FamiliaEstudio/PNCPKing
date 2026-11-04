@@ -1894,6 +1894,20 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
             null,
             cancellationToken);
 
+    public Task<QuotationAutomationRun> CreateExternalAiRunAsync(
+        Guid projectId,
+        string outputPath,
+        SearchGeoFilter geoFilter,
+        DateOnly startDate,
+        DateOnly endDate,
+        IReadOnlyList<QuotationImportItem> items,
+        AdequacyWeights weights,
+        IProgress<QuotationAiProgress>? progress = null,
+        CancellationToken cancellationToken = default) => Task.Run(() =>
+            CreateAutomationRunCoreAsync(projectId, outputPath, string.Empty, geoFilter, startDate,
+                endDate, items, weights, QuotationAutomationMode.ExternalAi, TimeSpan.Zero,
+                null, null, null, cancellationToken, progress), cancellationToken);
+
     public Task<QuotationAutomationRun> CreateTimedAutomationRunAsync(
         Guid projectId,
         SearchGeoFilter geoFilter,
@@ -1936,7 +1950,8 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
         IReadOnlyList<string>? contractSearchPrompts,
         Guid? sourceDraftId,
         string? sourcePdfSha256,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<QuotationAiProgress>? progress = null)
     {
         ArgumentNullException.ThrowIfNull(geoFilter);
         ArgumentNullException.ThrowIfNull(items);
@@ -1944,6 +1959,14 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
             ArgumentException.ThrowIfNullOrWhiteSpace(responsibleName);
+        }
+        else if (mode == QuotationAutomationMode.ExternalAi)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+            if (!string.Equals(Path.GetExtension(outputPath), ".zip", StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Salve o resultado para IA em um arquivo .zip.", nameof(outputPath));
+            if (startDate > endDate)
+                throw new ArgumentException("O início do período deve ser anterior ou igual ao fim.");
         }
         else if (timeBudget < TimeSpan.FromMinutes(5) || timeBudget > TimeSpan.FromHours(24))
         {
@@ -1960,15 +1983,27 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
         weights.Validate();
         foreach (var item in items)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             QuotationQuantity.Validate(item.Quantity);
             QuotationWordExportOptions.ValidateMinimumOrderQuantity(item.MinimumOrderQuantity);
+            if (mode == QuotationAutomationMode.ExternalAi)
+            {
+                _ = PNCPKing.Core.Search.SearchText.ParseMainCriteria(item.SearchText);
+                if (string.IsNullOrWhiteSpace(item.SearchText) || string.IsNullOrWhiteSpace(item.OutputDescription) ||
+                    string.IsNullOrWhiteSpace(item.Unit) || item.Quantity <= 0 || item.BatchCount is < 1 or > 100 ||
+                    item.RequestedBasketSize is < 3 or > 10 || item.MinimumUnitPrice < 0 ||
+                    item.MaximumUnitPrice < 0 || item.MinimumUnitPrice > item.MaximumUnitPrice)
+                    throw new ArgumentException($"Revise os dados da linha {item.SourceRow} antes de iniciar a coleta.", nameof(items));
+            }
         }
+        progress?.Report(new QuotationAiProgress("import", 0, items.Count, 0, "Preparando os itens da cotação."));
         var now = DateTimeOffset.UtcNow;
         var run = new QuotationAutomationRun
         {
             Id = Guid.NewGuid(),
             ProjectId = projectId,
-            OutputPath = mode == QuotationAutomationMode.FixedBatches ? Path.GetFullPath(outputPath) : string.Empty,
+            OutputPath = mode is QuotationAutomationMode.FixedBatches or QuotationAutomationMode.ExternalAi
+                ? Path.GetFullPath(outputPath) : string.Empty,
             ResponsibleName = mode == QuotationAutomationMode.FixedBatches
                 ? responsibleName.Trim()
                 : string.Empty,
@@ -1983,7 +2018,8 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
             ActiveElapsed = TimeSpan.Zero,
             SourceDraftId = sourceDraftId,
             SourcePdfSha256 = sourcePdfSha256 ?? string.Empty,
-            StrategyVersion = mode == QuotationAutomationMode.TimedRoundRobin ? 3 : 0
+            StrategyVersion = mode == QuotationAutomationMode.TimedRoundRobin ? 3 :
+                mode == QuotationAutomationMode.ExternalAi ? 1 : 0
         };
         await using var writer = await _connections.WorkCoordinator
             .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
@@ -2032,6 +2068,72 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
                 CultureInfo.InvariantCulture);
         }
 
+        await using var line = connection.CreateCommand();
+        line.Transaction = (SqliteTransaction)transaction;
+        line.CommandText = """
+            INSERT INTO quotation_lines(
+                id, project_id, description, display_name, requested_quantity_scaled, requested_unit,
+                minimum_unit_price_scaled, maximum_unit_price_scaled, description_weight,
+                unit_weight, quantity_weight, proximity_weight, recency_weight, sample_version,
+                sampled_at, selected_basket_key, selection_confirmed, search_text,
+                requested_batch_count, display_order, automation_run_id, automation_state,
+                automation_message, requested_basket_size, estimated_unit_price_scaled,
+                estimated_total_price_scaled, use_estimated_price, estimate_stage,
+                search_random_pivot, search_contracts_examined, search_batches_completed,
+                search_candidate_exhausted, catmat_code_override, minimum_order_quantity_scaled)
+            VALUES($id, $projectId, $description, $displayName, $quantity, $unit, $minimum, $maximum,
+                   $descriptionWeight, $unitWeight, $quantityWeight, $proximityWeight, $recencyWeight,
+                   0, $sampledAt, NULL, 0, $searchText, $batches, $displayOrder, $runId, $state, '',
+                   $basketSize, $estimatedUnit, $estimatedTotal, $useEstimated, $estimateStage,
+                   0, 0, 0, 0, $catmatOverride, $minimumOrder);
+            """;
+        line.Parameters.AddWithValue("$id", DBNull.Value);
+        line.Parameters.AddWithValue("$projectId", DBNull.Value);
+        line.Parameters.AddWithValue("$description", DBNull.Value);
+        line.Parameters.AddWithValue("$displayName", DBNull.Value);
+        line.Parameters.AddWithValue("$catmatOverride", DBNull.Value);
+        line.Parameters.AddWithValue("$minimumOrder", DBNull.Value);
+        line.Parameters.AddWithValue("$quantity", DBNull.Value);
+        line.Parameters.AddWithValue("$unit", DBNull.Value);
+        line.Parameters.AddWithValue("$minimum", DBNull.Value);
+        line.Parameters.AddWithValue("$maximum", DBNull.Value);
+        line.Parameters.AddWithValue("$descriptionWeight", DBNull.Value);
+        line.Parameters.AddWithValue("$unitWeight", DBNull.Value);
+        line.Parameters.AddWithValue("$quantityWeight", DBNull.Value);
+        line.Parameters.AddWithValue("$proximityWeight", DBNull.Value);
+        line.Parameters.AddWithValue("$recencyWeight", DBNull.Value);
+        line.Parameters.AddWithValue("$sampledAt", DBNull.Value);
+        line.Parameters.AddWithValue("$searchText", DBNull.Value);
+        line.Parameters.AddWithValue("$batches", DBNull.Value);
+        line.Parameters.AddWithValue("$basketSize", DBNull.Value);
+        line.Parameters.AddWithValue("$estimatedUnit", DBNull.Value);
+        line.Parameters.AddWithValue("$estimatedTotal", DBNull.Value);
+        line.Parameters.AddWithValue("$useEstimated", DBNull.Value);
+        line.Parameters.AddWithValue("$estimateStage", DBNull.Value);
+        line.Parameters.AddWithValue("$displayOrder", DBNull.Value);
+        line.Parameters.AddWithValue("$runId", DBNull.Value);
+        line.Parameters.AddWithValue("$state", DBNull.Value);
+        line.Prepare();
+        await using var promptSet = connection.CreateCommand();
+        promptSet.Transaction = (SqliteTransaction)transaction;
+        promptSet.CommandText = """
+            UPDATE quotation_line_search_prompts
+               SET restrictive_text = $restrictive,
+                   intermediate_text = $intermediate,
+                   broad_text = $broad,
+                   origin = $origin,
+                   updated_at = $updated
+             WHERE line_id = $lineId AND is_current = 1;
+            """;
+        promptSet.Parameters.AddWithValue("$restrictive", DBNull.Value);
+        promptSet.Parameters.AddWithValue("$intermediate", DBNull.Value);
+        promptSet.Parameters.AddWithValue("$broad", DBNull.Value);
+        promptSet.Parameters.AddWithValue("$origin", DBNull.Value);
+        promptSet.Parameters.AddWithValue("$updated", DBNull.Value);
+        promptSet.Parameters.AddWithValue("$lineId", DBNull.Value);
+        promptSet.Prepare();
+
+        var imported = 0;
         foreach (var item in items)
         {
             if (item.RequestedBasketSize is < 3 or > 10)
@@ -2041,75 +2143,57 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
                     $"A linha {item.SourceRow:N0} deve solicitar de 3 a 10 preços por cesta.");
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             var lineId = Guid.NewGuid();
-            await using var line = connection.CreateCommand();
-            line.Transaction = (SqliteTransaction)transaction;
-            line.CommandText = """
-                INSERT INTO quotation_lines(
-                    id, project_id, description, display_name, requested_quantity_scaled, requested_unit,
-                    minimum_unit_price_scaled, maximum_unit_price_scaled, description_weight,
-                    unit_weight, quantity_weight, proximity_weight, recency_weight, sample_version,
-                    sampled_at, selected_basket_key, selection_confirmed, search_text,
-                    requested_batch_count, display_order, automation_run_id, automation_state,
-                    automation_message, requested_basket_size, estimated_unit_price_scaled,
-                    estimated_total_price_scaled, use_estimated_price, estimate_stage,
-                    search_random_pivot, search_contracts_examined, search_batches_completed,
-                    search_candidate_exhausted, catmat_code_override, minimum_order_quantity_scaled)
-                VALUES($id, $projectId, $description, $description, $quantity, $unit, $minimum, $maximum,
-                       $descriptionWeight, $unitWeight, $quantityWeight, $proximityWeight, $recencyWeight,
-                       0, $sampledAt, NULL, 0, $searchText, $batches, $displayOrder, $runId, $state, '',
-                       $basketSize, $estimatedUnit, $estimatedTotal, $useEstimated, $estimateStage,
-                       0, 0, 0, 0, $catmatOverride, $minimumOrder);
-                """;
-            line.Parameters.AddWithValue("$id", lineId.ToString("N"));
-            line.Parameters.AddWithValue("$projectId", projectId.ToString("N"));
-            line.Parameters.AddWithValue("$description", item.OutputDescription.Trim());
-            line.Parameters.AddWithValue("$catmatOverride", item.CatmatCodeOverride.Trim());
-            line.Parameters.AddWithValue("$minimumOrder", DbValue(DecimalScale.ToScaled(item.MinimumOrderQuantity)));
-            line.Parameters.AddWithValue("$quantity", DecimalScale.ToScaled(item.Quantity)!.Value);
-            line.Parameters.AddWithValue("$unit", item.Unit.Trim());
-            line.Parameters.AddWithValue("$minimum", DbValue(DecimalScale.ToScaled(item.MinimumUnitPrice)));
-            line.Parameters.AddWithValue("$maximum", DbValue(DecimalScale.ToScaled(item.MaximumUnitPrice)));
-            line.Parameters.AddWithValue("$descriptionWeight", weights.Description);
-            line.Parameters.AddWithValue("$unitWeight", weights.Unit);
-            line.Parameters.AddWithValue("$quantityWeight", weights.Quantity);
-            line.Parameters.AddWithValue("$proximityWeight", weights.Proximity);
-            line.Parameters.AddWithValue("$recencyWeight", weights.Recency);
-            line.Parameters.AddWithValue("$sampledAt", FormatDateTime(now));
-            line.Parameters.AddWithValue("$searchText", item.SearchText.Trim());
-            line.Parameters.AddWithValue("$batches", item.BatchCount);
-            line.Parameters.AddWithValue("$basketSize", item.RequestedBasketSize);
-            line.Parameters.AddWithValue("$estimatedUnit", DbValue(DecimalScale.ToScaled(item.EstimatedUnitPrice)));
-            line.Parameters.AddWithValue("$estimatedTotal", DbValue(DecimalScale.ToScaled(item.EstimatedTotalPrice)));
-            line.Parameters.AddWithValue("$useEstimated", item.UseEstimatedPrice ? 1 : 0);
-            line.Parameters.AddWithValue(
-                "$estimateStage",
-                (int)(item.UseEstimatedPrice && item.EstimatedUnitPrice is > 0
+            line.Parameters["$id"].Value = lineId.ToString("N");
+            line.Parameters["$projectId"].Value = projectId.ToString("N");
+            line.Parameters["$description"].Value = mode == QuotationAutomationMode.ExternalAi &&
+                !string.IsNullOrWhiteSpace(item.FullDescription) ? item.FullDescription.Trim() : item.OutputDescription.Trim();
+            line.Parameters["$displayName"].Value = item.OutputDescription.Trim();
+            line.Parameters["$catmatOverride"].Value = item.CatmatCodeOverride.Trim();
+            line.Parameters["$minimumOrder"].Value = DbValue(DecimalScale.ToScaled(item.MinimumOrderQuantity));
+            line.Parameters["$quantity"].Value = DecimalScale.ToScaled(item.Quantity)!.Value;
+            line.Parameters["$unit"].Value = item.Unit.Trim();
+            line.Parameters["$minimum"].Value = DbValue(DecimalScale.ToScaled(item.MinimumUnitPrice));
+            line.Parameters["$maximum"].Value = DbValue(DecimalScale.ToScaled(item.MaximumUnitPrice));
+            line.Parameters["$descriptionWeight"].Value = weights.Description;
+            line.Parameters["$unitWeight"].Value = weights.Unit;
+            line.Parameters["$quantityWeight"].Value = weights.Quantity;
+            line.Parameters["$proximityWeight"].Value = weights.Proximity;
+            line.Parameters["$recencyWeight"].Value = weights.Recency;
+            line.Parameters["$sampledAt"].Value = FormatDateTime(now);
+            line.Parameters["$searchText"].Value = item.SearchText.Trim();
+            line.Parameters["$batches"].Value = item.BatchCount;
+            line.Parameters["$basketSize"].Value = item.RequestedBasketSize;
+            line.Parameters["$estimatedUnit"].Value = DbValue(DecimalScale.ToScaled(item.EstimatedUnitPrice));
+            line.Parameters["$estimatedTotal"].Value = DbValue(DecimalScale.ToScaled(item.EstimatedTotalPrice));
+            line.Parameters["$useEstimated"].Value = item.UseEstimatedPrice ? 1 : 0;
+            line.Parameters["$estimateStage"].Value = (int)(item.UseEstimatedPrice && item.EstimatedUnitPrice is > 0
                     ? EstimateResolutionStage.Within25Percent
-                    : EstimateResolutionStage.NotApplicable));
-            line.Parameters.AddWithValue("$displayOrder", nextOrder++);
-            line.Parameters.AddWithValue("$runId", run.Id.ToString("N"));
-            line.Parameters.AddWithValue("$state", (int)QuotationAutomationItemState.Pending);
+                    : EstimateResolutionStage.NotApplicable);
+            line.Parameters["$displayOrder"].Value = nextOrder++;
+            line.Parameters["$runId"].Value = run.Id.ToString("N");
+            line.Parameters["$state"].Value = (int)QuotationAutomationItemState.Pending;
             await line.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
-            await using var promptSet = connection.CreateCommand();
-            promptSet.Transaction = (SqliteTransaction)transaction;
-            promptSet.CommandText = """
-                UPDATE quotation_line_search_prompts
-                   SET restrictive_text = $restrictive,
-                       intermediate_text = $intermediate,
-                       broad_text = $broad,
-                       origin = $origin,
-                       updated_at = $updated
-                 WHERE line_id = $lineId AND is_current = 1;
-                """;
-            promptSet.Parameters.AddWithValue("$restrictive", item.SearchText.Trim());
-            promptSet.Parameters.AddWithValue("$intermediate", item.IntermediateSearchText.Trim());
-            promptSet.Parameters.AddWithValue("$broad", item.BroadSearchText.Trim());
-            promptSet.Parameters.AddWithValue("$origin", (int)item.PromptOrigin);
-            promptSet.Parameters.AddWithValue("$updated", FormatDateTime(now));
-            promptSet.Parameters.AddWithValue("$lineId", lineId.ToString("N"));
+            var externalCriteria = mode == QuotationAutomationMode.ExternalAi
+                ? PNCPKing.Core.Search.SearchText.ParseMainCriteria(item.SearchText)
+                : null;
+            promptSet.Parameters["$restrictive"].Value = externalCriteria is null
+                ? item.SearchText.Trim() : externalCriteria[0].OriginalText;
+            promptSet.Parameters["$intermediate"].Value = externalCriteria is null
+                ? item.IntermediateSearchText.Trim() : externalCriteria.ElementAtOrDefault(1)?.OriginalText ?? string.Empty;
+            promptSet.Parameters["$broad"].Value = externalCriteria is null
+                ? item.BroadSearchText.Trim() : externalCriteria.ElementAtOrDefault(2)?.OriginalText ?? string.Empty;
+            promptSet.Parameters["$origin"].Value = (int)(externalCriteria is null
+                ? item.PromptOrigin : SearchPromptOrigin.User);
+            promptSet.Parameters["$updated"].Value = FormatDateTime(now);
+            promptSet.Parameters["$lineId"].Value = lineId.ToString("N");
             await promptSet.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            imported++;
+            if (imported % 25 == 0 && imported < items.Count)
+                progress?.Report(new QuotationAiProgress("import", imported, items.Count, 0,
+                    $"Inserindo itens: {imported:N0}/{items.Count:N0}."));
         }
 
         if (mode == QuotationAutomationMode.TimedRoundRobin)
@@ -2169,6 +2253,8 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
         }
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        progress?.Report(new QuotationAiProgress("import", items.Count, items.Count, 0,
+            $"{items.Count:N0} itens inseridos na cotação."));
         return run;
     }
 

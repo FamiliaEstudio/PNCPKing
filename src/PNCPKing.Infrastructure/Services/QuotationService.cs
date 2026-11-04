@@ -677,7 +677,7 @@ public sealed class QuotationService(
         { Groups = await repository.GetGroupsAsync(projectId, cancellationToken).ConfigureAwait(false) };
     }
 
-    private static QuotationReference MapReference(Guid lineId, ItemSearchRow row)
+    internal static QuotationReference MapReference(Guid lineId, ItemSearchRow row)
     {
         var result = row.Result ?? throw new InvalidOperationException("Uma referência homologada deve possuir resultado.");
         var distance = row.Contract.DistanceFromRibeiraoKilometers;

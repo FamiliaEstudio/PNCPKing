@@ -427,7 +427,7 @@ public sealed class UiBindingTests
             new
             {
                 Header = "Automação ▾",
-                Separators = 3,
+                Separators = 4,
                 Commands = new[]
                 {
                     "{Binding AiQuotationCommand}",
@@ -470,9 +470,43 @@ public sealed class UiBindingTests
                 "PlacementTarget.DataContext",
                 dataContext);
             Assert.Equal(group.Separators, menu.Descendants(presentation + "Separator").Count());
+            var items = menu.Elements(presentation + "MenuItem").ToArray();
+            if (group.Header == "Automação ▾")
+            {
+                var externalAi = Assert.Single(items,
+                    element => element.Attribute("Header")?.Value == "IA externa — por arquivos");
+                Assert.Null(externalAi.Attribute("Command"));
+                Assert.Equal(externalAi, items[0]);
+                var steps = externalAi.Elements(presentation + "MenuItem").ToArray();
+                Assert.Equal(
+                    new[]
+                    {
+                        "1. Salvar modelo Excel de entrada",
+                        "2. Importar Excel e coletar candidatos",
+                        "3. Gerar modelos de triagem e guia",
+                        "4. Aplicar triagem da IA",
+                        "5. Importar guia final e montar cestas"
+                    },
+                    steps.Select(element => Assert.IsType<XAttribute>(element.Attribute("Header")).Value).ToArray());
+                Assert.Equal(
+                    new[]
+                    {
+                        "{Binding CreateExternalAiTemplateCommand}",
+                        "{Binding ImportQuotationCommand}",
+                        "{Binding CreateExternalAiGuideTemplatesCommand}",
+                        "{Binding FilterExternalAiCandidatesCommand}",
+                        "{Binding ImportExternalAiGuideCommand}"
+                    },
+                    steps.Select(element => Assert.IsType<XAttribute>(element.Attribute("Command")).Value).ToArray());
+                Assert.Equal(steps.Length, externalAi.Elements().Count());
+                Assert.All(steps, element => Assert.Empty(element.Elements()));
+                items = items.Where(element => element != externalAi).ToArray();
+            }
+
+            Assert.All(items, element => Assert.Empty(element.Descendants(presentation + "MenuItem")));
             Assert.Equal(
                 group.Commands,
-                menu.Descendants(presentation + "MenuItem")
+                items
                     .Select(element => Assert.IsType<XAttribute>(element.Attribute("Command")).Value)
                     .ToArray());
         }

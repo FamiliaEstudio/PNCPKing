@@ -359,6 +359,7 @@ public partial class App : Application
                 _performanceTelemetry,
                 maintenanceCoordinator,
                 new SqliteCalibrationService(sqliteConnections, resourceProbe));
+            viewModel.InitializeExternalAi(quotationRepository, databasePath);
             _mainViewModel = viewModel;
             var mainWindow = new MainWindow(
                 viewModel,

@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Spreadsheet;
 using PNCPKing.Core.Interfaces;
@@ -10,6 +11,13 @@ namespace PNCPKing.Infrastructure.Services;
 
 public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportService
 {
+    public const string ExternalAiSheetName = "PNCPKing_IA_v1";
+    private static readonly string[] ExternalAiHeaders =
+    [
+        "Pesquisa", "Descrição de saída", "Quantidade", "Unidade", "Faixa mínima",
+        "Faixa máxima", "Páginas por pesquisa", "Preços na cesta", "CATMAT",
+        "Quantidade mínima por pedido", "Descritivo completo"
+    ];
     private static readonly NumberFormatInfo BrazilianNumberFormat = new()
     {
         NumberDecimalSeparator = ",",
@@ -21,7 +29,10 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
 
     public Task<QuotationImportDocument> ReadAsync(
         string sourcePath,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        Task.Run(() => ReadCore(sourcePath, cancellationToken), cancellationToken);
+
+    private static QuotationImportDocument ReadCore(string sourcePath, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         cancellationToken.ThrowIfCancellationRequested();
@@ -38,8 +49,20 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
             var worksheet = FindFirstVisibleWorksheet(workbookPart)
                 ?? throw new InvalidDataException("O arquivo não possui uma planilha visível.");
             var sheetName = worksheet.Sheet.Name?.Value ?? "Planilha";
+            var isExternalAi = string.Equals(sheetName, ExternalAiSheetName, StringComparison.Ordinal);
+            if (!isExternalAi && sheetName.StartsWith("PNCPKing_IA_", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Versão do modelo de entrada para IA não suportada. Gere um modelo atualizado pelo programa.");
             var sharedStrings = ReadSharedStrings(workbookPart);
-            var rows = ReadRows(worksheet.Part, sharedStrings, cancellationToken);
+            var rows = ReadRows(worksheet.Part, sharedStrings, isExternalAi ? 11 : 10, cancellationToken);
+            if (isExternalAi)
+            {
+                var header = rows.FirstOrDefault();
+                if (header is null || header.Number != 1 ||
+                    !ExternalAiHeaders.Select((value, index) => string.Equals(value,
+                        header.Cells[index].Text, StringComparison.OrdinalIgnoreCase)).All(value => value))
+                    throw new InvalidDataException($"{sheetName}!A1:K1 — mantenha os cabeçalhos do modelo de entrada para IA.");
+                rows.RemoveAt(0);
+            }
             if (LooksLikeResultWorkbook(sheetName, rows))
             {
                 throw new InvalidDataException(
@@ -59,7 +82,10 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
                     var searchText = RequiredText(row, 1, "Descrição da Pesquisa", sheetName);
                     try
                     {
-                        _ = SearchText.Parse(searchText);
+                        if (isExternalAi)
+                            _ = SearchText.ParseMainCriteria(searchText);
+                        else
+                            _ = SearchText.Parse(searchText);
                     }
                     catch (SearchQueryException exception)
                     {
@@ -143,10 +169,14 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
                         minimum,
                         maximum,
                         decimal.ToInt32(batchesDecimal),
-                        decimal.ToInt32(basketSizeDecimal))
+                        decimal.ToInt32(basketSizeDecimal),
+                        PromptOrigin: isExternalAi ? SearchPromptOrigin.User : SearchPromptOrigin.Ai)
                     {
                         CatmatCodeOverride = catmat,
-                        MinimumOrderQuantity = minimumOrder
+                        MinimumOrderQuantity = minimumOrder,
+                        FullDescription = isExternalAi && row.Cells[10].Text.Length > 0
+                            ? row.Cells[10].Text
+                            : string.Empty
                     });
                 }
                 catch (CellValidationException exception)
@@ -157,7 +187,9 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
 
             if (items.Count == 0 && errors.Count == 0)
             {
-                errors.Add($"{sheetName}!A:J — a primeira planilha visível não contém itens nas colunas A:J.");
+                errors.Add(isExternalAi
+                    ? $"{sheetName}!A:K — preencha os itens a partir da linha 2."
+                    : $"{sheetName}!A:J — a primeira planilha visível não contém itens nas colunas A:J.");
             }
 
             if (errors.Count > 0)
@@ -168,7 +200,7 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
                     string.Join(Environment.NewLine, errors));
             }
 
-            return Task.FromResult(new QuotationImportDocument(Path.GetFullPath(sourcePath), items));
+            return new QuotationImportDocument(Path.GetFullPath(sourcePath), items) { IsExternalAi = isExternalAi };
         }
         catch (InvalidDataException)
         {
@@ -182,6 +214,98 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
                 exception);
         }
     }
+
+    public Task CreateExternalAiTemplateAsync(
+        string destinationPath,
+        CancellationToken cancellationToken = default) => Task.Run(() =>
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
+        cancellationToken.ThrowIfCancellationRequested();
+        var target = Path.GetFullPath(destinationPath);
+        if (!string.Equals(Path.GetExtension(target), ".xlsx", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Salve o modelo como arquivo .xlsx.");
+        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+        var temporary = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            using (var document = SpreadsheetDocument.Create(temporary, SpreadsheetDocumentType.Workbook))
+            {
+                var workbook = document.AddWorkbookPart();
+                workbook.Workbook = new Workbook();
+                var styles = workbook.AddNewPart<WorkbookStylesPart>();
+                styles.Stylesheet = new Stylesheet(
+                    new Fonts(new Font(), new Font(new Bold())),
+                    new Fills(new Fill(new PatternFill { PatternType = PatternValues.None }),
+                        new Fill(new PatternFill { PatternType = PatternValues.Gray125 })),
+                    new Borders(new Border()),
+                    new CellStyleFormats(new CellFormat()),
+                    new CellFormats(new CellFormat(),
+                        new CellFormat { FontId = 1, ApplyFont = true },
+                        new CellFormat { NumberFormatId = 49, ApplyNumberFormat = true }));
+                var part = workbook.AddNewPart<WorksheetPart>();
+                var data = new SheetData();
+                var header = new Row { RowIndex = 1 };
+                for (var index = 0; index < ExternalAiHeaders.Length; index++)
+                    header.Append(TextCell(GetColumnName(index + 1) + "1", ExternalAiHeaders[index], 1));
+                data.Append(header);
+                var columns = new Columns();
+                for (uint column = 1; column <= 11; column++)
+                    columns.Append(new Column
+                    {
+                        Min = column, Max = column, CustomWidth = true,
+                        Width = column is 1 or 2 or 11 ? 48 : column is 7 or 10 ? 28 : 18,
+                        Style = column == 9 ? 2u : 0u
+                    });
+                part.Worksheet = new Worksheet(
+                    new SheetViews(new SheetView(
+                        new Pane { VerticalSplit = 1, TopLeftCell = "A2", ActivePane = PaneValues.BottomLeft,
+                            State = PaneStateValues.Frozen }) { WorkbookViewId = 0 }), columns, data);
+                var instructions = workbook.AddNewPart<WorksheetPart>();
+                var instructionData = new SheetData();
+                var notes = new[]
+                {
+                    "Entrada para coleta e seleção por IA — formato 1",
+                    "Preencha a aba PNCPKing_IA_v1 a partir da linha 2. Preserve o nome da aba e os cabeçalhos.",
+                    "A: use + como na busca principal. Exemplo: copo descartável + copo plástico + copo polipropileno.",
+                    "Cada trecho entre + é uma pesquisa independente; preencha todos os trechos e evite + consecutivos.",
+                    "B: nome de saída. C: quantidade inteira positiva. D: unidade solicitada.",
+                    "E/F: faixa opcional na unidade solicitada; a seleção final considera conversões justificadas.",
+                    "G: páginas por expressão (1 a 100), com até 50 preços por página; limite atingido é coleta parcial.",
+                    "H: quantidade de preços na cesta (3 a 10); vazio usa 3. I: CATMAT como texto.",
+                    "J: quantidade mínima nominal por pedido, inteira positiva, opcional.",
+                    "K: descritivo técnico completo, sem abreviar requisitos; vazio usa o texto de B.",
+                    "A coleta cria os itens da cotação e gera dados para triagem e guia, sem baixar documentos.",
+                    "Planilhas antigas sem identificação continuam usando as regras anteriores. Este modelo usa a sintaxe da busca principal."
+                };
+                for (var index = 0; index < notes.Length; index++)
+                {
+                    var row = new Row { RowIndex = (uint)index + 1 };
+                    row.Append(TextCell("A" + (index + 1).ToString(CultureInfo.InvariantCulture), notes[index]));
+                    instructionData.Append(row);
+                }
+                instructions.Worksheet = new Worksheet(
+                    new Columns(new Column { Min = 1, Max = 1, Width = 130, CustomWidth = true }), instructionData);
+                workbook.Workbook.Append(new Sheets(
+                    new Sheet { Name = ExternalAiSheetName, SheetId = 1, Id = workbook.GetIdOfPart(part) },
+                    new Sheet { Name = "Instruções", SheetId = 2, Id = workbook.GetIdOfPart(instructions) }));
+                workbook.Workbook.Save();
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Move(temporary, target, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+    }, cancellationToken);
+
+    private static Cell TextCell(string reference, string text, uint style = 0) => new()
+    {
+        CellReference = reference,
+        DataType = CellValues.InlineString,
+        StyleIndex = style,
+        InlineString = new InlineString(new Text(text))
+    };
 
     private static (Sheet Sheet, WorksheetPart Part)? FindFirstVisibleWorksheet(WorkbookPart workbookPart)
     {
@@ -207,22 +331,27 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
             .ToArray()
         ?? [];
 
-    private static IReadOnlyList<SpreadsheetRow> ReadRows(
+    private static List<SpreadsheetRow> ReadRows(
         WorksheetPart worksheetPart,
         IReadOnlyList<string> sharedStrings,
+        int columnCount,
         CancellationToken cancellationToken)
     {
         var rows = new List<SpreadsheetRow>();
-        foreach (var sourceRow in worksheetPart.Worksheet.Descendants<Row>())
+        using var reader = OpenXmlReader.Create(worksheetPart);
+        while (reader.Read())
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (reader.ElementType != typeof(Row) || !reader.IsStartElement) continue;
+            var sourceRow = reader.LoadCurrentElement() as Row
+                ?? throw new InvalidDataException("Não foi possível ler uma linha da planilha.");
             var cells = Enumerable
-                .Repeat(new SpreadsheetCell(string.Empty, false, false), 10)
+                .Repeat(new SpreadsheetCell(string.Empty, false, false), columnCount)
                 .ToArray();
             foreach (var sourceCell in sourceRow.Elements<Cell>())
             {
                 var column = GetColumnNumber(sourceCell.CellReference?.Value);
-                if (column is < 1 or > 10)
+                if (column < 1 || column > columnCount)
                 {
                     continue;
                 }

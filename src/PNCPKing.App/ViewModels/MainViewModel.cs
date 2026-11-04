@@ -4845,6 +4845,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      RenameQuotationCommand, DeleteQuotationCommand,
                      ToggleQuotationMedicationCommand, OrganizeQuotationItemsCommand, ManageQuotationGroupsCommand,
                      DeleteQuotationLineCommand, ImportQuotationCommand, AiQuotationCommand,
+                     CreateExternalAiTemplateCommand, CreateExternalAiGuideTemplatesCommand,
+                     FilterExternalAiCandidatesCommand, ImportExternalAiGuideCommand,
                      RenameQuotationLineCommand,
                      ResumeQuotationAutomationCommand, CancelQuotationAutomationCommand,
                      RefineQuotationPromptsCommand,

@@ -114,6 +114,8 @@ CATMAT/CATSER não faz parte do `.pncpupdate` e continua sendo atualizado separa
 
 ## Uso
 
+Para cotações extensas com triagem e seleção por IA fora do programa, consulte o [fluxo de IA externa por arquivos](docs/automacao-ia-externa.md). O novo modelo Excel usa `+` como na pesquisa principal, cria os itens e coleta candidatos sem baixar documentos. O esquema 34 e as buscas existentes são preservados.
+
 1. Na primeira abertura, escolha a pasta que armazenará o banco.
 2. Clique em **Calcular tamanho** e aguarde a contagem das modalidades.
 3. Revise o volume, o espaço e a duração estimados.
