@@ -103,6 +103,32 @@ public partial class QuotationItemWindow : Window
     private async void Refresh_Click(object sender, RoutedEventArgs e) =>
         await RunAsync(() => ViewModel.LoadAsync()).ConfigureAwait(true);
 
+    private void StopCalculation_Click(object sender, RoutedEventArgs e) => ViewModel.StopCalculation();
+
+    private async void CopyPriceToBasket_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel.IsBusy || ViewModel.IsAnalysisBusy) return;
+        if (ViewModel.SelectedPrice is not { IsInSelectedBasket: true } row || ViewModel.SelectedBasket is null || ViewModel.Line is null)
+        {
+            MessageBox.Show(this, "Selecione um preço da cesta de origem.", "Copiar preço",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var analysis = ViewModel.Line.Analysis;
+        var sourceKey = ViewModel.SelectedBasket.Key;
+        var destinations = ViewModel.Baskets.Where(basket => basket.Key != sourceKey &&
+            basket.Source.References.All(reference => reference.Id != row.Id)).ToArray();
+        if (destinations.Length == 0)
+        {
+            MessageBox.Show(this, "Não há outra cesta deste item sem o preço selecionado.", "Copiar preço",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var window = new QuotationBasketCopyWindow(destinations) { Owner = this };
+        if (window.ShowDialog() == true && window.DestinationKey is { } destination)
+            await RunAsync(() => ViewModel.CopySelectedPriceToBasketAsync(analysis, sourceKey, row.Id, destination)).ConfigureAwait(true);
+    }
+
     private async void RenameItem_Click(object sender, RoutedEventArgs e) =>
         await PromptRenameItemAsync().ConfigureAwait(true);
 

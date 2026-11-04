@@ -13,6 +13,10 @@ public sealed partial class SqliteQuotationRepository
         QuotationAiBasketApplication application, CancellationToken cancellationToken = default)
     {
         var expected = application.ExpectedLine;
+        var range = application.PriceRangeAdjustment;
+        ValidateAiPriceRangeAdjustment(expected, range);
+        var rangeChanged = range is not null &&
+            (range.MinimumUnitPrice != expected.MinimumUnitPrice || range.MaximumUnitPrice != expected.MaximumUnitPrice);
         if (application.Selections.Count is < 3 or > 10 ||
             application.Selections.Select(value => value.Reference.Id).Distinct(StringComparer.Ordinal).Count() !=
             application.Selections.Count)
@@ -50,8 +54,12 @@ public sealed partial class SqliteQuotationRepository
         }
 
         var newReferences = new List<QuotationReference>();
+        var reviewedReferences = new List<QuotationReference>();
         foreach (var selection in application.Selections)
         {
+            if (selection.Reference.TechnicalReview is { } technicalReview &&
+                !technicalReview.Matches(current, selection.Reference))
+                throw new InvalidDataException("A revisão técnica não corresponde à especificação e à referência atuais.");
             await using var existing = connection.CreateCommand();
             existing.Transaction = transaction;
             existing.CommandText = ReferenceSelectSql + " WHERE line_id = $line AND id = $id;";
@@ -60,8 +68,13 @@ public sealed partial class SqliteQuotationRepository
             await using var reader = await existing.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                if (!SameAiReference(ReadReference(reader), selection.Reference))
+                var stored = ReadReference(reader);
+                if (!SameAiReference(stored, selection.Reference))
                     throw new InvalidDataException("Uma referência existente diverge do pacote. Os dados locais foram preservados.");
+                // Candidate import deliberately preserves existing reviews. Only an
+                // explicitly validated guide can add or update this local evidence.
+                if (selection.Reference.TechnicalReview is { } review && stored.TechnicalReview != review)
+                    reviewedReferences.Add(stored with { TechnicalReview = review });
             }
             else newReferences.Add(selection.Reference);
         }
@@ -105,63 +118,81 @@ public sealed partial class SqliteQuotationRepository
             }
             if (index != application.Selections.Count || newReferences.Count != 0)
                 throw new InvalidDataException("A cesta do guia foi alterada localmente. Ela não será sobrescrita.");
-            return false;
+            if (!rangeChanged && reviewedReferences.Count == 0) return false;
         }
 
         await InsertReferencesAsync(connection, transaction, expected.Id, newReferences, cancellationToken).ConfigureAwait(false);
-        var now = FormatDateTime(DateTimeOffset.UtcNow);
-        await using (var basket = connection.CreateCommand())
+        if (reviewedReferences.Count > 0)
         {
-            basket.Transaction = transaction;
-            basket.CommandText = """
-                INSERT INTO quotation_manual_baskets(id, line_id, name, display_order, created_at, updated_at, calculation_method)
-                VALUES($id, $line, $name,
-                    COALESCE((SELECT MAX(display_order) + 1 FROM quotation_manual_baskets WHERE line_id = $line), 0),
-                    $now, $now, $method);
-                """;
-            basket.Parameters.AddWithValue("$id", application.BasketId.ToString("N"));
-            basket.Parameters.AddWithValue("$line", expected.Id.ToString("N"));
-            basket.Parameters.AddWithValue("$name", application.Name);
-            basket.Parameters.AddWithValue("$now", now);
-            basket.Parameters.AddWithValue("$method", (int)application.Method);
-            await basket.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-        await using (var insert = connection.CreateCommand())
-        {
-            insert.Transaction = transaction;
-            insert.CommandText = """
-                INSERT INTO quotation_manual_basket_references(basket_id,line_id,reference_id,display_order,conversion_factor_millionths)
-                VALUES($basket,$line,$reference,$position,$factor);
-                """;
-            insert.Parameters.AddWithValue("$basket", application.BasketId.ToString("N"));
-            insert.Parameters.AddWithValue("$line", expected.Id.ToString("N"));
-            insert.Parameters.Add("$reference", SqliteType.Text);
-            insert.Parameters.Add("$position", SqliteType.Integer);
-            insert.Parameters.Add("$factor", SqliteType.Integer);
-            for (var index = 0; index < application.Selections.Count; index++)
+            await using var review = connection.CreateCommand();
+            review.Transaction = transaction;
+            review.CommandText = "UPDATE quotation_references SET explanation = $explanation WHERE line_id = $line AND id = $id;";
+            review.Parameters.AddWithValue("$line", expected.Id.ToString("N"));
+            review.Parameters.Add("$id", SqliteType.Text);
+            review.Parameters.Add("$explanation", SqliteType.Text);
+            foreach (var reference in reviewedReferences)
             {
-                var selection = application.Selections[index];
-                insert.Parameters["$reference"].Value = selection.Reference.Id;
-                insert.Parameters["$position"].Value = index;
-                insert.Parameters["$factor"].Value = ScaleConversionFactor(selection.ConversionFactor);
-                await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                review.Parameters["$id"].Value = reference.Id;
+                review.Parameters["$explanation"].Value = QuotationAiReviewStorage.Encode(reference);
+                await review.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
         }
-        if (application.Selections.Any(selection => selection.PriceDivisor is not null))
+        var now = FormatDateTime(DateTimeOffset.UtcNow);
+        if (!basketExists)
         {
-            // Reuse the optional divisor storage already supported by the current release.
-            await EnsurePriceDivisorsTableAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
-            await using var divisor = connection.CreateCommand();
-            divisor.Transaction = transaction;
-            divisor.CommandText = "INSERT INTO quotation_manual_price_divisors(basket_id,reference_id,price_divisor_millionths) VALUES($basket,$reference,$divisor);";
-            divisor.Parameters.AddWithValue("$basket", application.BasketId.ToString("N"));
-            divisor.Parameters.Add("$reference", SqliteType.Text);
-            divisor.Parameters.Add("$divisor", SqliteType.Integer);
-            foreach (var selection in application.Selections.Where(selection => selection.PriceDivisor is not null))
+            await using (var basket = connection.CreateCommand())
             {
-                divisor.Parameters["$reference"].Value = selection.Reference.Id;
-                divisor.Parameters["$divisor"].Value = checked((long)(selection.PriceDivisor!.Value * 1_000_000m));
-                await divisor.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                basket.Transaction = transaction;
+                basket.CommandText = """
+                    INSERT INTO quotation_manual_baskets(id, line_id, name, display_order, created_at, updated_at, calculation_method)
+                    VALUES($id, $line, $name,
+                        COALESCE((SELECT MAX(display_order) + 1 FROM quotation_manual_baskets WHERE line_id = $line), 0),
+                        $now, $now, $method);
+                    """;
+                basket.Parameters.AddWithValue("$id", application.BasketId.ToString("N"));
+                basket.Parameters.AddWithValue("$line", expected.Id.ToString("N"));
+                basket.Parameters.AddWithValue("$name", application.Name);
+                basket.Parameters.AddWithValue("$now", now);
+                basket.Parameters.AddWithValue("$method", (int)application.Method);
+                await basket.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            await using (var insert = connection.CreateCommand())
+            {
+                insert.Transaction = transaction;
+                insert.CommandText = """
+                    INSERT INTO quotation_manual_basket_references(basket_id,line_id,reference_id,display_order,conversion_factor_millionths)
+                    VALUES($basket,$line,$reference,$position,$factor);
+                    """;
+                insert.Parameters.AddWithValue("$basket", application.BasketId.ToString("N"));
+                insert.Parameters.AddWithValue("$line", expected.Id.ToString("N"));
+                insert.Parameters.Add("$reference", SqliteType.Text);
+                insert.Parameters.Add("$position", SqliteType.Integer);
+                insert.Parameters.Add("$factor", SqliteType.Integer);
+                for (var index = 0; index < application.Selections.Count; index++)
+                {
+                    var selection = application.Selections[index];
+                    insert.Parameters["$reference"].Value = selection.Reference.Id;
+                    insert.Parameters["$position"].Value = index;
+                    insert.Parameters["$factor"].Value = ScaleConversionFactor(selection.ConversionFactor);
+                    await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+            if (application.Selections.Any(selection => selection.PriceDivisor is not null))
+            {
+                // Reuse the optional divisor storage already supported by the current release.
+                await EnsurePriceDivisorsTableAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+                await using var divisor = connection.CreateCommand();
+                divisor.Transaction = transaction;
+                divisor.CommandText = "INSERT INTO quotation_manual_price_divisors(basket_id,reference_id,price_divisor_millionths) VALUES($basket,$reference,$divisor);";
+                divisor.Parameters.AddWithValue("$basket", application.BasketId.ToString("N"));
+                divisor.Parameters.Add("$reference", SqliteType.Text);
+                divisor.Parameters.Add("$divisor", SqliteType.Integer);
+                foreach (var selection in application.Selections.Where(selection => selection.PriceDivisor is not null))
+                {
+                    divisor.Parameters["$reference"].Value = selection.Reference.Id;
+                    divisor.Parameters["$divisor"].Value = checked((long)(selection.PriceDivisor!.Value * 1_000_000m));
+                    await divisor.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
             }
         }
         await using (var update = connection.CreateCommand())
@@ -169,8 +200,10 @@ public sealed partial class SqliteQuotationRepository
             update.Transaction = transaction;
             update.CommandText = """
                 UPDATE quotation_lines SET sample_version = sample_version + 1, sampled_at = $now,
+                    minimum_unit_price_scaled = $minimum, maximum_unit_price_scaled = $maximum,
                     selected_basket_key = CASE WHEN selected_basket_key IS NULL THEN $key ELSE selected_basket_key END,
                     selection_confirmed = CASE WHEN selected_basket_key IS NULL THEN 1
+                        WHEN $rangeChanged = 1 THEN CASE WHEN selected_basket_key = $key THEN 1 ELSE 0 END
                         WHEN $newReferences > 0 AND selected_basket_key NOT LIKE 'manual:%' THEN 0
                         ELSE selection_confirmed END
                 WHERE id = $line;
@@ -181,10 +214,33 @@ public sealed partial class SqliteQuotationRepository
             update.Parameters.AddWithValue("$line", expected.Id.ToString("N"));
             update.Parameters.AddWithValue("$project", expected.ProjectId.ToString("N"));
             update.Parameters.AddWithValue("$newReferences", newReferences.Count);
+            update.Parameters.AddWithValue("$rangeChanged", rangeChanged ? 1 : 0);
+            update.Parameters.AddWithValue("$minimum", DbValue(DecimalScale.ToScaled(range is null ? current.MinimumUnitPrice : range.MinimumUnitPrice)));
+            update.Parameters.AddWithValue("$maximum", DbValue(DecimalScale.ToScaled(range is null ? current.MaximumUnitPrice : range.MaximumUnitPrice)));
             await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return true;
+    }
+
+    private static void ValidateAiPriceRangeAdjustment(QuotationLine line, QuotationAiPriceRangeAdjustment? range)
+    {
+        if (range is null) return;
+        if (string.IsNullOrWhiteSpace(range.Reason))
+            throw new InvalidDataException("A ampliação da faixa exige justificativa.");
+        if (range.MinimumUnitPrice < 0 || range.MaximumUnitPrice < 0 ||
+            range.MinimumUnitPrice > range.MaximumUnitPrice)
+            throw new InvalidDataException("A faixa proposta é inválida.");
+        if ((line.MinimumUnitPrice is null && range.MinimumUnitPrice is not null) ||
+            (line.MaximumUnitPrice is null && range.MaximumUnitPrice is not null) ||
+            (line.MinimumUnitPrice is not null && range.MinimumUnitPrice is null) ||
+            (line.MaximumUnitPrice is not null && range.MaximumUnitPrice is null) ||
+            (range.MinimumUnitPrice is not null && range.MinimumUnitPrice > line.MinimumUnitPrice) ||
+            (range.MaximumUnitPrice is not null && range.MaximumUnitPrice < line.MaximumUnitPrice))
+            throw new InvalidDataException("O guia pode ampliar a faixa com valores explícitos, mas não restringi-la ou remover seus limites.");
+        foreach (var value in new[] { range.MinimumUnitPrice, range.MaximumUnitPrice })
+            if (value is not null && DecimalScale.FromScaled(DecimalScale.ToScaled(value)) != value)
+                throw new InvalidDataException("A faixa proposta deve ter no máximo quatro casas decimais.");
     }
 
     private static bool SameAiReference(QuotationReference a, QuotationReference b) =>
@@ -210,7 +266,8 @@ public sealed partial class SqliteQuotationRepository
             SELECT description,display_name,requested_quantity_scaled,requested_unit,
                 minimum_unit_price_scaled,maximum_unit_price_scaled,description_weight,unit_weight,
                 quantity_weight,proximity_weight,recency_weight,requested_basket_size,search_text,
-                catmat_code_override,minimum_order_quantity_scaled,sample_version
+                catmat_code_override,minimum_order_quantity_scaled,sample_version,
+                selected_basket_key,selection_confirmed,sampled_at
             FROM quotation_lines WHERE id = $id AND project_id = $project;
             """;
         command.Parameters.AddWithValue("$id", expected.Id.ToString("N"));
@@ -225,7 +282,9 @@ public sealed partial class SqliteQuotationRepository
             MaximumUnitPrice = DecimalScale.FromScaled(ReadNullableLong(reader, 5)),
             Weights = new(reader.GetInt32(6), reader.GetInt32(7), reader.GetInt32(8), reader.GetInt32(9), reader.GetInt32(10)),
             RequestedBasketSize = reader.GetInt32(11), SearchText = reader.GetString(12), CatmatCodeOverride = reader.GetString(13),
-            MinimumOrderQuantity = DecimalScale.FromScaled(ReadNullableLong(reader, 14)), SampleVersion = reader.GetInt32(15)
+            MinimumOrderQuantity = DecimalScale.FromScaled(ReadNullableLong(reader, 14)), SampleVersion = reader.GetInt32(15),
+            SelectedBasketKey = reader.IsDBNull(16) ? null : reader.GetString(16),
+            SelectionConfirmed = reader.GetInt64(17) == 1, SampledAt = ParseDateTime(reader.GetString(18))
         };
     }
 }

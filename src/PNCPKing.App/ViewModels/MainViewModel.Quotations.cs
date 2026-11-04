@@ -20,6 +20,12 @@ public sealed partial class MainViewModel
     private IQuotationWordService _quotationWordService = null!;
     private QuotationProjectReport? _quotationWordReport;
     private int _quotationReportLoadVersion;
+    private CancellationTokenSource? _quotationReportCancellation;
+    private CancellationTokenSource? _quotationReferenceLoadCancellation;
+    private bool _bindingQuotationAnalysis;
+    private bool _showQuotationCalculationProgress;
+    private double _quotationCalculationProgress;
+    private string _quotationCalculationStatus = string.Empty;
     private IQuotationWorkbookImportService _quotationWorkbookImportService = null!;
     private IQuotationPackageService _quotationPackageService = null!;
     private CancellationTokenSource? _quotationAutomationCancellation;
@@ -44,6 +50,27 @@ public sealed partial class MainViewModel
     }
 
     public bool IsQuotationAutomationRunning => _quotationAutomationCancellation is not null;
+    public bool IsQuotationCalculationRunning =>
+        _quotationReportCancellation is not null || _quotationReferenceLoadCancellation is not null;
+    public bool CanInteractWithQuotationItem => !IsQuotationCalculationRunning &&
+        SelectedQuotationLine?.Analysis.ReferencesArePartial != true;
+    public bool ShowQuotationCalculationProgress
+    {
+        get => _showQuotationCalculationProgress;
+        private set => SetProperty(ref _showQuotationCalculationProgress, value);
+    }
+    public double QuotationCalculationProgress
+    {
+        get => _quotationCalculationProgress;
+        private set => SetProperty(ref _quotationCalculationProgress, Math.Clamp(value, 0, 100));
+    }
+    public string QuotationCalculationStatus
+    {
+        get => _quotationCalculationStatus;
+        private set => SetProperty(ref _quotationCalculationStatus, value);
+    }
+    public ICommand CancelQuotationCalculationCommand { get; private set; } = null!;
+    public ICommand RetryQuotationCalculationCommand { get; private set; } = null!;
 
     public RangeObservableCollection<QuotationProjectDisplay> QuotationProjects { get; } = [];
     public RangeObservableCollection<QuotationLineDisplay> QuotationLines { get; } = [];
@@ -109,11 +136,17 @@ public sealed partial class MainViewModel
         get => _selectedQuotationLine;
         set
         {
-            if (SetProperty(ref _selectedQuotationLine, value))
+            var previous = _selectedQuotationLine;
+            if (SetProperty(ref _selectedQuotationLine, value) && !_bindingQuotationAnalysis)
             {
+                _quotationReferenceLoadCancellation?.Cancel();
+                if (previous is not null && previous.Line.Id != value?.Line.Id)
+                    ReplaceQuotationOverviewLine(previous.Analysis.ToCompactOverview(), select: false);
                 QuotationBasketPage = 1;
                 BindSelectedQuotationLine();
-                NotifyCommands();
+                NotifyQuotationCalculationState();
+                if (value?.Analysis.ReferencesArePartial == true)
+                    _ = HydrateSelectedQuotationLineAsync(value);
             }
         }
     }
@@ -223,6 +256,15 @@ public sealed partial class MainViewModel
         _quotationWordService = quotationWordService;
         _quotationWorkbookImportService = quotationWorkbookImportService;
         _quotationPackageService = quotationPackageService;
+        CancelQuotationCalculationCommand = new RelayCommand(CancelQuotationCalculations,
+            () => IsQuotationCalculationRunning);
+        RetryQuotationCalculationCommand = new AsyncRelayCommand(async () =>
+        {
+            if (SelectedQuotationLine?.Analysis.ReferencesArePartial == true)
+                await HydrateSelectedQuotationLineAsync(SelectedQuotationLine).ConfigureAwait(true);
+            else
+                await LoadQuotationProjectAsync(SelectedQuotationProject?.Id, SelectedQuotationLine?.Line.Id).ConfigureAwait(true);
+        }, () => !IsQuotationCalculationRunning && !IsFileBusy && !IsPriceBusy && SelectedQuotationProject is not null);
         UseQuotationSampleCommand = new AsyncRelayCommand(
             UseCurrentSampleAsync,
             () => !IsFileBusy && !IsPriceBusy && HasCurrentQuotationSample);
@@ -235,7 +277,7 @@ public sealed partial class MainViewModel
             () => !IsFileBusy && SelectedQuotationLine is not null && SelectedQuotationProject is not null);
         ConfirmQuotationBasketCommand = new AsyncRelayCommand(
             ConfirmSelectedBasketAsync,
-            () => !IsFileBusy && SelectedQuotationLine is not null && SelectedQuotationBasket is not null);
+            () => !IsFileBusy && CanInteractWithQuotationItem && SelectedQuotationLine is not null && SelectedQuotationBasket is not null);
         ExportQuotationCommand = new AsyncRelayCommand(
             () => ExportQuotationAsync(includeEvidence: true),
             () => !IsAnyAggressivePncpMode && !IsFileBusy && !IsDocumentBusy &&
@@ -714,21 +756,47 @@ public sealed partial class MainViewModel
     private async Task LoadQuotationProjectAsync(Guid? projectId, Guid? preferredLineId = null)
     {
         var loadVersion = ++_quotationReportLoadVersion;
+        CancelQuotationCalculations();
+        var previousProjectId = _quotationWordReport?.Project.Id;
         InvalidateQuotationWordReport();
-        if (projectId is null)
+        if (previousProjectId != projectId)
         {
+            SelectedQuotationLine = null;
+            QuotationLines.Clear();
+        }
+        if (projectId is null || _disposed)
+        {
+            ShowQuotationCalculationProgress = false;
             return;
         }
-
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_startupCancellation.Token);
+        _quotationReportCancellation = cancellation;
+        ShowQuotationCalculationProgress = true;
+        QuotationCalculationProgress = 0;
+        QuotationCalculationStatus = "Calculando cestas do projeto, um item por vez…";
+        NotifyQuotationCalculationState();
+        using var progress = new LatestQuotationAiProgress(value =>
+        {
+            if (!ReferenceEquals(_quotationReportCancellation, cancellation) || _disposed) return;
+            QuotationCalculationProgress = value.Percentage;
+            QuotationCalculationStatus = value.Message;
+        });
         try
         {
-            var report = await Task.Run(() => _quotationService.GetReportAsync(projectId.Value)).ConfigureAwait(true);
-            if (loadVersion != _quotationReportLoadVersion || SelectedQuotationProject?.Id != projectId) return;
+            var report = await _quotationService.GetReportAsync(projectId.Value, cancellation.Token,
+                progress, compactReferences: true).ConfigureAwait(true);
+            progress.Flush();
+            if (loadVersion != _quotationReportLoadVersion || SelectedQuotationProject?.Id != projectId || _disposed) return;
             _quotationWordReport = report;
-            QuotationLines.ReplaceAll(report.Lines.Select(analysis => new QuotationLineDisplay(analysis, report.Project.Organization)));
-
-            SelectedQuotationLine = QuotationLines.FirstOrDefault(line => line.Line.Id == preferredLineId)
-                                      ?? QuotationLines.FirstOrDefault();
+            _bindingQuotationAnalysis = true;
+            try
+            {
+                QuotationLines.ReplaceAll(report.Lines.Select(analysis => new QuotationLineDisplay(analysis, report.Project.Organization)));
+                SelectedQuotationLine = QuotationLines.FirstOrDefault(line => line.Line.Id == preferredLineId)
+                                          ?? QuotationLines.FirstOrDefault();
+            }
+            finally { _bindingQuotationAnalysis = false; }
+            BindSelectedQuotationLine();
             var resolved = QuotationLines.Count(line => line.Status == "Resolvido");
             QuotationSummary = $"{QuotationLines.Count:N0} item(ns); {resolved:N0} resolvido(s); " +
                                $"{QuotationLines.Count - resolved:N0} pendente(s).";
@@ -736,13 +804,122 @@ public sealed partial class MainViewModel
                 QuotationSummary += " Organização desatualizada — clique em Organizar Itens antes de exportar.";
             else if (report.Project.Organization is { } organization)
                 QuotationSummary += $" {organization.Groups.Count} grupos; {organization.Positions.Count} posições.";
-            NotifyCommands();
+            QuotationCalculationProgress = 100;
+            QuotationCalculationStatus = "Cestas calculadas. Os candidatos completos são carregados para o item selecionado.";
+            if (SelectedQuotationLine?.Analysis.ReferencesArePartial == true)
+                await HydrateSelectedQuotationLineAsync(SelectedQuotationLine).ConfigureAwait(true);
         }
-        catch (Exception exception)
+        catch (OperationCanceledException)
         {
-            if (loadVersion != _quotationReportLoadVersion) return;
-            QuotationSummary = $"Não foi possível abrir o projeto: {exception.Message}";
+            if (loadVersion == _quotationReportLoadVersion && !_disposed)
+                QuotationCalculationStatus = "Cálculo interrompido. Os preços e as cestas salvos foram preservados. Use Recalcular para continuar.";
         }
+        catch (Exception exception) when (!AsyncCommandRuntime.IsCritical(exception))
+        {
+            if (loadVersion != _quotationReportLoadVersion || _disposed) return;
+            QuotationSummary = $"Não foi possível abrir o projeto: {exception.Message}";
+            QuotationCalculationStatus = QuotationSummary;
+        }
+        finally
+        {
+            if (ReferenceEquals(_quotationReportCancellation, cancellation))
+                _quotationReportCancellation = null;
+            cancellation.Dispose();
+            if (!_disposed) NotifyQuotationCalculationState();
+        }
+    }
+
+    private void CancelQuotationCalculations()
+    {
+        _quotationReportCancellation?.Cancel();
+        _quotationReferenceLoadCancellation?.Cancel();
+    }
+
+    private void NotifyQuotationCalculationState()
+    {
+        OnPropertyChanged(nameof(IsQuotationCalculationRunning));
+        OnPropertyChanged(nameof(CanInteractWithQuotationItem));
+        (CancelQuotationCalculationCommand as RelayCommand)?.NotifyCanExecuteChanged();
+        (RetryQuotationCalculationCommand as AsyncRelayCommand)?.NotifyCanExecuteChanged();
+        NotifyCommands();
+    }
+
+    private void ReplaceQuotationOverviewLine(QuotationLineAnalysis analysis, bool select)
+    {
+        var index = QuotationLines.ToList().FindIndex(value => value.Line.Id == analysis.Line.Id);
+        if (index < 0 || _quotationWordReport is not { } report || report.Project.Id != analysis.Line.ProjectId) return;
+        if (!select)
+            analysis = report.Lines.FirstOrDefault(value => value.Line.Id == analysis.Line.Id)?.ToCompactOverview() ?? analysis;
+        var display = new QuotationLineDisplay(analysis, report.Project.Organization);
+        var selectedBeforeReplacement = SelectedQuotationLine;
+        _bindingQuotationAnalysis = true;
+        try
+        {
+            QuotationLines[index] = display;
+            SelectedQuotationLine = select ? display : selectedBeforeReplacement;
+        }
+        finally { _bindingQuotationAnalysis = false; }
+        _quotationWordReport = report with
+        {
+            Lines = report.Lines.Select(value => value.Line.Id == analysis.Line.Id ? analysis : value).ToArray()
+        };
+    }
+
+    private async Task HydrateSelectedQuotationLineAsync(QuotationLineDisplay requested)
+    {
+        _quotationReferenceLoadCancellation?.Cancel();
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_startupCancellation.Token);
+        _quotationReferenceLoadCancellation = cancellation;
+        var reportVersion = _quotationReportLoadVersion;
+        ShowQuotationCalculationProgress = true;
+        QuotationCalculationProgress = 0;
+        QuotationCalculationStatus = $"Carregando todos os candidatos de {requested.Description}…";
+        NotifyQuotationCalculationState();
+        using var progress = new LatestQuotationAiProgress(value =>
+        {
+            if (!ReferenceEquals(_quotationReferenceLoadCancellation, cancellation) || _disposed) return;
+            QuotationCalculationProgress = value.Percentage;
+            QuotationCalculationStatus = value.Message;
+        });
+        var itemProgress = new QuotationOverviewItemProgress(progress, requested.Description);
+        try
+        {
+            var analysis = await _quotationService.GetAnalysisAsync(requested.Line.ProjectId, requested.Line.Id,
+                cancellation.Token, itemProgress).ConfigureAwait(true);
+            progress.Flush();
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (analysis is null || _disposed || reportVersion != _quotationReportLoadVersion ||
+                SelectedQuotationLine?.Line.Id != requested.Line.Id || SelectedQuotationProject?.Id != requested.Line.ProjectId)
+                return;
+            ReplaceQuotationOverviewLine(analysis, select: true);
+            BindSelectedQuotationLine();
+            QuotationCalculationProgress = 100;
+            QuotationCalculationStatus = $"{analysis.CollectedCount:N0} candidatos disponíveis para {requested.Description}.";
+        }
+        catch (OperationCanceledException)
+        {
+            if (ReferenceEquals(_quotationReferenceLoadCancellation, cancellation) && !_disposed)
+                QuotationCalculationStatus = "Carregamento interrompido. Use Recalcular para consultar todos os candidatos deste item.";
+        }
+        catch (Exception exception) when (!AsyncCommandRuntime.IsCritical(exception))
+        {
+            if (ReferenceEquals(_quotationReferenceLoadCancellation, cancellation) && !_disposed)
+                QuotationCalculationStatus = "Não foi possível carregar os candidatos: " + exception.Message;
+        }
+        finally
+        {
+            if (ReferenceEquals(_quotationReferenceLoadCancellation, cancellation))
+                _quotationReferenceLoadCancellation = null;
+            cancellation.Dispose();
+            if (!_disposed) NotifyQuotationCalculationState();
+        }
+    }
+
+    private sealed class QuotationOverviewItemProgress(IProgress<QuotationAiProgress> target, string name)
+        : IProgress<QuotationAnalysisProgress>
+    {
+        public void Report(QuotationAnalysisProgress value) => target.Report(new("calculate", (int)value.Percentage,
+            100, 0, $"{name}: {value.Message}"));
     }
 
     internal void InvalidateQuotationWordReport()
@@ -754,7 +931,10 @@ public sealed partial class MainViewModel
     internal void RefreshQuotationWordItem(QuotationLineAnalysis analysis)
     {
         if (_quotationWordReport is not { } report || report.Project.Id != analysis.Line.ProjectId) return;
-        var lines = report.Lines.Select(item => item.Line.Id == analysis.Line.Id ? analysis : item).ToArray();
+        // An item window must not make the overview retain another complete
+        // candidate list in addition to the currently selected item.
+        var retained = SelectedQuotationLine?.Line.Id == analysis.Line.Id ? analysis : analysis.ToCompactOverview();
+        var lines = report.Lines.Select(item => item.Line.Id == analysis.Line.Id ? retained : item).ToArray();
         _quotationWordReport = report with { Lines = QuotationOrganization.Order(report.Project, lines) };
         ((AsyncRelayCommand)ExportQuotationWordCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)ExportQuotationPriceWordCommand).NotifyCanExecuteChanged();
@@ -2433,8 +2613,10 @@ public sealed partial class MainViewModel
 
     private void BindSelectedQuotationLine()
     {
+        var visibleAnalysis = SelectedQuotationLine?.Analysis.ReferencesArePartial == true
+            ? null : SelectedQuotationLine?.Analysis;
         QuotationReferences.ReplaceAll(
-            SelectedQuotationLine?.Analysis.References
+            visibleAnalysis?.References
                 .OrderBy(reference => reference.State)
                 .ThenByDescending(reference => reference.Adequacy.Total)
                 .Select(reference => new QuotationReferenceDisplay(reference)) ?? []);
@@ -2535,7 +2717,10 @@ public sealed partial class MainViewModel
             marked.Select(entry => entry.EffectiveUnitPrice).ToArray(), SelectedQuotationLine?.Analysis.PriceDecimalPlaces ?? 2);
         var validMarkedIds = marked.Where((_, index) => validity[index])
             .Select(entry => entry.Reference.Id).ToHashSet(StringComparer.Ordinal);
-        var visibleReferences = SelectedQuotationLine?.Analysis.References
+        var visibleAnalysis = SelectedQuotationLine?.Analysis.ReferencesArePartial == true
+            ? null : SelectedQuotationLine?.Analysis;
+        var priceDecimalPlaces = visibleAnalysis?.PriceDecimalPlaces ?? 2;
+        var visibleReferences = visibleAnalysis?.References
             .Select(reference =>
             {
                 var inBasket = selectedIds.Contains(reference.Id);
@@ -2559,7 +2744,7 @@ public sealed partial class MainViewModel
                     value.InBasket,
                     price?.ConversionFactor ?? 1m,
                     price?.EffectiveUnitPrice,
-                    SelectedQuotationLine.Analysis.PriceDecimalPlaces,
+                    priceDecimalPlaces,
                     price?.PriceDivisor);
                 row.IsValidInMarkedGroup = value.InBasket && validMarkedIds.Contains(row.Id);
                 return row;

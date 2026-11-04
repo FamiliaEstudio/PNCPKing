@@ -61,6 +61,10 @@ public interface IQuotationRepository
         string name,
         IReadOnlyList<string> referenceIds,
         CancellationToken cancellationToken = default);
+    Task<Guid> SaveBasketReferenceCopyAsync(QuotationLine expectedLine, QuotationBasket source,
+        QuotationBasket destination, string referenceId, string automaticCopyName,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("Este repositório não permite copiar preços entre cestas.");
     Task RenameManualBasketAsync(
         Guid basketId,
         string name,

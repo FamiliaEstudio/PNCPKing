@@ -1,6 +1,6 @@
 # Cotação com IA externa por arquivos
 
-O Excel cria o projeto e seus itens. A coleta lê o banco local sem baixar documentos. A IA primeiro pode retirar candidatos claramente incompatíveis e depois devolver um guia com os preços escolhidos. O PNCP King valida o guia e cria cestas manuais persistentes.
+O Excel cria o projeto e seus itens. A coleta lê o banco local sem baixar documentos. A IA primeiro pode retirar candidatos claramente incompatíveis e depois devolver um guia com os preços escolhidos. Desde a versão 1.2.34, a importação traz também os demais candidatos do ZIP e cria as cestas guiadas válidas. Os candidatos disponíveis alimentam as alternativas do programa; a triagem não certifica sua adequação técnica.
 
 ## Entrada e coleta
 
@@ -47,11 +47,29 @@ A cesta deve atingir o alvo e conter pelo menos três preços. Não repetir **CN
 
 ## Aplicação e revisão
 
-Use **Importar guia final**, selecione o ZIP utilizado pela IA e seu guia. A prévia mostra cestas prontas, insuficiências e pendências, com mensagens copiáveis. Cada item é aplicado em uma transação curta. Reimportar não duplica cestas e não sobrescreve edições manuais.
+Use **Importar guia final**, selecione primeiro o ZIP utilizado pela IA e depois o Excel do guia. A prévia mostra cestas prontas, candidatos disponíveis, insuficiências e pendências, com mensagens copiáveis. **Importar preços e aplicar cestas válidas** traz os candidatos de todos os itens corretamente vinculados ao pacote, inclusive dos itens insuficientes ou em revisão. Candidatos de um item com divergência de identificação/especificação ou pacote corrompido não são importados.
+
+Cada importação de candidatos é atômica por item; a aplicação da cesta e de sua eventual faixa também é atômica. Se uma cesta continuar pendente, os candidatos já importados ficam disponíveis para trabalho manual. Reimportar não duplica cestas ou preços e não sobrescreve edições manuais. Após a importação, a barra de cálculo acompanha a formação das alternativas, incluindo recomendada, mais barata e mais cara, segundo os pesos existentes. As alternativas não representam todas as combinações possíveis: o algoritmo conserva seus limites de trabalho.
+
+Para aproveitar um preço de outra cesta, abra o item, selecione o preço e use **Copiar preço para outra cesta**. Escolha uma cesta do mesmo item. A origem permanece intacta; o fator ou divisor é preservado. Se o destino for automático, o programa cria uma cópia manual. Repetição de referência ou de empresa na mesma contratação e excesso de dez preços são recusados. A cesta resultante passa pela validação e não é adotada silenciosamente.
+
+### Ampliação de faixa
+
+Os modelos novos incluem a aba opcional `Faixas`, com os cabeçalhos `item_id`, `faixa_minima`, `faixa_maxima`, `justificativa`. Uma linha por item; informe os limites ampliados necessários e a justificativa técnica. Um limite em branco conserva o limite original. A proposta deve apenas ampliar a faixa, sem estreitar um lado ou criar um limite onde antes não havia. Sem ampliação, deixe a aba vazia. Preserve os hashes e todas as outras abas.
+
+Para guias antigos, ou sem proposta explícita, marque **Permitir ampliar a faixa para os preços escolhidos no guia** na prévia. Clique em **Revalidar e mostrar alterações**, confira os limites e só então aplique. A expansão automática alcança apenas os preços efetivos selecionados. Uma proposta explícita na aba `Faixas` é respeitada; o programa não a amplia silenciosamente se ainda for insuficiente. A faixa e a cesta são gravadas juntas somente quando a cesta passa pelas demais validações. O relatório guarda a alteração e sua razão.
+
+O ZIP original e seus hashes permanecem intactos. Não é necessário recolher os mesmos candidatos; uma nova pesquisa só é necessária quando faltarem dados. Ampliar a faixa não altera a regra de 25%, calculada contra a média truncada dos demais preços da cesta.
+
+### Descrições resumidas e revisão técnica
+
+Quando a IA selecionou preços tecnicamente comparáveis, mas a baixa coincidência de palavras bloqueia a importação, a prévia permite **Aceitar revisão técnica documentada no guia quando a pontuação textual for baixa**. Marque a opção e revalide antes de aplicar. Cada preço deve continuar acompanhado de justificativa técnica e trecho literal da origem; o programa mostra a exceção para conferência.
+
+A decisão é preservada junto ao preço do item e vinculada aos dados técnicos de origem. Alterações que invalidem essa vinculação exigem nova revisão. A pontuação baixa permanece informativa; a exceção só vale para cestas manuais e não libera o candidato automaticamente nas alternativas da busca normal. Preço, faixa, conversão, CNPJ, repetição de origem e dispersão continuam sujeitos às conferências. Uma justificativa da IA torna a decisão revisável, sem provar por si só a equivalência técnica.
 
 São conferidos pacote, IDs, especificação atual, fatores, preço efetivo, faixa, desvio de até 25% e validação vigente das cestas. Permanecem os valores de origem e o truncamento, com duas casas ou quatro para medicamentos. Uma cópia do guia identificado por hash e um relatório da aplicação ficam junto ao pacote para auditoria.
 
-**Limitação:** a validação local não comprova equivalência técnica por si só. A justificativa e o trecho tornam a escolha revisável. Nesta versão, seleções divergentes do filtro lexical ou da elegibilidade atual ficam pendentes; não se altera descrição, preço original ou regra global para contornar isso.
+**Limitação:** a validação local não comprova equivalência técnica por si só. A justificativa e o trecho tornam a escolha revisável. Sem autorização da revisão técnica, o corte textual continua aplicado; as outras causas de inelegibilidade permanecem pendentes. Não se alteram descrição ou preço original para forçar aprovação.
 
 Documentos podem ser obtidos pelos comandos de evidências depois da seleção. Nenhuma etapa deste fluxo dispara anexos, PDFs ou OCR automaticamente.
 
@@ -60,7 +78,9 @@ Documentos podem ser obtidos pelos comandos de evidências depois da seleção. 
 - Um leitor do banco, páginas limitadas e comandos preparados na inserção. Sem migração do esquema 33, novos índices ou mudanças no SQL da pesquisa.
 - Candidatos e checkpoints em arquivo auxiliar junto ao ZIP. Depois de exportação durável concluída, o auxiliar é removido; em pausa/falha, é preservado.
 - Memória limitada por páginas e lotes; interface recebe contadores agregados a cada 150 ms.
+- Inserção de candidatos em lotes de 100 e transações por item. Cancelar desfaz o item em processamento; itens concluídos permanecem disponíveis, sem duplicação na repetição.
+- Visão geral compacta, cálculo em segundo plano com progresso e candidatos completos somente do item selecionado. Interromper o cálculo não apaga os preços importados.
 - Use **Retomar automação** após pausar/fechar. Se a base mudar, somente o item incompleto reinicia; itens concluídos conservam suas capturas datadas.
-- Mudanças na especificação/filtros exigem nova coleta. Atualizações e outras operações concorrentes devem terminar antes da coleta.
+- Mudanças na especificação/filtros exigem nova coleta; a ampliação de faixa autorizada usa o mecanismo específico acima. Atualizações e outras operações concorrentes devem terminar antes da coleta.
 
 Os testes incluem bases sintéticas com 450 itens. Tempos e consumo no HD antigo precisam ser medidos na máquina de destino; testes e compilação não constituem benchmark desse hardware.

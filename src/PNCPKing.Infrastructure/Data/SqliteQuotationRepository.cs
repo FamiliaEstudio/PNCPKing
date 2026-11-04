@@ -3111,7 +3111,7 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
             command.Parameters["$quantityScore"].Value = DecimalScale.ToScaled(reference.Adequacy.QuantityScore)!.Value;
             command.Parameters["$proximityScore"].Value = DecimalScale.ToScaled(reference.Adequacy.ProximityScore)!.Value;
             command.Parameters["$recencyScore"].Value = DecimalScale.ToScaled(reference.Adequacy.RecencyScore)!.Value;
-            command.Parameters["$explanation"].Value = reference.Adequacy.Explanation;
+            command.Parameters["$explanation"].Value = QuotationAiReviewStorage.Encode(reference);
             command.Parameters["$state"].Value = (int)reference.State;
             command.Parameters["$stateReason"].Value = reference.StateReason;
             command.Parameters["$duplicateOf"].Value = DbValue(reference.DuplicateOfReferenceId);
@@ -3321,51 +3321,56 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
             }
     };
 
-    private static QuotationReference ReadReference(SqliteDataReader reader) => new()
+    private static QuotationReference ReadReference(SqliteDataReader reader)
     {
-        Id = reader.GetString(0),
-        LineId = Guid.ParseExact(reader.GetString(1), "N"),
-        ContractId = reader.GetString(2),
-        ItemNumber = reader.GetInt64(3),
-        ResultSequence = reader.GetInt64(4),
-        SupplierName = reader.GetString(5),
-        SupplierTaxId = reader.GetString(6),
-        SupplierType = reader.GetString(7),
-        HomologatedQuantity = DecimalScale.FromScaled(ReadNullableLong(reader, 8)),
-        UnitPrice = DecimalScale.FromScaled(reader.GetInt64(9))!.Value,
-        ResultDate = ParseDate(reader, 10),
-        ItemDescription = reader.GetString(11),
-        ItemAdditionalInformation = reader.GetString(12),
-        ItemUnit = reader.GetString(13),
-        ItemRequestedQuantity = DecimalScale.FromScaled(ReadNullableLong(reader, 14)),
-        ItemCategory = reader.GetString(15),
-        NcmNbsCode = reader.GetString(16),
-        NcmNbsDescription = reader.GetString(17),
-        CatalogCode = reader.GetString(18),
-        CatalogName = reader.GetString(19),
-        CatalogCategory = reader.GetString(20),
-        Organization = reader.GetString(21),
-        Municipality = reader.GetString(22),
-        Uf = reader.GetString(23),
-        DistanceFromRibeiraoKilometers = reader.IsDBNull(24) ? null : reader.GetDouble(24),
-        PublicationDate = reader.IsDBNull(25) ? null : ParseDateTime(reader.GetString(25)),
-        PortalUrl = reader.GetString(26),
-        Adequacy = new AdequacyBreakdown(
-            DecimalScale.FromScaled(reader.GetInt64(27))!.Value,
-            DecimalScale.FromScaled(reader.GetInt64(28))!.Value,
-            DecimalScale.FromScaled(reader.GetInt64(29))!.Value,
-            DecimalScale.FromScaled(reader.GetInt64(30))!.Value,
-            DecimalScale.FromScaled(reader.GetInt64(31))!.Value,
-            reader.GetString(32)),
-        State = (QuotationReferenceState)reader.GetInt32(33),
-        StateReason = reader.GetString(34),
-        DuplicateOfReferenceId = reader.IsDBNull(35) ? null : reader.GetString(35),
-        MatchedPromptLevel = reader.IsDBNull(36) ? null : (PromptMatchLevel)reader.GetInt32(36),
-        MatchedSearchText = reader.GetString(37),
-        Source = (QuotationReferenceSource)reader.GetInt32(38),
-        SupplierMunicipality = reader.GetString(39),
-        SupplierUf = reader.GetString(40)
-    };
+        var storedReview = QuotationAiReviewStorage.Decode(reader.GetString(32));
+        return new()
+        {
+            Id = reader.GetString(0),
+            LineId = Guid.ParseExact(reader.GetString(1), "N"),
+            ContractId = reader.GetString(2),
+            ItemNumber = reader.GetInt64(3),
+            ResultSequence = reader.GetInt64(4),
+            SupplierName = reader.GetString(5),
+            SupplierTaxId = reader.GetString(6),
+            SupplierType = reader.GetString(7),
+            HomologatedQuantity = DecimalScale.FromScaled(ReadNullableLong(reader, 8)),
+            UnitPrice = DecimalScale.FromScaled(reader.GetInt64(9))!.Value,
+            ResultDate = ParseDate(reader, 10),
+            ItemDescription = reader.GetString(11),
+            ItemAdditionalInformation = reader.GetString(12),
+            ItemUnit = reader.GetString(13),
+            ItemRequestedQuantity = DecimalScale.FromScaled(ReadNullableLong(reader, 14)),
+            ItemCategory = reader.GetString(15),
+            NcmNbsCode = reader.GetString(16),
+            NcmNbsDescription = reader.GetString(17),
+            CatalogCode = reader.GetString(18),
+            CatalogName = reader.GetString(19),
+            CatalogCategory = reader.GetString(20),
+            Organization = reader.GetString(21),
+            Municipality = reader.GetString(22),
+            Uf = reader.GetString(23),
+            DistanceFromRibeiraoKilometers = reader.IsDBNull(24) ? null : reader.GetDouble(24),
+            PublicationDate = reader.IsDBNull(25) ? null : ParseDateTime(reader.GetString(25)),
+            PortalUrl = reader.GetString(26),
+            Adequacy = new AdequacyBreakdown(
+                DecimalScale.FromScaled(reader.GetInt64(27))!.Value,
+                DecimalScale.FromScaled(reader.GetInt64(28))!.Value,
+                DecimalScale.FromScaled(reader.GetInt64(29))!.Value,
+                DecimalScale.FromScaled(reader.GetInt64(30))!.Value,
+                DecimalScale.FromScaled(reader.GetInt64(31))!.Value,
+                storedReview.Explanation),
+            TechnicalReview = storedReview.Review,
+            State = (QuotationReferenceState)reader.GetInt32(33),
+            StateReason = reader.GetString(34),
+            DuplicateOfReferenceId = reader.IsDBNull(35) ? null : reader.GetString(35),
+            MatchedPromptLevel = reader.IsDBNull(36) ? null : (PromptMatchLevel)reader.GetInt32(36),
+            MatchedSearchText = reader.GetString(37),
+            Source = (QuotationReferenceSource)reader.GetInt32(38),
+            SupplierMunicipality = reader.GetString(39),
+            SupplierUf = reader.GetString(40)
+        };
+    }
 
     private static void ValidateInput(QuotationLineInput input)
     {

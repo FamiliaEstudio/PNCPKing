@@ -110,7 +110,18 @@ public static class QuotationAiPackage
                     reference.Source != QuotationReferenceSource.PncpIncisoII || reference.UnitPrice <= 0)
                     throw new InvalidDataException($"Referência inválida em {part.Path}.");
                 partCount++;
-                yield return reference;
+                // A result package contains captured source facts, never trusted
+                // eligibility, scores or locally accepted technical decisions.
+                // ShouldSerialize=false only controls writing, so reset metadata
+                // explicitly on reading hostile or externally edited JSON as well.
+                yield return reference with
+                {
+                    Adequacy = new(0, 0, 0, 0, 0, string.Empty),
+                    State = QuotationReferenceState.Rejected,
+                    StateReason = string.Empty,
+                    DuplicateOfReferenceId = null,
+                    TechnicalReview = null
+                };
             }
             if (partCount != part.CandidateCount)
                 throw new InvalidDataException($"Contagem incorreta em {part.Path}.");

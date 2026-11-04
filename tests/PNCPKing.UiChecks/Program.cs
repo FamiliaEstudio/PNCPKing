@@ -112,6 +112,8 @@ internal static partial class Program
                     Console.WriteLine("Quotation transfer/copy dialog: passed");
                     CheckQuotationOrganization();
                     Console.WriteLine("Quotation organization options: passed");
+                    CheckQuotationAiGuideOptions();
+                    Console.WriteLine("External AI candidate and review options: passed");
                     await CheckColumnChooserAsync();
                     Console.WriteLine("Column chooser: passed");
                     CheckGitHubUpdateDialog();

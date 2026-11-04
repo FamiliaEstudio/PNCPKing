@@ -782,7 +782,8 @@
                                    HorizontalAlignment="Right" />
                     </DockPanel>
 
-                    <Border Grid.Row="1" Padding="10" Margin="0,0,0,6"
+                    <StackPanel Grid.Row="1">
+                    <Border Padding="10" Margin="0,0,0,6"
                             BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
                             Visibility="{Binding ShowExternalAiProgress, Converter={StaticResource BooleanToVisibilityConverter}}">
                         <Grid>
@@ -803,6 +804,31 @@
                                     ToolTip="Interrompe a etapa atual; a coleta pode ser continuada em Retomar automação." />
                         </Grid>
                     </Border>
+
+                    <Border Padding="10" Margin="0,0,0,6"
+                            BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                            Visibility="{Binding ShowQuotationCalculationProgress, Converter={StaticResource BooleanToVisibilityConverter}}">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="{Binding QuotationCalculationStatus}" TextWrapping="Wrap" Margin="0,0,8,6" />
+                                <ProgressBar Height="9" Minimum="0" Maximum="100"
+                                             Value="{Binding QuotationCalculationProgress, Mode=OneWay}"
+                                             AutomationProperties.Name="Progresso do cálculo das cestas" />
+                            </StackPanel>
+                            <WrapPanel Grid.Column="1" VerticalAlignment="Center" Margin="12,0,0,0">
+                                <Button Content="Interromper cálculo" Command="{Binding CancelQuotationCalculationCommand}"
+                                        Visibility="{Binding IsQuotationCalculationRunning, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                        ToolTip="Interrompe somente o cálculo; os preços e as cestas salvos são preservados." />
+                                <Button Content="Recalcular" Command="{Binding RetryQuotationCalculationCommand}"
+                                        ToolTip="Calcula as cestas ou carrega os candidatos do item selecionado." />
+                            </WrapPanel>
+                        </Grid>
+                    </Border>
+                    </StackPanel>
 
                     <Grid Grid.Row="2">
                         <Grid.ColumnDefinitions>
@@ -858,7 +884,7 @@
 
                         <GridSplitter Grid.Column="1" Width="8" HorizontalAlignment="Stretch" Background="{StaticResource BorderBrush}" />
 
-                        <Grid Grid.Column="2">
+                        <Grid Grid.Column="2" IsEnabled="{Binding CanInteractWithQuotationItem}">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="*" />
                                 <RowDefinition Height="Auto" />

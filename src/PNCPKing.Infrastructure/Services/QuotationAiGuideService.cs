@@ -19,6 +19,7 @@ public sealed class QuotationAiGuideService(SqliteQuotationRepository repository
     private static readonly string[] ItemHeaders = ["item_id", "especificacao_sha256", "situacao", "metodo", "justificativa", "unidade_final"];
     private static readonly string[] SelectionHeaders = ["item_id", "referencia_id", "ordem", "fator", "justificativa_tecnica", "justificativa_conversao", "trecho_fonte", "fator_numerador", "fator_denominador", "divisor"];
     private static readonly string[] TriageHeaders = ["item_id", "referencia_id", "decisao", "justificativa"];
+    private static readonly string[] RangeHeaders = ["item_id", "faixa_minima", "faixa_maxima", "justificativa"];
 
     public async Task<QuotationAiTemplatePaths> CreateTemplatesAsync(string packagePath,
         string outputDirectory, CancellationToken cancellationToken = default)
@@ -137,16 +138,34 @@ public sealed class QuotationAiGuideService(SqliteQuotationRepository repository
         CancellationToken cancellationToken = default) => PreviewGuideAsync(packagePath, guidePath, null, cancellationToken);
 
     public async Task<QuotationAiGuidePreview> PreviewGuideAsync(string packagePath, string guidePath,
-        IProgress<QuotationAiProgress>? progress, CancellationToken cancellationToken = default)
+        IProgress<QuotationAiProgress>? progress, CancellationToken cancellationToken = default,
+        bool allowPriceRangeExpansion = false, bool allowTechnicalReview = false)
     {
-        var validation = await ValidateGuideAsync(packagePath, guidePath, progress, cancellationToken).ConfigureAwait(false);
-        return new(validation.Manifest.PackageId, validation.Manifest.ProjectId, validation.Items.Select(value => value.Result).ToArray());
+        // Keep the preview tied to the same workbook bytes the user inspected.
+        // Sharing permits the reader's own handles, but not a concurrent writer.
+        await using var guideLock = new FileStream(guidePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+            64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var guideHash = Convert.ToHexString(await SHA256.HashDataAsync(guideLock, cancellationToken).ConfigureAwait(false));
+        var validation = await ValidateGuideAsync(packagePath, guidePath, progress, cancellationToken,
+            allowPriceRangeExpansion, allowTechnicalReview).ConfigureAwait(false);
+        if (await HashFileAsync(guidePath, cancellationToken).ConfigureAwait(false) != guideHash)
+            throw new InvalidDataException("O guia foi alterado durante a prévia. Feche a planilha e gere uma nova prévia.");
+        return new(validation.Manifest.PackageId, validation.Manifest.ProjectId, validation.Items.Select(value => value.Result).ToArray())
+            { GuideSha256 = guideHash };
     }
 
     public async Task<QuotationAiGuideApplyResult> ApplyGuideAsync(string packagePath, string guidePath,
-        IProgress<QuotationAiProgress>? progress = null, CancellationToken cancellationToken = default)
+        IProgress<QuotationAiProgress>? progress = null, CancellationToken cancellationToken = default,
+        bool allowPriceRangeExpansion = false, bool allowTechnicalReview = false,
+        string? expectedGuideSha256 = null)
     {
-        var archivedGuide = await ArchiveGuideAsync(packagePath, guidePath, cancellationToken).ConfigureAwait(false);
+        var archivedGuide = await ArchiveGuideAsync(packagePath, guidePath, cancellationToken, expectedGuideSha256).ConfigureAwait(false);
+        await using var guideLock = new FileStream(archivedGuide, FileMode.Open, FileAccess.Read, FileShare.Read,
+            64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var archivedHash = Convert.ToHexString(await SHA256.HashDataAsync(guideLock, cancellationToken).ConfigureAwait(false));
+        if (archivedHash != Path.GetFileNameWithoutExtension(archivedGuide))
+            throw new InvalidDataException("A cópia de auditoria do guia foi alterada durante o arquivamento; nenhuma aplicação foi iniciada.");
+        ValidateExpectedGuideHash(archivedHash, expectedGuideSha256);
         var completed = new List<QuotationAiGuideItemResult>();
         // Revalidate and apply one item at a time. Only IDs/decisions, not all selected
         // descritivos across 450 items, remain in memory between item transactions.
@@ -154,14 +173,29 @@ public sealed class QuotationAiGuideService(SqliteQuotationRepository repository
         {
             cancellationToken.ThrowIfCancellationRequested();
             var result = item.Result;
-            if (item.Application is { } application)
+            if (result.CanImportCandidates && item.CandidateLine is { } expectedLine && item.Candidates is { } candidates)
             {
                 try
                 {
-                    var applied = await repository.SaveAiGuideBasketAsync(application, cancellationToken).ConfigureAwait(false);
-                    result = result with { Status = applied ? "applied" : "unchanged", Message = applied
-                        ? "Cesta guiada criada. Uma escolha anterior do usuário, quando existente, foi preservada."
-                        : "Este guia já foi aplicado; nenhuma cesta ou referência foi duplicada." };
+                    var imported = await repository.ImportAiCandidatesAsync(expectedLine, item.IsMedication,
+                        candidates, progress is null ? null : new CandidateProgress(progress, completed.Count,
+                            item.TotalItems, result.Name), cancellationToken).ConfigureAwait(false);
+                    result = result with { ImportedCandidateCount = imported.AddedCount, CandidatesImported = true };
+                    if (item.Application is { } application)
+                    {
+                        var applied = await repository.SaveAiGuideBasketAsync(application with { ExpectedLine = imported.Line },
+                            cancellationToken).ConfigureAwait(false);
+                        result = result with { Status = applied ? "applied" : "unchanged", Message = applied
+                            ? "Cesta guiada criada. Uma escolha anterior do usuário, quando existente, foi preservada."
+                            : "Este guia já foi aplicado; nenhuma cesta ou referência foi duplicada." };
+                        if (application.PriceRangeAdjustment is { } range)
+                            result = result with { Message = result.Message + " " + DescribeRangeChange(item.PackageLine!, range) };
+                        if (result.TechnicalReviewCount > 0)
+                            result = result with { Message = result.Message +
+                                $" {result.TechnicalReviewCount:N0} preço(s) mantêm a revisão técnica documentada e autorizada apesar do baixo índice lexical." };
+                    }
+                    result = result with { Message = result.Message +
+                        $" {imported.AddedCount:N0} candidato(s) acrescentado(s); os preços do pacote ficam disponíveis no item para análise e outras cestas." };
                 }
                 catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException or ArgumentException or OverflowException)
                 { result = result with { Status = "review", Message = exception.Message }; }
@@ -172,7 +206,8 @@ public sealed class QuotationAiGuideService(SqliteQuotationRepository repository
         Exception? failure = null;
         try
         {
-            var validation = await ValidateGuideAsync(packagePath, archivedGuide, progress, cancellationToken, ApplyItemAsync).ConfigureAwait(false);
+            var validation = await ValidateGuideAsync(packagePath, archivedGuide, progress, cancellationToken,
+                allowPriceRangeExpansion, allowTechnicalReview, ApplyItemAsync).ConfigureAwait(false);
             return new(validation.Items.Select(item => item.Result).ToArray());
         }
         catch (Exception exception) { failure = exception; throw; }
@@ -192,6 +227,8 @@ public sealed class QuotationAiGuideService(SqliteQuotationRepository repository
                         {
                             format = "pncpking-ai-guide-application", version = 1, attemptedAt = DateTimeOffset.UtcNow,
                             sourcePackage = Path.GetFileName(packagePath), guide = Path.GetFileName(archivedGuide),
+                            allowPriceRangeExpansion,
+                            allowTechnicalReview,
                             completed = failure is null, error = failure?.Message, items = completed
                         }, QuotationAiPackage.JsonOptions, CancellationToken.None).ConfigureAwait(false);
                         await output.FlushAsync(CancellationToken.None).ConfigureAwait(false);
@@ -209,6 +246,7 @@ public sealed class QuotationAiGuideService(SqliteQuotationRepository repository
 
     private async Task<GuideValidation> ValidateGuideAsync(string packagePath, string guidePath,
         IProgress<QuotationAiProgress>? progress, CancellationToken cancellationToken,
+        bool allowPriceRangeExpansion, bool allowTechnicalReview,
         Func<ValidatedItem, Task<QuotationAiGuideItemResult>>? apply = null)
     {
         var manifest = await QuotationAiPackage.ReadManifestAsync(packagePath, cancellationToken).ConfigureAwait(false);
@@ -238,6 +276,22 @@ public sealed class QuotationAiGuideService(SqliteQuotationRepository repository
                 throw new InvalidDataException("Fator inválido; use um número decimal positivo sem separador de milhares.");
             list.Add(new(row[1], order, factor, row[4], row[5], row[6], OptionalDecimal(row[7]), OptionalDecimal(row[8]), OptionalDecimal(row[9])));
         }
+        var ranges = new Dictionary<Guid, QuotationAiPriceRangeAdjustment>();
+        if (workbook.HasWorksheet("Faixas"))
+        {
+            foreach (var row in DataRows(workbook, "Faixas", RangeHeaders, cancellationToken))
+            {
+                var lineId = ParseId(row[0], "item_id");
+                if (!declared.ContainsKey(lineId)) throw new InvalidDataException("Uma faixa proposta não tem item correspondente na aba Itens.");
+                Required(row[3], "justificativa da ampliação da faixa");
+                if (row[1].Length == 0 && row[2].Length == 0)
+                    throw new InvalidDataException("Informe pelo menos um limite na faixa proposta; deixe a aba Faixas vazia quando não houver ampliação.");
+                var original = manifest.Items.Single(value => value.Line.Id == lineId).Line;
+                if (!ranges.TryAdd(lineId, new(ParseRangeBound(row[1]) ?? original.MinimumUnitPrice,
+                        ParseRangeBound(row[2]) ?? original.MaximumUnitPrice, row[3])))
+                    throw new InvalidDataException("O guia repete a faixa proposta do mesmo item.");
+            }
+        }
         var projects = await repository.GetProjectsAsync(cancellationToken).ConfigureAwait(false);
         var project = projects.SingleOrDefault(value => value.Id == manifest.ProjectId)
             ?? throw new InvalidDataException("A cotação do pacote não existe neste banco.");
@@ -250,72 +304,146 @@ public sealed class QuotationAiGuideService(SqliteQuotationRepository repository
             cancellationToken.ThrowIfCancellationRequested();
             var lineId = packageItem.Line.Id;
             var name = packageItem.Line.EffectiveDisplayName;
-            var result = new QuotationAiGuideItemResult(lineId, name, "review", "Item não analisado no guia; mantido pendente.");
+            var result = new QuotationAiGuideItemResult(lineId, name, "review", "Item não analisado no guia; mantido pendente.")
+                { CandidateCount = packageItem.CandidateCount };
             QuotationAiBasketApplication? application = null;
+            QuotationLine? candidateLine = null;
             try
             {
-                if (declared.TryGetValue(lineId, out var item))
+                declared.TryGetValue(lineId, out var item);
+                if (item is not null)
                 {
                     if (item.SpecificationHash != packageItem.SpecificationHash)
                         throw new InvalidDataException("A especificação indicada no guia diverge do pacote.");
                     if (item.Status is not ("pronto" or "insuficiente" or "revisar"))
                         throw new InvalidDataException("Situação inválida. Use pronto, insuficiente ou revisar.");
-                    Required(item.Reason, "justificativa do item");
-                    if (item.Status != "pronto")
-                        result = result with { Status = item.Status == "insuficiente" ? "insufficient" : "review", Message = item.Reason };
-                    else
+                }
+                var current = await repository.GetLineAsync(manifest.ProjectId, lineId, cancellationToken).ConfigureAwait(false)
+                    ?? throw new InvalidDataException("O item foi removido da cotação.");
+                // Only an explicit range adjustment may differ from the immutable source definition.
+                // All descriptors, units, quantities, weights and identifiers retain the original hash.
+                if (QuotationAiPackage.SpecificationHash(current with
                     {
-                        var current = await repository.GetLineAsync(manifest.ProjectId, lineId, cancellationToken).ConfigureAwait(false)
-                            ?? throw new InvalidDataException("O item foi removido da cotação.");
-                        if (QuotationAiPackage.SpecificationHash(current) != packageItem.SpecificationHash)
-                            throw new InvalidDataException("O item foi alterado depois da coleta. Refaça a coleta deste item.");
-                        var chosen = selections.GetValueOrDefault(lineId, []).OrderBy(value => value.Order).ToArray();
-                        if (chosen.Length < current.RequestedBasketSize || chosen.Length < 3)
-                            throw new InvalidDataException($"A cesta exige {current.RequestedBasketSize} preços; o guia não atingiu o alvo.");
-                        if (chosen.Select(value => value.ReferenceId).Distinct(StringComparer.Ordinal).Count() != chosen.Length ||
-                            chosen.Select(value => value.Order).Distinct().Count() != chosen.Length)
-                            throw new InvalidDataException("O guia repete referência ou ordem na mesma cesta.");
-                        if (!SearchText.Normalize(item.FinalUnit).Equals(SearchText.Normalize(current.RequestedUnit), StringComparison.Ordinal))
-                            throw new InvalidDataException("A unidade final do guia diverge da unidade solicitada.");
-                        var wanted = chosen.Select(value => value.ReferenceId).ToHashSet(StringComparer.Ordinal);
-                        var found = new Dictionary<string, QuotationReference>(StringComparer.Ordinal);
-                        await foreach (var reference in QuotationAiPackage.ReadItemReferencesAsync(archive, manifest, lineId, cancellationToken).ConfigureAwait(false))
-                            if (wanted.Contains(reference.Id) && !found.TryAdd(reference.Id, reference))
-                                throw new InvalidDataException("O pacote repete uma referência selecionada.");
-                        if (found.Count != wanted.Count) throw new InvalidDataException("Uma referência selecionada não pertence ao item do pacote.");
-                        var appliedSelections = ValidateSelections(current, chosen, found, project.PriceDecimalPlaces);
-                        var method = item.Method switch
+                        MinimumUnitPrice = packageItem.Line.MinimumUnitPrice,
+                        MaximumUnitPrice = packageItem.Line.MaximumUnitPrice
+                    }) != packageItem.SpecificationHash)
+                    throw new InvalidDataException("O item foi alterado depois da coleta. Refaça a coleta deste item.");
+                var chosen = selections.GetValueOrDefault(lineId, []).OrderBy(value => value.Order).ToArray();
+                var wanted = chosen.Select(value => value.ReferenceId).ToHashSet(StringComparer.Ordinal);
+                var found = new Dictionary<string, QuotationReference>(StringComparer.Ordinal);
+                long verified = 0;
+                await foreach (var reference in QuotationAiPackage.ReadItemReferencesAsync(archive, manifest, lineId, cancellationToken).ConfigureAwait(false))
+                {
+                    if (wanted.Contains(reference.Id) && !found.TryAdd(reference.Id, reference))
+                        throw new InvalidDataException("O pacote repete uma referência selecionada.");
+                    if (++verified % 250 == 0)
+                        progress?.Report(new("validate", items.Count, manifest.Items.Count, verified,
+                            $"Conferindo {name}: {verified:N0}/{packageItem.CandidateCount:N0} candidatos."));
+                }
+                candidateLine = current;
+                var originalRangeMatches = SameRange(current, packageItem.Line.MinimumUnitPrice, packageItem.Line.MaximumUnitPrice);
+                result = result with { CanImportCandidates = originalRangeMatches };
+                if (item is null || item.Status != "pronto")
+                {
+                    // A pending item never authorizes a range change, even when a proposal was written.
+                    if (!originalRangeMatches)
+                        throw new InvalidDataException("A faixa do item foi alterada depois da coleta. Confira a faixa atual antes de importar este pacote.");
+                    if (item is not null)
+                        result = result with { Status = item.Status == "insuficiente" ? "insufficient" : "review",
+                            Message = string.IsNullOrWhiteSpace(item.Reason)
+                                ? "Item pendente: informe a justificativa no guia antes de montar a cesta." : item.Reason };
+                }
+                else
+                {
+                    Required(item.Reason, "justificativa do item");
+                    if (chosen.Length < current.RequestedBasketSize || chosen.Length < 3)
+                        throw new InvalidDataException($"A cesta exige {current.RequestedBasketSize} preços; o guia não atingiu o alvo.");
+                    if (chosen.Select(value => value.ReferenceId).Distinct(StringComparer.Ordinal).Count() != chosen.Length ||
+                        chosen.Select(value => value.Order).Distinct().Count() != chosen.Length)
+                        throw new InvalidDataException("O guia repete referência ou ordem na mesma cesta.");
+                    if (!SearchText.Normalize(item.FinalUnit).Equals(SearchText.Normalize(current.RequestedUnit), StringComparison.Ordinal))
+                        throw new InvalidDataException("A unidade final do guia diverge da unidade solicitada.");
+                    if (found.Count != wanted.Count) throw new InvalidDataException("Uma referência selecionada não pertence ao item do pacote.");
+                    var appliedSelections = ValidateSelections(current, chosen, found, project.PriceDecimalPlaces);
+                    var prices = appliedSelections.Select(value => QuotationMoney.EffectivePrice(value.Reference.UnitPrice,
+                        value.ConversionFactor, value.PriceDivisor, project.PriceDecimalPlaces)).ToArray();
+                    var adjustment = ResolveRangeAdjustment(packageItem.Line, ranges.GetValueOrDefault(lineId), prices,
+                        allowPriceRangeExpansion);
+                    var effectiveLine = current with
+                    {
+                        MinimumUnitPrice = adjustment is null ? packageItem.Line.MinimumUnitPrice : adjustment.MinimumUnitPrice,
+                        MaximumUnitPrice = adjustment is null ? packageItem.Line.MaximumUnitPrice : adjustment.MaximumUnitPrice
+                    };
+                    if (!originalRangeMatches && !SameRange(current, effectiveLine.MinimumUnitPrice, effectiveLine.MaximumUnitPrice))
+                        throw new InvalidDataException("A faixa do item foi alterada depois da coleta e diverge da ampliação proposta; a alteração local foi preservada.");
+                    result = result with { CanImportCandidates = true };
+                    if (prices.Any(price => effectiveLine.MinimumUnitPrice is { } minimum && price < minimum ||
+                                            effectiveLine.MaximumUnitPrice is { } maximum && price > maximum))
+                        throw new InvalidDataException("Preço efetivo fora da faixa definida. Proponha uma ampliação justificada na aba Faixas ou habilite a ampliação na prévia.");
+                    var technicalReviewCount = 0;
+                    if (allowTechnicalReview)
+                    {
+                        var scorer = new QuotationAnalyzer();
+                        // Range validation already used effective prices above. Removing its bounds
+                        // here isolates the lexical rejection without altering any source descriptor.
+                        var lexicalLine = effectiveLine with { MinimumUnitPrice = null, MaximumUnitPrice = null };
+                        appliedSelections = appliedSelections.Select(selection =>
                         {
-                            "media" => QuotationAggregationMethod.Mean,
-                            "mediana" => QuotationAggregationMethod.Median,
-                            _ => throw new InvalidDataException("Método inválido. Use media ou mediana.")
-                        };
-                        var basketId = BasketId(manifest.PackageId, lineId, method, appliedSelections);
-                        var manual = new QuotationManualBasket
-                        {
-                            Id = basketId, LineId = lineId, Name = $"IA externa {manifest.PackageId.ToString("N")[..8]}",
-                            ReferenceIds = appliedSelections.Select(value => value.Reference.Id).ToArray(),
-                            ConversionFactors = appliedSelections.ToDictionary(value => value.Reference.Id, value => value.ConversionFactor),
-                            PriceDivisors = appliedSelections.Where(value => value.PriceDivisor is not null)
-                                .ToDictionary(value => value.Reference.Id, value => value.PriceDivisor!.Value),
-                            AggregationMethod = method
-                        };
-                        var analysis = new QuotationAnalyzer().Analyze(current,
-                            appliedSelections.Select(value => value.Reference).ToArray(), [manual], project.PriceDecimalPlaces);
-                        var basket = analysis.Baskets.Single(value => value.ManualBasketId == basketId);
-                        if (!basket.IsValid)
-                            throw new InvalidDataException("A seleção requer revisão na cotação: " + basket.ValidationMessage +
-                                " O filtro atual do programa não foi contornado nem o descritivo alterado.");
-                        application = new(current, project.IsMedication, basketId, manual.Name, method, appliedSelections);
-                        result = result with { Status = "ready", BasketId = basketId,
-                            Message = packageItem.Complete ? "Cesta validada para aplicação." :
-                                "Cesta validada; a coleta de origem foi parcial e não representa busca exaustiva." };
+                            if (scorer.ScoreReference(lexicalLine, selection.Reference).State != QuotationReferenceState.Rejected)
+                                return selection;
+                            technicalReviewCount++;
+                            var sourceDecision = chosen.Single(value => value.ReferenceId == selection.Reference.Id);
+                            return selection with { Reference = selection.Reference with
+                            {
+                                TechnicalReview = QuotationAiTechnicalReview.Create(effectiveLine, selection.Reference,
+                                    selection.TechnicalReason, sourceDecision.SourceExcerpt)
+                            } };
+                        }).ToArray();
                     }
+                    var method = item.Method switch
+                    {
+                        "media" => QuotationAggregationMethod.Mean,
+                        "mediana" => QuotationAggregationMethod.Median,
+                        _ => throw new InvalidDataException("Método inválido. Use media ou mediana.")
+                    };
+                    var basketId = BasketId(manifest.PackageId, lineId, method, appliedSelections);
+                    var manual = new QuotationManualBasket
+                    {
+                        Id = basketId, LineId = lineId, Name = $"IA externa {manifest.PackageId.ToString("N")[..8]}",
+                        ReferenceIds = appliedSelections.Select(value => value.Reference.Id).ToArray(),
+                        ConversionFactors = appliedSelections.ToDictionary(value => value.Reference.Id, value => value.ConversionFactor),
+                        PriceDivisors = appliedSelections.Where(value => value.PriceDivisor is not null)
+                            .ToDictionary(value => value.Reference.Id, value => value.PriceDivisor!.Value),
+                        AggregationMethod = method
+                    };
+                    var analysis = new QuotationAnalyzer().Analyze(effectiveLine,
+                        appliedSelections.Select(value => value.Reference).ToArray(), [manual], project.PriceDecimalPlaces);
+                    var basket = analysis.Baskets.Single(value => value.ManualBasketId == basketId);
+                    if (!basket.IsValid)
+                        throw new InvalidDataException("A seleção requer revisão na cotação: " + basket.ValidationMessage +
+                            " O descritivo e os preços de origem foram preservados.");
+                    application = new(current, project.IsMedication, basketId, manual.Name, method, appliedSelections)
+                        { PriceRangeAdjustment = adjustment };
+                    result = result with { Status = "ready", BasketId = basketId, PriceRangeAdjustment = adjustment,
+                        TechnicalReviewCount = technicalReviewCount,
+                        Message = packageItem.Complete ? "Cesta validada para aplicação." :
+                            "Cesta validada; a coleta de origem foi parcial e não representa busca exaustiva." };
+                    if (adjustment is not null)
+                        result = result with { Message = result.Message + " " + DescribeRangeChange(packageItem.Line, adjustment) };
+                    if (technicalReviewCount > 0)
+                        result = result with { Message = result.Message +
+                            $" {technicalReviewCount:N0} preço(s) com revisão técnica documentada no guia, autorizada na importação, apesar do baixo índice lexical. Confira a justificativa e a equivalência técnica." };
                 }
             }
             catch (Exception exception) when (exception is InvalidDataException or ArgumentException or OverflowException)
             { result = result with { Status = "review", Message = exception.Message }; }
-            if (apply is not null) result = await apply(new(result, application)).ConfigureAwait(false);
+            if (result.CanImportCandidates)
+                result = result with { Message = result.Message +
+                    $" {result.CandidateCount:N0} candidato(s) do pacote disponível(is) para importar; manter na triagem não certifica a adequação técnica." };
+            if (apply is not null)
+                result = await apply(new(result, application, candidateLine,
+                    result.CanImportCandidates ? QuotationAiPackage.ReadItemReferencesAsync(archive, manifest, lineId, cancellationToken) : null,
+                    project.IsMedication, packageItem.Line, manifest.Items.Count)).ConfigureAwait(false);
             items.Add(new(result, null));
             progress?.Report(new(apply is null ? "validate" : "guide", items.Count, manifest.Items.Count, 0,
                 $"{(apply is null ? "Validando" : "Aplicando")} guia: {items.Count:N0}/{manifest.Items.Count:N0} itens."));
@@ -339,7 +467,7 @@ public sealed class QuotationAiGuideService(SqliteQuotationRepository repository
                 throw new InvalidDataException("O trecho técnico citado não consta do descritivo, complemento ou unidade da referência.");
             if (!QuotationAnalyzer.IsValidCnpj(reference.SupplierTaxId))
                 throw new InvalidDataException("CNPJ ausente ou inválido: não é possível validar a independência da fonte.");
-            var cnpj = string.Concat(reference.SupplierTaxId.Where(char.IsDigit));
+            var cnpj = string.Concat(reference.SupplierTaxId.Where(char.IsAsciiLetterOrDigit).Select(char.ToUpperInvariant));
             if (!origins.Add(cnpj + "|" + reference.ContractId))
                 throw new InvalidDataException("A cesta repete a mesma empresa na mesma contratação PNCP.");
             QuotationMoney.ValidateConversionFactor(selection.Factor);
@@ -357,15 +485,67 @@ public sealed class QuotationAiGuideService(SqliteQuotationRepository repository
                 checked(selection.Factor * selection.Denominator.Value) != selection.Numerator.Value))
                 throw new InvalidDataException("Informe numerador e denominador positivos que representem exatamente o fator. Conversões arredondadas exigem revisão.");
             var price = QuotationMoney.EffectivePrice(reference.UnitPrice, selection.Factor, selection.Divisor, decimalPlaces);
-            if (price <= 0 || line.MinimumUnitPrice is { } minimum && price < minimum ||
-                line.MaximumUnitPrice is { } maximum && price > maximum)
-                throw new InvalidDataException("Preço efetivo fora da faixa definida para a unidade solicitada.");
+            if (price <= 0)
+                throw new InvalidDataException("Preço efetivo deve ser positivo na unidade solicitada.");
             prices.Add(price);
             result.Add(new(reference, selection.Factor, selection.TechnicalReason, selection.ConversionReason, selection.Divisor));
         }
         if (QuotationMoney.EvaluatePriceGroup(prices, decimalPlaces).Any(value => !value))
             throw new InvalidDataException("A cesta não atende ao desvio máximo de 25% sobre a média truncada dos demais preços.");
         return result;
+    }
+
+    private static QuotationAiPriceRangeAdjustment? ResolveRangeAdjustment(QuotationLine original,
+        QuotationAiPriceRangeAdjustment? proposed, IReadOnlyList<decimal> selectedPrices, bool allowAutomaticExpansion)
+    {
+        if (proposed is null && allowAutomaticExpansion)
+        {
+            proposed = new(
+                original.MinimumUnitPrice is { } minimum ? Math.Min(minimum, selectedPrices.Min()) : null,
+                original.MaximumUnitPrice is { } maximum ? Math.Max(maximum, selectedPrices.Max()) : null,
+                "Ampliação autorizada na importação, limitada aos preços selecionados no guia e convertidos para a unidade solicitada.");
+        }
+        if (proposed is null) return null;
+        Required(proposed.Reason, "justificativa da ampliação da faixa");
+        ValidateRangeBound(proposed.MinimumUnitPrice);
+        ValidateRangeBound(proposed.MaximumUnitPrice);
+        if (proposed.MinimumUnitPrice is { } lower && proposed.MaximumUnitPrice is { } upper && lower > upper)
+            throw new InvalidDataException("A faixa proposta tem mínimo maior que o máximo.");
+        if ((original.MinimumUnitPrice is null && proposed.MinimumUnitPrice is not null) ||
+            (original.MaximumUnitPrice is null && proposed.MaximumUnitPrice is not null) ||
+            (original.MinimumUnitPrice is { } oldMinimum && proposed.MinimumUnitPrice is { } newMinimum && newMinimum > oldMinimum) ||
+            (original.MaximumUnitPrice is { } oldMaximum && proposed.MaximumUnitPrice is { } newMaximum && newMaximum < oldMaximum))
+            throw new InvalidDataException("A aba Faixas permite somente ampliar os limites originais; não restringir a faixa.");
+        if ((original.MinimumUnitPrice is not null && proposed.MinimumUnitPrice is null) ||
+            (original.MaximumUnitPrice is not null && proposed.MaximumUnitPrice is null))
+            throw new InvalidDataException("Informe limites numéricos para ampliar a faixa; não remova os limites originais.");
+        return SameRange(original, proposed.MinimumUnitPrice, proposed.MaximumUnitPrice) ? null : proposed;
+    }
+
+    private static bool SameRange(QuotationLine line, decimal? minimum, decimal? maximum) =>
+        line.MinimumUnitPrice == minimum && line.MaximumUnitPrice == maximum;
+
+    private static decimal? ParseRangeBound(string text)
+    {
+        if (text.Length == 0) return null;
+        if (!decimal.TryParse(text.Replace(',', '.'), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var value))
+            throw new InvalidDataException("Limite de faixa inválido; use número sem separador de milhares.");
+        ValidateRangeBound(value);
+        return value;
+    }
+
+    private static void ValidateRangeBound(decimal? value)
+    {
+        if (value is { } bound && (bound < 0 || decimal.Truncate(bound * 10_000m) != bound * 10_000m))
+            throw new InvalidDataException("Os limites da faixa devem ser não negativos e ter no máximo quatro casas decimais.");
+    }
+
+    private static string DescribeRangeChange(QuotationLine original, QuotationAiPriceRangeAdjustment range)
+    {
+        static string Format(decimal? value, string empty) => value is { } amount
+            ? "R$ " + amount.ToString("0.####", CultureInfo.GetCultureInfo("pt-BR")) : empty;
+        return $"Faixa original: {Format(original.MinimumUnitPrice, "sem mínimo")} a {Format(original.MaximumUnitPrice, "sem máximo")}; " +
+               $"faixa ampliada: {Format(range.MinimumUnitPrice, "sem mínimo")} a {Format(range.MaximumUnitPrice, "sem máximo")}. {range.Reason}";
     }
 
     private static Guid BasketId(Guid packageId, Guid lineId, QuotationAggregationMethod method,
@@ -405,6 +585,12 @@ public sealed class QuotationAiGuideService(SqliteQuotationRepository repository
                 "Para dividir o preço, preencha divisor, mantenha fator 1 e deixe numerador/denominador vazios. O divisor tem até seis casas e exige justificativa apoiada no texto.",
                 "Ex.: pacote de 12 para unidade: divisor 12, fator 1. O programa divide diretamente, sem arredondar 1/12 nem modificar o preço original.",
                 "Respeite faixa, mínimo de três e alvo informado. Não repetir CNPJ + contratação PNCP na mesma cesta.",
+                "Para ampliar a faixa, preencha a aba opcional Faixas: item_id, faixa_minima, faixa_maxima, justificativa. Preserve os hashes originais.",
+                "Em Faixas, limite em branco conserva o original. Use até quatro casas decimais, sem separador de milhares. Só é permitido ampliar, com motivo técnico; não reduzir a faixa.",
+                "A ampliação será mostrada na prévia e aplicada somente junto com uma cesta válida. Mantêm-se a similaridade, as unidades e o desvio máximo de 25%.",
+                "Todos os candidatos do pacote final serão importados, inclusive em itens insuficientes ou para revisão, para comparação e cestas alternativas no programa.",
+                "Descrições curtas ou abreviadas podem ter índice lexical baixo. Explique a equivalência em justificativa_tecnica e cite trecho_fonte literal, sem reescrever o descritivo original.",
+                "A revisão técnica do guia depende de autorização explícita na prévia. Ela não afasta divergência evidente de medida, unidades sem conversão documentada, faixa, dispersão ou origem.",
                 "A validação local não certifica equivalência semântica; divergências do filtro vigente ficam para revisão.",
                 "complete=false no pacote indica coleta parcial. Não declarar busca exaustiva." };
         for (var index = 0; index < text.Length; index++) instructions.Cell(index + 1, 1).Value = text[index];
@@ -422,6 +608,7 @@ public sealed class QuotationAiGuideService(SqliteQuotationRepository repository
             items.Cell(index + 2, 6).Value = item.Line.RequestedUnit;
         }
         SetHeaders(workbook.AddWorksheet(isTriage ? "Triagem" : "Selecoes"), isTriage ? TriageHeaders : SelectionHeaders);
+        if (!isTriage) SetHeaders(workbook.AddWorksheet("Faixas"), RangeHeaders);
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
@@ -494,9 +681,14 @@ public sealed class QuotationAiGuideService(SqliteQuotationRepository repository
             FileOptions.Asynchronous | FileOptions.SequentialScan);
         return Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false));
     }
-    private static async Task<string> ArchiveGuideAsync(string packagePath, string guidePath, CancellationToken cancellationToken)
+    private static async Task<string> ArchiveGuideAsync(string packagePath, string guidePath, CancellationToken cancellationToken,
+        string? expectedGuideSha256)
     {
-        var hash = await HashFileAsync(guidePath, cancellationToken).ConfigureAwait(false);
+        await using var input = new FileStream(guidePath, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var hash = Convert.ToHexString(await SHA256.HashDataAsync(input, cancellationToken).ConfigureAwait(false));
+        ValidateExpectedGuideHash(hash, expectedGuideSha256);
+        input.Position = 0;
         var directory = Path.GetFullPath(packagePath) + ".guias";
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, hash + ".xlsx");
@@ -509,7 +701,6 @@ public sealed class QuotationAiGuideService(SqliteQuotationRepository repository
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            await using (var input = new FileStream(guidePath, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous))
             await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous))
             {
                 await input.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
@@ -523,9 +714,26 @@ public sealed class QuotationAiGuideService(SqliteQuotationRepository repository
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
+    private static void ValidateExpectedGuideHash(string actual, string? expected)
+    {
+        if (!string.IsNullOrWhiteSpace(expected) && !actual.Equals(expected, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("O guia foi alterado depois da prévia. Gere uma nova prévia antes de aplicar; nenhuma alteração foi importada.");
+    }
     private sealed record GuideItem(Guid LineId, string SpecificationHash, string Status, string Method, string Reason, string FinalUnit);
     private sealed record GuideSelection(string ReferenceId, int Order, decimal Factor, string TechnicalReason, string ConversionReason, string SourceExcerpt,
         decimal? Numerator, decimal? Denominator, decimal? Divisor);
-    private sealed record ValidatedItem(QuotationAiGuideItemResult Result, QuotationAiBasketApplication? Application);
+    private sealed record ValidatedItem(QuotationAiGuideItemResult Result, QuotationAiBasketApplication? Application,
+        QuotationLine? CandidateLine = null, IAsyncEnumerable<QuotationReference>? Candidates = null,
+        bool IsMedication = false, QuotationLine? PackageLine = null, int TotalItems = 0);
     private sealed record GuideValidation(QuotationAiPackageManifest Manifest, IReadOnlyList<ValidatedItem> Items);
+
+    private sealed class CandidateProgress(IProgress<QuotationAiProgress> target, int completed, int total, string name)
+        : IProgress<QuotationAiProgress>
+    {
+        public void Report(QuotationAiProgress value) => target.Report(value with
+        {
+            CompletedItems = completed, TotalItems = total,
+            Message = $"Item {completed + 1:N0}/{total:N0} — {name}: {value.Message}"
+        });
+    }
 }

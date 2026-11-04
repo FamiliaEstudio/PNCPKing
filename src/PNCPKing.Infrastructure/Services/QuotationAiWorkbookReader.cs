@@ -65,6 +65,9 @@ internal sealed class QuotationAiWorkbookReader : IDisposable
         catch { Dispose(); throw; }
     }
 
+    public bool HasWorksheet(string sheetName) =>
+        _document.WorkbookPart!.Workbook.Sheets?.Elements<Sheet>().Any(sheet => sheet.Name?.Value == sheetName) == true;
+
     public IEnumerable<string[]> ReadRows(string sheetName, CancellationToken cancellationToken)
     {
         var workbook = _document.WorkbookPart!;

@@ -1,4 +1,6 @@
 using System.Runtime.CompilerServices;
+using System.IO.Compression;
+using System.Security.Cryptography;
 using ClosedXML.Excel;
 using Microsoft.Data.Sqlite;
 using PNCPKing.Core.Models;
@@ -78,7 +80,8 @@ public sealed class QuotationAiGuideTests
         Assert.Equal(0, preview.ReadyCount);
         Assert.Contains("mesma empresa", preview.Items.Single().Message);
         Assert.Equal(0, (await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath)).AppliedCount);
-        Assert.Empty(await fixture.Repository.GetReferencesAsync(fixture.Line.Id));
+        Assert.Equal(3, (await fixture.Repository.GetReferencesAsync(fixture.Line.Id)).Count);
+        Assert.Empty(await fixture.Repository.GetManualBasketsAsync(fixture.Line.Id));
     }
 
     [Fact]
@@ -101,8 +104,12 @@ public sealed class QuotationAiGuideTests
         Assert.Equal(0, (await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath)).ReadyCount);
         fixture.CompleteGuide();
         await fixture.Repository.UpdateLineRequestedDetailsAsync(fixture.Line.Id, 101, "unidade");
-        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath);
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath, null,
+            allowPriceRangeExpansion: true, allowTechnicalReview: true);
         Assert.Contains("alterado", preview.Items.Single().Message);
+        Assert.Equal(0, preview.ImportableCount);
+        await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath,
+            allowPriceRangeExpansion: true, allowTechnicalReview: true);
         Assert.Empty(await fixture.Repository.GetReferencesAsync(fixture.Line.Id));
     }
 
@@ -227,7 +234,7 @@ public sealed class QuotationAiGuideTests
     }
 
     [Fact]
-    public async Task DatabaseFailureAfterReferenceInsertion_RollsBackWholeItem()
+    public async Task DatabaseFailureAfterCandidateImport_PreservesCandidatesWithoutPartialBasket()
     {
         await using var fixture = await Fixture.CreateAsync();
         fixture.CompleteGuide();
@@ -239,9 +246,9 @@ public sealed class QuotationAiGuideTests
             await command.ExecuteNonQueryAsync();
         }
         await Assert.ThrowsAsync<SqliteException>(() => fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath));
-        Assert.Empty(await fixture.Repository.GetReferencesAsync(fixture.Line.Id));
+        Assert.Equal(3, (await fixture.Repository.GetReferencesAsync(fixture.Line.Id)).Count);
         Assert.Empty(await fixture.Repository.GetManualBasketsAsync(fixture.Line.Id));
-        Assert.Equal(0, (await fixture.Repository.GetLineAsync(fixture.Line.ProjectId, fixture.Line.Id))!.SampleVersion);
+        Assert.Equal(1, (await fixture.Repository.GetLineAsync(fixture.Line.ProjectId, fixture.Line.Id))!.SampleVersion);
         await using (var command = connection.CreateCommand())
         { command.CommandText = "DROP TRIGGER fail_ai_basket;"; await command.ExecuteNonQueryAsync(); }
         Assert.Equal(1, (await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath)).AppliedCount);
@@ -266,6 +273,319 @@ public sealed class QuotationAiGuideTests
         Assert.Equal(6, (await fixture.Repository.GetReferencesAsync(fixture.Line.Id)).Count);
     }
 
+    [Fact]
+    public async Task AllRetainedCandidates_AreImported_AndCanFeedAlternativeBaskets()
+    {
+        await using var fixture = await Fixture.CreateAsync(referenceCount: 8);
+        fixture.CompleteGuide();
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath);
+        Assert.Equal(8, preview.Items.Single().CandidateCount);
+        Assert.Equal(1, preview.ImportableCount);
+        Assert.Empty(await fixture.Repository.GetReferencesAsync(fixture.Line.Id));
+        var applied = await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath);
+        Assert.Equal(8, applied.ImportedCandidateCount);
+        var references = await fixture.Repository.GetReferencesAsync(fixture.Line.Id);
+        var manual = Assert.Single(await fixture.Repository.GetManualBasketsAsync(fixture.Line.Id));
+        Assert.Equal(3, manual.ReferenceIds.Count);
+        Assert.Equal(fixture.References.Select(value => value.Id).Order(), references.Select(value => value.Id).Order());
+        var current = (await fixture.Repository.GetLineAsync(fixture.Line.ProjectId, fixture.Line.Id))!;
+        var analysis = new PNCPKing.Core.Quotations.QuotationAnalyzer().Analyze(current, references, [manual]);
+        Assert.Contains(analysis.Baskets, value => value.IsCheapest);
+        Assert.Contains(analysis.Baskets, value => value.IsMostExpensive);
+        Assert.True(analysis.Baskets.Count > 2);
+        var repeated = await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath);
+        Assert.Equal(0, repeated.ImportedCandidateCount);
+        Assert.Equal(1, repeated.UnchangedCount);
+    }
+
+    [Fact]
+    public async Task InsufficientGuide_StillImportsCandidates_WithoutInventingGuidedBasket()
+    {
+        await using var fixture = await Fixture.CreateAsync(referenceCount: 8);
+        using (var workbook = new XLWorkbook(fixture.Templates.GuidePath))
+        {
+            workbook.Worksheet("Itens").Cell(2, 3).Value = "insuficiente";
+            workbook.Worksheet("Itens").Cell(2, 5).Value = "A equivalência técnica exige revisão humana.";
+            workbook.Save();
+        }
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath);
+        Assert.Equal(0, preview.ReadyCount);
+        Assert.Equal(1, preview.ImportableCount);
+        var applied = await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath);
+        Assert.Equal(8, applied.ImportedCandidateCount);
+        Assert.Equal(1, applied.PendingCount);
+        Assert.Empty(await fixture.Repository.GetManualBasketsAsync(fixture.Line.Id));
+    }
+
+    [Fact]
+    public async Task LegacyGuide_CanExpandOnlyToSelectedPrices_WithoutChangingSourceHashes()
+    {
+        await using var fixture = await Fixture.CreateAsync(minimum: 0.5m, maximum: 1m);
+        fixture.CompleteGuide();
+        using (var workbook = new XLWorkbook(fixture.Templates.GuidePath))
+        { workbook.Worksheet("Faixas").Delete(); workbook.Save(); }
+        var sourceBytes = await File.ReadAllBytesAsync(fixture.PackagePath);
+        Assert.Equal(0, (await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath)).ReadyCount);
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath, null,
+            allowPriceRangeExpansion: true);
+        Assert.Equal(1, preview.ReadyCount);
+        var adjustment = Assert.IsType<QuotationAiPriceRangeAdjustment>(preview.Items.Single().PriceRangeAdjustment);
+        Assert.Equal(0.5m, adjustment.MinimumUnitPrice);
+        Assert.Equal(1.03m, adjustment.MaximumUnitPrice);
+        Assert.Contains("Faixa original", preview.Items.Single().Message);
+        Assert.Equal(1, (await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath,
+            allowPriceRangeExpansion: true)).AppliedCount);
+        var current = (await fixture.Repository.GetLineAsync(fixture.Line.ProjectId, fixture.Line.Id))!;
+        Assert.Equal(1.03m, current.MaximumUnitPrice);
+        Assert.Equal(sourceBytes, await File.ReadAllBytesAsync(fixture.PackagePath));
+        using (var workbook = new XLWorkbook(fixture.Templates.GuidePath))
+            Assert.Equal(fixture.Manifest.Items.Single().SpecificationHash, workbook.Worksheet("Itens").Cell(2, 2).GetString());
+        Assert.Equal(1, (await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath,
+            allowPriceRangeExpansion: true)).UnchangedCount);
+    }
+
+    [Fact]
+    public async Task ExplicitRangeProposal_IsAppliedAtomicallyWithValidBasket_AndKeepsBlankOriginalBound()
+    {
+        await using var fixture = await Fixture.CreateAsync(minimum: 0.5m, maximum: 1m);
+        fixture.CompleteGuide();
+        AddRange(fixture, null, 1.1m);
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath);
+        Assert.Equal(1, preview.ReadyCount);
+        Assert.Equal(0.5m, preview.Items.Single().PriceRangeAdjustment!.MinimumUnitPrice);
+        Assert.Equal(1m, (await fixture.Repository.GetLineAsync(fixture.Line.ProjectId, fixture.Line.Id))!.MaximumUnitPrice);
+        Assert.Equal(1, (await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath)).AppliedCount);
+        Assert.Equal(1.1m, (await fixture.Repository.GetLineAsync(fixture.Line.ProjectId, fixture.Line.Id))!.MaximumUnitPrice);
+        Assert.Equal(1, (await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath)).UnchangedCount);
+    }
+
+    [Fact]
+    public async Task ExplicitRangeCannotNarrowTheOriginal_AndDoesNotChangeBoundsWithoutValidBasket()
+    {
+        await using var fixture = await Fixture.CreateAsync(minimum: 0.5m, maximum: 1m);
+        fixture.CompleteGuide();
+        AddRange(fixture, 0.7m, 1.1m);
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath);
+        Assert.Equal(0, preview.ReadyCount);
+        Assert.Contains("somente ampliar", preview.Items.Single().Message);
+        var applied = await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath);
+        Assert.Equal(0, applied.AppliedCount);
+        Assert.Equal(3, applied.ImportedCandidateCount);
+        var current = (await fixture.Repository.GetLineAsync(fixture.Line.ProjectId, fixture.Line.Id))!;
+        Assert.Equal(0.5m, current.MinimumUnitPrice);
+        Assert.Equal(1m, current.MaximumUnitPrice);
+    }
+
+    [Fact]
+    public async Task RangeExpansion_DoesNotBypassDispersionRule()
+    {
+        await using var fixture = await Fixture.CreateAsync(minimum: 0.5m, maximum: 1m, outlier: true);
+        fixture.CompleteGuide();
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath, null,
+            allowPriceRangeExpansion: true);
+        Assert.Equal(0, preview.ReadyCount);
+        Assert.Contains("25%", preview.Items.Single().Message);
+        var applied = await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath,
+            allowPriceRangeExpansion: true);
+        Assert.Equal(0, applied.AppliedCount);
+        Assert.Equal(1m, (await fixture.Repository.GetLineAsync(fixture.Line.ProjectId, fixture.Line.Id))!.MaximumUnitPrice);
+    }
+
+    [Fact]
+    public async Task ConcurrentManualRangeChange_IsNotOverwrittenByAutomaticExpansion()
+    {
+        await using var fixture = await Fixture.CreateAsync(minimum: 0.5m, maximum: 1m);
+        fixture.CompleteGuide();
+        await fixture.Repository.SaveSampleAsync(fixture.Line.ProjectId, fixture.Line.Id,
+            new(fixture.Line.Description, fixture.Line.RequestedQuantity, fixture.Line.RequestedUnit, 0.4m, 1.2m), []);
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath, null,
+            allowPriceRangeExpansion: true);
+        Assert.Equal(0, preview.ImportableCount);
+        Assert.Equal(0, preview.ReadyCount);
+        await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath, allowPriceRangeExpansion: true);
+        var current = (await fixture.Repository.GetLineAsync(fixture.Line.ProjectId, fixture.Line.Id))!;
+        Assert.Equal(0.4m, current.MinimumUnitPrice);
+        Assert.Equal(1.2m, current.MaximumUnitPrice);
+        Assert.Empty(await fixture.Repository.GetReferencesAsync(fixture.Line.Id));
+    }
+
+    [Fact]
+    public async Task ConvertedGuide_UsesEffectivePriceRange_AndPreservesSourcePrices()
+    {
+        await using var fixture = await Fixture.CreateAsync(packagingUnits: 12, minimum: 9m, maximum: 11m);
+        fixture.CompleteGuide();
+        using (var workbook = new XLWorkbook(fixture.Templates.GuidePath))
+        {
+            var selections = workbook.Worksheet("Selecoes");
+            for (var index = 0; index < 3; index++)
+            {
+                selections.Cell(index + 2, 6).Value = "Pacote com 12 unidades; divisão exata pela quantidade.";
+                selections.Cell(index + 2, 7).Value = fixture.References[index].ItemAdditionalInformation;
+                selections.Cell(index + 2, 10).Value = 12;
+            }
+            workbook.Save();
+        }
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath);
+        Assert.Equal(1, preview.ReadyCount);
+        Assert.Null(preview.Items.Single().PriceRangeAdjustment);
+        Assert.Equal(1, (await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath)).AppliedCount);
+        var references = await fixture.Repository.GetReferencesAsync(fixture.Line.Id);
+        Assert.All(references, value => Assert.True(value.UnitPrice >= 120m));
+        Assert.Equal(11m, (await fixture.Repository.GetLineAsync(fixture.Line.ProjectId, fixture.Line.Id))!.MaximumUnitPrice);
+    }
+
+    [Fact]
+    public async Task CorruptCandidatePart_DoesNotImportEvenForPendingItem()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        using (var archive = ZipFile.Open(fixture.PackagePath, ZipArchiveMode.Update))
+        {
+            var entry = archive.GetEntry(fixture.Manifest.Parts[0].Path)!;
+            using var input = entry.Open();
+            input.Position = input.Length - 2;
+            input.WriteByte((byte)'x');
+        }
+        var templates = await fixture.Service.CreateTemplatesAsync(fixture.PackagePath, fixture.Database.Directory);
+        using (var workbook = new XLWorkbook(templates.GuidePath))
+        { workbook.Worksheet("Itens").Cell(2, 5).Value = "Análise pendente."; workbook.Save(); }
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, templates.GuidePath);
+        Assert.Equal(0, preview.ImportableCount);
+        await fixture.Service.ApplyGuideAsync(fixture.PackagePath, templates.GuidePath);
+        Assert.Empty(await fixture.Repository.GetReferencesAsync(fixture.Line.Id));
+    }
+
+    [Fact]
+    public async Task RangeWithUnsupportedPrecision_IsRejectedBeforeImport()
+    {
+        await using var fixture = await Fixture.CreateAsync(minimum: 0.5m, maximum: 1m);
+        fixture.CompleteGuide();
+        AddRange(fixture, null, 1.10001m);
+        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath));
+        Assert.Empty(await fixture.Repository.GetReferencesAsync(fixture.Line.Id));
+    }
+
+    [Fact]
+    public async Task ShortTechnicalDescription_RequiresExplicitReview_AndKeepsAutomaticFilter()
+    {
+        await using var fixture = await Fixture.CreateAsync(shortDescription: true);
+        fixture.CompleteGuide();
+        Assert.Equal(0, (await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath)).ReadyCount);
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath, null,
+            allowTechnicalReview: true);
+        Assert.Equal(1, preview.ReadyCount);
+        Assert.Equal(3, preview.Items.Single().TechnicalReviewCount);
+        Assert.Contains("baixo índice lexical", preview.Items.Single().Message);
+        Assert.Equal(1, (await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath,
+            allowTechnicalReview: true)).AppliedCount);
+        var references = await fixture.Repository.GetReferencesAsync(fixture.Line.Id);
+        Assert.All(references, reference => Assert.NotNull(reference.TechnicalReview));
+        var current = (await fixture.Repository.GetLineAsync(fixture.Line.ProjectId, fixture.Line.Id))!;
+        var basket = Assert.Single(await fixture.Repository.GetManualBasketsAsync(fixture.Line.Id));
+        var analysis = new PNCPKing.Core.Quotations.QuotationAnalyzer().Analyze(current, references, [basket]);
+        Assert.True(analysis.Baskets.Single(value => value.ManualBasketId == basket.Id).IsValid);
+        Assert.All(analysis.References, reference => Assert.Equal(QuotationReferenceState.Rejected, reference.State));
+        Assert.Equal(1, (await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath,
+            allowTechnicalReview: true)).UnchangedCount);
+    }
+
+    [Fact]
+    public async Task TechnicalReview_DoesNotOverrideClearlyDifferentMeasure()
+    {
+        await using var fixture = await Fixture.CreateAsync(shortDescription: true, conflictingMeasure: true);
+        fixture.CompleteGuide();
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath, null,
+            allowTechnicalReview: true);
+        Assert.Equal(0, preview.ReadyCount);
+        Assert.Equal(0, (await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath,
+            allowTechnicalReview: true)).AppliedCount);
+        Assert.Empty(await fixture.Repository.GetManualBasketsAsync(fixture.Line.Id));
+    }
+
+    [Fact]
+    public async Task TechnicalReview_StillRequiresValidPriceRangeAndLiteralEvidence()
+    {
+        await using var fixture = await Fixture.CreateAsync(shortDescription: true, minimum: 0.5m, maximum: 1m);
+        fixture.CompleteGuide();
+        Assert.Equal(0, (await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath, null,
+            allowTechnicalReview: true)).ReadyCount);
+        using (var workbook = new XLWorkbook(fixture.Templates.GuidePath))
+        { workbook.Worksheet("Selecoes").Cell(2, 7).Value = "Texto inventado pela IA"; workbook.Save(); }
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath, null,
+            allowPriceRangeExpansion: true, allowTechnicalReview: true);
+        Assert.Equal(0, preview.ReadyCount);
+        Assert.Contains("trecho", preview.Items.Single().Message);
+    }
+
+    [Theory]
+    [InlineData("Faixas")]
+    [InlineData("Selecoes")]
+    public async Task GuideEditedAfterPreview_CannotApplyUnshownSelectionsOrRange(string editedSheet)
+    {
+        await using var fixture = await Fixture.CreateAsync(referenceCount: 8, minimum: 0.5m, maximum: 1m);
+        fixture.CompleteGuide();
+        AddRange(fixture, null, 1.1m);
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath);
+        Assert.Equal(1, preview.ReadyCount);
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(fixture.Templates.GuidePath))),
+            preview.GuideSha256);
+        using (var workbook = new XLWorkbook(fixture.Templates.GuidePath))
+        {
+            if (editedSheet == "Faixas") workbook.Worksheet("Faixas").Cell(2, 3).Value = 2m;
+            else workbook.Worksheet("Selecoes").Cell(2, 2).Value = fixture.References[3].Id;
+            workbook.Save();
+        }
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() => fixture.Service.ApplyGuideAsync(
+            fixture.PackagePath, fixture.Templates.GuidePath, expectedGuideSha256: preview.GuideSha256));
+        Assert.Contains("depois da prévia", error.Message);
+        Assert.Empty(await fixture.Repository.GetReferencesAsync(fixture.Line.Id));
+        Assert.Empty(await fixture.Repository.GetManualBasketsAsync(fixture.Line.Id));
+        Assert.Equal(1m, (await fixture.Repository.GetLineAsync(fixture.Line.ProjectId, fixture.Line.Id))!.MaximumUnitPrice);
+        var refreshed = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath);
+        Assert.NotEqual(preview.GuideSha256, refreshed.GuideSha256);
+        Assert.Equal(1, refreshed.ReadyCount);
+        Assert.Equal(1, (await fixture.Service.ApplyGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath,
+            expectedGuideSha256: refreshed.GuideSha256)).AppliedCount);
+    }
+
+    [Fact]
+    public async Task GuideBeingWritten_CannotBeArchivedOrApplied()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        fixture.CompleteGuide();
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath);
+        await using (var writer = new FileStream(fixture.Templates.GuidePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            await Assert.ThrowsAnyAsync<IOException>(() => fixture.Service.ApplyGuideAsync(fixture.PackagePath,
+                fixture.Templates.GuidePath, expectedGuideSha256: preview.GuideSha256));
+        Assert.Empty(await fixture.Repository.GetReferencesAsync(fixture.Line.Id));
+        Assert.Empty(await fixture.Repository.GetManualBasketsAsync(fixture.Line.Id));
+    }
+
+    [Fact]
+    public async Task ArchivedGuideName_DoesNotSubstituteForItsContentHash()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        fixture.CompleteGuide();
+        var preview = await fixture.Service.PreviewGuideAsync(fixture.PackagePath, fixture.Templates.GuidePath);
+        var directory = fixture.PackagePath + ".guias";
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(Path.Combine(directory, preview.GuideSha256 + ".xlsx"), "conteúdo alterado");
+        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.Service.ApplyGuideAsync(fixture.PackagePath,
+            fixture.Templates.GuidePath, expectedGuideSha256: preview.GuideSha256));
+        Assert.Empty(await fixture.Repository.GetReferencesAsync(fixture.Line.Id));
+        Assert.Empty(await fixture.Repository.GetManualBasketsAsync(fixture.Line.Id));
+    }
+
+    private static void AddRange(Fixture fixture, decimal? minimum, decimal? maximum)
+    {
+        using var workbook = new XLWorkbook(fixture.Templates.GuidePath);
+        var ranges = workbook.Worksheet("Faixas");
+        ranges.Cell(2, 1).Value = fixture.Line.Id.ToString("N");
+        if (minimum is { } min) ranges.Cell(2, 2).Value = min;
+        if (maximum is { } max) ranges.Cell(2, 3).Value = max;
+        ranges.Cell(2, 4).Value = "Os preços mais próximos tecnicamente ultrapassam a estimativa inicial.";
+        workbook.Save();
+    }
+
     private static void AddTriage(IXLWorksheet sheet, int row, Guid item, string reference, string decision)
     {
         sheet.Cell(row, 1).Value = item.ToString("N"); sheet.Cell(row, 2).Value = reference;
@@ -283,20 +603,25 @@ public sealed class QuotationAiGuideTests
         public required string PackagePath { get; init; }
         public required QuotationAiTemplatePaths Templates { get; init; }
 
-        public static async Task<Fixture> CreateAsync(bool sameContract = false, bool missingTaxId = false, int? packagingUnits = null)
+        public static async Task<Fixture> CreateAsync(bool sameContract = false, bool missingTaxId = false,
+            int? packagingUnits = null, int referenceCount = 3, decimal? minimum = null, decimal? maximum = null,
+            bool outlier = false, bool shortDescription = false, bool conflictingMeasure = false)
         {
             var database = await TestDatabase.CreateAsync();
             var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
             var project = await repository.CreateProjectAsync("IA externa");
             var line = await repository.CreateLineAsync(project.Id,
-                new("Copo descartável de polipropileno 180 ml", 100, "unidade", null, null));
-            var references = Enumerable.Range(1, 3).Select(index => new QuotationReference
+                new(shortDescription
+                    ? "Copo descartável de polipropileno 180 ml, transparente, atóxico, resistente, reforçado, liso, íntegro, uniforme, limpo, inodoro, apropriado para bebidas e acondicionado em embalagem protegida"
+                    : "Copo descartável de polipropileno 180 ml", 100, "unidade", minimum, maximum));
+            var references = Enumerable.Range(1, referenceCount).Select(index => new QuotationReference
             {
                 Id = $"{(sameContract ? "contrato" : "contrato" + index)}|{index}|1", LineId = line.Id,
                 ContractId = sameContract ? "contrato" : "contrato" + index, ItemNumber = index, ResultSequence = 1,
-                ItemDescription = line.Description, ItemUnit = packagingUnits is null ? "unidade" : "pacote",
+                ItemDescription = shortDescription ? (conflictingMeasure ? "Copo PP 50 ml" : "Copo PP 180 ml") : line.Description,
+                ItemUnit = packagingUnits is null ? "unidade" : "pacote",
                 ItemAdditionalInformation = packagingUnits is null ? string.Empty : $"Pacote com {packagingUnits} unidades.",
-                UnitPrice = packagingUnits is null ? 1m + index / 100m : 120m + index - 1,
+                UnitPrice = outlier && index == 3 ? 100m : packagingUnits is null ? 1m + index / 100m : 120m + index - 1,
                 SupplierName = "Fornecedor de teste", SupplierTaxId = missingTaxId && index == 1 ? "" : "11222333000181",
                 HomologatedQuantity = 100, ResultDate = DateOnly.FromDateTime(DateTime.Today), Municipality = "Ribeirão Preto", Uf = "SP"
             }).ToArray();
@@ -323,7 +648,7 @@ public sealed class QuotationAiGuideTests
             items.Cell(2, 3).Value = "pronto";
             items.Cell(2, 5).Value = "Os candidatos correspondem ao material, à capacidade e à unidade solicitados.";
             var selections = workbook.Worksheet("Selecoes");
-            for (var index = 0; index < References.Length; index++)
+            for (var index = 0; index < Math.Min(3, References.Length); index++)
             {
                 var row = index + 2;
                 selections.Cell(row, 1).Value = Line.Id.ToString("N");

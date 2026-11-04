@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
 using PNCPKing.Core.Search;
@@ -58,6 +59,11 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     private bool _disposed;
     private DateTimeOffset _lastRefresh = DateTimeOffset.MinValue;
     private CancellationTokenSource? _searchCancellation;
+    private CancellationTokenSource? _analysisCancellation;
+    private TaskCompletionSource? _analysisCompletion;
+    private bool _isAnalysisBusy;
+    private double _analysisProgress;
+    private string _analysisStatus = "As cestas serão calculadas ao abrir o item.";
     private TaskCompletionSource? _searchCompletion;
     private CancellationTokenSource? _summaryCancellation;
     private int _searchGeneration;
@@ -144,9 +150,9 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     public IReadOnlyList<SearchGeoFilter> GeoFilters { get; }
     public IReadOnlyList<SearchSortOption> SortOptions { get; }
     public IReadOnlyList<DateRangeOption> DateRanges { get; }
-    public ObservableCollection<QuotationBasketDisplay> Baskets { get; } = [];
-    public ObservableCollection<QuotationReferenceDisplay> References { get; } = [];
-    public ObservableCollection<QuotationPriceDisplayRow> VisibleReferences { get; } = [];
+    public ObservableCollection<QuotationBasketDisplay> Baskets { get; private set; } = [];
+    public ObservableCollection<QuotationReferenceDisplay> References { get; private set; } = [];
+    public ObservableCollection<QuotationPriceDisplayRow> VisibleReferences { get; private set; } = [];
     public ObservableCollection<ItemSearchDisplayRow> SearchRows { get; } = [];
     public ObservableCollection<InternetPriceDraft> Drafts { get; } = [];
     public ObservableCollection<DocumentThumbnailDisplay> DocumentThumbnails { get; } = [];
@@ -508,6 +514,28 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
+    public bool IsAnalysisBusy
+    {
+        get => _isAnalysisBusy;
+        private set => SetProperty(ref _isAnalysisBusy, value);
+    }
+    public double AnalysisProgress
+    {
+        get => _analysisProgress;
+        private set => SetProperty(ref _analysisProgress, value);
+    }
+    public string AnalysisStatus
+    {
+        get => _analysisStatus;
+        private set => SetProperty(ref _analysisStatus, value);
+    }
+
+    public void StopCalculation()
+    {
+        _refreshPending = false;
+        _analysisCancellation?.Cancel();
+    }
+
     private bool _isInteracting;
     public bool IsInteracting
     {
@@ -538,6 +566,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
 
     public async Task LoadAsync(string? preferredBasketKey = null)
     {
+        if (_disposed) return;
         if (IsBusy)
         {
             _refreshPending = true;
@@ -545,11 +574,25 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         }
 
         IsBusy = true;
+        IsAnalysisBusy = true;
+        AnalysisProgress = 0;
+        AnalysisStatus = "Lendo os preços e preparando as cestas…";
+        using var cancellation = new CancellationTokenSource();
+        _analysisCancellation = cancellation;
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _analysisCompletion = completion;
+        using var progress = new LatestAnalysisProgress(value =>
+        {
+            AnalysisProgress = value.Percentage;
+            AnalysisStatus = value.Message;
+        });
         try
         {
             var previousBasketKey = preferredBasketKey ?? SelectedBasket?.Key;
-            var analysis = await _quotations.GetAnalysisAsync(_projectId, _lineId).ConfigureAwait(true)
+            var analysis = await _quotations.GetAnalysisAsync(_projectId, _lineId, cancellation.Token, progress).ConfigureAwait(true)
                            ?? throw new InvalidOperationException("O item da cotação não existe mais.");
+            cancellation.Token.ThrowIfCancellationRequested();
+            progress.Flush();
             Line = new QuotationLineDisplay(analysis);
             _main.RefreshQuotationWordItem(analysis);
             if (string.IsNullOrWhiteSpace(CatalogQuery))
@@ -557,23 +600,18 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                 CatalogQuery = analysis.Line.EffectiveDisplayName;
             }
             UpdateProgress(_main.LatestTimedQuotationProgress);
-            Baskets.Clear();
-            foreach (var basket in analysis.Baskets)
-            {
-                Baskets.Add(new QuotationBasketDisplay(
+            Baskets = new(analysis.Baskets.Select(basket => new QuotationBasketDisplay(
                     basket,
                     basket.Key == analysis.Line.SelectedBasketKey,
-                    analysis.PriceDecimalPlaces));
-            }
+                    analysis.PriceDecimalPlaces)));
+            OnPropertyChanged(nameof(Baskets));
 
-            References.Clear();
-            foreach (var reference in analysis.References
+            References = new(analysis.References
                          .OrderBy(reference => reference.Source)
                          .ThenByDescending(reference => reference.Adequacy.Total)
-                         .ThenBy(reference => reference.UnitPrice))
-            {
-                References.Add(new QuotationReferenceDisplay(reference));
-            }
+                         .ThenBy(reference => reference.UnitPrice)
+                         .Select(reference => new QuotationReferenceDisplay(reference)));
+            OnPropertyChanged(nameof(References));
 
             Drafts.Clear();
             foreach (var draft in await _internetPrices.GetDraftsAsync(_lineId).ConfigureAwait(true))
@@ -598,11 +636,18 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                 await LoadPromptSlotAsync(ItemSearchPromptSlot.Restrictive).ConfigureAwait(true);
             }
         }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            AnalysisStatus = "Cálculo interrompido. Os preços e as cestas salvas foram preservados; use Atualizar para recalcular.";
+        }
         finally
         {
+            _analysisCancellation = null;
+            IsAnalysisBusy = false;
             IsBusy = false;
+            completion.TrySetResult();
             _lastRefresh = DateTimeOffset.UtcNow;
-            if (_refreshPending)
+            if (_refreshPending && !_disposed)
             {
                 _refreshPending = false;
                 _ = LoadAsync();
@@ -943,6 +988,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     public async Task PrepareForRetentionAsync()
     {
         StopSearch();
+        StopCalculation();
         _summaryCancellation?.Cancel();
         if (_searchCompletion is { } completion)
             await completion.Task.ConfigureAwait(true);
@@ -963,6 +1009,21 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     {
         await _main.ConfirmManualBasketAfterSaveAsync(_projectId, _lineId, basketKey).ConfigureAwait(true);
         await LoadAsync(basketKey).ConfigureAwait(true);
+    }
+
+    public async Task CopySelectedPriceToBasketAsync(QuotationLineAnalysis analysis, string sourceKey,
+        string referenceId, string destinationKey)
+    {
+        if (analysis.Line.Id != _lineId || analysis.Line.ProjectId != _projectId)
+            throw new InvalidOperationException("O preço e as cestas devem pertencer ao item aberto.");
+        var id = await _quotations.CopyBasketReferenceAsync(analysis, sourceKey,
+            destinationKey, referenceId).ConfigureAwait(true);
+        // Copying does not adopt the destination or discard the original price.
+        await LoadAsync($"manual:{id:N}").ConfigureAwait(true);
+        SelectedPrice = VisibleReferences.FirstOrDefault(value => value.Id == referenceId);
+        AnalysisStatus = SelectedBasket?.Source.IsValid == true
+            ? "Preço copiado. A cesta de origem foi preservada; confira o destino antes de confirmar."
+            : "Preço copiado. A cesta de destino requer revisão: " + SelectedBasket?.ValidationMessage;
     }
 
     public async Task AddSearchRowsAsync(IReadOnlyList<ItemSearchDisplayRow> rows)
@@ -1369,6 +1430,9 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         _main.PropertyChanged -= OnMainPropertyChanged;
         _searchCancellation?.Cancel();
         _summaryCancellation?.Cancel();
+        _analysisCancellation?.Cancel();
+        if (_analysisCompletion is { } analysisCompletion)
+            await analysisCompletion.Task.ConfigureAwait(true);
         if (_workspace is not null && !string.IsNullOrWhiteSpace(SearchText))
         {
             try
@@ -1498,7 +1562,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         var validMarkedIds = marked.Where((_, index) => validity[index])
             .Select(entry => entry.Reference.Id).ToHashSet(StringComparer.Ordinal);
         var selectedId = SelectedPrice?.Id;
-        VisibleReferences.Clear();
+        var visibleRows = new List<QuotationPriceDisplayRow>();
         foreach (var reference in Line.Analysis.References)
         {
             var inBasket = selectedIds.Contains(reference.Id);
@@ -1515,16 +1579,18 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             {
                 selectedPrices.TryGetValue(reference.Id, out var price);
                 var row = new QuotationPriceDisplayRow(
-                    reference,
+                    price?.Reference ?? reference,
                     inBasket,
                     price?.ConversionFactor ?? 1m,
                     price?.EffectiveUnitPrice,
                     Line.Analysis.PriceDecimalPlaces,
                     price?.PriceDivisor);
                 row.IsValidInMarkedGroup = inBasket && validMarkedIds.Contains(row.Id);
-                VisibleReferences.Add(row);
+                visibleRows.Add(row);
             }
         }
+        VisibleReferences = new(visibleRows);
+        OnPropertyChanged(nameof(VisibleReferences));
 
         SelectedPrice = VisibleReferences.FirstOrDefault(row => row.Id == selectedId) ??
                         VisibleReferences.FirstOrDefault();
@@ -1856,6 +1922,33 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         image.EndInit();
         image.Freeze();
         return image;
+    }
+
+    private sealed class LatestAnalysisProgress : IProgress<QuotationAnalysisProgress>, IDisposable
+    {
+        private readonly Action<QuotationAnalysisProgress> _apply;
+        private readonly DispatcherTimer _timer;
+        private QuotationAnalysisProgress? _latest;
+
+        public LatestAnalysisProgress(Action<QuotationAnalysisProgress> apply)
+        {
+            _apply = apply;
+            _timer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(150) };
+            _timer.Tick += Tick;
+            _timer.Start();
+        }
+        public void Report(QuotationAnalysisProgress value) => Interlocked.Exchange(ref _latest, value);
+        private void Tick(object? sender, EventArgs args) => Flush();
+        public void Flush()
+        {
+            if (Interlocked.Exchange(ref _latest, null) is { } value) _apply(value);
+        }
+        public void Dispose()
+        {
+            _timer.Stop();
+            _timer.Tick -= Tick;
+            Interlocked.Exchange(ref _latest, null);
+        }
     }
 }
 

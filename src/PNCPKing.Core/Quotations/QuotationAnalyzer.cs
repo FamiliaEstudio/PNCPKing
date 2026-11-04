@@ -45,7 +45,9 @@ public sealed partial class QuotationAnalyzer
         QuotationLine line,
         IReadOnlyList<QuotationReference> collectedReferences,
         IReadOnlyList<QuotationManualBasket>? manualBaskets = null,
-        int priceDecimalPlaces = 2)
+        int priceDecimalPlaces = 2,
+        IProgress<QuotationAnalysisProgress>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(line);
         ArgumentNullException.ThrowIfNull(collectedReferences);
@@ -58,18 +60,35 @@ public sealed partial class QuotationAnalyzer
                 "O número de preços da cesta automática deve estar entre 3 e 10.");
         }
 
-        var exactlyUnique = collectedReferences
-            .GroupBy(reference => reference.Id, StringComparer.Ordinal)
-            .Select(group => group.First())
-            .ToArray();
-        var scored = exactlyUnique.Select(reference => ScoreReference(line, reference)).ToArray();
+        cancellationToken.ThrowIfCancellationRequested();
+        progress?.Report(new(0, "Conferindo os preços do item…"));
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        var unique = new List<QuotationReference>();
+        foreach (var reference in collectedReferences)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (ids.Add(reference.Id)) unique.Add(reference);
+        }
+        var exactlyUnique = unique.ToArray();
+        var scored = new QuotationReference[exactlyUnique.Length];
+        for (var index = 0; index < exactlyUnique.Length; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            scored[index] = ScoreReference(line, exactlyUnique[index]);
+            if (index % 25 == 0 || index == exactlyUnique.Length - 1)
+                progress?.Report(new(5 + 30d * (index + 1) / exactlyUnique.Length,
+                    $"Avaliando pesos: {index + 1:N0}/{exactlyUnique.Length:N0} preços."));
+        }
         var eligible = scored.Where(reference => reference.State == QuotationReferenceState.Eligible).ToArray();
         var pool = BuildBasketPool(
             eligible.Where(reference =>
                 reference.Source == QuotationReferenceSource.PncpIncisoII).ToArray());
-        var automaticBaskets = BuildAutomaticBaskets(pool, line.RequestedBasketSize, priceDecimalPlaces);
-        var persistedManualBaskets = BuildManualBaskets(scored, manualBaskets ?? [], priceDecimalPlaces);
+        var automaticBaskets = BuildAutomaticBaskets(pool, line.RequestedBasketSize, priceDecimalPlaces, progress, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        progress?.Report(new(96, "Conferindo as cestas manuais…"));
+        var persistedManualBaskets = BuildManualBaskets(line, scored, manualBaskets ?? [], priceDecimalPlaces, cancellationToken);
         var baskets = persistedManualBaskets.Concat(automaticBaskets).ToArray();
+        progress?.Report(new(100, $"{baskets.Length:N0} cestas calculadas; mais barata, mais cara e recomendada identificadas."));
 
         return new QuotationLineAnalysis(
             line,
@@ -85,7 +104,11 @@ public sealed partial class QuotationAnalyzer
         };
     }
 
-    public QuotationReference ScoreReference(QuotationLine line, QuotationReference reference)
+    public QuotationReference ScoreReference(QuotationLine line, QuotationReference reference) =>
+        ScoreReferenceCore(line, reference, null, false);
+
+    private QuotationReference ScoreReferenceCore(QuotationLine line, QuotationReference reference,
+        QuotationReference? manuallyReviewedSource, bool hasConversion)
     {
         if (reference.Source == QuotationReferenceSource.InternetIncisoIII)
         {
@@ -140,6 +163,20 @@ public sealed partial class QuotationAnalyzer
             line,
             reference,
             descriptionQuality);
+        var acceptedReview = false;
+        if (descriptionQuality < MinimumDescriptionScore && manuallyReviewedSource?.TechnicalReview is { } review &&
+            review.Matches(line, manuallyReviewedSource) &&
+            GetRejectionReason(line, reference, MinimumDescriptionScore) is null && !measureConflict &&
+            (!unitConflict || hasConversion &&
+                !ResolveUnit(line.RequestedUnit, line.Description).Conflict &&
+                !ResolveUnit(reference.ItemUnit, $"{reference.ItemDescription} {reference.ItemAdditionalInformation}").Conflict))
+        {
+            rejectionReason = null;
+            acceptedReview = true;
+            breakdown = breakdown with { Explanation = breakdown.Explanation +
+                " Revisão técnica da IA aceita para esta cesta; baixa correspondência textual. " + review.Justification +
+                " Trecho da fonte: “" + review.SourceExcerpt + "”." };
+        }
         var observations = new List<string>();
         if (!IsValidCnpj(normalizedTaxId))
         {
@@ -164,7 +201,7 @@ public sealed partial class QuotationAnalyzer
             SupplierTaxId = normalizedTaxId,
             Adequacy = breakdown,
             State = rejectionReason is null ? QuotationReferenceState.Eligible : QuotationReferenceState.Rejected,
-            StateReason = rejectionReason ?? eligibleReason,
+            StateReason = rejectionReason ?? (acceptedReview ? "Revisão técnica da IA aceita para esta cesta. " : "") + eligibleReason,
             DuplicateOfReferenceId = null
         };
     }
@@ -349,7 +386,9 @@ public sealed partial class QuotationAnalyzer
     private static IReadOnlyList<QuotationBasket> BuildAutomaticBaskets(
         IReadOnlyList<QuotationReference> pool,
         int requestedSize,
-        int priceDecimalPlaces)
+        int priceDecimalPlaces,
+        IProgress<QuotationAnalysisProgress>? progress,
+        CancellationToken cancellationToken)
     {
         if (pool.Count < 2)
         {
@@ -373,26 +412,33 @@ public sealed partial class QuotationAnalyzer
                 .ThenBy(reference => reference.Id, StringComparer.Ordinal).ToArray()
         };
 
+        var completed = 0;
+        var total = pool.Count * 4;
         foreach (var ranking in rankings)
         {
             for (var start = 0; start < ranking.Length; start++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 AddAutomaticCandidate(
                     candidates,
                     Enumerable.Range(0, basketSize)
                         .Select(offset => ranking[(start + offset) % ranking.Length]),
                     requestedSize,
                     priceDecimalPlaces);
+                progress?.Report(new(35 + 59d * ++completed / total,
+                    $"Calculando alternativas: {completed:N0}/{total:N0} combinações avaliadas."));
             }
         }
 
         foreach (var seed in pool.OrderBy(reference => reference.Id, StringComparer.Ordinal))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var selected = new List<QuotationReference> { seed };
             while (selected.Count < basketSize)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var next = pool
-                    .Where(candidate => selected.All(existing => existing.Id != candidate.Id))
+                    .Where(candidate => selected.All(existing => BasketSourceKey(existing) != BasketSourceKey(candidate)))
                     .Select(candidate => new
                     {
                         Reference = candidate,
@@ -410,12 +456,15 @@ public sealed partial class QuotationAnalyzer
                     .ThenBy(candidate => BasketPromptRank(candidate.Basket))
                     .ThenBy(candidate => PromptRank(candidate.Reference))
                     .ThenBy(candidate => candidate.Reference.Id, StringComparer.Ordinal)
-                    .First()
-                    .Reference;
+                    .FirstOrDefault()
+                    ?.Reference;
+                if (next is null) break;
                 selected.Add(next);
             }
 
             AddAutomaticCandidate(candidates, selected, requestedSize, priceDecimalPlaces);
+            progress?.Report(new(35 + 59d * ++completed / total,
+                $"Calculando alternativas: {completed:N0}/{total:N0} combinações avaliadas."));
         }
 
         var baskets = candidates.Values.ToArray();
@@ -482,7 +531,7 @@ public sealed partial class QuotationAnalyzer
         int priceDecimalPlaces)
     {
         var basket = CreateBasket(
-            references.ToArray(),
+            references.GroupBy(BasketSourceKey, StringComparer.Ordinal).Select(group => group.First()).ToArray(),
             QuotationBasketKind.Automatic,
             string.Empty,
             null,
@@ -493,19 +542,43 @@ public sealed partial class QuotationAnalyzer
         candidates.TryAdd(basket.Key, basket);
     }
 
-    private static IReadOnlyList<QuotationBasket> BuildManualBaskets(
+    private static string BasketSourceKey(QuotationReference reference)
+    {
+        var cnpj = NormalizeTaxId(reference.SupplierTaxId);
+        return reference.Source == QuotationReferenceSource.PncpIncisoII &&
+               cnpj.Length > 0 && !string.IsNullOrWhiteSpace(reference.ContractId)
+            ? $"pncp:{cnpj}|{reference.ContractId}"
+            : $"reference:{reference.Id}";
+    }
+
+    private IReadOnlyList<QuotationBasket> BuildManualBaskets(
+        QuotationLine line,
         IReadOnlyList<QuotationReference> scoredReferences,
         IReadOnlyList<QuotationManualBasket> manualBaskets,
-        int priceDecimalPlaces)
+        int priceDecimalPlaces,
+        CancellationToken cancellationToken)
     {
         var referencesById = scoredReferences.ToDictionary(reference => reference.Id, StringComparer.Ordinal);
         var result = new List<QuotationBasket>();
         foreach (var manual in manualBaskets.OrderBy(basket => basket.DisplayOrder).ThenBy(basket => basket.Name))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var references = manual.ReferenceIds
                 .Distinct(StringComparer.Ordinal)
                 .Where(referencesById.ContainsKey)
-                .Select(id => referencesById[id])
+                .Select(id =>
+                {
+                    var reference = referencesById[id];
+                    var factor = manual.GetConversionFactor(id);
+                    decimal? divisor = manual.PriceDivisors.TryGetValue(id, out var value) ? value : null;
+                    if (reference.UnitPrice <= 0) return reference;
+                    if (factor == 1m && divisor is null && reference.TechnicalReview is null) return reference;
+                    // Only this manual basket uses the converted unit. The source and
+                    // automatic pools keep the original price and their normal filters.
+                    var effective = QuotationMoney.EffectivePrice(reference.UnitPrice, factor, divisor, priceDecimalPlaces);
+                    return ScoreReferenceCore(line, reference with { UnitPrice = effective }, reference,
+                        factor != 1m || divisor is not null) with { UnitPrice = reference.UnitPrice };
+                })
                 .ToArray();
             if (references.Length == 0)
             {
@@ -581,6 +654,7 @@ public sealed partial class QuotationAnalyzer
         var adopted = aggregationMethod == QuotationAggregationMethod.Median ? median : average;
         var averageAdequacy = ordered.Average(reference => reference.Adequacy.Total);
         var minimumAdequacy = ordered.Min(reference => reference.Adequacy.Total);
+        var repeatedOrigin = ordered.Select(BasketSourceKey).Distinct(StringComparer.Ordinal).Count() != ordered.Length;
         var cohesion = Math.Clamp(100m * (1m - maximumDeviation / 25m), 0m, 100m);
         var visualState = kind == QuotationBasketKind.Automatic
             ? adopted > 0m && maximumDeviation <= 25m
@@ -589,7 +663,7 @@ public sealed partial class QuotationAnalyzer
             : ordered.Length < 3
                 ? QuotationBasketVisualState.ManualIncomplete
                 : ordered.All(reference => reference.State == QuotationReferenceState.Eligible) &&
-                  adopted > 0m && maximumDeviation <= 25m
+                  !repeatedOrigin && adopted > 0m && maximumDeviation <= 25m
                     ? QuotationBasketVisualState.ManualRegular
                     : QuotationBasketVisualState.ManualInvalid;
         var validationMessage = adopted <= 0m
@@ -604,7 +678,8 @@ public sealed partial class QuotationAnalyzer
             QuotationBasketVisualState.ManualIncomplete =>
                 $"Cesta manual incompleta: {ordered.Length:N0} de pelo menos 3 preços.",
             QuotationBasketVisualState.ManualInvalid =>
-                BuildManualValidationMessage(ordered, maximumDeviation),
+                repeatedOrigin ? "A cesta repete a mesma empresa na mesma contratação PNCP." :
+                    BuildManualValidationMessage(ordered, maximumDeviation),
             _ => "Cesta regular."
         };
         var ids = ordered.Select(reference => reference.Id).Order(StringComparer.Ordinal).ToArray();

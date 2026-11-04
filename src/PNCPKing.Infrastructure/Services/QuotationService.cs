@@ -336,6 +336,7 @@ public sealed class QuotationService(
         var manualBaskets = existingLine is null
             ? []
             : await repository.GetManualBasketsAsync(id, cancellationToken).ConfigureAwait(false);
+        PreserveTechnicalReviews(transientLine, existingReferences, union);
         var analysis = analyzer.Analyze(transientLine, union, manualBaskets, project.PriceDecimalPlaces);
         var savedLine = await repository.SaveSampleAsync(
                 projectId,
@@ -347,27 +348,38 @@ public sealed class QuotationService(
         return analyzer.Analyze(savedLine, analysis.References, manualBaskets, project.PriceDecimalPlaces);
     }
 
-    public async Task<IReadOnlyList<QuotationLineAnalysis>> GetAnalysesAsync(
+    public Task<IReadOnlyList<QuotationLineAnalysis>> GetAnalysesAsync(
         Guid projectId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IProgress<QuotationAiProgress>? progress = null,
+        bool compactReferences = false) => Task.Run(async () =>
     {
         var project = await GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
         var lines = await repository.GetLinesAsync(projectId, cancellationToken).ConfigureAwait(false);
         var analyses = new List<QuotationLineAnalysis>(lines.Count);
         foreach (var line in lines)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            progress?.Report(new("baskets", analyses.Count, lines.Count, 0,
+                $"Lendo preços do item {analyses.Count + 1:N0}/{lines.Count:N0}: {line.EffectiveDisplayName}."));
             var references = await repository.GetReferencesAsync(line.Id, cancellationToken).ConfigureAwait(false);
             var manualBaskets = await repository.GetManualBasketsAsync(line.Id, cancellationToken).ConfigureAwait(false);
-            analyses.Add(analyzer.Analyze(line, references, manualBaskets, project.PriceDecimalPlaces));
+            var itemProgress = progress is null ? null : new ProjectAnalysisProgress(progress,
+                analyses.Count, lines.Count, references.Count, line.EffectiveDisplayName);
+            var analysis = analyzer.Analyze(line, references, manualBaskets, project.PriceDecimalPlaces, itemProgress, cancellationToken);
+            analyses.Add(compactReferences ? analysis.ToCompactOverview() : analysis);
+            progress?.Report(new("baskets", analyses.Count, lines.Count, references.Count,
+                $"Cestas calculadas: {analyses.Count:N0}/{lines.Count:N0} itens."));
         }
 
         return QuotationOrganization.Order(project, analyses);
-    }
+    }, cancellationToken);
 
-    public async Task<QuotationLineAnalysis?> GetAnalysisAsync(
+    public Task<QuotationLineAnalysis?> GetAnalysisAsync(
         Guid projectId,
         Guid lineId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IProgress<QuotationAnalysisProgress>? progress = null) => Task.Run(async () =>
     {
         using var span = _performance.Begin("quotation-item", "analysis-load");
         var line = await repository.GetLineAsync(projectId, lineId, cancellationToken).ConfigureAwait(false);
@@ -380,9 +392,16 @@ public sealed class QuotationService(
         var references = await repository.GetReferencesAsync(lineId, cancellationToken).ConfigureAwait(false);
         var manualBaskets = await repository.GetManualBasketsAsync(lineId, cancellationToken).ConfigureAwait(false);
         var project = await GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
-        var analysis = analyzer.Analyze(line, references, manualBaskets, project.PriceDecimalPlaces);
+        var analysis = analyzer.Analyze(line, references, manualBaskets, project.PriceDecimalPlaces, progress, cancellationToken);
         span.Complete(references.Count + manualBaskets.Count + 1);
         return analysis;
+    }, cancellationToken);
+
+    private sealed class ProjectAnalysisProgress(IProgress<QuotationAiProgress> progress,
+        int completed, int total, int candidates, string name) : IProgress<QuotationAnalysisProgress>
+    {
+        public void Report(QuotationAnalysisProgress value) => progress.Report(new("baskets", completed, total,
+            candidates, $"Item {completed + 1:N0}/{total:N0} — {name}: {value.Percentage:N0}% · {value.Message}"));
     }
 
     public async Task ConfirmBasketAsync(
@@ -465,6 +484,7 @@ public sealed class QuotationService(
             SampleVersion = 1,
             SampledAt = DateTimeOffset.UtcNow
         };
+        PreserveTechnicalReviews(transientLine, existingReferences, union);
         var scored = analyzer.Analyze(transientLine, union, existingManualBaskets, project.PriceDecimalPlaces);
         var savedLine = await repository.SaveSampleAsync(
                 projectId,
@@ -592,6 +612,19 @@ public sealed class QuotationService(
         CancellationToken cancellationToken = default) =>
         repository.DeleteManualBasketAsync(basketId, cancellationToken);
 
+    public Task<Guid> CopyBasketReferenceAsync(QuotationLineAnalysis analysis, string sourceKey,
+        string destinationKey, string referenceId, CancellationToken cancellationToken = default) => Task.Run(async () =>
+    {
+        ArgumentNullException.ThrowIfNull(analysis);
+        var source = analysis.Baskets.SingleOrDefault(value => value.Key == sourceKey)
+            ?? throw new InvalidOperationException("A cesta de origem não pertence ao item.");
+        var destination = analysis.Baskets.SingleOrDefault(value => value.Key == destinationKey)
+            ?? throw new InvalidOperationException("A cesta de destino não pertence ao item.");
+        var manualBaskets = await repository.GetManualBasketsAsync(analysis.Line.Id, cancellationToken).ConfigureAwait(false);
+        return await repository.SaveBasketReferenceCopyAsync(analysis.Line, source, destination, referenceId,
+            NextManualBasketName(manualBaskets), cancellationToken).ConfigureAwait(false);
+    }, cancellationToken);
+
     public async Task<QuotationManualBasket> CreateManualCopyAsync(
         QuotationLineAnalysis analysis,
         QuotationBasket source,
@@ -653,6 +686,17 @@ public sealed class QuotationService(
         return copy;
     }
 
+    private static void PreserveTechnicalReviews(QuotationLine line, IReadOnlyList<QuotationReference> existing,
+        QuotationReference[] references)
+    {
+        var reviews = existing.Where(value => value.TechnicalReview is not null)
+            .ToDictionary(value => value.Id, value => value.TechnicalReview!, StringComparer.Ordinal);
+        for (var index = 0; index < references.Length; index++)
+            if (references[index].TechnicalReview is null && reviews.TryGetValue(references[index].Id, out var review) &&
+                review.Matches(line, references[index]))
+                references[index] = references[index] with { TechnicalReview = review };
+    }
+
     private static string NextManualBasketName(IReadOnlyList<QuotationManualBasket> baskets)
     {
         var names = baskets.Select(basket => basket.Name)
@@ -669,10 +713,12 @@ public sealed class QuotationService(
 
     public async Task<QuotationProjectReport> GetReportAsync(
         Guid projectId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IProgress<QuotationAiProgress>? progress = null,
+        bool compactReferences = false)
     {
         var project = await GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
-        var lines = await GetAnalysesAsync(projectId, cancellationToken).ConfigureAwait(false);
+        var lines = await GetAnalysesAsync(projectId, cancellationToken, progress, compactReferences).ConfigureAwait(false);
         return new QuotationProjectReport(project, lines)
         { Groups = await repository.GetGroupsAsync(projectId, cancellationToken).ConfigureAwait(false) };
     }

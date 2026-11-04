@@ -79,7 +79,7 @@ public sealed partial class MainViewModel
         !IsFileBusy && !IsPriceBusy && !IsDocumentBusy && !IsForegroundBusy &&
         !IsIndexBusy && !IsCatalogBusy && !IsPriceCacheBusy && !IsNationalPriceIndexBusy &&
         !_automaticMaintenanceRunning && !IsAnyAggressivePncpMode &&
-        !IsQuotationAutomationRunning &&
+        !IsQuotationAutomationRunning && !IsQuotationCalculationRunning &&
         _quotationItemWindow?.ViewModel.IsBusy != true &&
         _quotationItemWindow?.ViewModel.IsSearchBusy != true;
 
@@ -265,16 +265,16 @@ public sealed partial class MainViewModel
 
     private async Task FilterExternalAiCandidatesAsync()
     {
-        var package = ChooseExternalAiPackage("Escolher o resultado original da coleta");
+        var package = ChooseExternalAiPackage("Triagem — 1/3: escolher o ZIP original da coleta");
         if (package is null) return;
         var triage = new OpenFileDialog
         {
-            Title = "Escolher a triagem preenchida pela IA", Filter = "Planilha do Excel (*.xlsx)|*.xlsx", CheckFileExists = true
+            Title = "Triagem — 2/3: escolher o Excel preenchido pela IA", Filter = "Planilha do Excel (*.xlsx)|*.xlsx", CheckFileExists = true
         };
         if (triage.ShowDialog() != true) return;
         var save = new SaveFileDialog
         {
-            Title = "Salvar resultado após a triagem", Filter = "Resultado para IA (*.zip)|*.zip",
+            Title = "Triagem — 3/3: salvar o novo ZIP filtrado", Filter = "Resultado para IA (*.zip)|*.zip",
             DefaultExt = ".zip", AddExtension = true,
             FileName = Path.GetFileNameWithoutExtension(package) + "-triado.zip"
         };
@@ -291,26 +291,44 @@ public sealed partial class MainViewModel
 
     private async Task ImportExternalAiGuideAsync()
     {
-        var package = ChooseExternalAiPackage("Escolher o resultado usado pela IA na seleção final");
+        var package = ChooseExternalAiPackage("Guia — 1/2: escolher o ZIP usado pela IA na seleção final");
         if (package is null) return;
         var guide = new OpenFileDialog
         {
-            Title = "Escolher o guia final preenchido pela IA", Filter = "Planilha do Excel (*.xlsx)|*.xlsx", CheckFileExists = true
+            Title = "Guia — 2/2: escolher o Excel final preenchido pela IA", Filter = "Planilha do Excel (*.xlsx)|*.xlsx", CheckFileExists = true
         };
         if (guide.ShowDialog() != true) return;
         var guidePath = guide.FileName;
-        var preview = await RunExternalAiOperationAsync("Validando o guia e as cestas…",
-            (token, progress) => _externalAiGuide!.PreviewGuideAsync(package, guidePath, progress, token)).ConfigureAwait(true);
-        if (preview is null || _disposed) return;
-        StatusText = ExternalAiStatus = $"Guia validado: {preview.ReadyCount:N0} item(ns) pronto(s), {preview.PendingCount:N0} pendente(s).";
-        var window = new QuotationAiGuidePreviewWindow(preview) { Owner = Application.Current.MainWindow };
-        if (window.ShowDialog() != true) return;
-        var result = await RunExternalAiOperationAsync("Aplicando as cestas válidas…",
-            (token, progress) => _externalAiGuide!.ApplyGuideAsync(package, guidePath, progress, token)).ConfigureAwait(true);
+        var allowExpansion = false;
+        var allowTechnicalReview = false;
+        QuotationAiGuidePreview? preview;
+        while (true)
+        {
+            preview = await RunExternalAiOperationAsync("Validando os candidatos, as faixas e as cestas…",
+                (token, progress) => _externalAiGuide!.PreviewGuideAsync(package, guidePath, progress, token,
+                    allowPriceRangeExpansion: allowExpansion, allowTechnicalReview: allowTechnicalReview)).ConfigureAwait(true);
+            if (preview is null || _disposed) return;
+            StatusText = ExternalAiStatus = $"Guia validado: {preview.ReadyCount:N0} cesta(s) pronta(s), " +
+                $"{preview.ImportableCount:N0} item(ns) com candidatos disponíveis para importar.";
+            var window = new QuotationAiGuidePreviewWindow(preview,
+                allowPriceRangeExpansion: allowExpansion, allowTechnicalReview: allowTechnicalReview)
+                { Owner = Application.Current.MainWindow };
+            if (window.ShowDialog() != true) return;
+            if (window.AllowPriceRangeExpansion == allowExpansion && window.AllowTechnicalReview == allowTechnicalReview) break;
+            allowExpansion = window.AllowPriceRangeExpansion;
+            allowTechnicalReview = window.AllowTechnicalReview;
+            // Show the newly validated ranges before applying any changes. Old guides
+            // remain usable, and changing this option never silently changes a basket.
+        }
+        var result = await RunExternalAiOperationAsync("Importando os preços e aplicando as cestas válidas…",
+            (token, progress) => _externalAiGuide!.ApplyGuideAsync(package, guidePath, progress, token,
+                allowPriceRangeExpansion: allowExpansion, allowTechnicalReview: allowTechnicalReview,
+                expectedGuideSha256: preview.GuideSha256)).ConfigureAwait(true);
         if (!_disposed) await RefreshQuotationProjectsAsync(preview.ProjectId).ConfigureAwait(true);
         if (result is not null)
         {
-            StatusText = ExternalAiStatus = $"Guia processado: {result.AppliedCount:N0} cesta(s) aplicada(s), " +
+            StatusText = ExternalAiStatus = $"Guia processado: {result.Items.Sum(item => item.ImportedCandidateCount):N0} preço(s) acrescentado(s), " +
+                $"{result.AppliedCount:N0} cesta(s) aplicada(s), " +
                 $"{result.UnchangedCount:N0} já aplicada(s), {result.PendingCount:N0} item(ns) pendente(s).";
             if (result.PendingCount > 0 && !_disposed)
                 new QuotationAiGuidePreviewWindow(new QuotationAiGuidePreview(preview.PackageId,

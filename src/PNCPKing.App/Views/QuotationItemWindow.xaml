@@ -47,7 +47,16 @@
 
         <Border Grid.Row="1" Background="{StaticResource InfoBrush}" BorderBrush="{StaticResource InfoBorderBrush}" BorderThickness="1"
                 CornerRadius="4" Padding="8" Margin="0,8,0,8">
-            <TextBox Style="{StaticResource SelectableInfo}" Text="{Binding ProgressText, Mode=OneWay}" TextWrapping="Wrap" />
+            <StackPanel>
+                <TextBox Style="{StaticResource SelectableInfo}" Text="{Binding ProgressText, Mode=OneWay}" TextWrapping="Wrap" />
+                <DockPanel Margin="0,3,0,0">
+                    <Button DockPanel.Dock="Right" Content="Parar cálculo" Click="StopCalculation_Click" IsEnabled="{Binding IsAnalysisBusy}" />
+                    <StackPanel>
+                        <TextBlock Text="{Binding AnalysisStatus}" TextWrapping="Wrap" />
+                        <ProgressBar Height="8" Minimum="0" Maximum="100" Value="{Binding AnalysisProgress}" Margin="0,3,8,0" />
+                    </StackPanel>
+                </DockPanel>
+            </StackPanel>
         </Border>
 
         <TabControl x:Name="WorkspaceTabs" Grid.Row="2" SelectionChanged="WorkspaceTabs_SelectionChanged">
@@ -97,6 +106,7 @@
                             <Button Content="Usar média" Click="UseMean_Click" />
                             <Button Content="Usar mediana" Click="UseMedian_Click" />
                             <Button Content="Confirmar cesta" Click="ConfirmBasket_Click" />
+                            <Button Content="Copiar preço para outra cesta…" Click="CopyPriceToBasket_Click" />
                             <Button Content="Inserir preço da internet" Click="NewInternetPrice_Click" />
                         </WrapPanel>
                     </StackPanel>
@@ -117,6 +127,7 @@
                                     <MenuItem Header="Ver páginas relevantes" Click="PriceRelevantPages_Click" />
                                     <Separator />
                                     <MenuItem Header="Adicionar/retirar da cesta" Click="PriceToggleBasket_Click" />
+                                    <MenuItem Header="Copiar preço para outra cesta…" Click="CopyPriceToBasket_Click" />
                                     <MenuItem Header="Dividir preço por" Click="PriceFactor_Click" />
                                     <MenuItem Header="Restaurar preço original" Click="PriceResetFactor_Click" />
                                     <MenuItem Header="Editar preço da internet" Click="EditInternetReference_Click" />

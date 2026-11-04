@@ -272,6 +272,8 @@ public sealed record QuotationReference
     public PromptMatchLevel? MatchedPromptLevel { get; init; }
     public string MatchedSearchText { get; init; } = string.Empty;
     public QuotationReferenceSource Source { get; init; } = QuotationReferenceSource.PncpIncisoII;
+    [System.Text.Json.Serialization.JsonIgnore]
+    public QuotationAiTechnicalReview? TechnicalReview { get; init; }
 }
 
 public sealed record EvidenceImageDescriptor
@@ -429,6 +431,33 @@ public sealed record QuotationLineAnalysis(
     int BasketPoolCount)
 {
     public int PriceDecimalPlaces { get; init; } = 2;
+
+    // The project overview retains bounded basket data. The selected item is
+    // loaded in full before exposing all of its candidates to the user.
+    public bool ReferencesArePartial { get; init; }
+
+    public QuotationLineAnalysis ToCompactOverview()
+    {
+        if (ReferencesArePartial || References.Count <= QuotationAnalyzer.MaximumBasketPoolSize)
+            return this;
+        var retainedIds = Baskets.SelectMany(basket => basket.References)
+            .Select(reference => reference.Id).ToHashSet(StringComparer.Ordinal);
+        if (retainedIds.Count == 0)
+        {
+            foreach (var reference in References
+                         .OrderBy(reference => reference.State)
+                         .ThenByDescending(reference => reference.Adequacy.Total)
+                         .ThenBy(reference => reference.Id, StringComparer.Ordinal)
+                         .Take(QuotationAnalyzer.MaximumBasketPoolSize))
+                retainedIds.Add(reference.Id);
+        }
+        var retained = References.Where(reference => retainedIds.Contains(reference.Id)).ToArray();
+        return retained.Length == References.Count ? this : this with
+        {
+            References = retained,
+            ReferencesArePartial = true
+        };
+    }
 
     public QuotationBasket? SelectedBasket => Line.SelectedBasketKey is null
         ? null
