@@ -25,22 +25,31 @@ public sealed class QuotationAiGuidePreviewWindow : Window
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
         MonitorAwareWindowBehavior.Attach(this);
         var panel = new Grid { Margin = new Thickness(16) };
-        panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         panel.RowDefinitions.Add(new RowDefinition());
         panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        panel.Children.Add(new TextBlock
+        var bodyPanel = new StackPanel();
+        var body = new ScrollViewer
         {
+            Name = "GuideBody", Content = bodyPanel,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+        };
+        panel.Children.Add(body);
+        bodyPanel.Children.Add(new TextBlock
+        {
+            Name = "GuideSummary",
             Text = allowApply
-                ? $"{preview.ReadyCount:N0} cesta(s) pronta(s); {preview.PendingCount:N0} item(ns) com pendências. " +
-                  $"Os candidatos de {preview.ImportableCount:N0} item(ns) poderão ser importados para formar outras cestas. " +
+                ? (preview.ReadyCount == 0
+                    ? "Nenhuma cesta da IA será aplicada. Confira no guia os itens marcados como revisar ou insuficiente. "
+                    : $"{preview.ReadyCount:N0} cesta(s) pronta(s); {preview.PendingCount:N0} item(ns) com pendências. ") +
+                  $"Os candidatos de {preview.ImportableCount:N0} item(ns) poderão ser importados para análise no programa. " +
                   "Confira as mensagens e as faixas antes de aplicar."
                 : "Confira abaixo o resultado de cada item. As cestas existentes que não pertencem a este guia foram preservadas.",
             TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 12)
         });
         var grid = new DataGrid
         {
+            Name = "GuideItems", Height = 180,
             ItemsSource = preview.Items.Select(item => new
             {
                 item.Name,
@@ -66,27 +75,34 @@ public sealed class QuotationAiGuidePreviewWindow : Window
         grid.Columns.Add(new DataGridTextColumn { Header = "Situação", Binding = new Binding("Status"), Width = 110 });
         grid.Columns.Add(new DataGridTextColumn { Header = "Candidatos", Binding = new Binding("CandidateCount"), Width = 90 });
         grid.Columns.Add(new DataGridTextColumn { Header = "Mensagem", Binding = new Binding("Message"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
-        Grid.SetRow(grid, 1);
-        panel.Children.Add(grid);
+        bodyPanel.Children.Add(grid);
+        // Keep a bounded viewport for row virtualization inside the scrolling body.
+        // Larger windows still devote most of that viewport to the item list.
+        body.SizeChanged += (_, args) => grid.Height = Math.Max(180, args.NewSize.Height * 0.6);
         var detail = new TextBox
         {
+            Name = "GuideDetails",
             IsReadOnly = true, TextWrapping = TextWrapping.Wrap, MinHeight = 65, MaxHeight = 130,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Margin = new Thickness(0, 8, 0, 0)
         };
         detail.SetBinding(TextBox.TextProperty, new Binding("SelectedItem.Message") { Source = grid, Mode = BindingMode.OneWay });
-        Grid.SetRow(detail, 2);
-        panel.Children.Add(detail);
-        var buttons = new StackPanel
+        bodyPanel.Children.Add(detail);
+        var buttons = new WrapPanel
         {
+            Name = "GuideFooter",
             Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right,
             Margin = new Thickness(0, 12, 0, 0)
         };
         buttons.Children.Add(new Button { Content = allowApply ? "Cancelar" : "Fechar", IsCancel = true });
         if (allowApply)
         {
+            var applyLabel = preview.ReadyCount == 0 && preview.ImportableCount > 0
+                ? "Importar somente candidatos"
+                : "Importar preços e aplicar cestas válidas";
+            var applyText = new TextBlock { Text = applyLabel, TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Center };
             var apply = new Button
             {
-                Content = "Importar preços e aplicar cestas válidas", IsDefault = true,
+                Content = applyText, IsDefault = true,
                 IsEnabled = preview.ImportableCount > 0 || preview.ReadyCount > 0
             };
             var range = new CheckBox
@@ -114,23 +130,22 @@ public sealed class QuotationAiGuidePreviewWindow : Window
                 AllowTechnicalReview = technical.IsChecked == true;
                 var changed = AllowPriceRangeExpansion != allowPriceRangeExpansion || AllowTechnicalReview != allowTechnicalReview;
                 apply.IsEnabled = changed || preview.ImportableCount > 0 || preview.ReadyCount > 0;
-                apply.Content = changed
+                applyText.Text = changed
                     ? "Revalidar e mostrar alterações"
-                    : "Importar preços e aplicar cestas válidas";
+                    : applyLabel;
             }
             range.Checked += UpdateRangeOption;
             range.Unchecked += UpdateRangeOption;
             technical.Checked += UpdateRangeOption;
             technical.Unchecked += UpdateRangeOption;
-            var options = new StackPanel();
+            var options = new StackPanel { Name = "GuideOptions" };
             options.Children.Add(range);
             options.Children.Add(technical);
-            Grid.SetRow(options, 3);
-            panel.Children.Add(options);
+            bodyPanel.Children.Add(options);
             apply.Click += (_, _) => DialogResult = true;
             buttons.Children.Add(apply);
         }
-        Grid.SetRow(buttons, 4);
+        Grid.SetRow(buttons, 1);
         panel.Children.Add(buttons);
         Content = panel;
     }
