@@ -114,6 +114,16 @@ public interface IQuotationRepository
         IReadOnlyList<QuotationImportItem> items,
         AdequacyWeights weights,
         CancellationToken cancellationToken = default);
+    Task<QuotationAutomationRun> CreateExternalAiRunAsync(
+        Guid projectId,
+        string outputPath,
+        SearchGeoFilter geoFilter,
+        DateOnly startDate,
+        DateOnly endDate,
+        IReadOnlyList<QuotationImportItem> items,
+        AdequacyWeights weights,
+        IProgress<QuotationAiProgress>? progress = null,
+        CancellationToken cancellationToken = default);
     Task<QuotationAutomationRun> CreateTimedAutomationRunAsync(
         Guid projectId,
         SearchGeoFilter geoFilter,
@@ -215,5 +225,8 @@ public interface IQuotationWorkbookImportService
 {
     Task<QuotationImportDocument> ReadAsync(
         string sourcePath,
+        CancellationToken cancellationToken = default);
+    Task CreateExternalAiTemplateAsync(
+        string destinationPath,
         CancellationToken cancellationToken = default);
 }

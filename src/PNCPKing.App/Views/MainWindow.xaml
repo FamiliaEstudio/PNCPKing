@@ -687,12 +687,14 @@
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
                     <DockPanel Margin="0,0,0,6">
                         <WrapPanel DockPanel.Dock="Left" Orientation="Horizontal">
                             <TextBlock Text="Projeto:" VerticalAlignment="Center" Margin="0,0,5,0" />
                             <ComboBox Width="260" ItemsSource="{Binding QuotationProjects}"
+                                      IsEnabled="{Binding CanChangeQuotationProject}"
                                       SelectedItem="{Binding SelectedQuotationProject}" />
                             <Button Content="Cotações ▾" Click="DropdownMenu_Click">
                                 <Button.ContextMenu>
@@ -723,6 +725,14 @@
                             <Button Content="Automação ▾" Click="DropdownMenu_Click">
                                 <Button.ContextMenu>
                                     <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                        <MenuItem Header="IA externa — por arquivos">
+                                            <MenuItem Header="1. Salvar modelo Excel de entrada" Command="{Binding CreateExternalAiTemplateCommand}" />
+                                            <MenuItem Header="2. Importar Excel e coletar candidatos" Command="{Binding ImportQuotationCommand}" />
+                                            <MenuItem Header="3. Gerar modelos de triagem e guia" Command="{Binding CreateExternalAiGuideTemplatesCommand}" />
+                                            <MenuItem Header="4. Aplicar triagem da IA" Command="{Binding FilterExternalAiCandidatesCommand}" />
+                                            <MenuItem Header="5. Importar guia final e montar cestas" Command="{Binding ImportExternalAiGuideCommand}" />
+                                        </MenuItem>
+                                        <Separator />
                                         <MenuItem Header="Automação com IA" Command="{Binding AiQuotationCommand}" />
                                         <MenuItem Header="Retrabalhar prompts com IA" Command="{Binding RefineQuotationPromptsCommand}" />
                                         <Separator />
@@ -769,7 +779,29 @@
                                    HorizontalAlignment="Right" />
                     </DockPanel>
 
-                    <Grid Grid.Row="1">
+                    <Border Grid.Row="1" Padding="10" Margin="0,0,0,6"
+                            BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                            Visibility="{Binding ShowExternalAiProgress, Converter={StaticResource BooleanToVisibilityConverter}}">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="{Binding ExternalAiStatus}" TextWrapping="Wrap" Margin="0,0,8,6" />
+                                <ProgressBar Height="9" Minimum="0" Maximum="100"
+                                             Value="{Binding ExternalAiProgress, Mode=OneWay}"
+                                             IsIndeterminate="{Binding IsExternalAiIndeterminate}"
+                                             AutomationProperties.Name="Progresso da automação com IA externa" />
+                            </StackPanel>
+                            <Button Grid.Column="1" Content="{Binding ExternalAiStopText}" Margin="12,0,0,0"
+                                    VerticalAlignment="Center" Command="{Binding CancelQuotationAutomationCommand}"
+                                    Visibility="{Binding IsExternalAiWorking, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                    ToolTip="Interrompe a etapa atual; a coleta pode ser continuada em Retomar automação." />
+                        </Grid>
+                    </Border>
+
+                    <Grid Grid.Row="2">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="38*" />
                             <ColumnDefinition Width="8" />

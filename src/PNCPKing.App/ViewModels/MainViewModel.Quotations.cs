@@ -342,7 +342,7 @@ public sealed partial class MainViewModel
                   SelectedBasketReference is not null);
         OpenQuotationItemCommand = new RelayCommand(
             OpenSelectedQuotationItem,
-            () => !IsAnyAggressivePncpMode &&
+            () => !IsAnyAggressivePncpMode && !IsExternalAiWorking &&
                   SelectedQuotationProject is not null && SelectedQuotationLine is not null);
     }
 
@@ -354,6 +354,12 @@ public sealed partial class MainViewModel
 
     private void OpenSelectedQuotationItemCore(string? referenceId)
     {
+        if (IsExternalAiWorking)
+        {
+            StatusText = "Pause ou conclua a etapa da IA externa antes de abrir o item.";
+            return;
+        }
+
         if (IsAnyAggressivePncpMode)
         {
             StatusText = "Desative o download agressivo antes de abrir a pesquisa do item da cotação.";
@@ -716,7 +722,7 @@ public sealed partial class MainViewModel
 
         try
         {
-            var report = await _quotationService.GetReportAsync(projectId.Value).ConfigureAwait(true);
+            var report = await Task.Run(() => _quotationService.GetReportAsync(projectId.Value)).ConfigureAwait(true);
             if (loadVersion != _quotationReportLoadVersion || SelectedQuotationProject?.Id != projectId) return;
             _quotationWordReport = report;
             QuotationLines.ReplaceAll(report.Lines.Select(analysis => new QuotationLineDisplay(analysis, report.Project.Organization)));
@@ -1054,16 +1060,8 @@ public sealed partial class MainViewModel
             return;
         }
 
-        QuotationImportDocument document;
-        try
-        {
-            document = await _quotationWorkbookImportService.ReadAsync(open.FileName).ConfigureAwait(true);
-        }
-        catch (Exception exception)
-        {
-            MessageBox.Show(exception.Message, "Importar cotação", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
-        }
+        var document = await ReadQuotationImportWithProgressAsync(open.FileName).ConfigureAwait(true);
+        if (document is null) return;
 
         var weightsWindow = new QuotationWeightsWindow(AdequacyWeights.Default)
         {
@@ -1089,6 +1087,13 @@ public sealed partial class MainViewModel
         };
         if (preview.ShowDialog() != true)
         {
+            return;
+        }
+
+        if (document.IsExternalAi)
+        {
+            await ImportExternalAiQuotationAsync(document, preview, weightsWindow.Weights, startDate, endDate)
+                .ConfigureAwait(true);
             return;
         }
 
@@ -1214,6 +1219,12 @@ public sealed partial class MainViewModel
                 "Retomar automação",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);
+            return;
+        }
+
+        if (run.Mode == QuotationAutomationMode.ExternalAi)
+        {
+            await RunExternalAiCollectionAsync(run).ConfigureAwait(true);
             return;
         }
 

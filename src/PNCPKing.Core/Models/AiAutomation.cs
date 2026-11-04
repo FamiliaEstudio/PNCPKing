@@ -208,7 +208,8 @@ public sealed record AiMarkdownPreparation
 public enum QuotationAutomationMode
 {
     FixedBatches,
-    TimedRoundRobin
+    TimedRoundRobin,
+    ExternalAi
 }
 
 public enum EstimateResolutionStage

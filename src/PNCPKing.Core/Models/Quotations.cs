@@ -199,11 +199,15 @@ public sealed record QuotationImportItem(
 {
     public string CatmatCodeOverride { get; init; } = string.Empty;
     public decimal? MinimumOrderQuantity { get; init; }
+    public string FullDescription { get; init; } = string.Empty;
 }
 
 public sealed record QuotationImportDocument(
     string SourcePath,
-    IReadOnlyList<QuotationImportItem> Items);
+    IReadOnlyList<QuotationImportItem> Items)
+{
+    public bool IsExternalAi { get; init; }
+}
 
 public enum QuotationReferenceState
 {
