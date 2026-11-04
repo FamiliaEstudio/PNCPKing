@@ -105,6 +105,24 @@ public partial class QuotationItemWindow : Window
 
     private void StopCalculation_Click(object sender, RoutedEventArgs e) => ViewModel.StopCalculation();
 
+    private async void CandidateSearch_Click(object sender, RoutedEventArgs e) =>
+        await RunAsync(ViewModel.SearchCandidatesAsync).ConfigureAwait(true);
+
+    private async void CandidateSearch_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        e.Handled = true;
+        await RunAsync(ViewModel.SearchCandidatesAsync).ConfigureAwait(true);
+    }
+
+    private void ClearCandidateSearch_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.ClearCandidateSearch();
+        CandidateSearchBox.Focus();
+    }
+
+    private void StopCandidateSearch_Click(object sender, RoutedEventArgs e) => ViewModel.StopCandidateSearch();
+
     private async void CopyPriceToBasket_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel.IsBusy || ViewModel.IsAnalysisBusy) return;

@@ -73,7 +73,7 @@ public sealed class QuotationAiGuidePreviewWindow : Window
             IsReadOnly = true, TextWrapping = TextWrapping.Wrap, MinHeight = 65, MaxHeight = 130,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Margin = new Thickness(0, 8, 0, 0)
         };
-        detail.SetBinding(TextBox.TextProperty, new Binding("SelectedItem.Message") { Source = grid });
+        detail.SetBinding(TextBox.TextProperty, new Binding("SelectedItem.Message") { Source = grid, Mode = BindingMode.OneWay });
         Grid.SetRow(detail, 2);
         panel.Children.Add(detail);
         var buttons = new StackPanel

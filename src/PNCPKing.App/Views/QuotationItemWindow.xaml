@@ -53,7 +53,7 @@
                     <Button DockPanel.Dock="Right" Content="Parar cálculo" Click="StopCalculation_Click" IsEnabled="{Binding IsAnalysisBusy}" />
                     <StackPanel>
                         <TextBlock Text="{Binding AnalysisStatus}" TextWrapping="Wrap" />
-                        <ProgressBar Height="8" Minimum="0" Maximum="100" Value="{Binding AnalysisProgress}" Margin="0,3,8,0" />
+                        <ProgressBar Height="8" Minimum="0" Maximum="100" Value="{Binding AnalysisProgress, Mode=OneWay}" Margin="0,3,8,0" />
                     </StackPanel>
                 </DockPanel>
             </StackPanel>
@@ -93,6 +93,23 @@
                     </controls:GridReader>
 
                     <StackPanel Grid.Row="1" Margin="0,6">
+                        <TextBlock Text="Pesquisar nos candidatos deste item" FontWeight="SemiBold" Margin="0,0,0,3" />
+                        <DockPanel>
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                <Button x:Name="CandidateSearchButton" Style="{StaticResource SearchButton}"
+                                        Content="Pesquisar" Click="CandidateSearch_Click" />
+                                <Button x:Name="ClearCandidateSearchButton" Content="Limpar" Click="ClearCandidateSearch_Click" />
+                                <Button Content="Parar" Click="StopCandidateSearch_Click" IsEnabled="{Binding IsCandidateSearchBusy}" />
+                            </StackPanel>
+                            <TextBox x:Name="CandidateSearchBox" Text="{Binding CandidateSearchText, UpdateSourceTrigger=PropertyChanged}"
+                                     KeyDown="CandidateSearch_KeyDown" MinWidth="150" Margin="0,0,8,0"
+                                     ToolTip="Pesquisa somente entre os preços já coletados ou importados deste item. Use espaço para combinar termos e + para alternativas, como na busca principal." />
+                        </DockPanel>
+                        <ProgressBar Height="4" IsIndeterminate="{Binding IsCandidateSearchBusy, Mode=OneWay}" Margin="0,3,0,0" />
+                        <TextBox Style="{StaticResource SelectableInfo}" Text="{Binding CandidateSearchSummary, Mode=OneWay}"
+                                 TextWrapping="Wrap" Margin="0,3,0,0" />
+                        <TextBlock Text="Marque Na cesta para incluir um preço. A pesquisa apenas filtra a lista; os preços da cesta são preservados."
+                                   TextWrapping="Wrap" Foreground="{StaticResource MutedTextBrush}" Margin="0,2,0,0" />
                         <WrapPanel>
                             <TextBlock Text="Mostrar:" VerticalAlignment="Center" FontWeight="SemiBold" />
                             <Button Content="Na cesta" Click="ScopeInBasket_Click" />
@@ -205,7 +222,7 @@
                 </Grid>
             </TabItem>
 
-            <TabItem Header="Pesquisar e complementar">
+            <TabItem x:Name="LegacyDatabaseSearchTab" Header="Pesquisar e complementar" Visibility="Collapsed">
                 <Grid Margin="4">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />

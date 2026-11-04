@@ -195,6 +195,7 @@ internal static partial class Program
             "Referências da tela principal dependeram da elegibilidade ou ignoraram a conversão.");
         var vm = new ItemVm(main, null!, null!, null!, null!, null!, null!, null!, "", line.ProjectId, line.Id);
         typeof(ItemVm).GetProperty(nameof(ItemVm.Line))!.SetValue(vm, display);
+        vm.ReferenceScope = ReferenceViewScope.InBasket;
         vm.SelectedBasket = basketDisplay;
         Require(vm.VisibleReferences.Count == 3 && vm.VisibleReferences.All(row => row.IsValidInMarkedGroup),
             "Referências do item dependeram da elegibilidade ou ignoraram a conversão.");

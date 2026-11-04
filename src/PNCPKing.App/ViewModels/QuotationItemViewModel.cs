@@ -5,6 +5,7 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
+using PNCPKing.Core.Quotations;
 using PNCPKing.Core.Search;
 using PNCPKing.Infrastructure.Services;
 using SearchParser = PNCPKing.Core.Search.SearchText;
@@ -34,7 +35,15 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     private QuotationReferenceDisplay? _selectedReference;
     private ItemSearchDisplayRow? _selectedSearchRow;
     private InternetPriceDraft? _selectedDraft;
-    private ReferenceViewScope _referenceScope = ReferenceViewScope.InBasket;
+    private ReferenceViewScope _referenceScope = ReferenceViewScope.All;
+    private string _candidateSearchText = string.Empty;
+    private string _appliedCandidateSearchText = string.Empty;
+    private string _candidateSearchMessage = string.Empty;
+    private HashSet<string>? _candidateSearchIds;
+    private CancellationTokenSource? _candidateSearchCancellation;
+    private TaskCompletionSource? _candidateSearchCompletion;
+    private int _candidateSearchGeneration;
+    private bool _isCandidateSearchBusy;
     private ItemSearchPromptSlot _selectedPromptSlot = ItemSearchPromptSlot.Restrictive;
     private QuotationItemSearchWorkspace? _workspace;
     private string _searchText = string.Empty;
@@ -200,7 +209,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     }
 
     public bool CanEditRequestedDetails =>
-        Line is not null && !_disposed && !IsBusy && !IsSearchBusy &&
+        Line is not null && !_disposed && !IsBusy && !IsSearchBusy && !IsCandidateSearchBusy &&
         !_main.IsPriceBusy && !_main.IsQuotationAutomationRunning;
 
     private void OnMainPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
@@ -356,8 +365,113 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         ReferenceViewScope.InBasket => "Preços da cesta selecionada",
         ReferenceViewScope.EligibleOutsideBasket => "Elegíveis fora da cesta",
         ReferenceViewScope.RejectedOrDuplicate => "Descartados ou duplicados",
-        _ => "Todos os preços encontrados"
+        _ => "Todos os candidatos deste item"
     };
+
+    public string CandidateSearchText
+    {
+        get => _candidateSearchText;
+        set => SetProperty(ref _candidateSearchText, value);
+    }
+
+    public bool IsCandidateSearchBusy
+    {
+        get => _isCandidateSearchBusy;
+        private set
+        {
+            if (SetProperty(ref _isCandidateSearchBusy, value))
+            {
+                OnPropertyChanged(nameof(CandidateSearchSummary));
+                OnPropertyChanged(nameof(CanEditRequestedDetails));
+            }
+        }
+    }
+
+    public string CandidateSearchSummary
+    {
+        get
+        {
+            var total = Line?.Analysis.References.Count ?? 0;
+            if (IsCandidateSearchBusy) return $"Pesquisando nos {total:N0} candidatos deste item…";
+            var matched = _candidateSearchIds?.Count ?? total;
+            var query = string.IsNullOrWhiteSpace(_appliedCandidateSearchText)
+                ? "Sem filtro de texto." : $"Pesquisa aplicada: {_appliedCandidateSearchText}.";
+            return $"{_candidateSearchMessage} {query} {matched:N0} de {total:N0} candidatos; " +
+                   $"{VisibleReferences.Count:N0} exibidos no filtro atual.";
+        }
+    }
+
+    public Task SearchCandidatesAsync() => FilterCandidatesAsync(CandidateSearchText, resetScope: true);
+
+    private async Task FilterCandidatesAsync(string query, bool resetScope)
+    {
+        if (_disposed || Line is null) return;
+        _candidateSearchCancellation?.Cancel();
+        var generation = ++_candidateSearchGeneration;
+        using var cancellation = new CancellationTokenSource();
+        _candidateSearchCancellation = cancellation;
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _candidateSearchCompletion = completion;
+        var analysis = Line.Analysis;
+        IsCandidateSearchBusy = true;
+        try
+        {
+            // Only the references already attached to this item are supplied.
+            // Parsing/matching runs once outside the dispatcher, with no database query.
+            var matches = await Task.Run(() => QuotationCandidateSearch.Filter(analysis.References,
+                query, cancellation.Token), cancellation.Token).ConfigureAwait(true);
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (_disposed || generation != _candidateSearchGeneration || !ReferenceEquals(Line?.Analysis, analysis)) return;
+            _candidateSearchIds = string.IsNullOrWhiteSpace(query)
+                ? null : matches.Select(reference => reference.Id).ToHashSet(StringComparer.Ordinal);
+            _appliedCandidateSearchText = query.Trim();
+            _candidateSearchMessage = string.Empty;
+            if (resetScope)
+            {
+                _referenceScope = ReferenceViewScope.All;
+                OnPropertyChanged(nameof(ReferenceScope));
+            }
+            RebuildVisibleReferences();
+        }
+        catch (SearchQueryException exception)
+        {
+            if (generation == _candidateSearchGeneration)
+                _candidateSearchMessage = $"Pesquisa não aplicada: {exception.Message} O resultado anterior foi preservado.";
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            if (generation == _candidateSearchGeneration)
+                _candidateSearchMessage = "Pesquisa interrompida; o resultado anterior foi preservado.";
+        }
+        finally
+        {
+            if (ReferenceEquals(_candidateSearchCancellation, cancellation)) _candidateSearchCancellation = null;
+            if (generation == _candidateSearchGeneration)
+            {
+                IsCandidateSearchBusy = false;
+                OnPropertyChanged(nameof(CandidateSearchSummary));
+            }
+            completion.TrySetResult();
+        }
+    }
+
+    public void ClearCandidateSearch()
+    {
+        _candidateSearchCancellation?.Cancel();
+        _candidateSearchCancellation = null;
+        ++_candidateSearchGeneration;
+        IsCandidateSearchBusy = false;
+        CandidateSearchText = string.Empty;
+        _appliedCandidateSearchText = string.Empty;
+        _candidateSearchMessage = string.Empty;
+        _candidateSearchIds = null;
+        _referenceScope = ReferenceViewScope.All;
+        OnPropertyChanged(nameof(ReferenceScope));
+        RebuildVisibleReferences();
+        OnPropertyChanged(nameof(CandidateSearchSummary));
+    }
+
+    public void StopCandidateSearch() => _candidateSearchCancellation?.Cancel();
 
     public ItemSearchPromptSlot SelectedPromptSlot
     {
@@ -534,6 +648,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     {
         _refreshPending = false;
         _analysisCancellation?.Cancel();
+        StopCandidateSearch();
     }
 
     private bool _isInteracting;
@@ -574,6 +689,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         }
 
         IsBusy = true;
+        StopCandidateSearch();
         IsAnalysisBusy = true;
         AnalysisProgress = 0;
         AnalysisStatus = "Lendo os preços e preparando as cestas…";
@@ -622,19 +738,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             SelectedBasket = Baskets.FirstOrDefault(item => item.Key == previousBasketKey) ??
                              Baskets.FirstOrDefault(item => item.Key == analysis.Line.SelectedBasketKey) ??
                              Baskets.FirstOrDefault();
-            if (_workspace is null)
-            {
-                var library = await _sweetCodes.LoadAsync().ConfigureAwait(true);
-                _sweetCodeEnabled = library.Enabled;
-                SweetCodeExpressions.Clear();
-                foreach (var expression in library.Expressions)
-                {
-                    SweetCodeExpressions.Add(expression);
-                }
-
-                OnPropertyChanged(nameof(SweetCodeEnabled));
-                await LoadPromptSlotAsync(ItemSearchPromptSlot.Restrictive).ConfigureAwait(true);
-            }
+            await FilterCandidatesAsync(_appliedCandidateSearchText, resetScope: false).ConfigureAwait(true);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
@@ -983,7 +1087,11 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         SearchSummary = $"Faixa aplicada: {SearchRows.Count:N0} linha(s) visível(is).";
     }
 
-    public void StopSearch() => _searchCancellation?.Cancel();
+    public void StopSearch()
+    {
+        _searchCancellation?.Cancel();
+        StopCandidateSearch();
+    }
 
     public async Task PrepareForRetentionAsync()
     {
@@ -1430,6 +1538,10 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         _main.PropertyChanged -= OnMainPropertyChanged;
         _searchCancellation?.Cancel();
         _summaryCancellation?.Cancel();
+        StopCandidateSearch();
+        ++_candidateSearchGeneration;
+        if (_candidateSearchCompletion is { } candidateCompletion)
+            await candidateCompletion.Task.ConfigureAwait(true);
         _analysisCancellation?.Cancel();
         if (_analysisCompletion is { } analysisCompletion)
             await analysisCompletion.Task.ConfigureAwait(true);
@@ -1565,6 +1677,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         var visibleRows = new List<QuotationPriceDisplayRow>();
         foreach (var reference in Line.Analysis.References)
         {
+            if (_candidateSearchIds is not null && !_candidateSearchIds.Contains(reference.Id)) continue;
             var inBasket = selectedIds.Contains(reference.Id);
             var visible = ReferenceScope switch
             {
@@ -1595,6 +1708,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         SelectedPrice = VisibleReferences.FirstOrDefault(row => row.Id == selectedId) ??
                         VisibleReferences.FirstOrDefault();
         OnPropertyChanged(nameof(ReferenceScopeSummary));
+        OnPropertyChanged(nameof(CandidateSearchSummary));
     }
 
     private QuotationItemSearchWorkspace CreateSeedWorkspace(ItemSearchPromptSlot slot)
