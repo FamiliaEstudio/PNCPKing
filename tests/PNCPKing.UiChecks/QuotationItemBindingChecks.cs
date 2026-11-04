@@ -133,7 +133,7 @@ internal static partial class Program
             input.Text = text;
             input.GetBindingExpression(TextBox.TextProperty)!.UpdateSource();
             if (enter)
-                input.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(input), 0, Key.Enter)
+                input.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(input), 0, System.Windows.Input.Key.Enter)
                 { RoutedEvent = Keyboard.KeyDownEvent });
             else search.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await UntilAsync(() => !vm.IsCandidateSearchBusy && !vm.IsInteracting);
