@@ -563,8 +563,12 @@ public sealed class AiAutomationTests
         var client = new CountingPncpClient(contract, unitPrice: 0.0001m, resultCount: 3);
         await database.Repository.UpsertItemsAsync(contract.PncpId,
             await client.GetItemsAsync(contract), false);
+        // This test isolates decimal precision. Repeated supplier + procurement
+        // would instead exercise the independent-source rule for basket creation.
+        string[] supplierIds = ["11222333000181", "60701190000104", "33000167000101"];
         await database.Repository.ReplaceItemResultsAsync(contract.PncpId, 1,
-            await client.GetItemResultsAsync(contract, 1));
+            (await client.GetItemResultsAsync(contract, 1)).Select((result, index) => result with
+                { SupplierTaxId = supplierIds[index], SupplierName = $"Fornecedor {index + 1}" }).ToArray());
         await using var search = new ItemSearchSessionService(client, database.Repository, Path.Combine(database.Directory, "search.db"));
         await new TimedQuotationAutomationService(database.Repository, search, quotations).RunAsync(run);
         var analysis = Assert.Single(await quotations.GetAnalysesAsync(project.Id));
