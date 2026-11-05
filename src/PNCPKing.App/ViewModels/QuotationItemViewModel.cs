@@ -1605,6 +1605,14 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
+        if (SelectedBasket is null && _referenceScope == ReferenceViewScope.InBasket)
+        {
+            // An item without a basket still owns all its collected candidates.
+            _referenceScope = ReferenceViewScope.All;
+            OnPropertyChanged(nameof(ReferenceScope));
+            OnPropertyChanged(nameof(ReferenceScopeSummary));
+        }
+
         var selectedIds = SelectedBasket?.Source.References
             .Select(reference => reference.Id)
             .ToHashSet(StringComparer.Ordinal) ?? [];

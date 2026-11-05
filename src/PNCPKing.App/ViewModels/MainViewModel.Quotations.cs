@@ -2357,6 +2357,14 @@ public sealed partial class MainViewModel
 
     private void RebuildVisibleQuotationReferences()
     {
+        if (SelectedQuotationLine is not null && SelectedQuotationBasket is null &&
+            _quotationReferenceScope == ReferenceViewScope.InBasket)
+        {
+            _quotationReferenceScope = ReferenceViewScope.All;
+            OnPropertyChanged(nameof(QuotationReferenceScope));
+            OnPropertyChanged(nameof(QuotationReferenceScopeSummary));
+        }
+
         var selectedId = SelectedVisibleQuotationReference?.Id;
         var selectedIds = SelectedQuotationBasket?.Source.References
             .Select(reference => reference.Id)

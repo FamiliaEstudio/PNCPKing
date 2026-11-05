@@ -114,7 +114,8 @@ public sealed partial class QuotationService
                     QuotationAutomationItemState.Completed => "Cesta recomendada selecionada automaticamente.",
                     QuotationAutomationItemState.CompletedWithWarning =>
                         $"Cesta recomendada reduzida para {recommended!.References.Count:N0} de {line.RequestedBasketSize:N0} preços.",
-                    _ => $"Foram encontradas {analysis.EligibleCount:N0} referência(s) válida(s)."
+                    _ => $"Nenhuma cesta automática formada. {analysis.References.Count:N0} preço(s) preservado(s) " +
+                        $"para revisão; {analysis.EligibleCount:N0} referência(s) elegível(is)."
                 };
                 await repository.UpdateAutomationItemStateAsync(line.Id, state, message, cancellationToken)
                     .ConfigureAwait(false);
