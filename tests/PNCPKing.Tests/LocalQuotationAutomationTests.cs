@@ -80,13 +80,13 @@ public sealed class LocalQuotationAutomationTests
     [Fact]
     public async Task ExcelAutomation_Processes423ItemsSequentiallyAndReportsEachCompletion()
     {
-        await using var database = await MainSearchLocalSequenceTests.SeedAsync(3);
+        await using var database = await MainSearchLocalSequenceTests.SeedAsync(5);
         var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
         var service = new QuotationService(repository, new QuotationAnalyzer());
         var project = await service.CreateProjectAsync("423 itens");
         var today = DateOnly.FromDateTime(DateTime.Today);
         var items = Enumerable.Range(1, 423).Select(index => new QuotationImportItem(index,
-            "café + açúcar", $"Café {index}", 10, "pacote", null, null, 1,
+            "café + açúcar", "Café", 10, "pacote", null, null, 1,
             PromptOrigin: SearchPromptOrigin.Excel)).ToArray();
         var run = await service.CreateAutomationRunAsync(project.Id, "unused.xlsx", "Teste",
             SearchGeoFilter.All, today.AddDays(-30), today, items, AdequacyWeights.Default);
@@ -99,7 +99,7 @@ public sealed class LocalQuotationAutomationTests
             if (value.UpdatedAnalysis is not { } analysis) return;
             completed++;
             Assert.Equal(423, value.TotalItems);
-            Assert.Equal(6, analysis.References.Count);
+            Assert.Equal(10, analysis.References.Count);
             Assert.Equal(completed * 100d / 423, value.Percentage);
         }));
         Assert.Equal(423, completed);

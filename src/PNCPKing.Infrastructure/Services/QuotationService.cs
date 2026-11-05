@@ -284,9 +284,8 @@ public sealed partial class QuotationService(
         var project = await GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
         var existingLine = lineId is null
             ? null
-            : (await repository.GetLinesAsync(projectId, cancellationToken).ConfigureAwait(false))
-                .SingleOrDefault(line => line.Id == lineId);
-        if (lineId is not null && existingLine is null)
+            : await repository.GetLineAsync(projectId, lineId.Value, cancellationToken).ConfigureAwait(false);
+        if (lineId is not null && (existingLine is null || existingLine.ProjectId != projectId))
         {
             throw new InvalidOperationException("O item selecionado não pertence ao projeto atual.");
         }

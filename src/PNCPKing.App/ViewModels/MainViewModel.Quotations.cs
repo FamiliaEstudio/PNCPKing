@@ -1137,20 +1137,27 @@ public sealed partial class MainViewModel
             projectId = created.Id;
         }
 
-        var run = await _quotationService.CreateAutomationRunAsync(
-                projectId.Value,
-                preview.OutputPath,
-                responsibleName,
-                SelectedGeoFilter,
-                startDate,
-                endDate,
-                document.Items,
-                weightsWindow.Weights)
-            .ConfigureAwait(true);
-        await RefreshQuotationProjectsAsync(projectId).ConfigureAwait(true);
-        await LoadQuotationProjectAsync(projectId).ConfigureAwait(true);
+        var geoFilter = SelectedGeoFilter;
+        IsFileBusy = true;
+        IsExcelAutomationRunning = true;
+        ExcelAutomationProgress = 0;
+        ExcelAutomationStatus = "Inserindo os itens da planilha…";
         SelectedResultsWorkspace = ResultsWorkspace.Quotations;
-        await RunQuotationAutomationAsync(run).ConfigureAwait(true);
+        try
+        {
+            var run = await Task.Run(() => _quotationService.CreateAutomationRunAsync(
+                projectId.Value, preview.OutputPath, responsibleName, geoFilter,
+                startDate, endDate, document.Items, weightsWindow.Weights)).ConfigureAwait(true);
+            await RefreshQuotationProjectsAsync(projectId).ConfigureAwait(true);
+            await LoadQuotationProjectAsync(projectId).ConfigureAwait(true);
+            await RunQuotationAutomationAsync(run).ConfigureAwait(true);
+        }
+        finally
+        {
+            IsExcelAutomationRunning = false;
+            IsFileBusy = false;
+            NotifyCommands();
+        }
     }
 
     private async Task StartAiQuotationAsync()
