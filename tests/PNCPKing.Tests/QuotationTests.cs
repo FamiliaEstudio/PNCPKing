@@ -54,6 +54,37 @@ public sealed class QuotationTests
         Assert.Contains(selected.References, reference => reference.MatchedPromptLevel == PromptMatchLevel.Intermediate);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void ExcelBaskets_FormAlternativesForReviewWhenDescriptiveScoringLeavesFewerThanTwoEligible(int eligibleCount)
+    {
+        var line = Line("Café torrado", 100m, "pacote");
+        line = line with { AutomationRunId = Guid.NewGuid(),
+            PromptSet = new ItemSearchPromptSet { LineId = line.Id, Origin = SearchPromptOrigin.Excel } };
+        var references = Enumerable.Range(0, 5).Select(index =>
+            Reference($"r{index}", $"c{index}", "11222333000181", 100m + index,
+                description: index < eligibleCount ? "Café torrado" : "Açúcar cristal")
+                with { MatchedPromptLevel = PromptMatchLevel.Restrictive }).ToArray();
+        var analyzer = new QuotationAnalyzer(Today);
+        var analysis = analyzer.Analyze(line, references);
+        Assert.Equal(5, analysis.References.Count);
+        Assert.Equal(eligibleCount, analysis.EligibleCount);
+        Assert.Equal(5, analysis.BasketPoolCount);
+        Assert.InRange(analysis.Baskets.Count, 2, QuotationAnalyzer.MaximumCuratedBaskets);
+        Assert.All(analysis.Baskets, basket =>
+        {
+            Assert.Equal(3, basket.References.Count);
+            Assert.True(basket.RequiresReview);
+            Assert.False(basket.IsValid);
+            Assert.False(basket.IsRecommended);
+            Assert.Equal("Revisar descrição", new QuotationBasketDisplay(basket).Status);
+            Assert.Contains("revisão técnica", basket.ValidationMessage);
+        });
+        var legacy = analyzer.Analyze(line with { AutomationRunId = null, PromptSet = null }, references);
+        Assert.Empty(legacy.Baskets);
+    }
+
     [Fact]
     public async Task CopyPricesBetweenBaskets_PreservesSourceDestinationAdjustmentsAndAvoidsDuplicates()
     {

@@ -106,12 +106,17 @@ public sealed partial class QuotationService
                 var recommended = analysis.Baskets.FirstOrDefault(basket => basket.IsRecommended);
                 if (recommended is not null)
                     await ConfirmBasketAsync(analysis, recommended.Key, cancellationToken).ConfigureAwait(false);
-                var state = recommended is null ? QuotationAutomationItemState.Insufficient :
-                    recommended.References.Count >= line.RequestedBasketSize
+                var reviewBasketCount = analysis.Baskets.Count(basket => basket.RequiresReview);
+                var state = recommended is null
+                    ? reviewBasketCount > 0 ? QuotationAutomationItemState.CompletedWithWarning : QuotationAutomationItemState.Insufficient
+                    : recommended.References.Count >= line.RequestedBasketSize
                         ? QuotationAutomationItemState.Completed : QuotationAutomationItemState.CompletedWithWarning;
                 var message = state switch
                 {
                     QuotationAutomationItemState.Completed => "Cesta recomendada selecionada automaticamente.",
+                    QuotationAutomationItemState.CompletedWithWarning when recommended is null =>
+                        $"{reviewBasketCount:N0} cesta(s) de candidatos formada(s) para revisão técnica. " +
+                        "Confira as descrições e escolha a cesta; nenhuma foi selecionada automaticamente.",
                     QuotationAutomationItemState.CompletedWithWarning =>
                         $"Cesta recomendada reduzida para {recommended!.References.Count:N0} de {line.RequestedBasketSize:N0} preços.",
                     _ => $"Nenhuma cesta automática formada. {analysis.References.Count:N0} preço(s) preservado(s) " +

@@ -91,7 +91,7 @@ public sealed class LocalQuotationAutomationTests
     }
 
     [Fact]
-    public async Task ExcelAutomation_NoEligibleBasketPreservesCandidatesAndOtherItemsBasketsAfterReopening()
+    public async Task ExcelAutomation_FormsReviewBasketsFromCandidatesAndKeepsOtherItemsBasketsAfterReopening()
     {
         await using var database = await MainSearchLocalSequenceTests.SeedAsync(5);
         var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
@@ -110,10 +110,17 @@ public sealed class LocalQuotationAutomationTests
         var analyses = (await reopened.GetAnalysesAsync(project.Id)).OrderBy(analysis => analysis.Line.DisplayOrder).ToArray();
         Assert.Equal(2, analyses.Length);
         var insufficient = analyses[0];
-        Assert.Equal(QuotationAutomationItemState.Insufficient, insufficient.Line.AutomationState);
+        Assert.Equal(QuotationAutomationItemState.CompletedWithWarning, insufficient.Line.AutomationState);
         Assert.Equal(5, insufficient.References.Count);
         Assert.All(insufficient.References, reference => Assert.Equal(QuotationReferenceState.Rejected, reference.State));
-        Assert.Empty(insufficient.Baskets);
+        Assert.NotEmpty(insufficient.Baskets);
+        Assert.All(insufficient.Baskets, basket =>
+        {
+            Assert.True(basket.RequiresReview);
+            Assert.False(basket.IsValid);
+            Assert.False(basket.IsRecommended);
+            Assert.Equal(3, basket.References.Count);
+        });
         Assert.Null(insufficient.SelectedBasket);
         Assert.False(insufficient.Line.SelectionConfirmed);
         var completed = analyses[1];
