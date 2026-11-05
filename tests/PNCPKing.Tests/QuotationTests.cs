@@ -11,6 +11,82 @@ public sealed class QuotationTests
 {
     private static readonly DateOnly Today = new(2026, 7, 21);
 
+    [Theory]
+    [InlineData(3, 3, PromptMatchLevel.Restrictive)]
+    [InlineData(2, 3, PromptMatchLevel.Intermediate)]
+    [InlineData(1, 1, PromptMatchLevel.Broad)]
+    public void ExcelBaskets_PreferTheNarrowestCompleteRegularLevel(int restrictive, int intermediate, PromptMatchLevel expected)
+    {
+        var line = Line("Café torrado", 100m, "pacote");
+        line = line with { AutomationRunId = Guid.NewGuid(),
+            PromptSet = new ItemSearchPromptSet { LineId = line.Id, Origin = SearchPromptOrigin.Excel } };
+        var references = Enumerable.Range(0, restrictive + intermediate + 65).Select(index =>
+        {
+            var level = index < restrictive ? PromptMatchLevel.Restrictive :
+                index < restrictive + intermediate ? PromptMatchLevel.Intermediate : PromptMatchLevel.Broad;
+            return Reference($"r{index:000}", $"c{index}", "11222333000181", 100m) with
+            {
+                MatchedPromptLevel = level,
+                // Broader candidates score better and exceed the global pool of 60.
+                ResultDate = Today.AddDays(level == PromptMatchLevel.Broad ? -1 : -250)
+            };
+        }).ToArray();
+        var result = new QuotationAnalyzer(Today).Analyze(line, references);
+        var selected = Assert.Single(result.Baskets, basket => basket.IsRecommended);
+        Assert.Equal(3, selected.References.Count);
+        Assert.Equal(QuotationBasketVisualState.AutomaticRegular, selected.VisualState);
+        Assert.Equal(expected, selected.References.Max(reference => reference.MatchedPromptLevel));
+        Assert.Equal(references.Length, result.References.Count);
+        Assert.InRange(result.Baskets.Count, 1, QuotationAnalyzer.MaximumCuratedBaskets);
+    }
+
+    [Fact]
+    public void ExcelBaskets_ExpandWhenRestrictivePricesCannotFormARegularBasket()
+    {
+        var line = Line("Café", 100m, "pacote");
+        line = line with { AutomationRunId = Guid.NewGuid(),
+            PromptSet = new ItemSearchPromptSet { LineId = line.Id, Origin = SearchPromptOrigin.Excel } };
+        var prices = new[] { 1m, 100m, 1000m, 100m, 101m, 102m };
+        var references = prices.Select((price, index) => Reference($"r{index}", $"c{index}", "11222333000181", price)
+            with { MatchedPromptLevel = index < 3 ? PromptMatchLevel.Restrictive : PromptMatchLevel.Intermediate }).ToArray();
+        var selected = new QuotationAnalyzer(Today).Analyze(line, references).Baskets.Single(basket => basket.IsRecommended);
+        Assert.Equal(QuotationBasketVisualState.AutomaticRegular, selected.VisualState);
+        Assert.Contains(selected.References, reference => reference.MatchedPromptLevel == PromptMatchLevel.Intermediate);
+    }
+
+    [Fact]
+    public async Task CopyPricesBetweenBaskets_PreservesSourceDestinationAdjustmentsAndAvoidsDuplicates()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer(Today));
+        var project = await service.CreateProjectAsync("Cópia de preços");
+        var analysis = await service.CaptureSampleAsync(project.Id, null, new("Café", 100m, "pacote", null, null),
+            [Row("copy1", "11222333000181", 100m), Row("copy2", "60701190000104", 101m),
+             Row("copy3", "33000167000101", 102m), Row("copy4", "00360305000104", 103m)]);
+        var ids = analysis.References.Select(reference => reference.Id).ToArray();
+        var source = await service.CreateManualBasketAsync(analysis.Line.Id, "Origem", ids[..3]);
+        await service.SetManualBasketPriceDivisorAsync(source.Id, ids[0], 10m);
+        var destination = await service.CreateManualBasketAsync(analysis.Line.Id, "Destino", ids[1..]);
+        await service.SetManualBasketConversionFactorAsync(destination.Id, ids[1], 2m);
+        analysis = (await service.GetAnalysisAsync(project.Id, analysis.Line.Id))!;
+        var copied = await service.CopyReferencesToBasketAsync(analysis, source.Key, destination.Key, ids[..2]);
+        Assert.Equal(4, copied.ReferenceIds.Count);
+        Assert.Equal(10m, copied.PriceDivisors[ids[0]]);
+        Assert.Equal(2m, copied.ConversionFactors[ids[1]]);
+        Assert.Equal(3, (await repository.GetManualBasketsAsync(analysis.Line.Id)).Single(b => b.Id == source.Id).ReferenceIds.Count);
+        copied = await service.CopyReferencesToBasketAsync(analysis, source.Key, destination.Key, ids[..2]);
+        Assert.Equal(4, copied.ReferenceIds.Count);
+        var automatic = analysis.Baskets.First(basket => !basket.IsManual);
+        var manualCopy = await service.CopyReferencesToBasketAsync(analysis, source.Key, automatic.Key, [ids[0]]);
+        Assert.NotEqual(source.Id, manualCopy.Id);
+        Assert.Contains(ids[0], manualCopy.ReferenceIds);
+        var created = await service.CopyReferencesToBasketAsync(analysis, source.Key, null, ids[..2]);
+        Assert.Equal(10m, created.PriceDivisors[ids[0]]);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.CopyReferencesToBasketAsync(analysis, source.Key, destination.Key, ["foreign-reference"]));
+    }
+
     [Fact]
     public async Task QuotationEditsWaitForTheSharedBackgroundWriter()
     {

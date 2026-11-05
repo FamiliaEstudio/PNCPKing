@@ -1,0 +1,120 @@
+extern alias AppUnderTest;
+
+using System.IO;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Threading;
+using PNCPKing.Core.Interfaces;
+using PNCPKing.Core.Models;
+using PNCPKing.Core.Quotations;
+using PNCPKing.Infrastructure.Data;
+using PNCPKing.Infrastructure.Services;
+using ExcelMainVm = AppUnderTest::PNCPKing.App.ViewModels.MainViewModel;
+using ExcelItemVm = AppUnderTest::PNCPKing.App.ViewModels.QuotationItemViewModel;
+using ExcelItemWindow = AppUnderTest::PNCPKing.App.Views.QuotationItemWindow;
+using ExcelMainWindow = AppUnderTest::PNCPKing.App.Views.MainWindow;
+using ExcelServices = AppUnderTest::PNCPKing.App.Services;
+
+internal static partial class Program
+{
+    private static async Task CheckExcelAutomationUiAsync()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "PNCPKing.UiChecks", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var database = new SqliteContractRepository(Path.Combine(directory, "test.db"));
+            await database.InitializeAsync();
+            var repository = new SqliteQuotationRepository(database.DatabasePath);
+            var quotations = new QuotationService(repository, new QuotationAnalyzer());
+            var project = await quotations.CreateProjectAsync("Itens do Excel");
+            var line = await repository.CreateLineAsync(project.Id, new("Café", 100, "pacote", null, null));
+            var references = Enumerable.Range(0, 120).Select(index => new QuotationReference
+            {
+                Id = $"candidate-{index}", LineId = line.Id, ContractId = $"contract-{index}",
+                ItemNumber = 1, ResultSequence = 1, UnitPrice = 100m,
+                ItemDescription = index < 60 ? "Café torrado" : "Açúcar cristal", ItemUnit = "pacote",
+                SupplierTaxId = "11222333000181", ResultDate = DateOnly.FromDateTime(DateTime.Today)
+            }).ToArray();
+            await repository.SaveSampleAsync(project.Id, line.Id, new("Café", 100, "pacote", null, null), references);
+            var main = (ExcelMainVm)RuntimeHelpers.GetUninitializedObject(typeof(ExcelMainVm));
+            foreach (var field in typeof(ExcelMainVm).GetFields(BindingFlags.Instance | BindingFlags.NonPublic))
+                if (field.FieldType.Name.StartsWith("RangeObservableCollection`", StringComparison.Ordinal) ||
+                    field.FieldType.Name.StartsWith("ObservableCollection`", StringComparison.Ordinal))
+                    field.SetValue(main, Activator.CreateInstance(field.FieldType));
+            var settings = new ExcelServices.AppSettingsService();
+            typeof(ExcelServices.AppSettingsService).GetField("_settingsPath", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .SetValue(settings, Path.Combine(directory, "settings.json"));
+            var layouts = new ExcelServices.DataGridColumnLayoutService(settings, new(directory, true));
+            var internet = DispatchProxy.Create<IInternetPriceService, EmptyInternetDrafts>();
+            var vm = new ExcelItemVm(main, quotations, null!, null!, internet, null!, null!, null!, directory, project.Id, line.Id);
+            var itemWindow = new ExcelItemWindow(vm, null!, null!, layouts);
+            try
+            {
+                itemWindow.Show();
+                var initialLoad = (Task)typeof(ExcelItemWindow).GetField("_initialLoadTask", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .GetValue(itemWindow)!;
+                await initialLoad.WaitAsync(TimeSpan.FromSeconds(45));
+                Require(vm.Line?.Analysis.References.Count == 120, "A janela não abriu todos os preços coletados.");
+                var basketKey = vm.SelectedBasket?.Key;
+                vm.CandidateSearchText = "açúcar";
+                await vm.SearchCandidatesAsync();
+                Require(vm.ReferenceScope == ReferenceViewScope.All && vm.VisibleReferences.Count == 60,
+                    "A pesquisa ficou limitada à cesta em vez dos preços coletados.");
+                Require(vm.SelectedBasket?.Key == basketKey, "Filtrar alterou a cesta selecionada.");
+                vm.CandidateSearchText = "café + açúcar";
+                await vm.SearchCandidatesAsync();
+                Require(vm.VisibleReferences.Count == 120, "O + não reuniu os candidatos.");
+                vm.CandidateSearchText = "café +";
+                await vm.SearchCandidatesAsync();
+                Require(vm.VisibleReferences.Count == 120 && vm.CandidateSearchSummary.Contains("não aplicada"),
+                    "Uma pesquisa inválida apagou o resultado anterior.");
+                vm.ClearCandidateSearch();
+                Require(vm.VisibleReferences.Count == 120 && !vm.IsCandidateSearchBusy, "Limpar não restaurou os candidatos.");
+                var menu = (ContextMenu)itemWindow.FindName("PriceContextMenu");
+                var copy = menu.Items.OfType<MenuItem>().Single(item => item.Header?.ToString()?.StartsWith("Copiar preço(s)") == true);
+                typeof(ExcelItemWindow).GetMethod("CopyPriceToBasket_Opened", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .Invoke(itemWindow, [copy, new RoutedEventArgs(MenuItem.SubmenuOpenedEvent, copy)]);
+                Require(copy.Items.OfType<MenuItem>().Any(item => item.Header?.ToString() == "Nova cesta manual"),
+                    "A ação da linha não permite copiar para uma nova cesta.");
+            }
+            finally { itemWindow.Close(); await vm.DisposeAsync(); }
+
+            var window = new ExcelMainWindow(main, layouts, null!);
+            typeof(ExcelMainWindow).GetField("_shutdownComplete", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(window, true);
+            try
+            {
+                window.Show();
+                var panel = (StackPanel)window.FindName("ExcelAutomationPanel");
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Require(panel.Visibility == Visibility.Collapsed, "O progresso apareceu sem automação.");
+                typeof(ExcelMainVm).GetProperty(nameof(ExcelMainVm.IsExcelAutomationRunning))!.SetValue(main, true);
+                typeof(ExcelMainVm).GetProperty(nameof(ExcelMainVm.ExcelAutomationProgress))!.SetValue(main, 50d);
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Require(panel.Visibility == Visibility.Visible, "O progresso não apareceu durante a automação.");
+                var progress = panel.Children.OfType<ProgressBar>().Single();
+                Require(progress.Value == 50, "O progresso não acompanhou o valor informado.");
+                typeof(ExcelMainVm).GetProperty(nameof(ExcelMainVm.IsExcelAutomationRunning))!.SetValue(main, false);
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Require(panel.Visibility == Visibility.Collapsed, "O progresso permaneceu depois do término.");
+            }
+            finally { window.Close(); }
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(directory, true);
+        }
+    }
+
+    public class EmptyInternetDrafts : DispatchProxy
+    {
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+        {
+            Require(method?.Name == nameof(IInternetPriceService.GetDraftsAsync), "O filtro tentou acessar outra fonte.");
+            return Task.FromResult<IReadOnlyList<InternetPriceDraft>>([]);
+        }
+    }
+}

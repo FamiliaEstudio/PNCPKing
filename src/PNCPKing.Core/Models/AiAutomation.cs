@@ -245,7 +245,8 @@ public enum SearchPromptOrigin
 {
     Ai,
     User,
-    Migrated
+    Migrated,
+    Excel
 }
 
 public enum SearchPromptValidationState

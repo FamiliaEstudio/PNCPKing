@@ -184,6 +184,12 @@ public partial class QuotationItemWindow : Window
 
     private async void WorkspaceTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (IsLoaded && ReferenceEquals(e.Source, WorkspaceTabs) &&
+            ReferenceEquals(WorkspaceTabs.SelectedItem, SupplementarySearchTab))
+        {
+            await RunAsync(ViewModel.EnsureSearchWorkspaceAsync).ConfigureAwait(true);
+            return;
+        }
         if (!IsLoaded || !ReferenceEquals(e.Source, WorkspaceTabs) ||
             !ReferenceEquals(WorkspaceTabs.SelectedItem, CatalogTab))
         {
@@ -199,6 +205,19 @@ public partial class QuotationItemWindow : Window
         e.Handled = true;
         await RunAsync(() => ViewModel.SearchCatalogAsync()).ConfigureAwait(true);
     }
+
+    private async void SearchCandidates_Click(object sender, RoutedEventArgs e) =>
+        await RunAsync(ViewModel.SearchCandidatesAsync).ConfigureAwait(true);
+
+    private async void CandidateSearch_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        e.Handled = true;
+        await RunAsync(ViewModel.SearchCandidatesAsync).ConfigureAwait(true);
+    }
+
+    private void ClearCandidateSearch_Click(object sender, RoutedEventArgs e) => ViewModel.ClearCandidateSearch();
+    private void StopCandidateSearch_Click(object sender, RoutedEventArgs e) => ViewModel.StopCandidateSearch();
 
     private void CatalogHierarchy_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e) =>
         ViewModel.ApplyCatalogHierarchy(e.NewValue as CatalogHierarchyNode);
@@ -424,6 +443,31 @@ public partial class QuotationItemWindow : Window
             ViewModel.SelectedSearchRow = row;
             SearchResultsGrid.SelectedItem = row;
             OpenMenu(SearchContextMenu, button);
+        }
+    }
+
+    private void CopyPriceToBasket_Opened(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem menu || !ReferenceEquals(e.Source, menu)) return;
+        menu.Items.Clear();
+        var selected = ViewModel.SelectedPrice;
+        if (selected is null) return;
+        var rows = PriceGrid.SelectedItems.Contains(selected)
+            ? PriceGrid.SelectedItems.Cast<QuotationPriceDisplayRow>().ToArray() : [selected];
+        void AddDestination(string label, string? key, bool enabled = true)
+        {
+            var item = new MenuItem { Header = label, IsEnabled = enabled };
+            item.Click += async (_, _) =>
+                await RunAsync(() => ViewModel.CopyPricesToBasketAsync(rows, key)).ConfigureAwait(true);
+            menu.Items.Add(item);
+        }
+        AddDestination("Nova cesta manual", null);
+        menu.Items.Add(new Separator());
+        foreach (var basket in ViewModel.Baskets.Where(basket => basket.Key != ViewModel.SelectedBasket?.Key))
+        {
+            var label = basket.Name + (basket.Source.IsManual ? "" : " (criar cópia manual)");
+            AddDestination(label, basket.Key,
+                rows.Any(row => basket.Source.References.All(reference => reference.Id != row.Id)));
         }
     }
 

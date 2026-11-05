@@ -84,6 +84,22 @@
                     </controls:GridReader>
 
                     <StackPanel Grid.Row="1" Margin="0,6">
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="CandidateSearchTextBox"
+                                     Text="{Binding CandidateSearchText, UpdateSourceTrigger=PropertyChanged}"
+                                     KeyDown="CandidateSearch_KeyDown"
+                                     ToolTip="Pesquisar nos preços já coletados deste item. Use palavras, frases, exclusões e + para alternativas." />
+                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                <Button Content="Pesquisar nos preços coletados" Click="SearchCandidates_Click" />
+                                <Button Content="Limpar" Click="ClearCandidateSearch_Click" />
+                                <Button Content="Parar" Click="StopCandidateSearch_Click" />
+                            </StackPanel>
+                        </Grid>
+                        <TextBlock Text="{Binding CandidateSearchSummary, Mode=OneWay}" TextWrapping="Wrap" />
                         <WrapPanel>
                             <TextBlock Text="Mostrar:" VerticalAlignment="Center" FontWeight="SemiBold" />
                             <Button Content="Na cesta" Click="ScopeInBasket_Click" />
@@ -117,6 +133,9 @@
                                     <MenuItem Header="Ver páginas relevantes" Click="PriceRelevantPages_Click" />
                                     <Separator />
                                     <MenuItem Header="Adicionar/retirar da cesta" Click="PriceToggleBasket_Click" />
+                                    <MenuItem Header="Copiar preço(s) para outra cesta" SubmenuOpened="CopyPriceToBasket_Opened">
+                                        <MenuItem Header="Escolher destino…" />
+                                    </MenuItem>
                                     <MenuItem Header="Dividir preço por" Click="PriceFactor_Click" />
                                     <MenuItem Header="Restaurar preço original" Click="PriceResetFactor_Click" />
                                     <MenuItem Header="Editar preço da internet" Click="EditInternetReference_Click" />
@@ -194,7 +213,7 @@
                 </Grid>
             </TabItem>
 
-            <TabItem Header="Pesquisar e complementar">
+            <TabItem x:Name="SupplementarySearchTab" Header="Complementar no banco local">
                 <Grid Margin="4">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />

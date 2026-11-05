@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using Microsoft.Win32;
 using PNCPKing.App.Services;
 using PNCPKing.Core.Models;
+using PNCPKing.Core.Search;
 
 namespace PNCPKing.App.Views;
 
@@ -33,11 +34,16 @@ public partial class QuotationImportWindow : Window
         NewProjectNameTextBox.Text = projects.Count == 0 ? baseName : string.Empty;
         _defaultOutputName = baseName + "-cotação.xlsx";
         var localPrices = document.Items.Sum(item =>
-            checked(item.BatchCount * ItemSearchDefaults.ContractsPerBatch));
+            checked(item.BatchCount * ItemSearchDefaults.ContractsPerBatch *
+                new[] { item.SearchText, item.IntermediateSearchText, item.BroadSearchText }
+                    .Where(text => !string.IsNullOrWhiteSpace(text))
+                    .Sum(text => SearchText.ParseMainCriteria(text).Count)));
         SummaryTextBlock.Text =
             $"{document.Items.Count:N0} item(ns), até {localPrices:N0} preços locais exibidos. " +
             $"Filtros: {filterSummary}. Pesos: {weights}. " +
-            "A coluna G define quantas páginas de até 50 preços salvos serão lidas por item.";
+            "A coluna G limita as páginas de até 50 preços por prompt. '+' separa pesquisas independentes, " +
+            "como na pesquisa normal. A: restritivo; K: intermediários; L: amplos. " +
+            "Todos os prompts preenchidos serão usados. As cestas e o Excel serão gerados; documentos ficam para coleta manual.";
     }
 
     public IReadOnlyList<QuotationImportItem> Items { get; }

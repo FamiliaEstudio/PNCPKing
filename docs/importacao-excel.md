@@ -4,16 +4,26 @@ Use um arquivo `.xlsx`. O PNCP King lê a primeira aba visível, a partir da lin
 
 | Coluna | Informação | Preenchimento |
 | --- | --- | --- |
-| A | Pesquisa | Expressão de pesquisa do item, obrigatória. |
+| A | Pesquisa restritiva | Obrigatória. Use `+` para separar pesquisas independentes, como na pesquisa normal. |
 | B | Descrição de saída | Nome do item, obrigatório; suas maiúsculas e minúsculas serão mantidas no Word. |
 | C | Quantidade total | Inteiro maior que zero, obrigatório. |
 | D | Unidade | Unidade de medida, obrigatória. |
 | E | Faixa mínima de preço | Opcional; não é quantidade mínima por pedido. |
 | F | Faixa máxima de preço | Opcional; deve ser igual ou maior que E quando ambas forem preenchidas. |
-| G | Páginas locais | Inteiro de 1 a 100; cada página reúne até 50 preços. |
+| G | Páginas locais por prompt | Inteiro de 1 a 100; cada expressão separada por `+` pode ler até G páginas de 50 preços. |
 | H | Número de preços na cesta | Inteiro de 3 a 10; vazio usa 3. |
 | I | CATMAT | Opcional. Formate a célula como **Texto** antes de digitar para preservar zeros iniciais. |
 | J | Quantidade mínima por pedido | Opcional; quantidade nominal inteira maior que zero, **não percentual**. Vazio usa o percentual escolhido na exportação Word. |
+| K | Pesquisas intermediárias | Opcional; vários prompts separados por `+`. |
+| L | Pesquisas amplas | Opcional; vários prompts separados por `+`. |
+
+O `+` reúne os resultados das pesquisas independentes e elimina preços repetidos. Para exigir duas palavras no mesmo resultado, escreva-as juntas com espaço: `café torrado`. Aspas, unidades, exclusões e aproximações continuam seguindo a sintaxe da pesquisa normal; o `+` dentro de uma frase entre aspas ou de um bloco `C:(...)` não separa prompts.
+
+Exemplo: A = `café torrado 500 g`; K = `café torrado + café moído`; L = `café + bebida café`. Todos os prompts preenchidos são pesquisados. A cesta recomendada dá prioridade a uma cesta completa e regular formada apenas por preços do restritivo; se isso não for possível, admite intermediários e, por último, amplos. Dentro do nível, preserva a preferência pelos preços mais restritos e aplica os pesos já configurados. As outras referências permanecem disponíveis para revisão. Quando não existe cesta completa e regular, as alternativas continuam identificadas com seus avisos; a prioridade de prompt não transforma uma cesta irregular em regular.
+
+Cada item é processado em segundo plano, com uma leitura por vez e páginas de até 50 preços. O progresso aparece na aba Cotações e desaparece ao terminar, cancelar ou falhar. Use **Automação → Cancelar automação** para interromper; **Retomar automação** preserva os preços já salvos e não repete itens concluídos. Ao finalizar, o programa monta as cestas e exporta somente o Excel. Para coletar os documentos depois, use **Exportar Excel e evidências**.
+
+Na janela do item, **Pesquisar nos preços coletados** filtra todos os candidatos já vinculados ao item, inclusive os que estão fora da cesta. **Limpar** restaura a visualização; nenhuma dessas ações altera a composição das cestas. Na linha do preço, **Ações → Copiar preço(s) para outra cesta** permite escolher o destino ou criar uma cesta manual. Uma cesta automática de destino recebe uma cópia manual para edição; a origem é preservada. Divisores e conversões acompanham os preços novos, sem substituir ajustes de preços já presentes no destino.
 
 Exemplo de uma linha de dados, nas colunas A:J:
 

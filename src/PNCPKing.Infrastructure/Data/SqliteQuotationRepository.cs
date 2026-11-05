@@ -2520,7 +2520,10 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
                      promptSet.BroadText
                  }.Where(value => !string.IsNullOrWhiteSpace(value)))
         {
-            _ = PNCPKing.Core.Search.SearchText.Parse(text);
+            if (promptSet.Origin == SearchPromptOrigin.Excel)
+                _ = PNCPKing.Core.Search.SearchText.ParseMainCriteria(text);
+            else
+                _ = PNCPKing.Core.Search.SearchText.Parse(text);
         }
 
         await using var writer = await _connections.WorkCoordinator
