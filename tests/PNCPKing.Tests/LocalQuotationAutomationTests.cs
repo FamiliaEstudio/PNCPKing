@@ -4,6 +4,7 @@ using PNCPKing.Core.Models;
 using PNCPKing.Core.Quotations;
 using PNCPKing.Infrastructure.Data;
 using PNCPKing.Infrastructure.Services;
+using static PNCPKing.Tests.PriceCacheTests;
 
 namespace PNCPKing.Tests;
 
@@ -121,6 +122,48 @@ public sealed class LocalQuotationAutomationTests
         Assert.NotEmpty(completed.Baskets);
         Assert.NotNull(completed.SelectedBasket);
         Assert.True(completed.Line.SelectionConfirmed);
+    }
+
+    [Fact]
+    public async Task ExcelAutomation_HighDispersionKeepsAllBasketsEvenWhenNoPricePassesTwentyFivePercent()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var contract = RecentContract("high-dispersion", today.AddDays(-1), 1);
+        await database.Repository.UpsertContractsAsync([contract]);
+        var items = Enumerable.Range(1, 3).Select(index => Item(contract, index) with
+            { Description = "Café torrado", Unit = "pacote" }).ToArray();
+        await database.Repository.UpsertItemsAsync(contract.PncpId, items, false);
+        var values = new[] { 1m, 100m, 1000m };
+        for (var index = 0; index < items.Length; index++)
+            await database.Repository.ReplaceItemResultsAsync(contract.PncpId, items[index].ItemNumber,
+                [Result(contract, items[index].ItemNumber, 1, true) with
+                    { HomologatedUnitValueScaled = DecimalScale.ToScaled(values[index]) }]);
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer());
+        var project = await service.CreateProjectAsync("Cesta com dispersão");
+        var run = await service.CreateAutomationRunAsync(project.Id, "unused.xlsx", "Teste",
+            SearchGeoFilter.All, today.AddDays(-30), today,
+            [new(1, "café", "Café torrado", 10, "pacote", null, null, 10,
+                PromptOrigin: SearchPromptOrigin.Excel)], AdequacyWeights.Default);
+
+        await service.CollectLocalAutomationAsync(run, new SqlitePriceCacheRepository(database.Repository.DatabasePath));
+
+        var reopened = new QuotationService(new SqliteQuotationRepository(database.Repository.DatabasePath), new QuotationAnalyzer());
+        var analysis = Assert.Single(await reopened.GetAnalysesAsync(project.Id));
+        Assert.Equal(3, analysis.References.Count);
+        Assert.Equal(3, analysis.EligibleCount);
+        Assert.NotEmpty(analysis.Baskets);
+        Assert.All(analysis.Baskets, basket =>
+        {
+            Assert.Equal(3, basket.References.Count);
+            Assert.Equal(QuotationBasketVisualState.AutomaticHighDispersion, basket.VisualState);
+            Assert.True(basket.MaximumDeviationPercent > 25m);
+            Assert.Equal(0m, basket.AdoptedPrice);
+        });
+        Assert.NotNull(analysis.SelectedBasket);
+        Assert.True(analysis.Line.SelectionConfirmed);
+        Assert.NotEqual(QuotationAutomationItemState.Insufficient, analysis.Line.AutomationState);
     }
 
     [Fact]
