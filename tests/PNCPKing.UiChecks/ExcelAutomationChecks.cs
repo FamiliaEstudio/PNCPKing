@@ -82,6 +82,43 @@ internal static partial class Program
             }
             finally { itemWindow.Close(); await vm.DisposeAsync(); }
 
+            foreach (var count in new[] { 1, 3 })
+            {
+                var description = count == 1 ? "Café" : "Tubo PVC rígido DN 100 milímetros";
+                var input = new QuotationLineInput(description, 100, "pacote", null, null);
+                var withoutBasket = await repository.CreateLineAsync(project.Id, input);
+                await repository.SaveSampleAsync(project.Id, withoutBasket.Id, input,
+                    references.Take(count).Select(reference => reference with { LineId = withoutBasket.Id }).ToArray());
+                var withoutBasketVm = new ExcelItemVm(main, quotations, null!, null!, internet,
+                    null!, null!, null!, directory, project.Id, withoutBasket.Id);
+                try
+                {
+                    await withoutBasketVm.LoadAsync();
+                    Require(withoutBasketVm.Baskets.Count == 0, "O cenário deveria estar sem cesta automática.");
+                    Require(withoutBasketVm.ReferenceScope == ReferenceViewScope.All &&
+                        withoutBasketVm.VisibleReferences.Count == count,
+                        "Um item sem cesta ocultou os candidatos salvos ao abrir a janela.");
+                    withoutBasketVm.ReferenceScope = ReferenceViewScope.InBasket;
+                    Require(withoutBasketVm.ReferenceScope == ReferenceViewScope.All &&
+                        withoutBasketVm.VisibleReferences.Count == count,
+                        "O filtro de uma cesta inexistente ocultou os candidatos.");
+
+                    var mainType = typeof(ExcelMainVm);
+                    mainType.GetField("_selectedQuotationLine", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .SetValue(main, new AppUnderTest::PNCPKing.App.ViewModels.QuotationLineDisplay(withoutBasketVm.Line!.Analysis));
+                    mainType.GetField("_selectedQuotationBasket", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .SetValue(main, null);
+                    mainType.GetField("_quotationReferenceScope", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .SetValue(main, ReferenceViewScope.InBasket);
+                    mainType.GetMethod("RebuildVisibleQuotationReferences", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .Invoke(main, null);
+                    Require(main.QuotationReferenceScope == ReferenceViewScope.All &&
+                        main.VisibleQuotationReferences.Count == count,
+                        "A tela principal ocultou os candidatos de um item sem cesta.");
+                }
+                finally { await withoutBasketVm.DisposeAsync(); }
+            }
+
             var window = new ExcelMainWindow(main, layouts, null!);
             typeof(ExcelMainWindow).GetField("_shutdownComplete", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(window, true);
             try

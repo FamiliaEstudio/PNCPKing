@@ -69,8 +69,27 @@ public sealed partial class QuotationAnalyzer
                 reference.Source == QuotationReferenceSource.PncpIncisoII).ToArray());
         var automaticBaskets = BuildAutomaticBaskets(pool, line.RequestedBasketSize, priceDecimalPlaces);
         if (line.AutomationRunId is not null && line.PromptSet?.Origin == SearchPromptOrigin.Excel)
+        {
             automaticBaskets = PreferRestrictiveBasket(eligible, automaticBaskets,
                 line.RequestedBasketSize, priceDecimalPlaces);
+            if (automaticBaskets.Count == 0)
+            {
+                // Keep the descriptive rejection and scores, but let the user compare
+                // baskets from the collected candidates instead of an empty basket list.
+                pool = BuildBasketPool(scored.Where(reference =>
+                    reference.Source == QuotationReferenceSource.PncpIncisoII &&
+                    reference.UnitPrice > 0m &&
+                    (line.MinimumUnitPrice is null || reference.UnitPrice >= line.MinimumUnitPrice.Value) &&
+                    (line.MaximumUnitPrice is null || reference.UnitPrice <= line.MaximumUnitPrice.Value)).ToArray());
+                automaticBaskets = BuildAutomaticBaskets(pool, line.RequestedBasketSize, priceDecimalPlaces)
+                    .Select(basket => basket with
+                    {
+                        IsRecommended = false,
+                        ValidationMessage = "Cesta de candidatos para revisão técnica; confira as descrições antes de escolher. " +
+                            basket.ValidationMessage
+                    }).ToArray();
+            }
+        }
         var persistedManualBaskets = BuildManualBaskets(scored, manualBaskets ?? [], priceDecimalPlaces);
         var baskets = persistedManualBaskets.Concat(automaticBaskets).ToArray();
 

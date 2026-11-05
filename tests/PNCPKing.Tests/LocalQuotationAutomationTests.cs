@@ -4,6 +4,7 @@ using PNCPKing.Core.Models;
 using PNCPKing.Core.Quotations;
 using PNCPKing.Infrastructure.Data;
 using PNCPKing.Infrastructure.Services;
+using static PNCPKing.Tests.PriceCacheTests;
 
 namespace PNCPKing.Tests;
 
@@ -46,6 +47,130 @@ public sealed class LocalQuotationAutomationTests
         var calls = proxy.Queries.Count;
         await service.CollectLocalAutomationAsync(run, prices);
         Assert.Equal(calls, proxy.Queries.Count); // completed items are not searched again
+    }
+
+    [Fact]
+    public async Task ExcelAutomation_TenPagesApplyToEveryAlternativeEvenAfterEnoughPricesOrAnEmptyPrompt()
+    {
+        await using var database = await MainSearchLocalSequenceTests.SeedAsync(650);
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer());
+        var project = await service.CreateProjectAsync("Dez páginas por prompt");
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var run = await service.CreateAutomationRunAsync(project.Id, "unused.xlsx", "Teste",
+            SearchGeoFilter.All, today.AddDays(-30), today,
+            [new(1, "café -solúvel + inexistente", "Café", 10, "pacote", null, null, 10,
+                IntermediateSearchText: "açúcar -café", BroadSearchText: "café -solúvel + açúcar -café",
+                PromptOrigin: SearchPromptOrigin.Excel)], AdequacyWeights.Default);
+        var prices = DispatchProxy.Create<IPriceCacheRepository, CountingPrices>();
+        var proxy = (CountingPrices)prices;
+        proxy.Inner = new SqlitePriceCacheRepository(database.Repository.DatabasePath);
+
+        await service.CollectLocalAutomationAsync(run, prices);
+
+        Assert.Equal(41, proxy.Pages.Count);
+        var empty = Assert.Single(proxy.Pages, page => page.Text == "inexistente");
+        Assert.Equal(0, empty.Count);
+        Assert.False(empty.HasMore);
+        foreach (var text in new[] { "café -solúvel", "açúcar -café" })
+        {
+            var pages = proxy.Pages.Where(page => page.Text == text).ToArray();
+            Assert.Equal(Enumerable.Range(1, 10).Concat(Enumerable.Range(1, 10)), pages.Select(page => page.Page));
+            Assert.All(pages, page =>
+            {
+                Assert.Equal(50, page.Count);
+                Assert.True(page.HasMore); // more matches exist beyond the requested ten pages
+            });
+        }
+        var line = Assert.Single(await repository.GetLinesAsync(project.Id));
+        var references = await repository.GetReferencesAsync(line.Id);
+        Assert.Equal(1000, references.Count); // broad alternatives repeat, without duplicating prices
+        Assert.Equal(500, references.Count(reference => reference.MatchedPromptLevel == PromptMatchLevel.Restrictive));
+        Assert.Equal(500, references.Count(reference => reference.MatchedPromptLevel == PromptMatchLevel.Intermediate));
+        Assert.Equal(1, proxy.MaximumConcurrentReads);
+    }
+
+    [Fact]
+    public async Task ExcelAutomation_FormsReviewBasketsFromCandidatesAndKeepsOtherItemsBasketsAfterReopening()
+    {
+        await using var database = await MainSearchLocalSequenceTests.SeedAsync(5);
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer());
+        var project = await service.CreateProjectAsync("Sem cesta");
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var run = await service.CreateAutomationRunAsync(project.Id, "unused.xlsx", "Teste",
+            SearchGeoFilter.All, today.AddDays(-30), today,
+            [new(1, "café", "Tubo PVC rígido DN 100 milímetros", 10, "barra", null, null, 10,
+                 PromptOrigin: SearchPromptOrigin.Excel),
+             new(2, "café", "Café", 10, "pacote", null, null, 10,
+                 PromptOrigin: SearchPromptOrigin.Excel)], AdequacyWeights.Default);
+        await service.CollectLocalAutomationAsync(run, new SqlitePriceCacheRepository(database.Repository.DatabasePath));
+
+        var reopened = new QuotationService(new SqliteQuotationRepository(database.Repository.DatabasePath), new QuotationAnalyzer());
+        var analyses = (await reopened.GetAnalysesAsync(project.Id)).OrderBy(analysis => analysis.Line.DisplayOrder).ToArray();
+        Assert.Equal(2, analyses.Length);
+        var insufficient = analyses[0];
+        Assert.Equal(QuotationAutomationItemState.CompletedWithWarning, insufficient.Line.AutomationState);
+        Assert.Equal(5, insufficient.References.Count);
+        Assert.All(insufficient.References, reference => Assert.Equal(QuotationReferenceState.Rejected, reference.State));
+        Assert.NotEmpty(insufficient.Baskets);
+        Assert.All(insufficient.Baskets, basket =>
+        {
+            Assert.True(basket.RequiresReview);
+            Assert.False(basket.IsValid);
+            Assert.False(basket.IsRecommended);
+            Assert.Equal(3, basket.References.Count);
+        });
+        Assert.Null(insufficient.SelectedBasket);
+        Assert.False(insufficient.Line.SelectionConfirmed);
+        var completed = analyses[1];
+        Assert.Equal(QuotationAutomationItemState.Completed, completed.Line.AutomationState);
+        Assert.Equal(5, completed.References.Count);
+        Assert.NotEmpty(completed.Baskets);
+        Assert.NotNull(completed.SelectedBasket);
+        Assert.True(completed.Line.SelectionConfirmed);
+    }
+
+    [Fact]
+    public async Task ExcelAutomation_HighDispersionKeepsAllBasketsEvenWhenNoPricePassesTwentyFivePercent()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var contract = RecentContract("high-dispersion", today.AddDays(-1), 1);
+        await database.Repository.UpsertContractsAsync([contract]);
+        var items = Enumerable.Range(1, 3).Select(index => Item(contract, index) with
+            { Description = "Café torrado", Unit = "pacote" }).ToArray();
+        await database.Repository.UpsertItemsAsync(contract.PncpId, items, false);
+        var values = new[] { 1m, 100m, 1000m };
+        for (var index = 0; index < items.Length; index++)
+            await database.Repository.ReplaceItemResultsAsync(contract.PncpId, items[index].ItemNumber,
+                [Result(contract, items[index].ItemNumber, 1, true) with
+                    { HomologatedUnitValueScaled = DecimalScale.ToScaled(values[index]) }]);
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer());
+        var project = await service.CreateProjectAsync("Cesta com dispersão");
+        var run = await service.CreateAutomationRunAsync(project.Id, "unused.xlsx", "Teste",
+            SearchGeoFilter.All, today.AddDays(-30), today,
+            [new(1, "café", "Café torrado", 10, "pacote", null, null, 10,
+                PromptOrigin: SearchPromptOrigin.Excel)], AdequacyWeights.Default);
+
+        await service.CollectLocalAutomationAsync(run, new SqlitePriceCacheRepository(database.Repository.DatabasePath));
+
+        var reopened = new QuotationService(new SqliteQuotationRepository(database.Repository.DatabasePath), new QuotationAnalyzer());
+        var analysis = Assert.Single(await reopened.GetAnalysesAsync(project.Id));
+        Assert.Equal(3, analysis.References.Count);
+        Assert.Equal(3, analysis.EligibleCount);
+        Assert.NotEmpty(analysis.Baskets);
+        Assert.All(analysis.Baskets, basket =>
+        {
+            Assert.Equal(3, basket.References.Count);
+            Assert.Equal(QuotationBasketVisualState.AutomaticHighDispersion, basket.VisualState);
+            Assert.True(basket.MaximumDeviationPercent > 25m);
+            Assert.Equal(0m, basket.AdoptedPrice);
+        });
+        Assert.NotNull(analysis.SelectedBasket);
+        Assert.True(analysis.Line.SelectionConfirmed);
+        Assert.NotEqual(QuotationAutomationItemState.Insufficient, analysis.Line.AutomationState);
     }
 
     [Fact]
@@ -113,6 +238,7 @@ public sealed class LocalQuotationAutomationTests
     {
         public IPriceCacheRepository Inner = null!;
         public List<string> Queries = [];
+        public List<(string Text, int Page, int Count, bool HasMore)> Pages = [];
         public Action? AfterRead;
         public int MaximumConcurrentReads;
         private int _concurrent;
@@ -130,6 +256,7 @@ public sealed class LocalQuotationAutomationTests
             try
             {
                 var result = await ((Task<PriceCacheLocalPage>)method.Invoke(Inner, args)!).ConfigureAwait(false);
+                Pages.Add((((SearchQuery)args[0]!).Text, result.Page, result.Rows?.Count ?? 0, result.HasMore));
                 AfterRead?.Invoke();
                 return result;
             }
