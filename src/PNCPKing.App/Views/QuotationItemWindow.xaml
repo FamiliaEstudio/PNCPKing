@@ -37,6 +37,9 @@
                         IsEnabled="{Binding CanEditRequestedDetails}"
                         ToolTip="Configura ou limpa quantidade e unidade, inclusive de itens importados. Pause pesquisas ou automação antes de editar." />
                 <Button Content="Atualizar" Click="Refresh_Click" />
+                <Button x:Name="RecalculateBasketsButton" Content="Recalcular cestas" Click="RecalculateBaskets_Click"
+                        IsEnabled="{Binding CanEditRequestedDetails}"
+                        ToolTip="Altera os pesos e a faixa de preço deste item e recalcula as cestas entre os preços já coletados." />
                 <Button Content="CATMAT e mínimo" Click="EditDocumentDetails_Click" />
                 <Button Content="Transferir ou copiar…" Click="TransferItem_Click"
                         ToolTip="Transfere ou copia este item, com todos os preços, cestas e evidências, para outro projeto local." />

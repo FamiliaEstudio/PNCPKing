@@ -403,6 +403,10 @@ public sealed partial class QuotationService(
         CancellationToken cancellationToken = default) =>
         repository.UpdateWeightsAsync(lineId, weights, cancellationToken);
 
+    public Task UpdateBasketSettingsAsync(Guid lineId, AdequacyWeights weights, decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice, CancellationToken cancellationToken = default) =>
+        repository.UpdateBasketSettingsAsync(lineId, weights, minimumUnitPrice, maximumUnitPrice, cancellationToken);
+
     public async Task<(QuotationLineAnalysis Analysis, QuotationManualBasket Basket)> SaveManualBasketAsync(
         Guid projectId,
         Guid? lineId,

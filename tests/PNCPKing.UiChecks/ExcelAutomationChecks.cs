@@ -79,6 +79,32 @@ internal static partial class Program
                     .Invoke(itemWindow, [copy, new RoutedEventArgs(MenuItem.SubmenuOpenedEvent, copy)]);
                 Require(copy.Items.OfType<MenuItem>().Any(item => item.Header?.ToString() == "Nova cesta manual"),
                     "A ação da linha não permite copiar para uma nova cesta.");
+
+                var recalculate = (Button)itemWindow.FindName("RecalculateBasketsButton");
+                Require(recalculate.IsEnabled, "O recálculo não ficou disponível ao carregar o item.");
+                var snapshot = vm.Line!.Line;
+                CheckBasketRecalculationDialog(vm.Line.Analysis, itemWindow);
+                await vm.RecalculateBasketsAsync(new(0, 0, 0, 0, 100), 200m, 300m);
+                Require(vm.Baskets.Count == 0 && vm.References.Count == 120 &&
+                    vm.ProgressText.Contains("Nenhuma cesta automática"),
+                    "Uma faixa vazia descartou candidatos ou deixou de informar a ausência de cestas.");
+                Require(vm.ItemSummary.Contains("200,00") && vm.ItemSummary.Contains("300,00"),
+                    "O resumo do item não exibe sua faixa atual.");
+                await vm.RecalculateBasketsAsync(AdequacyWeights.Default, null, null);
+                Require(vm.Baskets.Count > 0 && vm.References.Count == 120 &&
+                    vm.Line!.Line.SampleVersion == snapshot.SampleVersion && !vm.Line.Line.SelectionConfirmed,
+                    "Limpar a faixa não restaurou as cestas locais ou modificou a coleta.");
+                typeof(ExcelMainVm).GetField("_quotationAutomationCancellation", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .SetValue(main, new CancellationTokenSource());
+                Require(!vm.CanEditRequestedDetails, "O recálculo ficou disponível durante a automação.");
+                var rejected = false;
+                try { await vm.RecalculateBasketsAsync(AdequacyWeights.Default, null, null); }
+                catch (InvalidOperationException) { rejected = true; }
+                Require(rejected, "O recálculo não recusou uma coleta em andamento.");
+                ((CancellationTokenSource)typeof(ExcelMainVm).GetField("_quotationAutomationCancellation",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(main)!).Dispose();
+                typeof(ExcelMainVm).GetField("_quotationAutomationCancellation", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .SetValue(main, null);
             }
             finally { itemWindow.Close(); await vm.DisposeAsync(); }
 
@@ -144,6 +170,56 @@ internal static partial class Program
             Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             Directory.Delete(directory, true);
         }
+    }
+
+    private static void CheckBasketRecalculationDialog(QuotationLineAnalysis analysis, Window owner)
+    {
+        foreach (var decimals in new[] { 2, 4 })
+        {
+            var dialog = new AppUnderTest::PNCPKing.App.Views.QuotationWeightsWindow(analysis with
+            {
+                PriceDecimalPlaces = decimals,
+                Line = analysis.Line with { MinimumUnitPrice = 1234.56m, MaximumUnitPrice = null }
+            }) { Owner = owner };
+            dialog.Loaded += (_, _) => dialog.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                dialog.Width = 540;
+                dialog.Height = 430;
+                dialog.UpdateLayout();
+                var minimum = (TextBox)dialog.FindName("MinimumPriceTextBox");
+                var maximum = (TextBox)dialog.FindName("MaximumPriceTextBox");
+                var accept = (Button)dialog.FindName("AcceptButton");
+                Require(minimum.Text.StartsWith("1.234,56", StringComparison.Ordinal) && maximum.Text == "",
+                    "O diálogo não carregou a faixa salva em formato brasileiro.");
+                var point = accept.TranslatePoint(new Point(), dialog);
+                Require(accept.IsVisible && accept.ActualHeight > 0 && point.Y >= 0 &&
+                    point.Y + accept.ActualHeight <= dialog.ActualHeight,
+                    "O botão de recalcular ficou inacessível na janela reduzida.");
+                foreach (var invalid in new[] { "abc", "-1", "99999999999999999999999999", "5" })
+                {
+                    minimum.Text = invalid;
+                    maximum.Text = "2";
+                    accept.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Require(dialog.IsVisible && ((TextBlock)dialog.FindName("ValidationText")).Visibility == Visibility.Visible,
+                        "O diálogo aceitou uma faixa inválida.");
+                }
+                minimum.Text = "1,23999";
+                maximum.Text = "";
+                ((Slider)dialog.FindName("RecencyWeightSlider")).Value = 100;
+                accept.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            }));
+            Require(dialog.ShowDialog() == true && dialog.MinimumUnitPrice == (decimals == 2 ? 1.23m : 1.2399m) &&
+                dialog.MaximumUnitPrice is null && dialog.Weights == new AdequacyWeights(0, 0, 0, 0, 100),
+                "O diálogo não aplicou os pesos e limites com truncamento.");
+        }
+
+        var cancelled = new AppUnderTest::PNCPKing.App.Views.QuotationWeightsWindow(analysis) { Owner = owner };
+        cancelled.Loaded += (_, _) => cancelled.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            ((TextBox)cancelled.FindName("MinimumPriceTextBox")).Text = "500";
+            cancelled.Close();
+        }));
+        Require(cancelled.ShowDialog() != true, "Fechar o diálogo aplicou os critérios.");
     }
 
     public class EmptyInternetDrafts : DispatchProxy

@@ -198,9 +198,14 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                 : $"unidade {Line.Line.RequestedUnit}";
             return $"{quantity} · {unit} · alvo {Line.RequestedBasketSize:N0} preços · " +
                    $"coletados {Line.CollectedCount:N0} · elegíveis {Line.EligibleCount:N0} · " +
+                   $"faixa {FormatPriceLimit(Line.Line.MinimumUnitPrice)} a {FormatPriceLimit(Line.Line.MaximumUnitPrice)} · " +
                    $"nível {Line.ActivePromptLevel} · situação {Line.Status}";
         }
     }
+
+    private string FormatPriceLimit(decimal? value) => value is { } price
+        ? price.ToString($"C{Line?.Analysis.PriceDecimalPlaces ?? 2}", CultureInfo.GetCultureInfo("pt-BR"))
+        : "sem limite";
 
     public bool CanEditRequestedDetails =>
         Line is not null && !_disposed && !IsBusy && !IsSearchBusy && !IsCandidateSearchBusy &&
@@ -700,6 +705,27 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                 _ = LoadAsync();
             }
         }
+    }
+
+    public async Task RecalculateBasketsAsync(AdequacyWeights weights, decimal? minimumUnitPrice, decimal? maximumUnitPrice)
+    {
+        if (!CanEditRequestedDetails)
+            throw new InvalidOperationException("Aguarde o carregamento e pause a pesquisa ou a automação antes de recalcular as cestas.");
+
+        IsBusy = true;
+        ProgressText = "Recalculando cestas com os preços já coletados deste item…";
+        try
+        {
+            await _quotations.UpdateBasketSettingsAsync(_lineId, weights, minimumUnitPrice, maximumUnitPrice)
+                .ConfigureAwait(true);
+        }
+        finally { IsBusy = false; }
+        await LoadAsync(SelectedBasket?.Key).ConfigureAwait(true);
+        if (Line is not null) _main.RefreshQuotationWordItem(Line.Analysis, updateOverview: true);
+        var automaticCount = Baskets.Count(basket => !basket.Source.IsManual);
+        ProgressText = automaticCount > 0
+            ? $"{automaticCount:N0} cesta(s) automática(s) recalculada(s). Confira e confirme a cesta desejada."
+            : "Nenhuma cesta automática pôde ser formada nessa faixa com os candidatos disponíveis. Amplie ou limpe os limites para tentar novamente.";
     }
 
     public async Task RenameItemAsync(string displayName)

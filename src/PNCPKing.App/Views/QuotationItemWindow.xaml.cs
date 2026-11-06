@@ -41,6 +41,16 @@ public partial class QuotationItemWindow : Window
     }
 
     public QuotationItemViewModel ViewModel { get; }
+
+    private async void RecalculateBaskets_Click(object sender, RoutedEventArgs e)
+    {
+        if (!ViewModel.CanEditRequestedDetails || ViewModel.Line is null) return;
+        var window = new QuotationWeightsWindow(ViewModel.Line.Analysis) { Owner = this };
+        if (window.ShowDialog() != true) return;
+        await RunAsync(() => ViewModel.RecalculateBasketsAsync(
+            window.Weights, window.MinimumUnitPrice, window.MaximumUnitPrice)).ConfigureAwait(true);
+    }
+
     internal bool ReturnFocusToOwnerOnClose { get; set; } = true;
 
     public void ShowReferenceDocuments(string referenceId)

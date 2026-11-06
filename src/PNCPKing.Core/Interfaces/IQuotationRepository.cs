@@ -109,6 +109,8 @@ public interface IQuotationRepository
     Task<IReadOnlySet<string>> GetReferencedInternetEvidenceHashesAsync(
         CancellationToken cancellationToken = default);
     Task UpdateWeightsAsync(Guid lineId, AdequacyWeights weights, CancellationToken cancellationToken = default);
+    Task UpdateBasketSettingsAsync(Guid lineId, AdequacyWeights weights, decimal? minimumUnitPrice,
+        decimal? maximumUnitPrice, CancellationToken cancellationToken = default);
     Task<QuotationAutomationRun> CreateAutomationRunAsync(
         Guid projectId,
         string outputPath,

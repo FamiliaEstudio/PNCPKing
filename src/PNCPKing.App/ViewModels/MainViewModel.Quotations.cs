@@ -770,11 +770,16 @@ public sealed partial class MainViewModel
         NotifyCommands();
     }
 
-    internal void RefreshQuotationWordItem(QuotationLineAnalysis analysis)
+    internal void RefreshQuotationWordItem(QuotationLineAnalysis analysis, bool updateOverview = false)
     {
         if (_quotationWordReport is not { } report || report.Project.Id != analysis.Line.ProjectId) return;
         var lines = report.Lines.Select(item => item.Line.Id == analysis.Line.Id ? analysis : item).ToArray();
         _quotationWordReport = report with { Lines = QuotationOrganization.Order(report.Project, lines) };
+        if (updateOverview)
+        {
+            ApplyQuotationReport(_quotationWordReport, analysis.Line.Id);
+            return;
+        }
         ((AsyncRelayCommand)ExportQuotationWordCommand).NotifyCanExecuteChanged();
         ((AsyncRelayCommand)ExportQuotationPriceWordCommand).NotifyCanExecuteChanged();
     }
