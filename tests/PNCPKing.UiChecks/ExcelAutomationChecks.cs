@@ -151,6 +151,7 @@ internal static partial class Program
             try
             {
                 window.Show();
+                await CheckCompiledSearchPriceHighlightsAsync(window, main);
                 var panel = (StackPanel)window.FindName("ExcelAutomationPanel");
                 await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 Require(panel.Visibility == Visibility.Collapsed, "O progresso apareceu sem automação.");

@@ -16,6 +16,41 @@ using MainVm = AppUnderTest::PNCPKing.App.ViewModels.MainViewModel;
 
 internal static partial class Program
 {
+    private static async Task CheckCompiledSearchPriceHighlightsAsync(
+        AppUnderTest::PNCPKing.App.Views.MainWindow window, MainVm main)
+    {
+        var rows = Enumerable.Range(0, 3).Select(index =>
+            new AppUnderTest::PNCPKing.App.ViewModels.ItemSearchDisplayRow(DisplayRow(index).Source)).ToArray();
+        main.ItemSearchRows.ReplaceAll(rows);
+        SetSearchField(main, "_retainedItemRows", new Dictionary<string, AppUnderTest::PNCPKing.App.ViewModels.ItemSearchDisplayRow>());
+        foreach (var name in new[] { "_currentItemResultKeys", "_visibleItemKeys" })
+            SetSearchField(main, name, rows.Select(row => Key(row.Source)).ToHashSet());
+        var grid = (DataGrid)window.FindName("ItemResultsGrid");
+        grid.UnselectAll();
+        foreach (var row in rows) grid.SelectedItems.Add(row);
+        grid.ScrollIntoView(rows[0]);
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        void CheckColor(string key)
+        {
+            var container = grid.ItemContainerGenerator.ContainerFromItem(rows[0]) as DataGridRow;
+            Require(container is not null, "A pesquisa compilada não materializou o preço.");
+            Require(((SolidColorBrush)container!.Background).Color ==
+                ((SolidColorBrush)Application.Current.FindResource(key)).Color,
+                $"A pesquisa compilada não exibiu {key}.");
+        }
+        Require(rows.All(row => row.IsValidInSelection), "A pesquisa compilada perdeu o cálculo do azul.");
+        CheckColor("ValidSelectedPriceBrush");
+        main.ApplyItemPriceAction(rows, AppUnderTest::PNCPKing.App.ViewModels.ItemPriceAction.MarkForBasket);
+        grid.UnselectAll();
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        Require(rows.All(row => row.IsValidInMarkedGroup), "A pesquisa compilada perdeu o cálculo do verde.");
+        CheckColor("ValidMarkedPriceBrush");
+        main.ClearItemPriceRetention(rows[2]);
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        Require(rows.All(row => !row.IsValidInMarkedGroup), "A pesquisa compilada manteve brilho com dois preços.");
+        CheckColor("MarkedPriceBrush");
+    }
+
     private static async Task CheckCompiledItemPriceHighlightsAsync(
         AppUnderTest::PNCPKing.App.Views.QuotationItemWindow window, ItemVm vm)
     {
@@ -43,7 +78,7 @@ internal static partial class Program
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
         CheckColor("ValidSelectedPriceBrush");
         var tabs = (TabControl)window.FindName("WorkspaceTabs");
-        tabs.SelectedIndex = 1;
+        tabs.SelectedIndex = 2;
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
         tabs.SelectedIndex = 0;
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
