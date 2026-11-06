@@ -120,6 +120,7 @@ internal static partial class Program
                     Console.WriteLine("Brazilian currency and quantity formatting: passed");
                     await CheckThemeControlsAsync();
                     Console.WriteLine("Theme controls: passed");
+                    await CheckPriceHighlightsAsync();
                     await CheckExcelAutomationUiAsync();
                     Console.WriteLine("Excel automation: candidate filter, basket actions and progress visibility passed");
                     layoutApp.Shutdown();

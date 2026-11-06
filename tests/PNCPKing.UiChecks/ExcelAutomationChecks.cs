@@ -58,6 +58,7 @@ internal static partial class Program
                     .GetValue(itemWindow)!;
                 await initialLoad.WaitAsync(TimeSpan.FromSeconds(45));
                 Require(vm.Line?.Analysis.References.Count == 120, "A janela não abriu todos os preços coletados.");
+                await CheckCompiledItemPriceHighlightsAsync(itemWindow, vm);
                 var basketKey = vm.SelectedBasket?.Key;
                 vm.CandidateSearchText = "açúcar";
                 await vm.SearchCandidatesAsync();

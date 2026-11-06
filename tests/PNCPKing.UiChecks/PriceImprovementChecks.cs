@@ -16,6 +16,43 @@ using MainVm = AppUnderTest::PNCPKing.App.ViewModels.MainViewModel;
 
 internal static partial class Program
 {
+    private static async Task CheckCompiledItemPriceHighlightsAsync(
+        AppUnderTest::PNCPKing.App.Views.QuotationItemWindow window, ItemVm vm)
+    {
+        var grid = (DataGrid)window.FindName("PriceGrid");
+        var rows = vm.VisibleReferences.ToArray();
+        Require(rows.Length >= 3, "O cenário precisa de pelo menos três preços na cesta.");
+        grid.UnselectAll();
+        grid.ScrollIntoView(rows[0]);
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        void CheckColor(string key)
+        {
+            var container = (DataGridRow)grid.ItemContainerGenerator.ContainerFromItem(rows[0]);
+            Require(container is not null, "A janela do item não materializou o preço.");
+            Require(((SolidColorBrush)container!.Background).Color ==
+                ((SolidColorBrush)Application.Current.FindResource(key)).Color,
+                $"A janela compilada do item não exibiu {key}.");
+        }
+        Require(rows.All(row => row.IsValidInMarkedGroup), "A cesta válida do item perdeu o cálculo do verde.");
+        CheckColor("ValidMarkedPriceBrush");
+        foreach (var row in rows.Take(3)) grid.SelectedItems.Add(row);
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        Require(rows.Take(3).All(row => row.IsValidInSelection), "A seleção do item perdeu o cálculo do azul.");
+        CheckColor("ValidSelectedPriceBrush");
+        ((TextBox)window.FindName("CandidateSearchTextBox")).Focus();
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        CheckColor("ValidSelectedPriceBrush");
+        var tabs = (TabControl)window.FindName("WorkspaceTabs");
+        tabs.SelectedIndex = 1;
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        tabs.SelectedIndex = 0;
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        CheckColor("ValidSelectedPriceBrush");
+        grid.UnselectAll();
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        CheckColor("ValidMarkedPriceBrush");
+    }
+
     private static async Task CheckPriceHighlightsAsync()
     {
         await CheckSearchPriceHighlightsFromXamlAsync();
