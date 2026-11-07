@@ -403,7 +403,7 @@ public partial class QuotationItemWindow : Window
         ViewModel.ReferenceScope = ReferenceViewScope.All;
 
     private void PriceGrid_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e) =>
-        SelectRowUnderPointer(PriceGrid, e.OriginalSource as DependencyObject);
+        SelectRowUnderPointer(PriceGrid, e.OriginalSource as DependencyObject, preserveSelection: true);
 
     private void SearchGrid_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e) =>
         SelectRowUnderPointer(SearchResultsGrid, e.OriginalSource as DependencyObject);
@@ -412,6 +412,7 @@ public partial class QuotationItemWindow : Window
     {
         if (sender is Button { DataContext: QuotationPriceDisplayRow row } button)
         {
+            SelectPriceForContextMenu(PriceGrid, row);
             ViewModel.SelectedPrice = row;
             OpenMenu(PriceContextMenu, button);
         }
@@ -481,6 +482,28 @@ public partial class QuotationItemWindow : Window
         await RunAsync(() => ViewModel.SetReferenceMembershipAsync(
             row,
             !row.IsInSelectedBasket)).ConfigureAwait(true);
+    }
+
+    private async void TransferPrices_Click(object sender, RoutedEventArgs e)
+    {
+        await RunAsync(async () =>
+        {
+            if (!ViewModel.CanEditRequestedDetails)
+                throw new InvalidOperationException("Aguarde o carregamento e pause a pesquisa ou a automação antes de transferir preços.");
+            var source = ViewModel.SelectedBasket?.Source;
+            var rows = PriceGrid.SelectedItems.OfType<QuotationPriceDisplayRow>().ToArray();
+            if (source is null || rows.Length == 0 || rows.Any(row => !row.IsInSelectedBasket))
+                throw new InvalidOperationException("Selecione um ou mais preços que pertençam à cesta atual.");
+            var destinations = ViewModel.Baskets.Select(basket => basket.Source)
+                .Where(basket => basket.Key != source.Key).ToArray();
+            if (destinations.Length == 0)
+                throw new InvalidOperationException("O item precisa de outra cesta para receber os preços.");
+            var referenceIds = rows.Select(row => row.Id).ToArray();
+            var window = new QuotationPriceTransferWindow(source, destinations, referenceIds.Length,
+                ViewModel.Line!.Analysis.PriceDecimalPlaces) { Owner = this };
+            if (window.ShowDialog() == true && window.Destination is { } destination)
+                await ViewModel.TransferPricesAsync(source.Key, destination.Key, referenceIds).ConfigureAwait(true);
+        }).ConfigureAwait(true);
     }
 
     private async void SearchAddToBasket_Click(object sender, RoutedEventArgs e)
@@ -630,7 +653,7 @@ public partial class QuotationItemWindow : Window
         }
     }
 
-    private static void SelectRowUnderPointer(DataGrid grid, DependencyObject? source)
+    private static void SelectRowUnderPointer(DataGrid grid, DependencyObject? source, bool preserveSelection = false)
     {
         while (source is not null && source is not DataGridRow)
         {
@@ -639,8 +662,27 @@ public partial class QuotationItemWindow : Window
 
         if (source is DataGridRow row)
         {
-            grid.SelectedItem = row.Item;
-            row.IsSelected = true;
+            if (preserveSelection)
+                SelectPriceForContextMenu(grid, row.Item);
+            else
+            {
+                grid.SelectedItem = row.Item;
+                row.IsSelected = true;
+            }
+        }
+    }
+
+    private static void SelectPriceForContextMenu(DataGrid grid, object item)
+    {
+        // O preço clicado continua sendo o alvo das ações individuais, sem perder
+        // os demais preços selecionados para a transferência em lote.
+        var selection = grid.SelectedItems.Contains(item)
+            ? grid.SelectedItems.Cast<object>().ToArray()
+            : [];
+        grid.SelectedItem = item;
+        foreach (var selected in selection)
+        {
+            if (!grid.SelectedItems.Contains(selected)) grid.SelectedItems.Add(selected);
         }
     }
 

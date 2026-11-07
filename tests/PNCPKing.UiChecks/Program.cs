@@ -110,6 +110,9 @@ internal static partial class Program
                     Console.WriteLine("Quotation groups dialog: passed");
                     CheckQuotationTransfer();
                     Console.WriteLine("Quotation transfer/copy dialog: passed");
+                    CheckQuotationPriceTransfer();
+                    CheckQuotationPriceContextSelection();
+                    Console.WriteLine("Quotation price transfer dialog: passed");
                     CheckQuotationOrganization();
                     Console.WriteLine("Quotation organization options: passed");
                     await CheckColumnChooserAsync();
@@ -228,6 +231,94 @@ internal static partial class Program
             Require(window.ShowDialog() == true && window.Copy == copy && window.Destination == project,
                 "A janela não entregou a operação e o destino escolhidos.");
         }
+    }
+
+    private static void CheckQuotationPriceTransfer()
+    {
+        var source = new QuotationBasket { Key = "source", References = [], AveragePrice = 10,
+            MinimumPrice = 10, MaximumPrice = 10, MaximumDeviationPercent = 0, Score = 0 };
+        var destination = source with { Key = "destination", Kind = QuotationBasketKind.Manual, Name = "Destino" };
+        foreach (var cancel in new[] { true, false })
+        {
+            var window = new AppUnderTest::PNCPKing.App.Views.QuotationPriceTransferWindow(source, [destination], 2);
+            var panel = (StackPanel)window.Content;
+            var baskets = panel.Children.OfType<ComboBox>().Single();
+            var buttons = panel.Children.OfType<StackPanel>().Single().Children.OfType<Button>().ToArray();
+            var transfer = buttons.Single(button => button.IsDefault);
+            Require(!transfer.IsEnabled && window.Destination is null,
+                "Transferir preços deve aguardar a escolha explícita de destino.");
+            Require(panel.Children.OfType<TextBlock>().Any(text => text.Text.Contains("cópias manuais")),
+                "A transferência deve explicar o tratamento das cestas automáticas.");
+            window.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                window.Width = 360;
+                window.UpdateLayout();
+                Require(transfer.IsVisible && transfer.ActualHeight > 0, "O botão de transferir não está visível.");
+                if (cancel) { window.Close(); return; }
+                baskets.SelectedIndex = 0;
+                Require(transfer.IsEnabled && window.Destination == destination,
+                    "O destino escolhido não foi capturado.");
+                transfer.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            }));
+            Require((window.ShowDialog() == true) == !cancel, "A janela não respeitou confirmação/cancelamento.");
+        }
+    }
+
+    private static void CheckQuotationPriceContextSelection()
+    {
+        var windowType = typeof(AppUnderTest::PNCPKing.App.Views.QuotationItemWindow);
+        var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+        var pointerSelection = windowType.GetMethod("SelectRowUnderPointer", flags)!;
+        var actionSelection = windowType.GetMethod("SelectPriceForContextMenu", flags)!;
+        var items = new[] { "Primeiro preço", "Segundo preço", "Terceiro preço" };
+        var grid = new DataGrid
+        {
+            ItemsSource = items, SelectionMode = DataGridSelectionMode.Extended,
+            SelectionUnit = DataGridSelectionUnit.FullRow, AutoGenerateColumns = false,
+            IsReadOnly = true, EnableRowVirtualization = false
+        };
+        grid.Columns.Add(new DataGridTextColumn { Header = "Preço", Binding = new Binding(".") });
+        var window = new Window { Content = grid, Width = 500, Height = 300 };
+        try
+        {
+            window.Show();
+            window.UpdateLayout();
+            foreach (var pointer in new[] { true, false })
+            {
+                grid.SelectedItems.Clear();
+                grid.SelectedItem = items[0];
+                grid.SelectedItems.Add(items[1]);
+                void Select(int index)
+                {
+                    if (pointer)
+                    {
+                        var row = grid.ItemContainerGenerator.ContainerFromItem(items[index]) as DataGridRow;
+                        Require(row is not null, "A linha real do DataGrid não foi materializada.");
+                        pointerSelection.Invoke(null, [grid, row, true]);
+                    }
+                    else actionSelection.Invoke(null, [grid, items[index]]);
+                }
+
+                Select(1);
+                Require(grid.SelectedItems.Count == 2 && grid.SelectedItems.Contains(items[0]) &&
+                    grid.SelectedItems.Contains(items[1]),
+                    "Clique direito/Ações sobre um preço selecionado perdeu a seleção múltipla.");
+                Require(Equals(grid.SelectedItem, items[1]),
+                    "As ações individuais devem continuar direcionadas ao preço clicado.");
+                Select(2);
+                Require(grid.SelectedItems.Count == 1 && Equals(grid.SelectedItem, items[2]),
+                    "Clique fora da seleção deve selecionar somente o novo preço.");
+            }
+
+            // A grade de pesquisa mantém o comportamento anterior de seleção única no menu.
+            grid.SelectedItem = items[0];
+            grid.SelectedItems.Add(items[1]);
+            var searchRow = grid.ItemContainerGenerator.ContainerFromItem(items[1]) as DataGridRow;
+            pointerSelection.Invoke(null, [grid, searchRow, false]);
+            Require(grid.SelectedItems.Count == 1 && Equals(grid.SelectedItem, items[1]),
+                "O comportamento do menu da pesquisa foi alterado.");
+        }
+        finally { window.Close(); }
     }
 
     private static async Task CheckQuotationGroupsAsync()

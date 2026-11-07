@@ -1077,6 +1077,21 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         await ReloadSavedManualBasketAsync(copied.Key).ConfigureAwait(true);
     }
 
+    public async Task TransferPricesAsync(
+        string sourceBasketKey,
+        string destinationBasketKey,
+        IReadOnlyList<string> referenceIds)
+    {
+        if (!CanEditRequestedDetails)
+            throw new InvalidOperationException("Aguarde o carregamento e pause a pesquisa ou a automação antes de transferir preços.");
+        var destinationId = await _quotations.TransferBasketReferencesAsync(
+            _projectId, _lineId, sourceBasketKey, destinationBasketKey, referenceIds).ConfigureAwait(true);
+        InvalidateWordReport();
+        await LoadAsync($"manual:{destinationId:N}").ConfigureAwait(true);
+        await _main.RefreshQuotationItemAsync(_projectId, _lineId).ConfigureAwait(true);
+        ProgressText = $"{referenceIds.Count:N0} preço(s) transferido(s). Revise os valores e confirme a cesta desejada.";
+    }
+
     public async Task ConfirmSelectedBasketAsync()
     {
         if (Line is null || SelectedBasket is null)

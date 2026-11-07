@@ -61,6 +61,9 @@ public interface IQuotationRepository
         string name,
         IReadOnlyList<string> referenceIds,
         CancellationToken cancellationToken = default);
+    Task<Guid> TransferBasketReferencesAsync(
+        Guid lineId, QuotationBasket source, QuotationBasket destination,
+        IReadOnlyList<string> referenceIds, CancellationToken cancellationToken = default);
     Task RenameManualBasketAsync(
         Guid basketId,
         string name,
