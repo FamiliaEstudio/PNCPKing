@@ -516,6 +516,7 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
                 $"Empresa: {reference.SupplierName}",
                 $"CNPJ: {reference.SupplierTaxId}",
                 $"Preço unitário informado: {reference.UnitPrice.ToString("C4", CultureInfo.GetCultureInfo("pt-BR"))}",
+                "Data de homologação: não se aplica (preço de internet).",
                 $"Descrição anunciada: {reference.ItemDescription}",
                 $"Fonte: {reference.PortalUrl}"
             ]
@@ -524,6 +525,7 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
                 $"Empresa: {reference.SupplierName}",
                 $"CNPJ/NI: {reference.SupplierTaxId}",
                 $"Preço unitário homologado: {reference.UnitPrice.ToString("C4", CultureInfo.GetCultureInfo("pt-BR"))}",
+                $"Data de homologação: {reference.ResultDate?.ToString("dd/MM/yyyy", CultureInfo.GetCultureInfo("pt-BR")) ?? "não informada"}",
                 $"Contratação: {reference.ContractId} · Item {reference.ItemNumber:N0}",
                 $"PNCP: {reference.PortalUrl}"
             ];

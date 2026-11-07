@@ -498,6 +498,25 @@ public sealed class QuotationService(
         CancellationToken cancellationToken = default) =>
         repository.RemoveManualBasketReferenceAsync(basketId, referenceId, cancellationToken);
 
+    public async Task<Guid> TransferBasketReferencesAsync(
+        Guid projectId,
+        Guid lineId,
+        string sourceBasketKey,
+        string destinationBasketKey,
+        IReadOnlyList<string> referenceIds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(referenceIds);
+        var analysis = await GetAnalysisAsync(projectId, lineId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("O item da cotação não existe mais.");
+        var source = analysis.Baskets.SingleOrDefault(basket => basket.Key == sourceBasketKey)
+            ?? throw new InvalidOperationException("A cesta de origem mudou. Atualize o item e selecione os preços novamente.");
+        var destination = analysis.Baskets.SingleOrDefault(basket => basket.Key == destinationBasketKey)
+            ?? throw new InvalidOperationException("A cesta de destino mudou. Atualize o item e escolha o destino novamente.");
+        return await repository.TransferBasketReferencesAsync(
+            lineId, source, destination, referenceIds, cancellationToken).ConfigureAwait(false);
+    }
+
     public Task SetManualBasketAggregationMethodAsync(
         Guid basketId,
         QuotationAggregationMethod aggregationMethod,

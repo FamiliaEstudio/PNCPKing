@@ -97,6 +97,9 @@
                             <Button Content="Usar média" Click="UseMean_Click" />
                             <Button Content="Usar mediana" Click="UseMedian_Click" />
                             <Button Content="Confirmar cesta" Click="ConfirmBasket_Click" />
+                            <Button Content="Transferir preços…" Click="TransferPrices_Click"
+                                    IsEnabled="{Binding CanEditRequestedDetails}"
+                                    ToolTip="Selecione um ou mais preços da cesta e transfira para outra cesta deste item." />
                             <Button Content="Inserir preço da internet" Click="NewInternetPrice_Click" />
                         </WrapPanel>
                     </StackPanel>
@@ -117,6 +120,7 @@
                                     <MenuItem Header="Ver páginas relevantes" Click="PriceRelevantPages_Click" />
                                     <Separator />
                                     <MenuItem Header="Adicionar/retirar da cesta" Click="PriceToggleBasket_Click" />
+                                    <MenuItem Header="Transferir preços para outra cesta…" Click="TransferPrices_Click" />
                                     <MenuItem Header="Dividir preço por" Click="PriceFactor_Click" />
                                     <MenuItem Header="Restaurar preço original" Click="PriceResetFactor_Click" />
                                     <MenuItem Header="Editar preço da internet" Click="EditInternetReference_Click" />

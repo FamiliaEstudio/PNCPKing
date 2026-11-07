@@ -657,6 +657,44 @@ public sealed class DocumentProcessingTests
     }
 
     [Fact]
+    public void EvidenceReport_UsesEachReferencesHomologationDateWithoutPublicationFallback()
+    {
+        var first = Reference() with
+        {
+            ResultDate = new DateOnly(2026, 7, 2),
+            PublicationDate = new DateTimeOffset(2025, 1, 1, 0, 0, 0, TimeSpan.Zero)
+        };
+        var second = first with { ResultDate = new DateOnly(2026, 8, 3) };
+        var missing = first with { ResultDate = null };
+
+        Assert.Contains("Data de homologação: 02/07/2026", ReferenceLines(first));
+        Assert.Contains("Data de homologação: 03/08/2026", ReferenceLines(second));
+        Assert.Contains("Data de homologação: não informada", ReferenceLines(missing));
+        Assert.DoesNotContain(ReferenceLines(missing), line => line.Contains("01/01/2025"));
+    }
+
+    [Fact]
+    public void EvidenceReport_DoesNotLabelInternetCaptureDateAsHomologation()
+    {
+        var reference = Reference() with
+        {
+            Source = QuotationReferenceSource.InternetIncisoIII,
+            ResultDate = new DateOnly(2026, 7, 2)
+        };
+
+        var lines = ReferenceLines(reference);
+
+        Assert.Contains("Data de homologação: não se aplica (preço de internet).", lines);
+        Assert.DoesNotContain(lines, line => line.Contains("02/07/2026"));
+    }
+
+    private static IReadOnlyList<string> ReferenceLines(QuotationReference reference) =>
+        (IReadOnlyList<string>)typeof(QuotationEvidenceExportService)
+            .GetMethod("BuildReferenceLines",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+            .Invoke(null, [reference])!;
+
+    [Fact]
     public async Task EvidenceReport_OrdersReferenceAndWritesFullPageWithoutKeywordHighlights()
     {
         var root = CreateTemporaryFolder();

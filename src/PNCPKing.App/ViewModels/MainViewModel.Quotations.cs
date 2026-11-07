@@ -1610,24 +1610,16 @@ public sealed partial class MainViewModel
                 run.ResponsibleName,
                 cancellationToken).ConfigureAwait(true);
             workbookExported = true;
-            var evidence = await ExportEvidenceAsync(
-                GetEvidencePath(run.OutputPath),
-                report,
-                cancellationToken).ConfigureAwait(true);
+            // A automação pelo Excel termina com a planilha. Evidências e documentos
+            // continuam disponíveis na exportação manual, quando forem necessários.
             cancellationToken.ThrowIfCancellationRequested();
-            var evidenceFolder = Path.GetDirectoryName(evidence.ReportPath) ?? evidence.ReportPath;
-            var evidenceSummary =
-                $" Evidências: {evidence.ReportPaths.Count:N0} arquivo(s) em {evidenceFolder}" +
-                (evidence.Warnings.Count == 0
-                    ? "."
-                    : $" ({evidence.Warnings.Count:N0} aviso(s)).");
             if (remainingFailures == 0)
             {
                 await _quotationService.UpdateAutomationRunStateAsync(
                     run.Id,
                     QuotationAutomationRunState.Completed,
-                    $"Concluída e exportada para {run.OutputPath}.{evidenceSummary}").ConfigureAwait(true);
-                StatusText = $"Cotação automática concluída: {run.OutputPath}.{evidenceSummary}";
+                    $"Concluída e exportada para {run.OutputPath}.").ConfigureAwait(true);
+                StatusText = $"Cotação automática concluída: {run.OutputPath}.";
             }
             else
             {
