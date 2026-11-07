@@ -5,7 +5,6 @@ using System.Windows.Media.Imaging;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
 using PNCPKing.Core.Search;
-using PNCPKing.Core.Quotations;
 using PNCPKing.Infrastructure.Services;
 using SearchParser = PNCPKing.Core.Search.SearchText;
 
@@ -35,14 +34,6 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     private ItemSearchDisplayRow? _selectedSearchRow;
     private InternetPriceDraft? _selectedDraft;
     private ReferenceViewScope _referenceScope = ReferenceViewScope.InBasket;
-    private string _candidateSearchText = string.Empty;
-    private string _appliedCandidateSearchText = string.Empty;
-    private string _candidateSearchMessage = string.Empty;
-    private HashSet<string>? _candidateSearchIds;
-    private CancellationTokenSource? _candidateSearchCancellation;
-    private TaskCompletionSource? _candidateSearchCompletion;
-    private int _candidateSearchGeneration;
-    private bool _isCandidateSearchBusy;
     private ItemSearchPromptSlot _selectedPromptSlot = ItemSearchPromptSlot.Restrictive;
     private QuotationItemSearchWorkspace? _workspace;
     private string _searchText = string.Empty;
@@ -153,9 +144,9 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     public IReadOnlyList<SearchGeoFilter> GeoFilters { get; }
     public IReadOnlyList<SearchSortOption> SortOptions { get; }
     public IReadOnlyList<DateRangeOption> DateRanges { get; }
-    public RangeObservableCollection<QuotationBasketDisplay> Baskets { get; } = [];
-    public RangeObservableCollection<QuotationReferenceDisplay> References { get; } = [];
-    public RangeObservableCollection<QuotationPriceDisplayRow> VisibleReferences { get; } = [];
+    public ObservableCollection<QuotationBasketDisplay> Baskets { get; } = [];
+    public ObservableCollection<QuotationReferenceDisplay> References { get; } = [];
+    public ObservableCollection<QuotationPriceDisplayRow> VisibleReferences { get; } = [];
     public ObservableCollection<ItemSearchDisplayRow> SearchRows { get; } = [];
     public ObservableCollection<InternetPriceDraft> Drafts { get; } = [];
     public ObservableCollection<DocumentThumbnailDisplay> DocumentThumbnails { get; } = [];
@@ -198,17 +189,12 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                 : $"unidade {Line.Line.RequestedUnit}";
             return $"{quantity} · {unit} · alvo {Line.RequestedBasketSize:N0} preços · " +
                    $"coletados {Line.CollectedCount:N0} · elegíveis {Line.EligibleCount:N0} · " +
-                   $"faixa {FormatPriceLimit(Line.Line.MinimumUnitPrice)} a {FormatPriceLimit(Line.Line.MaximumUnitPrice)} · " +
                    $"nível {Line.ActivePromptLevel} · situação {Line.Status}";
         }
     }
 
-    private string FormatPriceLimit(decimal? value) => value is { } price
-        ? price.ToString($"C{Line?.Analysis.PriceDecimalPlaces ?? 2}", CultureInfo.GetCultureInfo("pt-BR"))
-        : "sem limite";
-
     public bool CanEditRequestedDetails =>
-        Line is not null && !_disposed && !IsBusy && !IsSearchBusy && !IsCandidateSearchBusy &&
+        Line is not null && !_disposed && !IsBusy && !IsSearchBusy &&
         !_main.IsPriceBusy && !_main.IsQuotationAutomationRunning;
 
     private void OnMainPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
@@ -366,111 +352,6 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         ReferenceViewScope.RejectedOrDuplicate => "Descartados ou duplicados",
         _ => "Todos os preços encontrados"
     };
-
-    public string CandidateSearchText
-    {
-        get => _candidateSearchText;
-        set => SetProperty(ref _candidateSearchText, value);
-    }
-
-    public bool IsCandidateSearchBusy
-    {
-        get => _isCandidateSearchBusy;
-        private set
-        {
-            if (SetProperty(ref _isCandidateSearchBusy, value))
-            {
-                OnPropertyChanged(nameof(CandidateSearchSummary));
-                OnPropertyChanged(nameof(CanEditRequestedDetails));
-            }
-        }
-    }
-
-    public string CandidateSearchSummary
-    {
-        get
-        {
-            var total = Line?.Analysis.References.Count ?? 0;
-            if (IsCandidateSearchBusy) return $"Pesquisando nos {total:N0} candidatos deste item…";
-            var matched = _candidateSearchIds?.Count ?? total;
-            var query = string.IsNullOrWhiteSpace(_appliedCandidateSearchText)
-                ? "Sem filtro de texto." : $"Pesquisa aplicada: {_appliedCandidateSearchText}.";
-            return $"{_candidateSearchMessage} {query} {matched:N0} de {total:N0} candidatos; " +
-                   $"{VisibleReferences.Count:N0} exibidos no filtro atual.";
-        }
-    }
-
-    public Task SearchCandidatesAsync() => FilterCandidatesAsync(CandidateSearchText, resetScope: true);
-
-    private async Task FilterCandidatesAsync(string query, bool resetScope)
-    {
-        if (_disposed || Line is null) return;
-        _candidateSearchCancellation?.Cancel();
-        var generation = ++_candidateSearchGeneration;
-        using var cancellation = new CancellationTokenSource();
-        _candidateSearchCancellation = cancellation;
-        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        _candidateSearchCompletion = completion;
-        var analysis = Line.Analysis;
-        IsCandidateSearchBusy = true;
-        try
-        {
-            // Only the references already attached to this item are supplied.
-            // Parsing/matching runs once outside the dispatcher, with no database query.
-            var matches = await Task.Run(() => QuotationCandidateSearch.Filter(analysis.References,
-                query, cancellation.Token), cancellation.Token).ConfigureAwait(true);
-            cancellation.Token.ThrowIfCancellationRequested();
-            if (_disposed || generation != _candidateSearchGeneration || !ReferenceEquals(Line?.Analysis, analysis)) return;
-            _candidateSearchIds = string.IsNullOrWhiteSpace(query)
-                ? null : matches.Select(reference => reference.Id).ToHashSet(StringComparer.Ordinal);
-            _appliedCandidateSearchText = query.Trim();
-            _candidateSearchMessage = string.Empty;
-            if (resetScope)
-            {
-                _referenceScope = ReferenceViewScope.All;
-                OnPropertyChanged(nameof(ReferenceScope));
-            }
-            RebuildVisibleReferences();
-        }
-        catch (SearchQueryException exception)
-        {
-            if (generation == _candidateSearchGeneration)
-                _candidateSearchMessage = $"Pesquisa não aplicada: {exception.Message} O resultado anterior foi preservado.";
-        }
-        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
-        {
-            if (generation == _candidateSearchGeneration)
-                _candidateSearchMessage = "Pesquisa interrompida; o resultado anterior foi preservado.";
-        }
-        finally
-        {
-            if (ReferenceEquals(_candidateSearchCancellation, cancellation)) _candidateSearchCancellation = null;
-            if (generation == _candidateSearchGeneration)
-            {
-                IsCandidateSearchBusy = false;
-                OnPropertyChanged(nameof(CandidateSearchSummary));
-            }
-            completion.TrySetResult();
-        }
-    }
-
-    public void ClearCandidateSearch()
-    {
-        _candidateSearchCancellation?.Cancel();
-        _candidateSearchCancellation = null;
-        ++_candidateSearchGeneration;
-        IsCandidateSearchBusy = false;
-        CandidateSearchText = string.Empty;
-        _appliedCandidateSearchText = string.Empty;
-        _candidateSearchMessage = string.Empty;
-        _candidateSearchIds = null;
-        _referenceScope = ReferenceViewScope.All;
-        OnPropertyChanged(nameof(ReferenceScope));
-        RebuildVisibleReferences();
-        OnPropertyChanged(nameof(CandidateSearchSummary));
-    }
-
-    public void StopCandidateSearch() => _candidateSearchCancellation?.Cancel();
 
     public ItemSearchPromptSlot SelectedPromptSlot
     {
@@ -657,7 +538,6 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
 
     public async Task LoadAsync(string? preferredBasketKey = null)
     {
-        if (_disposed) return;
         if (IsBusy)
         {
             _refreshPending = true;
@@ -668,9 +548,8 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         try
         {
             var previousBasketKey = preferredBasketKey ?? SelectedBasket?.Key;
-            var analysis = await Task.Run(() => _quotations.GetAnalysisAsync(_projectId, _lineId)).ConfigureAwait(true)
+            var analysis = await _quotations.GetAnalysisAsync(_projectId, _lineId).ConfigureAwait(true)
                            ?? throw new InvalidOperationException("O item da cotação não existe mais.");
-            if (_disposed) return;
             Line = new QuotationLineDisplay(analysis);
             _main.RefreshQuotationWordItem(analysis);
             if (string.IsNullOrWhiteSpace(CatalogQuery))
@@ -678,11 +557,23 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                 CatalogQuery = analysis.Line.EffectiveDisplayName;
             }
             UpdateProgress(_main.LatestTimedQuotationProgress);
-            Baskets.ReplaceAll(analysis.Baskets.Select(basket => new QuotationBasketDisplay(
-                basket, basket.Key == analysis.Line.SelectedBasketKey, analysis.PriceDecimalPlaces)));
-            References.ReplaceAll(analysis.References.OrderBy(reference => reference.Source)
-                .ThenByDescending(reference => reference.Adequacy.Total).ThenBy(reference => reference.UnitPrice)
-                .Select(reference => new QuotationReferenceDisplay(reference)));
+            Baskets.Clear();
+            foreach (var basket in analysis.Baskets)
+            {
+                Baskets.Add(new QuotationBasketDisplay(
+                    basket,
+                    basket.Key == analysis.Line.SelectedBasketKey,
+                    analysis.PriceDecimalPlaces));
+            }
+
+            References.Clear();
+            foreach (var reference in analysis.References
+                         .OrderBy(reference => reference.Source)
+                         .ThenByDescending(reference => reference.Adequacy.Total)
+                         .ThenBy(reference => reference.UnitPrice))
+            {
+                References.Add(new QuotationReferenceDisplay(reference));
+            }
 
             Drafts.Clear();
             foreach (var draft in await _internetPrices.GetDraftsAsync(_lineId).ConfigureAwait(true))
@@ -693,7 +584,19 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             SelectedBasket = Baskets.FirstOrDefault(item => item.Key == previousBasketKey) ??
                              Baskets.FirstOrDefault(item => item.Key == analysis.Line.SelectedBasketKey) ??
                              Baskets.FirstOrDefault();
-            await FilterCandidatesAsync(_appliedCandidateSearchText, resetScope: false).ConfigureAwait(true);
+            if (_workspace is null)
+            {
+                var library = await _sweetCodes.LoadAsync().ConfigureAwait(true);
+                _sweetCodeEnabled = library.Enabled;
+                SweetCodeExpressions.Clear();
+                foreach (var expression in library.Expressions)
+                {
+                    SweetCodeExpressions.Add(expression);
+                }
+
+                OnPropertyChanged(nameof(SweetCodeEnabled));
+                await LoadPromptSlotAsync(ItemSearchPromptSlot.Restrictive).ConfigureAwait(true);
+            }
         }
         finally
         {
@@ -705,27 +608,6 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                 _ = LoadAsync();
             }
         }
-    }
-
-    public async Task RecalculateBasketsAsync(AdequacyWeights weights, decimal? minimumUnitPrice, decimal? maximumUnitPrice)
-    {
-        if (!CanEditRequestedDetails)
-            throw new InvalidOperationException("Aguarde o carregamento e pause a pesquisa ou a automação antes de recalcular as cestas.");
-
-        IsBusy = true;
-        ProgressText = "Recalculando cestas com os preços já coletados deste item…";
-        try
-        {
-            await _quotations.UpdateBasketSettingsAsync(_lineId, weights, minimumUnitPrice, maximumUnitPrice)
-                .ConfigureAwait(true);
-        }
-        finally { IsBusy = false; }
-        await LoadAsync(SelectedBasket?.Key).ConfigureAwait(true);
-        if (Line is not null) _main.RefreshQuotationWordItem(Line.Analysis, updateOverview: true);
-        var automaticCount = Baskets.Count(basket => !basket.Source.IsManual);
-        ProgressText = automaticCount > 0
-            ? $"{automaticCount:N0} cesta(s) automática(s) recalculada(s). Confira e confirme a cesta desejada."
-            : "Nenhuma cesta automática pôde ser formada nessa faixa com os candidatos disponíveis. Amplie ou limpe os limites para tentar novamente.";
     }
 
     public async Task RenameItemAsync(string displayName)
@@ -929,17 +811,6 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         node.ChildrenLoaded = true;
     }
 
-    public async Task EnsureSearchWorkspaceAsync()
-    {
-        if (_workspace is not null || _disposed) return;
-        var library = await _sweetCodes.LoadAsync().ConfigureAwait(true);
-        _sweetCodeEnabled = library.Enabled;
-        SweetCodeExpressions.Clear();
-        foreach (var expression in library.Expressions) SweetCodeExpressions.Add(expression);
-        OnPropertyChanged(nameof(SweetCodeEnabled));
-        await LoadPromptSlotAsync(ItemSearchPromptSlot.Restrictive).ConfigureAwait(true);
-    }
-
     public async Task LoadPromptSlotAsync(ItemSearchPromptSlot slot)
     {
         if (Line is null)
@@ -1072,9 +943,6 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     public async Task PrepareForRetentionAsync()
     {
         StopSearch();
-        StopCandidateSearch();
-        if (_candidateSearchCompletion is { } filterCompletion) await filterCompletion.Task.ConfigureAwait(true);
-        _candidateSearchIds = null;
         _summaryCancellation?.Cancel();
         if (_searchCompletion is { } completion)
             await completion.Task.ConfigureAwait(true);
@@ -1206,16 +1074,6 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             Line.Analysis,
             SelectedBasket.Source,
             excludedReferenceId: SelectedPrice.Id).ConfigureAwait(true);
-        await ReloadSavedManualBasketAsync(copied.Key).ConfigureAwait(true);
-    }
-
-    public async Task CopyPricesToBasketAsync(IReadOnlyList<QuotationPriceDisplayRow> rows, string? destinationKey)
-    {
-        if (Line is null || rows.Count == 0) return;
-        var analysis = Line.Analysis;
-        var sourceKey = SelectedBasket?.Key;
-        var copied = await Task.Run(() => _quotations.CopyReferencesToBasketAsync(analysis, sourceKey,
-            destinationKey, rows.Select(row => row.Id).ToArray())).ConfigureAwait(true);
         await ReloadSavedManualBasketAsync(copied.Key).ConfigureAwait(true);
     }
 
@@ -1506,8 +1364,6 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         }
 
         _disposed = true;
-        StopCandidateSearch();
-        ++_candidateSearchGeneration;
         Interlocked.Increment(ref _searchGeneration);
         _main.TimedQuotationProgressChanged -= OnTimedProgress;
         _main.PropertyChanged -= OnMainPropertyChanged;
@@ -1631,14 +1487,6 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        if (SelectedBasket is null && _referenceScope == ReferenceViewScope.InBasket)
-        {
-            // An item without a basket still owns all its collected candidates.
-            _referenceScope = ReferenceViewScope.All;
-            OnPropertyChanged(nameof(ReferenceScope));
-            OnPropertyChanged(nameof(ReferenceScopeSummary));
-        }
-
         var selectedIds = SelectedBasket?.Source.References
             .Select(reference => reference.Id)
             .ToHashSet(StringComparer.Ordinal) ?? [];
@@ -1650,7 +1498,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         var validMarkedIds = marked.Where((_, index) => validity[index])
             .Select(entry => entry.Reference.Id).ToHashSet(StringComparer.Ordinal);
         var selectedId = SelectedPrice?.Id;
-        var visibleRows = new List<QuotationPriceDisplayRow>();
+        VisibleReferences.Clear();
         foreach (var reference in Line.Analysis.References)
         {
             var inBasket = selectedIds.Contains(reference.Id);
@@ -1663,7 +1511,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                     reference.State != QuotationReferenceState.Eligible,
                 _ => true
             };
-            if (visible && (_candidateSearchIds is null || _candidateSearchIds.Contains(reference.Id)))
+            if (visible)
             {
                 selectedPrices.TryGetValue(reference.Id, out var price);
                 var row = new QuotationPriceDisplayRow(
@@ -1674,12 +1522,10 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
                     Line.Analysis.PriceDecimalPlaces,
                     price?.PriceDivisor);
                 row.IsValidInMarkedGroup = inBasket && validMarkedIds.Contains(row.Id);
-                visibleRows.Add(row);
+                VisibleReferences.Add(row);
             }
         }
 
-        VisibleReferences.ReplaceAll(visibleRows);
-        OnPropertyChanged(nameof(CandidateSearchSummary));
         SelectedPrice = VisibleReferences.FirstOrDefault(row => row.Id == selectedId) ??
                         VisibleReferences.FirstOrDefault();
         OnPropertyChanged(nameof(ReferenceScopeSummary));

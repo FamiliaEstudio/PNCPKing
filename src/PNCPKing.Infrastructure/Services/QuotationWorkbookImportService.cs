@@ -46,8 +46,7 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
                     $"O arquivo \"{Path.GetFileName(sourcePath)}\" é uma planilha de resultado da cotação. " +
                     "Para importar, selecione a planilha de entrada com Pesquisa, Descrição, Quantidade, " +
                     "Unidade, Faixa mínima, Faixa máxima, Páginas locais e Número de preços na cesta nas colunas A:H; " +
-                    "CATMAT em I, Quantidade mínima por pedido em J, prompts intermediários em K " +
-                    "e amplos em L são opcionais.");
+                    "CATMAT em I e Quantidade mínima por pedido em J são opcionais.");
             }
 
             var items = new List<QuotationImportItem>();
@@ -58,22 +57,18 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
                 try
                 {
                     var searchText = RequiredText(row, 1, "Descrição da Pesquisa", sheetName);
-                    var intermediate = row.Cells[10].Text;
-                    var broad = row.Cells[11].Text;
-                    foreach (var (column, label, text) in new[]
+                    try
                     {
-                        (1, "Pesquisa restritiva", searchText),
-                        (11, "Pesquisas intermediárias", intermediate),
-                        (12, "Pesquisas amplas", broad)
-                    })
+                        _ = SearchText.Parse(searchText);
+                    }
+                    catch (SearchQueryException exception)
                     {
-                        if (string.IsNullOrWhiteSpace(text)) continue;
-                        try { _ = SearchText.ParseMainCriteria(text); }
-                        catch (SearchQueryException exception)
-                        {
-                            throw CellError(row, column, sheetName, label,
-                                $"expressão inválida: {exception.Message}");
-                        }
+                        throw CellError(
+                            row,
+                            1,
+                            sheetName,
+                            "Descrição da Pesquisa",
+                            $"expressão inválida: {exception.Message}");
                     }
 
                     var description = RequiredText(row, 2, "Descrição do Item", sheetName);
@@ -148,10 +143,7 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
                         minimum,
                         maximum,
                         decimal.ToInt32(batchesDecimal),
-                        decimal.ToInt32(basketSizeDecimal),
-                        IntermediateSearchText: intermediate,
-                        BroadSearchText: broad,
-                        PromptOrigin: SearchPromptOrigin.Excel)
+                        decimal.ToInt32(basketSizeDecimal))
                     {
                         CatmatCodeOverride = catmat,
                         MinimumOrderQuantity = minimumOrder
@@ -165,7 +157,7 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
 
             if (items.Count == 0 && errors.Count == 0)
             {
-                errors.Add($"{sheetName}!A:L — a primeira planilha visível não contém itens nas colunas A:L.");
+                errors.Add($"{sheetName}!A:J — a primeira planilha visível não contém itens nas colunas A:J.");
             }
 
             if (errors.Count > 0)
@@ -225,12 +217,12 @@ public sealed class QuotationWorkbookImportService : IQuotationWorkbookImportSer
         {
             cancellationToken.ThrowIfCancellationRequested();
             var cells = Enumerable
-                .Repeat(new SpreadsheetCell(string.Empty, false, false), 12)
+                .Repeat(new SpreadsheetCell(string.Empty, false, false), 10)
                 .ToArray();
             foreach (var sourceCell in sourceRow.Elements<Cell>())
             {
                 var column = GetColumnNumber(sourceCell.CellReference?.Value);
-                if (column is < 1 or > 12)
+                if (column is < 1 or > 10)
                 {
                     continue;
                 }

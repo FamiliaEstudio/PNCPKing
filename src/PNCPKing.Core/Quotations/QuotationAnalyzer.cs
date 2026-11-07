@@ -68,28 +68,6 @@ public sealed partial class QuotationAnalyzer
             eligible.Where(reference =>
                 reference.Source == QuotationReferenceSource.PncpIncisoII).ToArray());
         var automaticBaskets = BuildAutomaticBaskets(pool, line.RequestedBasketSize, priceDecimalPlaces);
-        if (line.AutomationRunId is not null && line.PromptSet?.Origin == SearchPromptOrigin.Excel)
-        {
-            automaticBaskets = PreferRestrictiveBasket(eligible, automaticBaskets,
-                line.RequestedBasketSize, priceDecimalPlaces);
-            if (automaticBaskets.Count == 0)
-            {
-                // Keep the descriptive rejection and scores, but let the user compare
-                // baskets from the collected candidates instead of an empty basket list.
-                pool = BuildBasketPool(scored.Where(reference =>
-                    reference.Source == QuotationReferenceSource.PncpIncisoII &&
-                    reference.UnitPrice > 0m &&
-                    (line.MinimumUnitPrice is null || reference.UnitPrice >= line.MinimumUnitPrice.Value) &&
-                    (line.MaximumUnitPrice is null || reference.UnitPrice <= line.MaximumUnitPrice.Value)).ToArray());
-                automaticBaskets = BuildAutomaticBaskets(pool, line.RequestedBasketSize, priceDecimalPlaces)
-                    .Select(basket => basket with
-                    {
-                        IsRecommended = false,
-                        ValidationMessage = "Cesta de candidatos para revisão técnica; confira as descrições antes de escolher. " +
-                            basket.ValidationMessage
-                    }).ToArray();
-            }
-        }
         var persistedManualBaskets = BuildManualBaskets(scored, manualBaskets ?? [], priceDecimalPlaces);
         var baskets = persistedManualBaskets.Concat(automaticBaskets).ToArray();
 
@@ -513,43 +491,6 @@ public sealed partial class QuotationAnalyzer
             null,
             priceDecimalPlaces);
         candidates.TryAdd(basket.Key, basket);
-    }
-
-    private static IReadOnlyList<QuotationBasket> PreferRestrictiveBasket(
-        IReadOnlyList<QuotationReference> eligible, IReadOnlyList<QuotationBasket> allBaskets,
-        int requestedSize, int priceDecimalPlaces)
-    {
-        // Only Excel imports using the new prompt semantics opt in. Keep every
-        // collected candidate and the existing basket algorithm, with a separate
-        // pool for each level so broad matches cannot crowd out restrictive ones.
-        foreach (var level in new[] { PromptMatchLevel.Restrictive, PromptMatchLevel.Intermediate, PromptMatchLevel.Broad })
-        {
-            var candidates = level == PromptMatchLevel.Broad ? allBaskets :
-                BuildAutomaticBaskets(BuildBasketPool(eligible.Where(reference =>
-                    reference.Source == QuotationReferenceSource.PncpIncisoII &&
-                    reference.MatchedPromptLevel is { } match && match <= level).ToArray()),
-                    requestedSize, priceDecimalPlaces);
-            var preferred = candidates.Where(basket => !basket.IsIncomplete &&
-                    basket.VisualState == QuotationBasketVisualState.AutomaticRegular && basket.AdoptedPrice > 0m)
-                .OrderBy(basket => basket.References.Count(reference =>
-                    reference.MatchedPromptLevel is null or PromptMatchLevel.Broad))
-                .ThenBy(basket => basket.References.Count(reference => reference.MatchedPromptLevel == PromptMatchLevel.Intermediate))
-                .ThenByDescending(basket => basket.Score)
-                .ThenBy(basket => basket.Key, StringComparer.Ordinal).FirstOrDefault();
-            if (preferred is null) continue;
-            var result = allBaskets.Where(basket => basket.Key != preferred.Key)
-                .Select(basket => basket with { IsRecommended = false }).ToList();
-            if (result.Count >= MaximumCuratedBaskets)
-            {
-                var remove = result.FindLastIndex(basket => !basket.IsCheapest && !basket.IsMostExpensive);
-                result.RemoveAt(remove);
-            }
-            result.Insert(0, preferred with { IsRecommended = true,
-                IsCheapest = allBaskets.Any(basket => basket.Key == preferred.Key && basket.IsCheapest),
-                IsMostExpensive = allBaskets.Any(basket => basket.Key == preferred.Key && basket.IsMostExpensive) });
-            return result;
-        }
-        return allBaskets;
     }
 
     private static IReadOnlyList<QuotationBasket> BuildManualBaskets(

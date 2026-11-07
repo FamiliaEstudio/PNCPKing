@@ -1816,51 +1816,17 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
         return hashes;
     }
 
-    public Task UpdateWeightsAsync(
+    public async Task UpdateWeightsAsync(
         Guid lineId,
         AdequacyWeights weights,
-        CancellationToken cancellationToken = default) =>
-        UpdateBasketSettingsCoreAsync(lineId, weights, null, null, false, cancellationToken);
-
-    public Task UpdateBasketSettingsAsync(Guid lineId, AdequacyWeights weights, decimal? minimumUnitPrice,
-        decimal? maximumUnitPrice, CancellationToken cancellationToken = default) =>
-        UpdateBasketSettingsCoreAsync(lineId, weights, minimumUnitPrice, maximumUnitPrice, true, cancellationToken);
-
-    private async Task UpdateBasketSettingsCoreAsync(Guid lineId, AdequacyWeights weights,
-        decimal? minimumUnitPrice, decimal? maximumUnitPrice, bool updateRange, CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         weights.Validate();
-        if (minimumUnitPrice < 0 || maximumUnitPrice < 0 || minimumUnitPrice > maximumUnitPrice)
-            throw new ArgumentException("A faixa de preço é inválida: use limites não negativos e mínimo menor ou igual ao máximo.");
-        if (minimumUnitPrice > long.MaxValue / DecimalScale.Scale || maximumUnitPrice > long.MaxValue / DecimalScale.Scale)
-            throw new ArgumentException("O limite de preço é grande demais.");
         var now = DateTimeOffset.UtcNow;
         await using var writer = await _connections.WorkCoordinator
             .EnterWriterAsync(SqliteWorkPriority.Visible, cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        if (updateRange)
-        {
-            await using var current = connection.CreateCommand();
-            current.Transaction = (SqliteTransaction)transaction;
-            current.CommandText = """
-                SELECT p.is_medication, l.automation_state,
-                       EXISTS(SELECT 1 FROM quotation_automation_runs r
-                              WHERE r.project_id = l.project_id AND r.state = $running)
-                  FROM quotation_lines l JOIN quotation_projects p ON p.id = l.project_id
-                 WHERE l.id = $lineId;
-                """;
-            current.Parameters.AddWithValue("$lineId", lineId.ToString("N"));
-            current.Parameters.AddWithValue("$running", (int)QuotationAutomationRunState.Running);
-            await using var reader = await current.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                throw new InvalidOperationException("O item da cotação não existe mais.");
-            if (reader.GetInt32(1) == (int)QuotationAutomationItemState.Running || reader.GetInt32(2) != 0)
-                throw new InvalidOperationException("Pause a automação antes de recalcular as cestas.");
-            var decimals = reader.GetInt32(0) == 0 ? 2 : 4;
-            minimumUnitPrice = minimumUnitPrice is { } minimum ? QuotationMoney.Truncate(minimum, decimals) : null;
-            maximumUnitPrice = maximumUnitPrice is { } maximum ? QuotationMoney.Truncate(maximum, decimals) : null;
-        }
         await using (var line = connection.CreateCommand())
         {
             line.Transaction = (SqliteTransaction)transaction;
@@ -1871,8 +1837,6 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
                        quantity_weight = $quantity,
                        proximity_weight = $proximity,
                        recency_weight = $recency,
-                       minimum_unit_price_scaled = CASE WHEN $updateRange THEN $minimum ELSE minimum_unit_price_scaled END,
-                       maximum_unit_price_scaled = CASE WHEN $updateRange THEN $maximum ELSE maximum_unit_price_scaled END,
                        selection_confirmed = 0
                  WHERE id = $lineId;
                 """;
@@ -1881,9 +1845,6 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
             line.Parameters.AddWithValue("$quantity", weights.Quantity);
             line.Parameters.AddWithValue("$proximity", weights.Proximity);
             line.Parameters.AddWithValue("$recency", weights.Recency);
-            line.Parameters.AddWithValue("$updateRange", updateRange ? 1 : 0);
-            line.Parameters.AddWithValue("$minimum", DbValue(DecimalScale.ToScaled(minimumUnitPrice)));
-            line.Parameters.AddWithValue("$maximum", DbValue(DecimalScale.ToScaled(maximumUnitPrice)));
             line.Parameters.AddWithValue("$lineId", lineId.ToString("N"));
             if (await line.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
             {
@@ -2559,10 +2520,7 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
                      promptSet.BroadText
                  }.Where(value => !string.IsNullOrWhiteSpace(value)))
         {
-            if (promptSet.Origin == SearchPromptOrigin.Excel)
-                _ = PNCPKing.Core.Search.SearchText.ParseMainCriteria(text);
-            else
-                _ = PNCPKing.Core.Search.SearchText.Parse(text);
+            _ = PNCPKing.Core.Search.SearchText.Parse(text);
         }
 
         await using var writer = await _connections.WorkCoordinator

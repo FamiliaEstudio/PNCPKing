@@ -23,9 +23,7 @@
                       ScrollViewer.VerticalScrollBarVisibility="Auto">
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="Linha" Binding="{Binding SourceRow}" Width="55" />
-                    <DataGridTextColumn Header="Pesquisa restritiva (+ alternativas)" Binding="{Binding SearchText}" Width="310" />
-                    <DataGridTextColumn Header="Intermediários (+ alternativas)" Binding="{Binding IntermediateSearchText}" Width="260" />
-                    <DataGridTextColumn Header="Amplos (+ alternativas)" Binding="{Binding BroadSearchText}" Width="260" />
+                    <DataGridTextColumn Header="Pesquisa" Binding="{Binding SearchText}" Width="310" />
                     <DataGridTextColumn Header="Descrição de saída" Binding="{Binding OutputDescription}" Width="200" />
                     <DataGridTextColumn Header="Quantidade" Binding="{Binding Quantity, StringFormat='#,##0.####'}" Width="100" />
                     <DataGridTextColumn Header="Unidade" Binding="{Binding Unit}" Width="120" />

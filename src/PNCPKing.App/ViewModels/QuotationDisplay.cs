@@ -113,8 +113,7 @@ public sealed class QuotationBasketDisplay(QuotationBasket source, bool wasPrevi
     public decimal Score => Source.Score;
     public string Type => Source.IsManual ? "Manual" : "Automática";
     public string Name => Source.IsManual ? Source.Name : string.Empty;
-    public string Status => Source.RequiresReview ? "Revisar descrição" :
-        AdoptedPrice <= 0m ? "Sem preços válidos" : Source.VisualState switch
+    public string Status => AdoptedPrice <= 0m ? "Sem preços válidos" : Source.VisualState switch
     {
         QuotationBasketVisualState.AutomaticRegular when Source.References.Count == 2 => "Resolvida com ressalva",
         QuotationBasketVisualState.AutomaticRegular when Source.IsIncomplete => "Reduzida",
@@ -128,7 +127,7 @@ public sealed class QuotationBasketDisplay(QuotationBasket source, bool wasPrevi
     };
     public string ValidationMessage => Source.ValidationMessage;
     public int ReferenceCount => Source.References.Count;
-    public string Background => Source.RequiresReview ? "#FFF4CE" : Source.VisualState switch
+    public string Background => Source.VisualState switch
     {
         QuotationBasketVisualState.AutomaticRegular => "#EAF7EE",
         QuotationBasketVisualState.AutomaticHighDispersion => "#FDECEC",

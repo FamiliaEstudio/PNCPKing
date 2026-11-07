@@ -6,7 +6,7 @@ using PNCPKing.Core.Quotations;
 
 namespace PNCPKing.Infrastructure.Services;
 
-public sealed partial class QuotationService(
+public sealed class QuotationService(
     IQuotationRepository repository,
     QuotationAnalyzer analyzer,
     IPerformanceTelemetry? performance = null)
@@ -284,8 +284,9 @@ public sealed partial class QuotationService(
         var project = await GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
         var existingLine = lineId is null
             ? null
-            : await repository.GetLineAsync(projectId, lineId.Value, cancellationToken).ConfigureAwait(false);
-        if (lineId is not null && (existingLine is null || existingLine.ProjectId != projectId))
+            : (await repository.GetLinesAsync(projectId, cancellationToken).ConfigureAwait(false))
+                .SingleOrDefault(line => line.Id == lineId);
+        if (lineId is not null && existingLine is null)
         {
             throw new InvalidOperationException("O item selecionado não pertence ao projeto atual.");
         }
@@ -402,10 +403,6 @@ public sealed partial class QuotationService(
         AdequacyWeights weights,
         CancellationToken cancellationToken = default) =>
         repository.UpdateWeightsAsync(lineId, weights, cancellationToken);
-
-    public Task UpdateBasketSettingsAsync(Guid lineId, AdequacyWeights weights, decimal? minimumUnitPrice,
-        decimal? maximumUnitPrice, CancellationToken cancellationToken = default) =>
-        repository.UpdateBasketSettingsAsync(lineId, weights, minimumUnitPrice, maximumUnitPrice, cancellationToken);
 
     public async Task<(QuotationLineAnalysis Analysis, QuotationManualBasket Basket)> SaveManualBasketAsync(
         Guid projectId,
@@ -594,44 +591,6 @@ public sealed partial class QuotationService(
         Guid basketId,
         CancellationToken cancellationToken = default) =>
         repository.DeleteManualBasketAsync(basketId, cancellationToken);
-
-    public async Task<QuotationManualBasket> CopyReferencesToBasketAsync(
-        QuotationLineAnalysis analysis, string? sourceBasketKey, string? destinationBasketKey,
-        IReadOnlyList<string> referenceIds, CancellationToken cancellationToken = default)
-    {
-        var ids = referenceIds.Distinct(StringComparer.Ordinal).ToArray();
-        if (ids.Length == 0 || ids.Any(id => analysis.References.All(reference => reference.Id != id)))
-            throw new InvalidOperationException("Selecione preços pertencentes a este item.");
-        var destination = destinationBasketKey is null ? null :
-            analysis.Baskets.SingleOrDefault(basket => basket.Key == destinationBasketKey)
-            ?? throw new InvalidOperationException("A cesta de destino não pertence a este item.");
-        if (destination is not null && destination.Key == sourceBasketKey)
-            throw new InvalidOperationException("Escolha outra cesta de destino.");
-        var source = analysis.Baskets.FirstOrDefault(basket => basket.Key == sourceBasketKey);
-        var basket = destination is null
-            ? await CreateManualBasketAsync(analysis.Line.Id,
-                NextManualBasketName(await repository.GetManualBasketsAsync(analysis.Line.Id, cancellationToken)
-                    .ConfigureAwait(false)), ids, cancellationToken).ConfigureAwait(false)
-            : await CreateManualCopyAsync(analysis, destination, cancellationToken: cancellationToken)
-                .ConfigureAwait(false);
-        var added = destination is null ? ids : ids.Except(basket.ReferenceIds, StringComparer.Ordinal).ToArray();
-        if (destination is not null && added.Length > 0)
-            basket = await repository.SaveManualBasketAsync(analysis.Line.Id, basket.Id, basket.Name,
-                basket.ReferenceIds.Concat(added).ToArray(), cancellationToken).ConfigureAwait(false);
-        // Adjustments belong to each basket. Preserve existing destination values;
-        // only newly copied prices inherit their source divisor/conversion.
-        foreach (var entry in source?.PriceEntries.Where(entry => added.Contains(entry.Reference.Id)) ?? [])
-        {
-            if (entry.PriceDivisor is { } divisor)
-                await repository.SetManualBasketPriceDivisorAsync(basket.Id, entry.Reference.Id, divisor, cancellationToken)
-                    .ConfigureAwait(false);
-            else if (entry.ConversionFactor != 1m)
-                await repository.SetManualBasketConversionFactorAsync(basket.Id, entry.Reference.Id,
-                    entry.ConversionFactor, cancellationToken).ConfigureAwait(false);
-        }
-        return (await repository.GetManualBasketsAsync(analysis.Line.Id, cancellationToken).ConfigureAwait(false))
-            .Single(value => value.Id == basket.Id);
-    }
 
     public async Task<QuotationManualBasket> CreateManualCopyAsync(
         QuotationLineAnalysis analysis,

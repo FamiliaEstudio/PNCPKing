@@ -360,10 +360,8 @@ public sealed record QuotationBasket
 
     public bool IsManual => Kind == QuotationBasketKind.Manual;
     public bool IsIncomplete => IsManual ? References.Count < 3 : References.Count < RequestedSize;
-    public bool RequiresReview => !IsManual &&
-        References.Any(reference => reference.State != QuotationReferenceState.Eligible);
-    public bool IsValid => !RequiresReview && (!IsManual ||
-        VisualState == QuotationBasketVisualState.ManualRegular);
+    public bool IsValid => !IsManual ||
+        VisualState == QuotationBasketVisualState.ManualRegular;
 }
 
 public enum QuotationAggregationMethod

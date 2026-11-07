@@ -37,9 +37,6 @@
                         IsEnabled="{Binding CanEditRequestedDetails}"
                         ToolTip="Configura ou limpa quantidade e unidade, inclusive de itens importados. Pause pesquisas ou automação antes de editar." />
                 <Button Content="Atualizar" Click="Refresh_Click" />
-                <Button x:Name="RecalculateBasketsButton" Content="Recalcular cestas" Click="RecalculateBaskets_Click"
-                        IsEnabled="{Binding CanEditRequestedDetails}"
-                        ToolTip="Altera os pesos e a faixa de preço deste item e recalcula as cestas entre os preços já coletados." />
                 <Button Content="CATMAT e mínimo" Click="EditDocumentDetails_Click" />
                 <Button Content="Transferir ou copiar…" Click="TransferItem_Click"
                         ToolTip="Transfere ou copia este item, com todos os preços, cestas e evidências, para outro projeto local." />
@@ -87,22 +84,6 @@
                     </controls:GridReader>
 
                     <StackPanel Grid.Row="1" Margin="0,6">
-                        <Grid Margin="0,0,0,4">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBox x:Name="CandidateSearchTextBox"
-                                     Text="{Binding CandidateSearchText, UpdateSourceTrigger=PropertyChanged}"
-                                     KeyDown="CandidateSearch_KeyDown"
-                                     ToolTip="Pesquisar nos preços já coletados deste item. Use palavras, frases, exclusões e + para alternativas." />
-                            <StackPanel Grid.Column="1" Orientation="Horizontal">
-                                <Button Content="Pesquisar nos preços coletados" Click="SearchCandidates_Click" />
-                                <Button Content="Limpar" Click="ClearCandidateSearch_Click" />
-                                <Button Content="Parar" Click="StopCandidateSearch_Click" />
-                            </StackPanel>
-                        </Grid>
-                        <TextBlock Text="{Binding CandidateSearchSummary, Mode=OneWay}" TextWrapping="Wrap" />
                         <WrapPanel>
                             <TextBlock Text="Mostrar:" VerticalAlignment="Center" FontWeight="SemiBold" />
                             <Button Content="Na cesta" Click="ScopeInBasket_Click" />
@@ -136,9 +117,6 @@
                                     <MenuItem Header="Ver páginas relevantes" Click="PriceRelevantPages_Click" />
                                     <Separator />
                                     <MenuItem Header="Adicionar/retirar da cesta" Click="PriceToggleBasket_Click" />
-                                    <MenuItem Header="Copiar preço(s) para outra cesta" SubmenuOpened="CopyPriceToBasket_Opened">
-                                        <MenuItem Header="Escolher destino…" />
-                                    </MenuItem>
                                     <MenuItem Header="Dividir preço por" Click="PriceFactor_Click" />
                                     <MenuItem Header="Restaurar preço original" Click="PriceResetFactor_Click" />
                                     <MenuItem Header="Editar preço da internet" Click="EditInternetReference_Click" />
@@ -216,7 +194,7 @@
                 </Grid>
             </TabItem>
 
-            <TabItem x:Name="SupplementarySearchTab" Header="Complementar no banco local">
+            <TabItem Header="Pesquisar e complementar">
                 <Grid Margin="4">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />

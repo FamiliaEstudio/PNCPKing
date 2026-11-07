@@ -1124,11 +1124,6 @@ public sealed class QuotationPackageService : IQuotationPackageService
 
     private static QuotationProjectReport BuildOrganizationReport(JsonObject payload)
     {
-        // Use the same current prompt metadata as SqliteQuotationRepository.GetLine(s)Async.
-        // Excel basket selection also depends on its origin, not just on the saved references.
-        var prompts = GetRows(payload, "quotation_line_search_prompts")
-            .Where(row => GetRequiredLong(row, "is_current") == 1)
-            .ToDictionary(row => GetRequiredText(row, "line_id"), MapPromptSet, StringComparer.Ordinal);
         var references = GetRows(payload, "quotation_references")
             .GroupBy(row => GetRequiredText(row, "line_id"), StringComparer.Ordinal)
             .ToDictionary(
@@ -1197,7 +1192,6 @@ public sealed class QuotationPackageService : IQuotationPackageService
             var line = MapLine(row);
             QuotationWordExportOptions.ValidateMinimumOrderQuantity(line.MinimumOrderQuantity);
             var lineKey = line.Id.ToString("N");
-            line = line with { PromptSet = prompts.GetValueOrDefault(lineKey) };
             var analysis = analyzer.Analyze(
                 line,
                 references.GetValueOrDefault(lineKey, []),
@@ -2062,22 +2056,6 @@ public sealed class QuotationPackageService : IQuotationPackageService
             }
         };
     }
-
-    private static ItemSearchPromptSet MapPromptSet(JsonObject row) => new()
-    {
-        LineId = ParseGuid(GetRequiredText(row, "line_id"), "item do prompt"),
-        Version = checked((int)GetRequiredLong(row, "version")),
-        RestrictiveText = GetRequiredText(row, "restrictive_text"),
-        IntermediateText = GetRequiredText(row, "intermediate_text"),
-        BroadText = GetRequiredText(row, "broad_text"),
-        Origin = (SearchPromptOrigin)GetRequiredLong(row, "origin"),
-        ValidationState = (SearchPromptValidationState)GetRequiredLong(row, "validation_state"),
-        ActiveLevel = (PromptMatchLevel)GetRequiredLong(row, "active_level"),
-        ContractsAtActiveLevel = checked((int)GetRequiredLong(row, "contracts_at_level")),
-        MatchedItems = checked((int)GetRequiredLong(row, "matched_items")),
-        RevealedPrices = checked((int)GetRequiredLong(row, "revealed_prices")),
-        UpdatedAt = ParseDateTime(GetRequiredText(row, "updated_at"))
-    };
 
     private static QuotationReference MapReference(JsonObject row) => new()
     {

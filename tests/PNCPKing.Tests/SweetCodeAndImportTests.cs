@@ -3,46 +3,12 @@ using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Spreadsheet;
 using PNCPKing.Infrastructure.Data;
-using PNCPKing.Core.Models;
-using PNCPKing.Core.Search;
 using PNCPKing.Infrastructure.Services;
 
 namespace PNCPKing.Tests;
 
 public sealed class SweetCodeAndImportTests
 {
-    [Fact]
-    public async Task Import_PreservesIndependentCriteriaAndOptionalPromptLevels()
-    {
-        await using var database = await TestDatabase.CreateAsync();
-        var path = Path.Combine(database.Directory, "prompts.xlsx");
-        using (var workbook = new XLWorkbook())
-        {
-            var sheet = workbook.Worksheets.Add("Itens");
-            sheet.Cell("A1").Value = "café C:(alimentos) + açúcar C:(mercearia)";
-            sheet.Cell("B1").Value = "Alimentos";
-            sheet.Cell("C1").Value = 100;
-            sheet.Cell("D1").Value = "pacote";
-            sheet.Cell("G1").Value = 2;
-            sheet.Cell("K1").Value = "café torrado + café solúvel";
-            sheet.Cell("L1").Value = "café + açúcar + chá";
-            workbook.SaveAs(path);
-        }
-        var importer = new QuotationWorkbookImportService();
-        var item = Assert.Single((await importer.ReadAsync(path)).Items);
-        Assert.Equal(SearchPromptOrigin.Excel, item.PromptOrigin);
-        Assert.Equal(2, SearchText.ParseMainCriteria(item.SearchText).Count);
-        Assert.Equal(2, SearchText.ParseMainCriteria(item.IntermediateSearchText).Count);
-        Assert.Equal(3, SearchText.ParseMainCriteria(item.BroadSearchText).Count);
-        using (var workbook = new XLWorkbook(path))
-        {
-            workbook.Worksheet(1).Cell("K1").Value = "café +";
-            workbook.Save();
-        }
-        var error = await Assert.ThrowsAsync<InvalidDataException>(() => importer.ReadAsync(path));
-        Assert.Contains("Itens!K1", error.Message);
-    }
-
     [Fact]
     public async Task SweetCodes_PersistOrderedLibraryAndEnabledState()
     {
