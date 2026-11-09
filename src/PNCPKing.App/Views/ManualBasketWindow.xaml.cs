@@ -168,6 +168,7 @@ public partial class ManualBasketWindow : Window
         _basketsLoading = line is not null;
         BasketComboBox.ItemsSource = new[] { new BasketChoice("Nova cesta manual", null) };
         BasketComboBox.SelectedIndex = 0;
+        BasketNameTextBox.Text = BuildNextManualName();
         UpdateLoadingState();
         try
         {
@@ -183,6 +184,9 @@ public partial class ManualBasketWindow : Window
             _manualBasketCount = choices.Count - 1;
             BasketComboBox.ItemsSource = choices;
             BasketComboBox.SelectedIndex = 0;
+            // The default choice compares equal across reloads, so WPF may keep it
+            // selected without raising SelectionChanged after the count changes.
+            BasketNameTextBox.Text = BuildNextManualName();
         }
         catch (OperationCanceledException) when (_closed) { }
         catch (Exception exception)
