@@ -848,7 +848,8 @@ public sealed class QuotationTests
         var saved = await service.SaveManualBasketAsync(project.Id, null, input, null, "Manual", rows);
         var lineId = saved.Analysis.Line.Id;
         var firstId = saved.Basket.ReferenceIds[0];
-        await repository.SetManualBasketConversionFactorAsync(saved.Basket.Id, firstId, 0.333333m);
+        var secondId = saved.Basket.ReferenceIds[1];
+        await repository.SetManualBasketConversionFactorAsync(saved.Basket.Id, secondId, 0.333333m);
         await repository.SetManualBasketPriceDivisorAsync(saved.Basket.Id, firstId, 3m);
         await repository.SetManualBasketAggregationMethodAsync(saved.Basket.Id, QuotationAggregationMethod.Median);
 
@@ -870,7 +871,7 @@ public sealed class QuotationTests
         Assert.Equal(1L, (long)(await command.ExecuteScalarAsync())!);
         Assert.Equal(4, (await repository.GetReferencesAsync(lineId)).Count);
         Assert.Equal(4, expanded.Basket.ReferenceIds.Count);
-        Assert.Equal(0.333333m, expanded.Basket.ConversionFactors[firstId]);
+        Assert.Equal(0.333333m, expanded.Basket.ConversionFactors[secondId]);
         Assert.Equal(3m, expanded.Basket.PriceDivisors[firstId]);
         Assert.Equal(QuotationAggregationMethod.Median, expanded.Basket.AggregationMethod);
 
