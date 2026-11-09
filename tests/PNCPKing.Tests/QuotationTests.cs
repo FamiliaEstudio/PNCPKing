@@ -836,6 +836,88 @@ public sealed class QuotationTests
     }
 
     [Fact]
+    public async Task ManualBasket_SaveWritesOnlyChangedReferencesAndPreservesDivisors()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer(Today));
+        var project = await service.CreateProjectAsync("Gravação incremental");
+        var input = new QuotationLineInput("Café", 100m, "pacote", null, null);
+        var rows = new[] { Row("c1", "11222333000181", 98m), Row("c2", "60701190000104", 100m),
+            Row("c3", "33000167000101", 102m) };
+        var saved = await service.SaveManualBasketAsync(project.Id, null, input, null, "Manual", rows);
+        var lineId = saved.Analysis.Line.Id;
+        var firstId = saved.Basket.ReferenceIds[0];
+        var secondId = saved.Basket.ReferenceIds[1];
+        await repository.SetManualBasketConversionFactorAsync(saved.Basket.Id, secondId, 0.333333m);
+        await repository.SetManualBasketPriceDivisorAsync(saved.Basket.Id, firstId, 3m);
+        await repository.SetManualBasketAggregationMethodAsync(saved.Basket.Id, QuotationAggregationMethod.Median);
+
+        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={database.Repository.DatabasePath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE reference_write_audit(id TEXT NOT NULL);
+            CREATE TRIGGER audit_reference_insert AFTER INSERT ON quotation_references
+                BEGIN INSERT INTO reference_write_audit VALUES(NEW.id); END;
+            CREATE TRIGGER audit_reference_update AFTER UPDATE ON quotation_references
+                BEGIN INSERT INTO reference_write_audit VALUES(NEW.id); END;
+            """;
+        await command.ExecuteNonQueryAsync();
+
+        var expanded = await service.SaveManualBasketAsync(project.Id, lineId, input, saved.Basket.Id,
+            saved.Basket.Name, [rows[1], Row("c4", "11111111000191", 104m)]);
+        command.CommandText = "SELECT COUNT(*) FROM reference_write_audit;";
+        Assert.Equal(1L, (long)(await command.ExecuteScalarAsync())!);
+        Assert.Equal(4, (await repository.GetReferencesAsync(lineId)).Count);
+        Assert.Equal(4, expanded.Basket.ReferenceIds.Count);
+        Assert.Equal(0.333333m, expanded.Basket.ConversionFactors[secondId]);
+        Assert.Equal(3m, expanded.Basket.PriceDivisors[firstId]);
+        Assert.Equal(QuotationAggregationMethod.Median, expanded.Basket.AggregationMethod);
+
+        command.CommandText = "DELETE FROM reference_write_audit;";
+        await command.ExecuteNonQueryAsync();
+        var repeated = await service.SaveManualBasketAsync(project.Id, lineId, input, saved.Basket.Id,
+            saved.Basket.Name, [rows[1], Row("c4", "11111111000191", 104m)]);
+        command.CommandText = "SELECT COUNT(*) FROM reference_write_audit;";
+        Assert.Equal(0L, (long)(await command.ExecuteScalarAsync())!);
+        Assert.Equal(4, repeated.Basket.ReferenceIds.Count);
+
+        await service.SaveManualBasketAsync(project.Id, lineId, input, saved.Basket.Id,
+            saved.Basket.Name, [Row("c4", "11111111000191", 106m)]);
+        command.CommandText = "SELECT COUNT(*) FROM reference_write_audit;";
+        Assert.Equal(1L, (long)(await command.ExecuteScalarAsync())!);
+        Assert.Equal(106m, (await repository.GetReferencesAsync(lineId)).Single(value => value.ContractId == "c4").UnitPrice);
+
+        var updated = await service.SaveManualBasketAsync(project.Id, lineId,
+            input with { Weights = new AdequacyWeights(40, 20, 10, 25, 5), MinimumUnitPrice = 100m },
+            saved.Basket.Id, saved.Basket.Name, [rows[1]]);
+        var reopened = Assert.IsType<QuotationLineAnalysis>(await service.GetAnalysisAsync(project.Id, lineId));
+        Assert.Equal(updated.Analysis.References, reopened.References);
+        Assert.Equal(updated.Analysis.Baskets.Select(value => value.Key), reopened.Baskets.Select(value => value.Key));
+        Assert.Equal(4, reopened.References.Count);
+        Assert.Equal(3m, Assert.Single(await repository.GetManualBasketsAsync(lineId)).PriceDivisors[firstId]);
+    }
+
+    [Fact]
+    public async Task ManualBasket_SaveRejectsAnItemFromAnotherProjectBeforeWriting()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = new SqliteQuotationRepository(database.Repository.DatabasePath);
+        var service = new QuotationService(repository, new QuotationAnalyzer(Today));
+        var project = await service.CreateProjectAsync("Origem");
+        var other = await service.CreateProjectAsync("Outro projeto");
+        var input = new QuotationLineInput("Café", 1m, "pacote", null, null);
+        var saved = await service.SaveManualBasketAsync(project.Id, null, input, null, "Manual",
+            [Row("c1", "11222333000181", 100m)]);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.SaveManualBasketAsync(
+            other.Id, saved.Analysis.Line.Id, input, null, "Não salvar",
+            [Row("c2", "60701190000104", 110m)]));
+        Assert.Single(await repository.GetReferencesAsync(saved.Analysis.Line.Id));
+        Assert.Empty(await repository.GetLinesAsync(other.Id));
+    }
+
+    [Fact]
     public async Task ManualBasket_CrudPersistsCompositionAndReevaluatesAfterRestart()
     {
         await using var database = await TestDatabase.CreateAsync();

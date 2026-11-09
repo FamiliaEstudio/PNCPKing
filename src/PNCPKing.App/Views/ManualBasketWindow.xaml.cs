@@ -3,17 +3,30 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using PNCPKing.Core.Models;
+using PNCPKing.Core.Quotations;
 
 namespace PNCPKing.App.Views;
 
 public partial class ManualBasketWindow : Window
 {
-    private readonly IReadOnlyDictionary<Guid, IReadOnlyList<QuotationLineAnalysis>> _analysesByProject;
+    private readonly Func<Guid, CancellationToken, Task<IReadOnlyList<QuotationLine>>> _loadLines;
+    private readonly Func<Guid, CancellationToken, Task<IReadOnlyList<QuotationManualBasket>>> _loadBaskets;
     private readonly string _suggestedDescription;
+    private readonly CancellationTokenSource _lifetime = new();
+    private bool _ready;
+    private bool _closed;
+    private bool _linesLoading;
+    private bool _basketsLoading;
+    private bool _linesFailed;
+    private bool _basketsFailed;
+    private int _lineLoadVersion;
+    private int _basketLoadVersion;
+    private int _manualBasketCount;
 
     public ManualBasketWindow(
         IReadOnlyList<QuotationProject> projects,
-        IReadOnlyDictionary<Guid, IReadOnlyList<QuotationLineAnalysis>> analysesByProject,
+        Func<Guid, CancellationToken, Task<IReadOnlyList<QuotationLine>>> loadLines,
+        Func<Guid, CancellationToken, Task<IReadOnlyList<QuotationManualBasket>>> loadBaskets,
         Guid? selectedProjectId,
         string suggestedDescription,
         string minimumPrice,
@@ -33,7 +46,8 @@ public partial class ManualBasketWindow : Window
                 e.Handled = true;
             }
         };
-        _analysesByProject = analysesByProject;
+        _loadLines = loadLines;
+        _loadBaskets = loadBaskets;
         _suggestedDescription = suggestedDescription;
         ProjectComboBox.ItemsSource = projects;
         ProjectComboBox.SelectedItem = projects.FirstOrDefault(project => project.Id == selectedProjectId)
@@ -44,7 +58,18 @@ public partial class ManualBasketWindow : Window
         DescriptionTextBox.Text = suggestedDescription;
         MinimumPriceTextBox.Text = minimumPrice;
         MaximumPriceTextBox.Text = maximumPrice;
-        RefreshLines();
+        Loaded += async (_, _) =>
+        {
+            if (_ready) return;
+            _ready = true;
+            await RefreshLinesAsync();
+        };
+        Closed += (_, _) =>
+        {
+            _closed = true;
+            _lifetime.Cancel();
+            _lifetime.Dispose();
+        };
     }
 
     public Guid? ExistingProjectId { get; private set; }
@@ -54,20 +79,23 @@ public partial class ManualBasketWindow : Window
     public string BasketName { get; private set; } = string.Empty;
     public QuotationLineInput? Input { get; private set; }
 
-    private void ProjectComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => RefreshLines();
-
-    private void LineComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void ProjectComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        var analysis = (LineComboBox.SelectedItem as LineChoice)?.Analysis;
-        var existing = analysis is not null;
+        if (_ready && !_closed) await RefreshLinesAsync();
+    }
+
+    private async void LineComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_ready || _closed) return;
+        var line = (LineComboBox.SelectedItem as LineChoice)?.Line;
+        var existing = line is not null;
         foreach (var control in NewLineControls)
         {
             control.IsEnabled = !existing;
         }
 
-        if (analysis is not null)
+        if (line is not null)
         {
-            var line = analysis.Line;
             DescriptionTextBox.Text = line.Description;
             QuantityTextBox.Text = line.RequestedQuantity > 0
                 ? line.RequestedQuantity.ToString("#,##0.####", CultureInfo.CurrentCulture)
@@ -82,7 +110,7 @@ public partial class ManualBasketWindow : Window
             DescriptionTextBox.Text = _suggestedDescription;
         }
 
-        RefreshBaskets();
+        await RefreshBasketsAsync();
     }
 
     private void BasketComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -91,45 +119,107 @@ public partial class ManualBasketWindow : Window
         BasketNameTextBox.Text = basket?.Name ?? BuildNextManualName();
     }
 
-    private void RefreshLines()
+    private async Task RefreshLinesAsync()
     {
+        var version = ++_lineLoadVersion;
+        ++_basketLoadVersion;
+        _linesLoading = true;
+        _basketsLoading = false;
+        _linesFailed = false;
+        LoadStatusTextBlock.Text = string.Empty;
         var project = ProjectComboBox.SelectedItem as QuotationProject;
-        var choices = new List<LineChoice> { new("Novo item", null) };
-        if (project is not null && _analysesByProject.TryGetValue(project.Id, out var analyses))
-        {
-            choices.AddRange(analyses.Select(analysis => new LineChoice(analysis.Line.EffectiveDisplayName, analysis)));
-        }
-
-        LineComboBox.ItemsSource = choices;
+        LineComboBox.ItemsSource = new[] { new LineChoice("Novo item", null) };
         LineComboBox.SelectedIndex = 0;
-        RefreshBaskets();
-    }
-
-    private void RefreshBaskets()
-    {
-        var analysis = (LineComboBox.SelectedItem as LineChoice)?.Analysis;
-        var choices = new List<BasketChoice> { new("Nova cesta manual", null) };
-        if (analysis is not null)
+        UpdateLoadingState();
+        try
         {
-            choices.AddRange(analysis.Baskets
-                .Where(basket => basket.IsManual)
-                .Select(basket => new BasketChoice(
-                    $"{basket.Name} ({basket.References.Count:N0} preço(s))",
-                    basket)));
+            if (project is null) return;
+            var lines = await _loadLines(project.Id, _lifetime.Token);
+            if (_closed || version != _lineLoadVersion) return;
+            var choices = new List<LineChoice> { new("Novo item", null) };
+            choices.AddRange(QuotationOrganization.OrderLines(project, lines)
+                .Select(line => new LineChoice(line.EffectiveDisplayName, line)));
+            LineComboBox.ItemsSource = choices;
+            LineComboBox.SelectedIndex = 0;
         }
-
-        BasketComboBox.ItemsSource = choices;
-        BasketComboBox.SelectedIndex = 0;
+        catch (OperationCanceledException) when (_closed) { }
+        catch (Exception exception)
+        {
+            if (_closed || version != _lineLoadVersion) return;
+            _linesFailed = true;
+            LoadStatusTextBlock.Text = $"Não foi possível carregar os itens: {exception.Message}";
+        }
+        finally
+        {
+            if (!_closed && version == _lineLoadVersion)
+            {
+                _linesLoading = false;
+                UpdateLoadingState();
+            }
+        }
     }
 
-    private string BuildNextManualName()
+    private async Task RefreshBasketsAsync()
     {
-        var count = (LineComboBox.SelectedItem as LineChoice)?.Analysis?.Baskets.Count(basket => basket.IsManual) ?? 0;
-        return $"Manual {count + 1:N0}";
+        var version = ++_basketLoadVersion;
+        var line = (LineComboBox.SelectedItem as LineChoice)?.Line;
+        _manualBasketCount = 0;
+        _basketsFailed = false;
+        _basketsLoading = line is not null;
+        BasketComboBox.ItemsSource = new[] { new BasketChoice("Nova cesta manual", null) };
+        BasketComboBox.SelectedIndex = 0;
+        BasketNameTextBox.Text = BuildNextManualName();
+        UpdateLoadingState();
+        try
+        {
+            if (line is null) return;
+            LoadStatusTextBlock.Text = string.Empty;
+            var baskets = await _loadBaskets(line.Id, _lifetime.Token);
+            if (_closed || version != _basketLoadVersion) return;
+            var choices = new List<BasketChoice> { new("Nova cesta manual", null) };
+            choices.AddRange(baskets.Where(basket => basket.ReferenceIds.Count > 0)
+                .Select(basket => new BasketChoice(
+                    $"{basket.Name} ({basket.ReferenceIds.Count:N0} preço(s))",
+                    basket)));
+            _manualBasketCount = choices.Count - 1;
+            BasketComboBox.ItemsSource = choices;
+            BasketComboBox.SelectedIndex = 0;
+            // The default choice compares equal across reloads, so WPF may keep it
+            // selected without raising SelectionChanged after the count changes.
+            BasketNameTextBox.Text = BuildNextManualName();
+        }
+        catch (OperationCanceledException) when (_closed) { }
+        catch (Exception exception)
+        {
+            if (_closed || version != _basketLoadVersion) return;
+            _basketsFailed = true;
+            LoadStatusTextBlock.Text = $"Não foi possível carregar as cestas: {exception.Message}";
+        }
+        finally
+        {
+            if (!_closed && version == _basketLoadVersion)
+            {
+                _basketsLoading = false;
+                UpdateLoadingState();
+            }
+        }
     }
+
+    private void UpdateLoadingState()
+    {
+        LineComboBox.IsEnabled = !_linesLoading;
+        BasketComboBox.IsEnabled = !_linesLoading && !_basketsLoading;
+        SaveButton.IsEnabled = !_linesLoading && !_basketsLoading && !_linesFailed && !_basketsFailed;
+        if (!_linesFailed && !_basketsFailed)
+            LoadStatusTextBlock.Text = _linesLoading ? "Carregando itens do projeto..."
+                : _basketsLoading ? "Carregando cestas do item..." : string.Empty;
+    }
+
+    private string BuildNextManualName() => $"Manual {_manualBasketCount + 1:N0}";
 
     private void Accept_Click(object sender, RoutedEventArgs e)
     {
+        if (!SaveButton.IsEnabled) return;
         try
         {
             NewProjectName = NewProjectNameTextBox.Text.Trim();
@@ -143,9 +233,9 @@ public partial class ManualBasketWindow : Window
 
             var selectedLine = NewProjectName.Length > 0
                 ? null
-                : (LineComboBox.SelectedItem as LineChoice)?.Analysis;
-            ExistingLineId = selectedLine?.Line.Id;
-            ExistingBasketId = (BasketComboBox.SelectedItem as BasketChoice)?.Basket?.ManualBasketId;
+                : (LineComboBox.SelectedItem as LineChoice)?.Line;
+            ExistingLineId = selectedLine?.Id;
+            ExistingBasketId = selectedLine is null ? null : (BasketComboBox.SelectedItem as BasketChoice)?.Basket?.Id;
             BasketName = BasketNameTextBox.Text.Trim();
             if (BasketName.Length == 0)
             {
@@ -154,7 +244,7 @@ public partial class ManualBasketWindow : Window
 
             if (selectedLine is not null)
             {
-                var line = selectedLine.Line;
+                var line = selectedLine;
                 Input = new QuotationLineInput(
                     line.Description,
                     line.RequestedQuantity,
@@ -239,6 +329,6 @@ public partial class ManualBasketWindow : Window
         MaximumPriceTextBox
     ];
 
-    private sealed record LineChoice(string Label, QuotationLineAnalysis? Analysis);
-    private sealed record BasketChoice(string Label, QuotationBasket? Basket);
+    private sealed record LineChoice(string Label, QuotationLine? Line);
+    private sealed record BasketChoice(string Label, QuotationManualBasket? Basket);
 }

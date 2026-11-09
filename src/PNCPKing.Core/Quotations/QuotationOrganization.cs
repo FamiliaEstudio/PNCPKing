@@ -153,14 +153,23 @@ public static class QuotationOrganization
     }
 
     public static IReadOnlyList<QuotationLineAnalysis> Order(QuotationProject project,
-        IReadOnlyList<QuotationLineAnalysis> lines)
+        IReadOnlyList<QuotationLineAnalysis> lines) => Order(project, lines, value => value.Line);
+
+    public static IReadOnlyList<QuotationLine> OrderLines(QuotationProject project,
+        IReadOnlyList<QuotationLine> lines) => Order(project, lines, value => value);
+
+    private static IReadOnlyList<T> Order<T>(QuotationProject project,
+        IReadOnlyList<T> lines, Func<T, QuotationLine> line)
     {
         if (project.Organization is not { } organization)
-            return project.SortItemsAlphabetically ? Alphabetical(lines, project.IgnoreItemNumberPrefix).ToArray() : lines;
+            return project.SortItemsAlphabetically
+                ? lines.OrderBy(value => SortName(line(value), project.IgnoreItemNumberPrefix), NameComparer)
+                    .ThenBy(value => line(value).DisplayOrder).ThenBy(value => line(value).Id).ToArray()
+                : lines;
         var numbers = organization.Positions.GroupBy(position => position.LineId)
             .ToDictionary(group => group.Key, group => group.Min(position => position.Number));
-        return lines.OrderBy(value => numbers.GetValueOrDefault(value.Line.Id, int.MaxValue))
-            .ThenBy(value => value.Line.DisplayOrder).ThenBy(value => value.Line.Id).ToArray();
+        return lines.OrderBy(value => numbers.GetValueOrDefault(line(value).Id, int.MaxValue))
+            .ThenBy(value => line(value).DisplayOrder).ThenBy(value => line(value).Id).ToArray();
     }
 
     public static void ValidateSnapshot(QuotationProjectReport report)

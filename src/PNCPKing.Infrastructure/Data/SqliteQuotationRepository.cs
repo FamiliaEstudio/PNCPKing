@@ -1042,8 +1042,8 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
         }
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        var lines = await GetLinesAsync(projectId, cancellationToken).ConfigureAwait(false);
-        return lines.Single(line => line.Id == id);
+        return await GetLineAsync(projectId, id, cancellationToken).ConfigureAwait(false)
+               ?? throw new InvalidOperationException("O item salvo não pôde ser reaberto.");
     }
 
     public async Task ConfirmBasketAsync(Guid lineId, string basketKey, CancellationToken cancellationToken = default)

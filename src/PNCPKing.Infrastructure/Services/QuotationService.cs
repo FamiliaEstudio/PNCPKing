@@ -15,6 +15,14 @@ public sealed class QuotationService(
     public Task<IReadOnlyList<QuotationProject>> GetProjectsAsync(CancellationToken cancellationToken = default) =>
         repository.GetProjectsAsync(cancellationToken);
 
+    public Task<IReadOnlyList<QuotationLine>> GetLinesAsync(
+        Guid projectId, CancellationToken cancellationToken = default) =>
+        repository.GetLinesAsync(projectId, cancellationToken);
+
+    public Task<IReadOnlyList<QuotationManualBasket>> GetManualBasketsAsync(
+        Guid lineId, CancellationToken cancellationToken = default) =>
+        repository.GetManualBasketsAsync(lineId, cancellationToken);
+
     public Task<QuotationProject> CreateProjectAsync(string name, CancellationToken cancellationToken = default) =>
         repository.CreateProjectAsync(name, cancellationToken);
 
@@ -431,6 +439,9 @@ public sealed class QuotationService(
         }
 
         var id = lineId ?? Guid.NewGuid();
+        if (lineId is not null &&
+            await repository.GetLineAsync(projectId, id, cancellationToken).ConfigureAwait(false) is null)
+            throw new InvalidOperationException("O item selecionado não pertence ao projeto atual.");
         var existingReferences = lineId is null
             ? []
             : await repository.GetReferencesAsync(id, cancellationToken).ConfigureAwait(false);
@@ -465,12 +476,18 @@ public sealed class QuotationService(
             SampleVersion = 1,
             SampledAt = DateTimeOffset.UtcNow
         };
-        var scored = analyzer.Analyze(transientLine, union, existingManualBaskets, project.PriceDecimalPlaces);
+        // Scoring references does not need to generate automatic baskets. Generate them once,
+        // after the manual composition has been saved, and write only changed snapshots.
+        var scoredReferences = union.Select(reference => analyzer.ScoreReference(transientLine, reference)).ToArray();
+        var previous = existingReferences.ToDictionary(reference => reference.Id, StringComparer.Ordinal);
+        var changedReferences = scoredReferences.Where(reference =>
+            !previous.TryGetValue(reference.Id, out var stored) ||
+            NormalizeStoredReference(reference) != stored).ToArray();
         var savedLine = await repository.SaveSampleAsync(
                 projectId,
                 id,
                 input,
-                scored.References,
+                changedReferences,
                 cancellationToken)
             .ConfigureAwait(false);
         var manualBasket = await repository.SaveManualBasketAsync(
@@ -482,8 +499,29 @@ public sealed class QuotationService(
             .ConfigureAwait(false);
         var allManualBaskets = await repository.GetManualBasketsAsync(savedLine.Id, cancellationToken)
             .ConfigureAwait(false);
-        var analysis = analyzer.Analyze(savedLine, scored.References, allManualBaskets, project.PriceDecimalPlaces);
+        var analysis = analyzer.Analyze(savedLine, scoredReferences, allManualBaskets, project.PriceDecimalPlaces);
         return (analysis, manualBasket);
+    }
+
+    private static QuotationReference NormalizeStoredReference(QuotationReference reference)
+    {
+        // Compare at the database's precision so calculated score fractions do not
+        // turn unchanged references into writes on every click.
+        static decimal Stored(decimal value) => DecimalScale.FromScaled(DecimalScale.ToScaled(value))!.Value;
+        return reference with
+        {
+            HomologatedQuantity = DecimalScale.FromScaled(DecimalScale.ToScaled(reference.HomologatedQuantity)),
+            UnitPrice = Stored(reference.UnitPrice),
+            ItemRequestedQuantity = DecimalScale.FromScaled(DecimalScale.ToScaled(reference.ItemRequestedQuantity)),
+            Adequacy = reference.Adequacy with
+            {
+                DescriptionScore = Stored(reference.Adequacy.DescriptionScore),
+                UnitScore = Stored(reference.Adequacy.UnitScore),
+                QuantityScore = Stored(reference.Adequacy.QuantityScore),
+                ProximityScore = Stored(reference.Adequacy.ProximityScore),
+                RecencyScore = Stored(reference.Adequacy.RecencyScore)
+            }
+        };
     }
 
     public Task RenameManualBasketAsync(
