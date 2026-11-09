@@ -113,6 +113,8 @@ internal static partial class Program
                     CheckQuotationPriceTransfer();
                     CheckQuotationPriceContextSelection();
                     Console.WriteLine("Quotation price transfer dialog: passed");
+                    await CheckManualBasketLoadingAsync();
+                    await CheckSavedManualBasketRefreshAsync();
                     CheckQuotationOrganization();
                     Console.WriteLine("Quotation organization options: passed");
                     await CheckColumnChooserAsync();

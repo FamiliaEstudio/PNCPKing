@@ -15,6 +15,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="190" />
@@ -67,10 +68,13 @@
             <TextBox x:Name="MaximumPriceTextBox" Grid.Column="3" ToolTip="Preço máximo" />
         </Grid>
 
-        <StackPanel Grid.Row="9" Grid.ColumnSpan="3" Orientation="Horizontal"
+        <TextBlock x:Name="LoadStatusTextBlock" Grid.Row="9" Grid.ColumnSpan="3" TextWrapping="Wrap" />
+
+        <StackPanel Grid.Row="10" Grid.ColumnSpan="3" Orientation="Horizontal"
                     HorizontalAlignment="Right" Margin="0,16,0,0">
             <Button Content="Cancelar" IsCancel="True" MinWidth="95" />
-            <Button Content="Salvar cesta manual" IsDefault="True" MinWidth="145" Click="Accept_Click" />
+            <Button x:Name="SaveButton" Content="Salvar cesta manual" IsDefault="True" IsEnabled="False"
+                    MinWidth="145" Click="Accept_Click" />
         </StackPanel>
     </Grid>
 </Window>

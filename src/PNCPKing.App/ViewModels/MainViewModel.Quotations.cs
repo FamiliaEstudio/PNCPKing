@@ -20,6 +20,7 @@ public sealed partial class MainViewModel
     private IQuotationWordService _quotationWordService = null!;
     private QuotationProjectReport? _quotationWordReport;
     private int _quotationReportLoadVersion;
+    private bool _suppressQuotationProjectLoad;
     private IQuotationWorkbookImportService _quotationWorkbookImportService = null!;
     private IQuotationPackageService _quotationPackageService = null!;
     private CancellationTokenSource? _quotationAutomationCancellation;
@@ -98,7 +99,7 @@ public sealed partial class MainViewModel
             {
                 OnPropertyChanged(nameof(IsMedicationQuotation));
                 RefreshMarkedPriceHighlights();
-                _ = LoadQuotationProjectAsync(value?.Id);
+                if (!_suppressQuotationProjectLoad) _ = LoadQuotationProjectAsync(value?.Id);
                 NotifyCommands();
             }
         }
@@ -688,14 +689,18 @@ public sealed partial class MainViewModel
             MessageBoxImage.Information);
     }
 
-    private async Task RefreshQuotationProjectsAsync(Guid? preferredProjectId = null)
+    private async Task RefreshQuotationProjectsAsync(Guid? preferredProjectId = null, bool loadSelectedProject = true)
     {
         var projects = await _quotationService.GetProjectsAsync().ConfigureAwait(true);
         var selectedId = preferredProjectId ?? SelectedQuotationProject?.Id;
-        QuotationProjects.ReplaceAll(projects.Select(project => new QuotationProjectDisplay(project)));
-
-        SelectedQuotationProject = QuotationProjects.FirstOrDefault(project => project.Id == selectedId)
-                                   ?? QuotationProjects.FirstOrDefault();
+        _suppressQuotationProjectLoad = !loadSelectedProject;
+        try
+        {
+            QuotationProjects.ReplaceAll(projects.Select(project => new QuotationProjectDisplay(project)));
+            SelectedQuotationProject = QuotationProjects.FirstOrDefault(project => project.Id == selectedId)
+                                       ?? QuotationProjects.FirstOrDefault();
+        }
+        finally { _suppressQuotationProjectLoad = false; }
         if (SelectedQuotationProject is null)
         {
             QuotationLines.Clear();
@@ -718,25 +723,29 @@ public sealed partial class MainViewModel
         {
             var report = await _quotationService.GetReportAsync(projectId.Value).ConfigureAwait(true);
             if (loadVersion != _quotationReportLoadVersion || SelectedQuotationProject?.Id != projectId) return;
-            _quotationWordReport = report;
-            QuotationLines.ReplaceAll(report.Lines.Select(analysis => new QuotationLineDisplay(analysis, report.Project.Organization)));
-
-            SelectedQuotationLine = QuotationLines.FirstOrDefault(line => line.Line.Id == preferredLineId)
-                                      ?? QuotationLines.FirstOrDefault();
-            var resolved = QuotationLines.Count(line => line.Status == "Resolvido");
-            QuotationSummary = $"{QuotationLines.Count:N0} item(ns); {resolved:N0} resolvido(s); " +
-                               $"{QuotationLines.Count - resolved:N0} pendente(s).";
-            if (report.OrganizationIsStale)
-                QuotationSummary += " Organização desatualizada — clique em Organizar Itens antes de exportar.";
-            else if (report.Project.Organization is { } organization)
-                QuotationSummary += $" {organization.Groups.Count} grupos; {organization.Positions.Count} posições.";
-            NotifyCommands();
+            ApplyQuotationReport(report, preferredLineId);
         }
         catch (Exception exception)
         {
             if (loadVersion != _quotationReportLoadVersion) return;
             QuotationSummary = $"Não foi possível abrir o projeto: {exception.Message}";
         }
+    }
+
+    private void ApplyQuotationReport(QuotationProjectReport report, Guid? preferredLineId)
+    {
+        _quotationWordReport = report;
+        QuotationLines.ReplaceAll(report.Lines.Select(analysis => new QuotationLineDisplay(analysis, report.Project.Organization)));
+        SelectedQuotationLine = QuotationLines.FirstOrDefault(line => line.Line.Id == preferredLineId)
+                                  ?? QuotationLines.FirstOrDefault();
+        var resolved = QuotationLines.Count(line => line.Status == "Resolvido");
+        QuotationSummary = $"{QuotationLines.Count:N0} item(ns); {resolved:N0} resolvido(s); " +
+                           $"{QuotationLines.Count - resolved:N0} pendente(s).";
+        if (report.OrganizationIsStale)
+            QuotationSummary += " Organização desatualizada — clique em Organizar Itens antes de exportar.";
+        else if (report.Project.Organization is { } organization)
+            QuotationSummary += $" {organization.Groups.Count} grupos; {organization.Positions.Count} posições.";
+        NotifyCommands();
     }
 
     internal void InvalidateQuotationWordReport()
@@ -1718,16 +1727,11 @@ public sealed partial class MainViewModel
         }
 
         var projects = await _quotationService.GetProjectsAsync().ConfigureAwait(true);
-        var analyses = new Dictionary<Guid, IReadOnlyList<QuotationLineAnalysis>>();
-        foreach (var project in projects)
-        {
-            analyses[project.Id] = await _quotationService.GetAnalysesAsync(project.Id).ConfigureAwait(true);
-        }
-
         var description = MainCriteriaDescription();
         var window = new ManualBasketWindow(
             projects,
-            analyses,
+            _quotationService.GetLinesAsync,
+            _quotationService.GetManualBasketsAsync,
             SelectedQuotationProject?.Id,
             description,
             MinimumPriceText,
@@ -1758,8 +1762,7 @@ public sealed partial class MainViewModel
                     window.BasketName,
                     validRows.Select(row => row.Source).ToArray())
                 .ConfigureAwait(true);
-            await RefreshQuotationProjectsAsync(projectId).ConfigureAwait(true);
-            await ReloadSavedManualBasketAsync(projectId.Value, saved.Analysis.Line.Id, saved.Basket.Key).ConfigureAwait(true);
+            await ShowSavedManualBasketAsync(saved.Analysis, saved.Basket.Key).ConfigureAwait(true);
             SelectedResultsWorkspace = ResultsWorkspace.Quotations;
             StatusText =
                 $"Cesta manual \"{saved.Basket.Name}\" salva com " +
@@ -1927,11 +1930,43 @@ public sealed partial class MainViewModel
         return true;
     }
 
-    internal async Task ConfirmManualBasketAfterSaveAsync(Guid projectId, Guid lineId, string basketKey)
+    internal async Task<QuotationLineAnalysis?> ConfirmManualBasketAfterSaveAsync(
+        Guid projectId, Guid lineId, string basketKey, QuotationLineAnalysis? savedAnalysis = null)
     {
-        var analysis = await _quotationService.GetAnalysisAsync(projectId, lineId).ConfigureAwait(true);
+        var analysis = savedAnalysis ?? await _quotationService.GetAnalysisAsync(projectId, lineId).ConfigureAwait(true);
         if (analysis?.Baskets.FirstOrDefault(value => value.Key == basketKey) is { IsManual: true })
-            await ConfirmBasketWithWarningAsync(analysis, basketKey).ConfigureAwait(true);
+        {
+            if (await ConfirmBasketWithWarningAsync(analysis, basketKey).ConfigureAwait(true))
+                analysis = analysis with { Line = analysis.Line with { SelectedBasketKey = basketKey, SelectionConfirmed = true } };
+        }
+        return analysis;
+    }
+
+    private async Task ShowSavedManualBasketAsync(QuotationLineAnalysis savedAnalysis, string basketKey)
+    {
+        var projectId = savedAnalysis.Line.ProjectId;
+        var analysis = (await ConfirmManualBasketAfterSaveAsync(
+            projectId, savedAnalysis.Line.Id, basketKey, savedAnalysis).ConfigureAwait(true))!;
+        // Reuse the loaded project and the analysis returned by the save. Prevent a
+        // selection notification from scheduling a second full project calculation.
+        var previousReport = _quotationWordReport;
+        ++_quotationReportLoadVersion;
+        await RefreshQuotationProjectsAsync(projectId, loadSelectedProject: false).ConfigureAwait(true);
+        if (previousReport?.Project.Id == projectId && SelectedQuotationProject is { } project)
+        {
+            var lines = previousReport.Lines.Select(value => value.Line.Id == analysis.Line.Id ? analysis : value).ToList();
+            if (lines.All(value => value.Line.Id != analysis.Line.Id)) lines.Add(analysis);
+            ApplyQuotationReport(previousReport with
+            {
+                Project = project.Source,
+                Lines = QuotationOrganization.Order(project.Source, lines)
+            }, analysis.Line.Id);
+        }
+        else
+        {
+            await LoadQuotationProjectAsync(projectId, analysis.Line.Id).ConfigureAwait(true);
+        }
+        SelectQuotationBasket(basketKey);
     }
 
     private async Task ReloadSavedManualBasketAsync(Guid projectId, Guid lineId, string basketKey)

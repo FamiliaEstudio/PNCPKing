@@ -536,7 +536,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
     public bool SearchDefinitionChanged =>
         _workspace is not null && !HasSameDefinition(_workspace, BuildWorkspace());
 
-    public async Task LoadAsync(string? preferredBasketKey = null)
+    public async Task LoadAsync(string? preferredBasketKey = null, QuotationLineAnalysis? savedAnalysis = null)
     {
         if (IsBusy)
         {
@@ -548,7 +548,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         try
         {
             var previousBasketKey = preferredBasketKey ?? SelectedBasket?.Key;
-            var analysis = await _quotations.GetAnalysisAsync(_projectId, _lineId).ConfigureAwait(true)
+            var analysis = savedAnalysis ?? await _quotations.GetAnalysisAsync(_projectId, _lineId).ConfigureAwait(true)
                            ?? throw new InvalidOperationException("O item da cotação não existe mais.");
             Line = new QuotationLineDisplay(analysis);
             _main.RefreshQuotationWordItem(analysis);
@@ -959,10 +959,11 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         VisibleReferences.Clear();
     }
 
-    private async Task ReloadSavedManualBasketAsync(string basketKey)
+    private async Task ReloadSavedManualBasketAsync(string basketKey, QuotationLineAnalysis? savedAnalysis = null)
     {
-        await _main.ConfirmManualBasketAfterSaveAsync(_projectId, _lineId, basketKey).ConfigureAwait(true);
-        await LoadAsync(basketKey).ConfigureAwait(true);
+        var analysis = await _main.ConfirmManualBasketAfterSaveAsync(
+            _projectId, _lineId, basketKey, savedAnalysis).ConfigureAwait(true);
+        await LoadAsync(basketKey, analysis).ConfigureAwait(true);
     }
 
     public async Task AddSearchRowsAsync(IReadOnlyList<ItemSearchDisplayRow> rows)
@@ -1001,7 +1002,7 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
             basket?.Id,
             basket?.Name ?? NextManualName(),
             valid).ConfigureAwait(true);
-        await ReloadSavedManualBasketAsync(saved.Basket.Key).ConfigureAwait(true);
+        await ReloadSavedManualBasketAsync(saved.Basket.Key, saved.Analysis).ConfigureAwait(true);
     }
 
     public async Task SetReferenceMembershipAsync(
