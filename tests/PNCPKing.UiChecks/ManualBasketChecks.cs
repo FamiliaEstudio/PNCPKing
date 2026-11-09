@@ -81,7 +81,7 @@ internal static partial class Program
                 "A sugestão do nome perdeu a contagem das cestas manuais.");
             baskets.SelectedIndex = 1;
             window.Hide();
-            window.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle,
+            _ = window.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle,
                 new Action(() => save.RaiseEvent(new RoutedEventArgs(Button.ClickEvent))));
             Require(window.ShowDialog() == true && window.ExistingProjectId == secondProject.Id &&
                     window.ExistingLineId == secondLine.Id && window.ExistingBasketId == basket.Id &&
