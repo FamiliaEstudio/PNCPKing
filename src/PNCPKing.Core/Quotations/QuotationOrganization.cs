@@ -68,7 +68,8 @@ public static class QuotationOrganization
     }
 
     public static QuotationOrganizationSnapshot Calculate(QuotationProject project,
-        IReadOnlyList<QuotationLineAnalysis> lines, IReadOnlyList<QuotationGroup> groups)
+        IReadOnlyList<QuotationLineAnalysis> lines, IReadOnlyList<QuotationGroup> groups,
+        bool preserveCurrentOrder = false)
     {
         if (lines.Count == 0) throw new InvalidOperationException("A cotação não contém itens para organizar.");
         var pending = lines.Where(value => value.Line.RequestedQuantity <= 0 ||
@@ -79,6 +80,8 @@ public static class QuotationOrganization
                 string.Join(", ", pending.Select(value => value.Line.EffectiveDisplayName)));
 
         var byId = lines.ToDictionary(value => value.Line.Id);
+        var sequence = preserveCurrentOrder ? lines : Alphabetical(lines, project.IgnoreItemNumberPrefix).ToArray();
+        var ranks = sequence.Select((value, index) => (value.Line.Id, index)).ToDictionary(value => value.Id, value => value.index);
         var members = new HashSet<Guid>();
         foreach (var group in groups)
         {
@@ -98,7 +101,7 @@ public static class QuotationOrganization
         var individualLines = lines.Where(value => value.Line.GroupId is null).ToList();
         foreach (var group in groups)
         {
-            var groupLines = Alphabetical(group.LineIds.Select(id => byId[id]), project.IgnoreItemNumberPrefix).ToArray();
+            var groupLines = group.LineIds.Select(id => byId[id]).OrderBy(value => ranks[value.Line.Id]).ToArray();
             var small = groupLines.Where(value => Reserved(value) == 0).ToArray();
             if (small.Length > 0 && small.Length < groupLines.Length && groupLines.Sum(Total) > 80_000m)
             {
@@ -113,8 +116,7 @@ public static class QuotationOrganization
         {
             group.Source, group.Lines,
             HasQuota = group.Lines.Sum(Total) > 80_000m && group.Lines.Any(value => Reserved(value) > 0)
-        }).OrderBy(group => SortName(group.Lines[0].Line, project.IgnoreItemNumberPrefix), NameComparer)
-            .ThenBy(group => group.Lines[0].Line.DisplayOrder).ThenBy(group => group.Lines[0].Line.Id).ToArray();
+        }).OrderBy(group => ranks[group.Lines[0].Line.Id]).ToArray();
         var resultGroups = new List<QuotationResultGroup>();
         var positions = new List<QuotationPosition>();
         void Add(QuotationLineAnalysis value, Guid? groupId, QuotationQuotaKind kind, decimal quantity)
@@ -139,7 +141,7 @@ public static class QuotationOrganization
                     Add(value, reserve, QuotationQuotaKind.Reserved, Reserved(value));
             }
         }
-        var individuals = Alphabetical(individualLines, project.IgnoreItemNumberPrefix).ToArray();
+        var individuals = individualLines.OrderBy(value => ranks[value.Line.Id]).ToArray();
         bool HasQuota(QuotationLineAnalysis value) => Total(value) > 80_000m && Reserved(value) > 0;
         foreach (var value in individuals.Where(HasQuota))
         {
@@ -149,7 +151,8 @@ public static class QuotationOrganization
         foreach (var value in individuals.Where(value => !HasQuota(value)))
             Add(value, null, QuotationQuotaKind.None, value.Line.RequestedQuantity);
         return new() { Signature = Signature(project, lines, groups), Groups = resultGroups, Positions = positions,
-            IgnoreItemNumberPrefix = project.IgnoreItemNumberPrefix };
+            IgnoreItemNumberPrefix = project.IgnoreItemNumberPrefix,
+            InputOrder = preserveCurrentOrder ? sequence.Select(value => value.Line.Id).ToArray() : null };
     }
 
     public static IReadOnlyList<QuotationLineAnalysis> Order(QuotationProject project,
@@ -182,6 +185,9 @@ public static class QuotationOrganization
             !snapshot.Groups.Select(group => group.Number).SequenceEqual(Enumerable.Range(1, snapshot.Groups.Count)) ||
             snapshot.Positions.Count == 0 ||
             !snapshot.Positions.Select(position => position.Number).SequenceEqual(Enumerable.Range(1, snapshot.Positions.Count))) Invalid();
+        if (snapshot.InputOrder is { } inputOrder &&
+            (inputOrder.Count != inputOrder.Distinct().Count() ||
+             !inputOrder.ToHashSet().SetEquals(snapshot.Positions.Select(position => position.LineId)))) Invalid();
         var groups = snapshot.Groups.ToDictionary(group => group.Id);
         foreach (var group in snapshot.Groups)
         {
@@ -223,7 +229,14 @@ public static class QuotationOrganization
         }
         // A stale snapshot may contain deleted members; validate its inputs only when the signature is current.
         if (report.OrganizationIsStale) return;
-        var expected = Calculate(report.Project, report.Lines, report.Groups);
+        var inputLines = report.Lines;
+        if (snapshot.InputOrder is { } savedOrder)
+        {
+            var byId = report.Lines.ToDictionary(value => value.Line.Id);
+            if (savedOrder.Count != byId.Count || savedOrder.Any(id => !byId.ContainsKey(id))) { Invalid(); return; }
+            inputLines = savedOrder.Select(id => byId[id]).ToArray();
+        }
+        var expected = Calculate(report.Project, inputLines, report.Groups, preserveCurrentOrder: snapshot.InputOrder is not null);
         if (!snapshot.Groups.Select(group => (group.Number, group.SourceGroupId, group.Name, group.Kind))
                 .SequenceEqual(expected.Groups.Select(group => (group.Number, group.SourceGroupId, group.Name, group.Kind)))) Invalid();
         var expectedGroups = expected.Groups.ToDictionary(group => group.Id);

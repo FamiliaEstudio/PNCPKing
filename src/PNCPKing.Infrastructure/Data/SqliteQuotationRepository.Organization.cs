@@ -80,13 +80,39 @@ public sealed partial class SqliteQuotationRepository
         await using var transaction = connection.BeginTransaction();
         // Calculate under the write lock, before any mutation, so every read sees the same committed inputs.
         options ??= new();
-        var snapshot = options.AlphabeticalOnly
-            ? new QuotationOrganizationSnapshot { AlphabeticalOnly = true, IgnoreItemNumberPrefix = options.IgnoreItemNumberPrefix }
+        if (options.AlphabeticalOnly && (options.ManualOnly || options.ItemOrder is not null) ||
+            options.ManualOnly && options.ItemOrder is null)
+            throw new ArgumentException("Escolha uma única forma de ordenar os itens.");
+        var lines = options.ItemOrder is not null || options.RemoveItemNumberPrefixes
+            ? await GetLinesAsync(projectId, cancellationToken).ConfigureAwait(false) : [];
+        if (options.ItemOrder is { } order && (order.Count != lines.Count ||
+            order.Distinct().Count() != order.Count || !lines.Select(line => line.Id).ToHashSet().SetEquals(order)))
+            throw new InvalidOperationException("Os itens do projeto mudaram. Reabra Organizar Itens e tente novamente.");
+        var snapshot = options.AlphabeticalOnly || options.ManualOnly
+            ? new QuotationOrganizationSnapshot { AlphabeticalOnly = options.AlphabeticalOnly,
+                ManualOnly = options.ManualOnly, IgnoreItemNumberPrefix = options.IgnoreItemNumberPrefix }
             : await calculate(cancellationToken).ConfigureAwait(false);
+        if (options.ItemOrder is { } itemOrder)
+        {
+            var existingOrder = lines.ToDictionary(line => line.Id, line => line.DisplayOrder);
+            await using var reorder = connection.CreateCommand();
+            reorder.Transaction = transaction;
+            reorder.CommandText = "UPDATE quotation_lines SET display_order = $order WHERE id = $line AND project_id = $project;";
+            reorder.Parameters.AddWithValue("$project", projectId.ToString("N"));
+            reorder.Parameters.Add("$line", SqliteType.Text);
+            reorder.Parameters.Add("$order", SqliteType.Integer);
+            reorder.Prepare();
+            for (var index = 0; index < itemOrder.Count; index++)
+            {
+                if (existingOrder[itemOrder[index]] == index) continue;
+                reorder.Parameters["$line"].Value = itemOrder[index].ToString("N");
+                reorder.Parameters["$order"].Value = index;
+                await reorder.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
         if (options.RemoveItemNumberPrefixes)
         {
             // Update every project item in the same transaction as the order. Never change search descriptions or baskets.
-            var lines = await GetLinesAsync(projectId, cancellationToken).ConfigureAwait(false);
             await using var rename = connection.CreateCommand();
             rename.Transaction = transaction;
             rename.CommandText = "UPDATE quotation_lines SET display_name = $name WHERE id = $line AND project_id = $project;";

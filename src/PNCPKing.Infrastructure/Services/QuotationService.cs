@@ -43,11 +43,17 @@ public sealed class QuotationService(
         repository.SaveOrganizationAsync(projectId, async token =>
         {
             var report = await GetReportAsync(projectId, token).ConfigureAwait(false);
+            if (options.ItemOrder is { } order)
+            {
+                var byId = report.Lines.ToDictionary(value => value.Line.Id);
+                report = report with { Lines = order.Select((id, index) => byId[id] with
+                    { Line = byId[id].Line with { DisplayOrder = index } }).ToArray() };
+            }
             var lines = options.RemoveItemNumberPrefixes
                 ? report.Lines.Select(value => value with { Line = QuotationOrganization.RemoveItemNumberPrefix(value.Line) }).ToArray()
                 : report.Lines;
             return QuotationOrganization.Calculate(report.Project with { IgnoreItemNumberPrefix = options.IgnoreItemNumberPrefix },
-                lines, report.Groups);
+                lines, report.Groups, preserveCurrentOrder: true);
         }, cancellationToken, options);
 
     public Task SetProjectAlphabeticalOrderAsync(Guid projectId, CancellationToken cancellationToken = default) =>

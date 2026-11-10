@@ -17,7 +17,10 @@ public sealed record QuotationOrganizationSnapshot
 {
     public int Version { get; init; } = 1;
     public bool AlphabeticalOnly { get; init; }
+    public bool ManualOnly { get; init; }
     public bool IgnoreItemNumberPrefix { get; init; }
+    // Null identifies legacy organizations, which used alphabetical order unconditionally.
+    public IReadOnlyList<Guid>? InputOrder { get; init; }
     public DateTimeOffset AppliedAt { get; init; } = DateTimeOffset.UtcNow;
     public string Signature { get; init; } = string.Empty;
     public IReadOnlyList<QuotationResultGroup> Groups { get; init; } = [];
@@ -50,7 +53,9 @@ public sealed record QuotationOrganizationSnapshot
 public sealed record QuotationOrganizationOptions(
     bool AlphabeticalOnly = false,
     bool IgnoreItemNumberPrefix = false,
-    bool RemoveItemNumberPrefixes = false);
+    bool RemoveItemNumberPrefixes = false,
+    bool ManualOnly = false,
+    IReadOnlyList<Guid>? ItemOrder = null);
 
 public static class QuotationQuantity
 {

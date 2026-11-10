@@ -1216,7 +1216,8 @@ public sealed class QuotationPackageService : IQuotationPackageService
         {
             IsMedication = priceDecimalPlaces == 4,
             IgnoreItemNumberPrefix = organization?.IgnoreItemNumberPrefix ?? false,
-            Organization = organization is { AlphabeticalOnly: true } ? null : organization
+            ManualItemOrder = organization?.ManualOnly ?? false,
+            Organization = organization is { AlphabeticalOnly: true } or { ManualOnly: true } ? null : organization
         };
         var groups = GetOptionalRows(payload, "quotation_groups").Select(row =>
         {
@@ -1329,6 +1330,7 @@ public sealed class QuotationPackageService : IQuotationPackageService
             var resultMap = originalOrganization.Groups.ToDictionary(group => group.Id.ToString("N"), _ => Guid.NewGuid().ToString("N"));
             var remapped = originalOrganization with
             {
+                InputOrder = originalOrganization.InputOrder?.Select(id => Mapped(id, lineMap)).ToArray(),
                 Groups = originalOrganization.Groups.Select(group => group with
                 {
                     Id = Mapped(group.Id, resultMap), SourceGroupId = Mapped(group.SourceGroupId, groupMap),

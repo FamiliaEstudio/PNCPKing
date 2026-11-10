@@ -7,7 +7,7 @@ using PNCPKing.Infrastructure.Services;
 
 namespace PNCPKing.Tests;
 
-public sealed class QuotationOrganizationTests
+public sealed partial class QuotationOrganizationTests
 {
     [Theory]
     [InlineData("Item 1 Água", "Água")]
@@ -141,6 +141,7 @@ public sealed class QuotationOrganizationTests
         var current = await service.GetAnalysesAsync(project.Id);
         var waterAnalysis = current.Single(value => value.Line.Id == water.Id);
         await repository.ConfirmBasketAsync(water.Id, waterAnalysis.Baskets[0].Key);
+        await service.OrganizeProjectAsync(project.Id, new QuotationOrganizationOptions(true, true));
         await service.OrganizeProjectAsync(project.Id, new QuotationOrganizationOptions(false, true, true));
         var report = await service.GetReportAsync(project.Id);
         Assert.False(report.OrganizationIsStale);
@@ -531,10 +532,10 @@ public sealed class QuotationOrganizationTests
         service = new(new SqliteQuotationRepository(database.Repository.DatabasePath), new QuotationAnalyzer());
         var report = await service.GetReportAsync(project.Id);
         Assert.False(report.OrganizationIsStale);
-        Assert.Equal("1 e 3", report.Project.Organization!.ItemNumbers(a.Id));
+        Assert.Equal("1 e 3", report.Project.Organization!.ItemNumbers(z.Id));
         Assert.Equal([z.Id, a.Id], (await repository.GetLinesAsync(project.Id)).Select(line => line.Id));
         var previous = report.Project.Organization.ToJson();
-        await repository.RenameLineDisplayNameAsync(z.Id, "Abacate");
+        await repository.RenameLineDisplayNameAsync(a.Id, "Abacate");
         report = await service.GetReportAsync(project.Id);
         Assert.True(report.OrganizationIsStale); Assert.Equal(previous, report.Project.Organization!.ToJson());
         await service.OrganizeProjectAsync(project.Id);
