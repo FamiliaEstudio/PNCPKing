@@ -73,7 +73,7 @@ public sealed partial class QuotationOrganizationTests
         Assert.Equal(["Banana", "Zebra", "Água"], restored.Lines.Select(value => value.Line.EffectiveDisplayName));
         var added = await restoredService.CreateLineAsync(copied.ProjectId, new("Abacate", 0, "", null, null));
         Assert.Equal(added.Line.Id, (await restoredService.GetReportAsync(copied.ProjectId)).Lines[^1].Line.Id);
-        await service.OrganizeProjectAsync(project.Id, new(AlphabeticalOnly: true));
+        await service.OrganizeProjectAsync(project.Id, new QuotationOrganizationOptions(AlphabeticalOnly: true));
         report = await service.GetReportAsync(project.Id);
         Assert.False(report.Project.ManualItemOrder);
         Assert.Equal([a.Id, b.Id, z.Id], report.Lines.Select(value => value.Line.Id));
@@ -94,9 +94,9 @@ public sealed partial class QuotationOrganizationTests
         var beforeProject = (await repo.GetProjectsAsync()).Single(value => value.Id == project.Id);
         foreach (Guid[] order in new Guid[][] { [a.Id], [a.Id, a.Id], [foreign.Id, b.Id], [a.Id, b.Id, Guid.NewGuid()] })
             await Assert.ThrowsAsync<InvalidOperationException>(() => service.OrganizeProjectAsync(project.Id,
-                new(RemoveItemNumberPrefixes: true, ManualOnly: true, ItemOrder: order)));
+                new QuotationOrganizationOptions(RemoveItemNumberPrefixes: true, ManualOnly: true, ItemOrder: order)));
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.OrganizeProjectAsync(project.Id,
-            new(RemoveItemNumberPrefixes: true, ItemOrder: [b.Id, a.Id])));
+            new QuotationOrganizationOptions(RemoveItemNumberPrefixes: true, ItemOrder: [b.Id, a.Id])));
         Assert.Equal(before, await repo.GetLinesAsync(project.Id));
         Assert.Equal(beforeProject, (await repo.GetProjectsAsync()).Single(value => value.Id == project.Id));
         Assert.Equal(foreign, await repo.GetLineAsync(other.Id, foreign.Id));
@@ -105,7 +105,8 @@ public sealed partial class QuotationOrganizationTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task QuotasFollowChosenSequenceAndKeepItAcrossReapplyAndPackage(bool manual)
+    [InlineData(true, true)]
+    public async Task QuotasFollowChosenSequenceAndKeepItAcrossReapplyAndPackage(bool manual, bool sameApply = false)
     {
         await using var source = await TestDatabase.CreateAsync();
         await using var destination = await TestDatabase.CreateAsync();
@@ -115,11 +116,11 @@ public sealed partial class QuotationOrganizationTests
         var z = await AddConfirmedAsync(repo, service, project, "Zebra", 8, 6000);
         var a = await AddConfirmedAsync(repo, service, project, "Água", 8, 6000);
         await service.SaveGroupsAsync(project.Id, [new(Guid.NewGuid(), project.Id, "Grupo", [a.Id, z.Id])]);
-        await service.OrganizeProjectAsync(project.Id, new(AlphabeticalOnly: true));
-        if (manual) await service.OrganizeProjectAsync(project.Id, new(ManualOnly: true, ItemOrder: [z.Id, a.Id]));
+        await service.OrganizeProjectAsync(project.Id, new QuotationOrganizationOptions(AlphabeticalOnly: true));
+        if (manual && !sameApply) await service.OrganizeProjectAsync(project.Id, new QuotationOrganizationOptions(ManualOnly: true, ItemOrder: [z.Id, a.Id]));
         var expected = manual ? new[] { z.Id, a.Id } : [a.Id, z.Id];
         var before = await service.GetReportAsync(project.Id);
-        await service.OrganizeProjectAsync(project.Id);
+        await service.OrganizeProjectAsync(project.Id, new QuotationOrganizationOptions(ItemOrder: sameApply ? expected : null));
         var report = await service.GetReportAsync(project.Id);
         Assert.Equal(expected, report.Project.Organization!.InputOrder);
         Assert.Equal(expected.Concat(expected), report.Project.Organization.Positions.Select(position => position.LineId));
@@ -128,7 +129,7 @@ public sealed partial class QuotationOrganizationTests
         foreach (var line in report.Lines)
         {
             var old = before.Lines.Single(value => value.Line.Id == line.Line.Id);
-            Assert.Equal(old.Line, line.Line);
+            Assert.Equal(old.Line with { DisplayOrder = line.Line.DisplayOrder }, line.Line);
             Assert.Equal(old.SelectedBasket!.AdoptedPrice, line.SelectedBasket!.AdoptedPrice);
             Assert.Equal(old.SelectedBasket.References.Select(value => (value.Id, value.UnitPrice)),
                 line.SelectedBasket.References.Select(value => (value.Id, value.UnitPrice)));

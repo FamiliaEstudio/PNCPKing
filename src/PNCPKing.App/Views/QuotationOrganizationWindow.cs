@@ -155,7 +155,7 @@ public sealed class QuotationOrganizationWindow : Window
         Content = root;
 
         void ResizeOptions() => optionsScroll.MaxHeight = _manual.IsChecked == true
-            ? Math.Max(100, ActualHeight * 0.4) : double.PositiveInfinity;
+            ? Math.Max(80, Math.Min(ActualHeight * 0.4, ActualHeight - 320)) : double.PositiveInfinity;
         void UpdateMode()
         {
             var manual = _manual.IsChecked == true;
