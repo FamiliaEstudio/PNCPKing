@@ -49,7 +49,7 @@ internal static partial class Program
             FindChooserButton(window, "Mover").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Require(window.Options.ItemOrder!.SequenceEqual(original), "Mover para o final perdeu itens ou mudou sua ordem relativa.");
             position.Text = "1";
-            var enter = new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(position)!, 0, Key.Enter)
+            var enter = new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(position)!, 0, System.Windows.Input.Key.Enter)
                 { RoutedEvent = Keyboard.PreviewKeyDownEvent };
             position.RaiseEvent(enter);
             Require(enter.Handled && window.IsVisible && last.Position == 1,
