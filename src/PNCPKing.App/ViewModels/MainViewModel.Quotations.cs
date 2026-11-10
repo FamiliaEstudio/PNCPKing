@@ -906,7 +906,9 @@ public sealed partial class MainViewModel
     {
         var project = SelectedQuotationProject;
         if (project is null) return;
-        var window = new QuotationOrganizationWindow(project.Source) { Owner = Application.Current.MainWindow };
+        var currentProject = _quotationWordReport is { } current && current.Project.Id == project.Id ? current.Project : project.Source;
+        var window = new QuotationOrganizationWindow(currentProject, QuotationLines.Select(value => value.Line).ToArray())
+            { Owner = Application.Current.MainWindow };
         if (window.ShowDialog() != true) return;
         var options = window.Options;
         var lineId = SelectedQuotationLine?.Line.Id;
@@ -918,6 +920,7 @@ public sealed partial class MainViewModel
             await LoadQuotationProjectAsync(project.Id, lineId).ConfigureAwait(true);
             StatusText = options.AlphabeticalOnly
                 ? "Todos os itens do projeto foram organizados em ordem alfabética."
+                : options.ManualOnly ? "Ordem manual aplicada a todos os itens do projeto."
                 : "Itens organizados por grupos e cotas; numeração aplicada às telas e exportações.";
             if (options.RemoveItemNumberPrefixes)
                 StatusText += " Prefixos manuais removidos dos nomes de todos os itens do projeto.";

@@ -144,7 +144,7 @@ public sealed class QuotationGroupsWindow : Window
         try
         {
             var lines = _rows.Select(row => row.Analysis with { Line = row.Analysis.Line with { GroupId = row.GroupId } }).ToArray();
-            preview = QuotationOrganization.Calculate(_report.Project, lines, Groups);
+            preview = QuotationOrganization.Calculate(_report.Project, lines, Groups, preserveCurrentOrder: true);
             _status.Text = $"Prévia: {preview.Groups.Count} grupos resultantes e {preview.Positions.Count} posições de itens. " +
                 "Salvar grupos preserva a organização anterior; depois clique em Organizar Itens para aplicar esta sequência.";
         }

@@ -3124,7 +3124,8 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
             IsMedication = reader.GetInt32(4) != 0,
             SortItemsAlphabetically = reader.GetInt32(5) != 0,
             IgnoreItemNumberPrefix = organization?.IgnoreItemNumberPrefix ?? false,
-            Organization = organization is { AlphabeticalOnly: true } ? null : organization
+            ManualItemOrder = organization?.ManualOnly ?? false,
+            Organization = organization is { AlphabeticalOnly: true } or { ManualOnly: true } ? null : organization
         };
     }
 

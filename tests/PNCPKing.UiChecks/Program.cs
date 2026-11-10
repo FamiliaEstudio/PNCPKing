@@ -116,6 +116,7 @@ internal static partial class Program
                     await CheckManualBasketLoadingAsync();
                     await CheckSavedManualBasketRefreshAsync();
                     CheckQuotationOrganization();
+                    await CheckManualItemOrderAsync();
                     Console.WriteLine("Quotation organization options: passed");
                     await CheckColumnChooserAsync();
                     Console.WriteLine("Column chooser: passed");
