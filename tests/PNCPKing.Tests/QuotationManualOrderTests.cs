@@ -56,7 +56,10 @@ public sealed partial class QuotationOrganizationTests
                 workbook.Worksheet(1).Column(2).CellsUsed().Select(cell => cell.GetString())
                     .Where(text => text.StartsWith("Item ", StringComparison.Ordinal)));
         var docx = Path.Combine(source.Directory, "manual.docx");
-        await new QuotationWordService().ExportAsync(docx, report, new());
+        // Word retains its existing requirement for positive quantities and a unit.
+        var wordReport = report with { Lines = report.Lines.Select(value => value with
+            { Line = value.Line with { RequestedQuantity = 1, RequestedUnit = "unidade" } }).ToArray() };
+        await new QuotationWordService().ExportAsync(docx, wordReport, new());
         using (var document = WordprocessingDocument.Open(docx, false))
         {
             var text = document.MainDocumentPart!.Document.InnerText;
@@ -113,8 +116,8 @@ public sealed partial class QuotationOrganizationTests
         var repo = new SqliteQuotationRepository(source.Repository.DatabasePath);
         var service = new QuotationService(repo, new QuotationAnalyzer());
         var project = await repo.CreateProjectAsync("Ordem antes das cotas");
-        var z = await AddConfirmedAsync(repo, service, project, "Zebra", 8, 6000);
         var a = await AddConfirmedAsync(repo, service, project, "Água", 8, 6000);
+        var z = await AddConfirmedAsync(repo, service, project, "Zebra", 8, 6000);
         await service.SaveGroupsAsync(project.Id, [new(Guid.NewGuid(), project.Id, "Grupo", [a.Id, z.Id])]);
         await service.OrganizeProjectAsync(project.Id, new QuotationOrganizationOptions(AlphabeticalOnly: true));
         if (manual && !sameApply) await service.OrganizeProjectAsync(project.Id, new QuotationOrganizationOptions(ManualOnly: true, ItemOrder: [z.Id, a.Id]));
