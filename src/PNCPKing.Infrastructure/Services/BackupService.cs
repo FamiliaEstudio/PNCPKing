@@ -695,6 +695,13 @@ public sealed partial class BackupService(
             // only the resulting schema version and never repeats integrity_check.
             if (manifest.SchemaVersion < SqliteContractRepository.CurrentSchemaVersion)
             {
+                if (manifest.BackupProfile is BackupProfile.FullWithoutQuotations or BackupProfile.PricesPreservingLocalData)
+                {
+                    // Check known legacy shapes before a migration can execute any
+                    // triggers from an imported database. No public-row scan is needed.
+                    await using var legacy = await TransferConnectionAsync(importedDatabase, cancellationToken);
+                    await ValidateTransferSchemaAsync(legacy, "main", temporaryDirectory, cancellationToken);
+                }
                 Report(
                     progress,
                     BackupImportStage.Migrating,

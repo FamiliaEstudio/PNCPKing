@@ -76,11 +76,21 @@ public sealed partial class BackupService
                 await tx.CommitAsync(ct);
             }
             var expected = await TransferSchemaAsync(reference, "main", ct);
+            // Released 1.2.28 used schema 34 for these additions. Its later 34-to-33
+            // converter intentionally kept them. Build exact trusted alternatives,
+            // never execute or accept an arbitrary definition from the incoming DB.
+            await TransferSqlAsync(reference, HistoricalTransferSchemaSql, ct);
+            var historical = await TransferSchemaAsync(reference, "main", ct);
             var actual = await TransferSchemaAsync(c, schema, ct);
-            // SQLite preserves harmless whitespace and IF NOT EXISTS in sqlite_master.
-            static string Normalize(string sql) => System.Text.RegularExpressions.Regex.Replace(sql.Replace("IF NOT EXISTS", "", StringComparison.OrdinalIgnoreCase), @"\s+", " ").Trim().TrimEnd(';');
+            // sqlite_master already removes CREATE ... IF NOT EXISTS. Preserve quoted
+            // contents exactly: changing a literal or identifier must never match a
+            // trusted definition. Only ASCII SQL whitespace outside quotes is cosmetic.
+            static string Normalize(string sql) => System.Text.RegularExpressions.Regex.Replace(
+                sql, @"('(?:''|[^'])*'|""(?:""""|[^""])*""|`(?:``|[^`])*`|\[[^\]]*\])|[ \t\r\n\f]+",
+                match => match.Groups[1].Success ? match.Value : " ").Trim(' ').TrimEnd(';');
             foreach (var entry in actual)
-                if (!expected.TryGetValue(entry.Key, out var ddl) || Normalize(ddl) != Normalize(entry.Value))
+                if ((!expected.TryGetValue(entry.Key, out var ddl) || Normalize(ddl) != Normalize(entry.Value)) &&
+                    (!historical.TryGetValue(entry.Key, out var oldDdl) || Normalize(oldDdl) != Normalize(entry.Value)))
                     throw new InvalidDataException($"Esquema não reconhecido para transferência segura: {entry.Key}.");
             foreach (var entry in expected)
                 if (!actual.ContainsKey(entry.Key) && entry.Key != "table:quotation_manual_price_divisors")
@@ -88,7 +98,7 @@ public sealed partial class BackupService
             foreach (var name in actual.Keys.Where(k => k.StartsWith("table:")).Select(k => k[6..]))
             {
                 var fts = new[] { "contracts_fts", "items_fts", "catalog_entries_fts", "catalog_description_fts" };
-                if (!TransferLocalTables.Contains(name) && !TransferResetTables.Contains(name) && !TransferPublicTables.Contains(name) &&
+                if (name != "sqlite_stat1" && !TransferLocalTables.Contains(name) && !TransferResetTables.Contains(name) && !TransferPublicTables.Contains(name) &&
                     !fts.Any(f => name == f || new[] { "_data", "_idx", "_content", "_docsize", "_config" }.Any(s => name == f + s)))
                     throw new InvalidDataException($"Tabela sem política de transferência: {name}.");
             }
@@ -100,6 +110,65 @@ public sealed partial class BackupService
                 if (File.Exists(referencePath + suffix)) File.Delete(referencePath + suffix);
         }
     }
+    // Only the known historical DDL is an alternative; all other objects still
+    // require an exact reviewed definition. ANALYZE runs on this tiny reference DB
+    // only, so sqlite_stat1 is optional and has the engine's own trusted definition.
+    private const string HistoricalTransferSchemaSql = """
+        ALTER TABLE official_update_chunks ADD COLUMN last_contract_id TEXT;
+        ALTER TABLE official_update_chunks ADD COLUMN processed_contracts INTEGER NOT NULL DEFAULT 0;
+        DROP TRIGGER contracts_fts_update;
+        CREATE TRIGGER contracts_fts_update AFTER UPDATE OF search_text ON contracts
+        WHEN old.search_text IS NOT new.search_text BEGIN
+            INSERT INTO contracts_fts(contracts_fts,rowid,search_text)
+            VALUES('delete',old.rowid,old.search_text);
+            INSERT INTO contracts_fts(rowid,search_text) VALUES(new.rowid,new.search_text);
+        END;
+        DROP TRIGGER items_fts_update;
+        CREATE TRIGGER items_fts_update AFTER UPDATE OF search_text ON items
+        WHEN old.search_text IS NOT new.search_text BEGIN
+            INSERT INTO items_fts(items_fts,rowid,search_text)
+            VALUES('delete',old.rowid,old.search_text);
+            INSERT INTO items_fts(rowid,search_text) VALUES(new.rowid,new.search_text);
+        END;
+        DROP TABLE quotation_processed_contracts;
+        CREATE TABLE quotation_processed_contracts(
+            run_id TEXT NOT NULL REFERENCES quotation_automation_runs(id) ON DELETE CASCADE,
+            contract_id TEXT NOT NULL REFERENCES contracts(pncp_id) ON DELETE CASCADE,
+            prompt_order INTEGER NOT NULL,
+            processed_at TEXT NOT NULL,
+            matched_items INTEGER NOT NULL DEFAULT 0,
+            revealed_prices INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(run_id, contract_id)
+        );
+        CREATE INDEX idx_processed_contracts_run_time
+            ON quotation_processed_contracts(run_id, processed_at, contract_id);
+        ANALYZE;
+        """;
+
+    private static async Task NormalizeTransferHistoryAsync(SqliteConnection c, SqliteTransaction tx, CancellationToken ct)
+    {
+        // Call only after validating every object. The historical schema 34 had
+        // this FK; normalize just the local table in the disposable snapshot/staging.
+        if (await TransferScalarAsync(c,"SELECT COUNT(*) FROM pragma_foreign_key_list('quotation_processed_contracts') WHERE \"table\"='contracts';",ct,tx)==0)
+            return;
+        await TransferSqlAsync(c,"""
+            CREATE TABLE quotation_processed_contracts_transfer(
+                run_id TEXT NOT NULL REFERENCES quotation_automation_runs(id) ON DELETE CASCADE,
+                contract_id TEXT NOT NULL,
+                prompt_order INTEGER NOT NULL,
+                processed_at TEXT NOT NULL,
+                matched_items INTEGER NOT NULL DEFAULT 0,
+                revealed_prices INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(run_id, contract_id)
+            );
+            INSERT INTO quotation_processed_contracts_transfer SELECT * FROM quotation_processed_contracts;
+            DROP TABLE quotation_processed_contracts;
+            ALTER TABLE quotation_processed_contracts_transfer RENAME TO quotation_processed_contracts;
+            CREATE INDEX idx_processed_contracts_run_time
+                ON quotation_processed_contracts(run_id, processed_at, contract_id);
+            """,ct,tx);
+    }
+
     private static async Task<List<(string Name, string Sql)>> SuspendLocalTriggersAsync(SqliteConnection c, SqliteTransaction tx, CancellationToken ct)
     {
         var triggers = new List<(string,string)>();
@@ -128,6 +197,7 @@ public sealed partial class BackupService
         var tables = await TransferTableNamesAsync(c,"main",ct);
         await using (var tx = c.BeginTransaction())
         {
+            await NormalizeTransferHistoryAsync(c,tx,ct);
             var triggers = await SuspendLocalTriggersAsync(c,tx,ct);
             // Count the public dictionary on the exporting PC, not on the old receiver.
             await TransferSqlAsync(c,"CREATE TEMP TABLE transfer_catalog_counts AS SELECT catalog_kind,COUNT(*) AS active_records FROM catalog_entries WHERE active=1 GROUP BY catalog_kind;",ct,tx);
@@ -181,6 +251,7 @@ public sealed partial class BackupService
             await using var tx = c.BeginTransaction();
             if (localTables.Contains("quotation_manual_price_divisors") && !stagingTables.Contains("quotation_manual_price_divisors"))
                 await SqliteQuotationRepository.EnsurePriceDivisorsTableAsync(c,tx,ct);
+            await NormalizeTransferHistoryAsync(c,tx,ct);
             var triggers=await SuspendLocalTriggersAsync(c,tx,ct);
             foreach (var table in TransferResetTables) await TransferSqlAsync(c,$"DELETE FROM main.{Q(table)};",ct,tx);
             // The incoming public database is authoritative. Save only its tiny catalogue

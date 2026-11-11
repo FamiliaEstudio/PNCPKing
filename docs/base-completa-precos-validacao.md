@@ -37,10 +37,29 @@ Foram aprovados 38 casos focados, além do benchmark de 1 milhão efetivamente h
 
 O custo mínimo permanece: ler/descompactar o arquivo inteiro, gravar o novo banco e copiar/conferir o trabalho local. Não é uma renomeação instantânea de um arquivo já pronto. A base anterior ocupa espaço até a remoção deliberada da recuperação.
 
-Não houve acesso ao banco real nem teste físico no HD de 16 anos. Não foram simulados corte real de energia ou falta física de espaço. A durabilidade final depende do Windows, sistema de arquivos e hardware. Testes usam verificações integrais para aferir seus resultados; essas verificações não fazem parte do receptor do aplicativo.
+Na validação inicial da 1.2.45, não houve acesso ao banco real nem teste físico no HD de 16 anos. Não foram simulados corte real de energia ou falta física de espaço. A durabilidade final depende do Windows, sistema de arquivos e hardware. Testes usam verificações integrais para aferir seus resultados; essas verificações não fazem parte do receptor do aplicativo.
 
 Para esta substituição, pacotes de esquema anterior a 33 devem ser reexportados no PC de origem. Isso evita migrações antigas que reconstruíam índices ou aplicavam retenção no receptor. Backups de recuperação com cotações mantêm seu suporte de migração.
 
 `official_update_packages`, `official_update_chunks`, `guard_imported_packages` e `sync_partitions` são zerados no snapshot e no receptor: são recibos/checkpoints da base pública anterior. Preservá-los faria atualizações futuras ignorarem preços descartados. `sync_runs` permanece como histórico/intenção de tarefa; retomadas reiniciam as partições com segurança. Campanhas e configurações Guard permanecem.
 
 Validação final local: solução compilada em Release sem avisos/erros, 1.068 testes aprovados (zero falhas/ignorados) e checks de interface aprovados. O benchmark foi executado separadamente com `PNCPKING_FULL_TRANSFER_BENCHMARK=1`.
+
+## Correção de compatibilidade da versão 1.2.46
+
+A versão 1.2.28 já havia utilizado o número de esquema 34 para adicionar duas colunas em `official_update_chunks` e proteger os triggers FTS de atualizações sem mudança de texto. O conversor posterior 34→33 preservava essas estruturas. A 1.2.45 voltou a usar o número 34 para uma alteração diferente no histórico local; portanto o número sozinho não identificava um único DDL.
+
+A validação agora aceita somente as definições completas conhecidas, geradas por SQL confiável em banco vazio de referência: schema atual e variantes históricas de `contracts_fts_update`, `items_fts_update`, `official_update_chunks` e `quotation_processed_contracts`. As variantes de triggers são independentes, porque backups compactos antigos podiam reconstruir apenas um deles. `sqlite_stat1` é opcional e exige o DDL exato produzido pelo próprio SQLite no banco de referência.
+
+Não há permissão genérica para triggers, colunas ou tabelas desconhecidas. Todos os objetos são conferidos antes de reconstruir a pequena tabela de histórico local em snapshot/staging. Pacotes 33 também passam pela validação antes da migração, para impedir que um objeto adulterado seja ocultado por ela. A origem e a base ativa não são normalizadas pelo serviço de transferência.
+
+O teste de regressão reproduziu o erro exato da 1.2.45 em duas linhagens históricas antes do patch. A correção não requer esquema 35, reconstrução de FTS ou comparação de preços. O banco real foi usado somente para leitura imutável do esquema durante o diagnóstico, sem ler preços/cotações ou alterar o arquivo.
+
+
+### Validação final da 1.2.46
+
+- Compilação Release: zero avisos e erros. Suíte completa: **1.108 testes aprovados**, zero falhas ou ignorados. Checks de interface aprovados.
+- Os **40 casos históricos** abrangem origem/destino atuais e antigos, esquema 33 e 34, ambos os perfis sem cotações, variantes de triggers, estatísticas SQLite e preservação de histórico cujo contrato não existe na base recebida. Os testes também rejeitam triggers, colunas e tipos adulterados antes de qualquer substituição.
+- A normalização para comparação mantém literais e identificadores exatamente como escritos. Espaços Unicode e texto dentro de aspas não podem mascarar diferenças estruturais.
+- Benchmark habilitado separadamente, com 1 milhão de itens / 50 mil contratos: exportação **12,374 s**, primeira importação **1,392 s**, reimportação com destino cheio **1,271 s**. Banco de 306.933.760 bytes; pacote de 53.739.904 bytes. São medidas sintéticas no computador de desenvolvimento, não previsão para HD antigo.
+- A revisão das definições capturadas em leitura imutável do banco que apresentou o erro reconheceu todos os 138 objetos. Nenhum preço ou cotação real foi usado nos testes ou incluído na distribuição.

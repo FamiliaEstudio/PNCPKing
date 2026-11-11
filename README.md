@@ -98,6 +98,8 @@ No instante da ativação, o banco atual é renomeado para `nome-do-banco.db.bef
 
 ## Base completa sem cotações entre PCs
 
+Use a versão **1.2.46 ou posterior** se um banco antigo apresentar o erro de esquema `trigger:contracts_fts_update`. Ela reconhece as estruturas históricas legítimas sem liberar objetos desconhecidos.
+
 Na versão **1.2.45 ou posterior**, use **Opções → Arquivo → Exportar backup → Completo → Sem cotações**, ou o atalho **Exportar base completa de preços**. As duas opções usam o mesmo pacote e o mesmo mecanismo. No outro PC, use **Importar backup** ou **Importar base completa de preços**.
 
 1. Atualize o programa nos dois PCs. No PC de origem, atualize a base de preços antes de exportar. A exportação não baixa dados novos por conta própria.
