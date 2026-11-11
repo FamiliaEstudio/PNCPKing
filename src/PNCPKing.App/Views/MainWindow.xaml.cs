@@ -431,7 +431,7 @@ public partial class MainWindow : Window
         }
         catch (Exception exception)
         {
-            MessageBox.Show(this, exception.Message, "Critério da cesta", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Critério da cesta", this);
         }
     }
 
@@ -478,7 +478,7 @@ public partial class MainWindow : Window
         }
         catch (Exception exception)
         {
-            MessageBox.Show(this, exception.Message, "Dividir preço por", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Dividir preço por", this);
         }
     }
 
@@ -513,12 +513,7 @@ public partial class MainWindow : Window
         }
         catch (Exception exception)
         {
-            MessageBox.Show(
-                this,
-                exception.Message,
-                "Editar cesta",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Editar cesta", this);
         }
     }
 

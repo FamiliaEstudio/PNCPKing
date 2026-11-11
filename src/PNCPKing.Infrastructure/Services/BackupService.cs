@@ -521,7 +521,7 @@ public sealed partial class BackupService(
             var stagedEvidenceFolder = Path.Combine(temporaryDirectory, "internet-evidence");
             DatasetManifest manifest;
             string actualHash;
-            using var extractionSpan = _performance.Begin("backup", "import-extraction");
+            TransferSchemaRules? transferRules = null;
             using (var archive = ZipFile.OpenRead(sourcePath))
             {
                 var manifestEntry = archive.GetEntry("manifest.json")
@@ -565,6 +565,16 @@ public sealed partial class BackupService(
                     ValidateEvidenceManifestEntry(asset);
                 }
 
+                if (manifest.BackupProfile is BackupProfile.FullWithoutQuotations or BackupProfile.PricesPreservingLocalData)
+                {
+                    Report(progress, BackupImportStage.CheckingLocalSchema, 3,
+                        "Conferindo o esquema do banco local antes de descompactar o pacote…", isIndeterminate: true);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    transferRules = await ReadTransferRulesAsync(temporaryDirectory, cancellationToken).ConfigureAwait(false);
+                    await CheckLocalTransferSchemaAsync(transferRules, cancellationToken).ConfigureAwait(false);
+                }
+
+                using var extractionSpan = _performance.Begin("backup", "import-extraction");
                 var extractionTotal = manifestAssets.Aggregate(
                     databaseEntry.Length,
                     (total, asset) => AddSaturated(total, asset.ByteLength));
@@ -631,10 +641,8 @@ public sealed partial class BackupService(
 
                     extractedBytes = AddSaturated(extractedBytes, entry.Length);
                 }
+                extractionSpan.Complete(bytes: AddSaturated(inspection.DatabaseBytes, inspection.EvidenceBytes));
             }
-            extractionSpan.Complete(bytes: AddSaturated(
-                inspection.DatabaseBytes,
-                inspection.EvidenceBytes));
 
             Report(progress, BackupImportStage.VerifyingChecksum, 43, "Checksum calculado durante a extração.");
             if (!CryptographicOperations.FixedTimeEquals(
@@ -695,12 +703,12 @@ public sealed partial class BackupService(
             // only the resulting schema version and never repeats integrity_check.
             if (manifest.SchemaVersion < SqliteContractRepository.CurrentSchemaVersion)
             {
-                if (manifest.BackupProfile is BackupProfile.FullWithoutQuotations or BackupProfile.PricesPreservingLocalData)
+                if (transferRules is not null)
                 {
                     // Check known legacy shapes before a migration can execute any
                     // triggers from an imported database. No public-row scan is needed.
                     await using var legacy = await TransferConnectionAsync(importedDatabase, cancellationToken);
-                    await ValidateTransferSchemaAsync(legacy, "main", temporaryDirectory, cancellationToken);
+                    await ValidateTransferSchemaAsync(legacy, "main", transferRules, "pacote de preços antes da migração", sourcePath, cancellationToken);
                 }
                 Report(
                     progress,
@@ -731,9 +739,10 @@ public sealed partial class BackupService(
                 }
             }
 
-            if (manifest.BackupProfile is BackupProfile.FullWithoutQuotations or BackupProfile.PricesPreservingLocalData)
+            if (transferRules is not null)
             {
-                var recovery = await InstallPreservingLocalDataAsync(importedDatabase, progress, cancellationToken).ConfigureAwait(false);
+                var recovery = await InstallPreservingLocalDataAsync(
+                    importedDatabase, sourcePath, transferRules, progress, cancellationToken).ConfigureAwait(false);
                 try { span.Complete(bytes: inspection.DatabaseBytes); } catch (Exception) { /* Already committed. */ }
                 return recovery;
             }

@@ -117,6 +117,12 @@ public sealed class SqliteConnectionFactory : ISqliteConnectionFactory
                 ProfileName == "Restrito" && tuning.OrderedItemBatches);
         }
     }
+    internal void ClearPool()
+    {
+        using var connection = new SqliteConnection(_connectionString);
+        SqliteConnection.ClearPool(connection);
+    }
+
     public void ResetCalibration() => _tuning = null;
 
     internal SqliteConnectionFactory ReadOnlyProfile(SqliteSearchTuning tuning, ISystemResourceProbe resourceProbe) =>

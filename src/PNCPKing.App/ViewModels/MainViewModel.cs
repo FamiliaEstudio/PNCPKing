@@ -412,7 +412,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         ClearBackupRecoveriesCommand = new AsyncRelayCommand(
             ClearBackupRecoveriesAsync,
             () => !IsFileBusy);
-        OpenDiagnosticLogsCommand = new RelayCommand(OpenDiagnosticLogs);
+        OpenDiagnosticLogsCommand = new AsyncRelayCommand(OpenDiagnosticLogsAsync);
+        SendLastDiagnosticErrorCommand = new AsyncRelayCommand(SendLastDiagnosticErrorAsync);
         EvaluatePcCommand = new AsyncRelayCommand(EvaluatePcAsync, () => _calibrationWindow is not null || CanEvaluatePc);
         SelectResourceProfileCommand = new AsyncRelayCommand<string>(SelectResourceProfileAsync);
         ExportPerformanceReportCommand = new AsyncRelayCommand(
@@ -488,6 +489,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public ICommand CancelFileOperationCommand { get; }
     public ICommand ClearBackupRecoveriesCommand { get; }
     public ICommand OpenDiagnosticLogsCommand { get; }
+    public ICommand SendLastDiagnosticErrorCommand { get; }
     public ICommand ExportPerformanceReportCommand { get; }
     public ICommand ComparePerformanceReportCommand { get; }
     public ICommand ClearCacheCommand { get; }
@@ -3545,7 +3547,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
             if (showErrorDialog)
             {
-                MessageBox.Show(message, "PNCP King", MessageBoxButton.OK, MessageBoxImage.Error);
+                await DiagnosticEmailDialog.ShowErrorAsync(exception, message, "PNCP King");
             }
         }
         finally
@@ -3893,12 +3895,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception)
         {
-            _diagnosticLog.Error("backup-export", "Falha na prévia da exportação.", exception);
-            MessageBox.Show(
-                $"Não foi possível preparar o backup.\n\n{exception.Message}",
-                "Exportar backup",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ReportAsync(_diagnosticLog, "backup-export",
+                "Falha na prévia da exportação.", exception, "Exportar backup");
             return;
         }
 
@@ -4054,13 +4052,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception)
         {
-            _diagnosticLog.Error("backup-import", "Falha ao inspecionar o backup.", exception);
-            MessageBox.Show(
-                $"Não foi possível inspecionar o backup.\n\n{exception.Message}\n\n" +
-                $"Log: {_diagnosticLog.FilePath}",
-                "Importar backup",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ReportAsync(_diagnosticLog, "backup-import",
+                "Falha ao inspecionar o backup.", exception, "Importar backup");
             return;
         }
 
@@ -4322,13 +4315,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception)
         {
-            _diagnosticLog.Error("file-operation", "Falha em operação de arquivo.", exception);
             StatusText = $"Falha: {exception.Message}";
-            MessageBox.Show(
-                $"{exception.Message}\n\nLog para diagnóstico:\n{_diagnosticLog.FilePath}",
-                "PNCP King",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ReportAsync(_diagnosticLog, "file-operation",
+                "Falha em operação de arquivo.", exception, "PNCP King");
         }
         finally
         {
@@ -4341,7 +4330,15 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    private void OpenDiagnosticLogs()
+    private Task SendLastDiagnosticErrorAsync()
+    {
+        if (_diagnosticLog.LastError is { } incident)
+            return DiagnosticEmailDialog.OfferAsync(_diagnosticLog, incident.Split(Environment.NewLine, 2)[0], incident);
+        MessageBox.Show("Ainda não há erro registrado nesta sessão.", "Diagnóstico");
+        return Task.CompletedTask;
+    }
+
+    private async Task OpenDiagnosticLogsAsync()
     {
         try
         {
@@ -4355,12 +4352,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception)
         {
-            _diagnosticLog.Error("diagnostics", "Não foi possível abrir a pasta de logs.", exception);
-            MessageBox.Show(
-                $"Não foi possível abrir a pasta de logs.\n\n{_diagnosticLog.DirectoryPath}\n\n{exception.Message}",
-                "Logs de diagnóstico",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ReportAsync(_diagnosticLog, "diagnostics",
+                "Não foi possível abrir a pasta de logs.", exception, "Logs de diagnóstico");
         }
     }
 
@@ -4386,12 +4379,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception)
         {
-            _diagnosticLog.Error("performance", "Não foi possível exportar o relatório.", exception);
-            MessageBox.Show(
-                exception.Message,
-                "Relatório de desempenho",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ReportAsync(_diagnosticLog, "performance",
+                "Não foi possível exportar o relatório.", exception, "Relatório de desempenho");
         }
         finally
         {
@@ -4435,12 +4424,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception)
         {
-            _diagnosticLog.Error("performance", "Não foi possível comparar os relatórios.", exception);
-            MessageBox.Show(
-                exception.Message,
-                "Comparar desempenho",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ReportAsync(_diagnosticLog, "performance",
+                "Não foi possível comparar os relatórios.", exception, "Comparar desempenho");
         }
         finally
         {
@@ -4616,7 +4601,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         catch (Exception exception)
         {
             DocumentProgressText = "Documentos: falha";
-            MessageBox.Show(exception.Message, "Documentos PNCP", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Documentos PNCP");
         }
         finally
         {
@@ -4656,7 +4641,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         catch (Exception exception)
         {
             DocumentProgressText = "Documentos: falha ao limpar o cache";
-            MessageBox.Show(exception.Message, "Limpar cache de documentos", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Limpar cache de documentos");
         }
         finally
         {

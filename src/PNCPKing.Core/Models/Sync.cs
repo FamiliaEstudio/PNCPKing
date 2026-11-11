@@ -187,7 +187,8 @@ public enum BackupImportStage
     InstallingDatabase = 7,
     Completed = 8,
     CheckingEvidence = 9,
-    ApplyingRetention = 10
+    ApplyingRetention = 10,
+    CheckingLocalSchema = 11
 }
 
 public sealed record BackupImportProgress(

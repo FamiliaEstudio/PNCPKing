@@ -1,3 +1,4 @@
+using PNCPKing.App.Services;
 using System.Windows;
 using Microsoft.Win32;
 
@@ -26,7 +27,7 @@ public partial class DataFolderWindow : Window
         }
     }
 
-    private void Accept_Click(object sender, RoutedEventArgs e)
+    private async void Accept_Click(object sender, RoutedEventArgs e)
     {
         if (string.IsNullOrWhiteSpace(FolderTextBox.Text))
         {
@@ -42,7 +43,7 @@ public partial class DataFolderWindow : Window
         }
         catch (Exception exception)
         {
-            MessageBox.Show(exception.Message, "Pasta inválida", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Pasta inválida");
         }
     }
 }

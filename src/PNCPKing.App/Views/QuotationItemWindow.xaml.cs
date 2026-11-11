@@ -592,7 +592,7 @@ public partial class QuotationItemWindow : Window
         }
         catch (Exception exception)
         {
-            ShowError(exception);
+            await ShowErrorAsync(exception);
         }
     }
 
@@ -717,7 +717,7 @@ public partial class QuotationItemWindow : Window
         catch (Exception exception)
         {
             ViewModel.InvalidateWordReport();
-            ShowError(exception);
+            await ShowErrorAsync(exception);
         }
         finally
         {
@@ -726,11 +726,6 @@ public partial class QuotationItemWindow : Window
         }
     }
 
-    private void ShowError(Exception exception) =>
-        MessageBox.Show(
-            this,
-            exception.Message,
-            "Item da cotação",
-            MessageBoxButton.OK,
-            MessageBoxImage.Error);
+    private Task ShowErrorAsync(Exception exception) =>
+        DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Item da cotação", this);
 }

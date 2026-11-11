@@ -31,10 +31,11 @@ public sealed partial class BackupService
         "maintenance_state", "official_result_snapshots"
     ];
     private static string Q(string name) => "\"" + name.Replace("\"", "\"\"") + "\"";
-    private static async Task<SqliteConnection> TransferConnectionAsync(string path, CancellationToken ct)
+    private static async Task<SqliteConnection> TransferConnectionAsync(
+        string path, CancellationToken ct, SqliteOpenMode mode = SqliteOpenMode.ReadWrite)
     {
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
-        { DataSource = new Uri(Path.GetFullPath(path)).AbsoluteUri, Mode = SqliteOpenMode.ReadWrite, Pooling = false, ForeignKeys = false }.ToString());
+        { DataSource = new Uri(Path.GetFullPath(path)).AbsoluteUri, Mode = mode, Pooling = false, ForeignKeys = false }.ToString());
         try
         {
             await connection.OpenAsync(ct).ConfigureAwait(false);
@@ -63,12 +64,18 @@ public sealed partial class BackupService
         while (await reader.ReadAsync(ct)) result.Add(reader.GetString(0), reader.GetString(1));
         return result;
     }
-    private static async Task ValidateTransferSchemaAsync(SqliteConnection c, string schema, string directory, CancellationToken ct)
+    public const string TransferSchemaDiagnosticKey = "PNCPKing.TransferSchema";
+
+    private sealed record TransferSchemaRules(
+        Dictionary<string, string> Current, Dictionary<string, string> Historical);
+
+    private static async Task<TransferSchemaRules> ReadTransferRulesAsync(string directory, CancellationToken ct)
     {
         var referencePath = Path.Combine(directory, $"schema-{Guid.NewGuid():N}.db");
+        var factory = new SqliteConnectionFactory(referencePath);
         try
         {
-            await new SqliteContractRepository(referencePath).InitializeAsync(ct).ConfigureAwait(false);
+            await new SqliteContractRepository(factory).InitializeAsync(ct).ConfigureAwait(false);
             await using var reference = await TransferConnectionAsync(referencePath, ct);
             await using (var tx = reference.BeginTransaction())
             {
@@ -81,35 +88,71 @@ public sealed partial class BackupService
             // never execute or accept an arbitrary definition from the incoming DB.
             await TransferSqlAsync(reference, HistoricalTransferSchemaSql, ct);
             var historical = await TransferSchemaAsync(reference, "main", ct);
-            var actual = await TransferSchemaAsync(c, schema, ct);
-            // sqlite_master already removes CREATE ... IF NOT EXISTS. Preserve quoted
-            // contents exactly: changing a literal or identifier must never match a
-            // trusted definition. Only ASCII SQL whitespace outside quotes is cosmetic.
-            static string Normalize(string sql) => System.Text.RegularExpressions.Regex.Replace(
-                sql, @"('(?:''|[^'])*'|""(?:""""|[^""])*""|`(?:``|[^`])*`|\[[^\]]*\])|[ \t\r\n\f]+",
-                match => match.Groups[1].Success ? match.Value : " ").Trim(' ').TrimEnd(';');
-            foreach (var entry in actual)
-                if ((!expected.TryGetValue(entry.Key, out var ddl) || Normalize(ddl) != Normalize(entry.Value)) &&
-                    (!historical.TryGetValue(entry.Key, out var oldDdl) || Normalize(oldDdl) != Normalize(entry.Value)))
-                    throw new InvalidDataException($"Esquema não reconhecido para transferência segura: {entry.Key}.");
-            foreach (var entry in expected)
-                if (!actual.ContainsKey(entry.Key) && entry.Key != "table:quotation_manual_price_divisors")
-                    throw new InvalidDataException($"Estrutura obrigatória ausente: {entry.Key}.");
-            foreach (var name in actual.Keys.Where(k => k.StartsWith("table:")).Select(k => k[6..]))
-            {
-                var fts = new[] { "contracts_fts", "items_fts", "catalog_entries_fts", "catalog_description_fts" };
-                if (name != "sqlite_stat1" && !TransferLocalTables.Contains(name) && !TransferResetTables.Contains(name) && !TransferPublicTables.Contains(name) &&
-                    !fts.Any(f => name == f || new[] { "_data", "_idx", "_content", "_docsize", "_config" }.Any(s => name == f + s)))
-                    throw new InvalidDataException($"Tabela sem política de transferência: {name}.");
-            }
+            return new(expected, historical);
         }
         finally
         {
-            SqliteConnection.ClearAllPools();
+            factory.ClearPool();
             foreach (var suffix in new[] { "", "-wal", "-shm" })
                 if (File.Exists(referencePath + suffix)) File.Delete(referencePath + suffix);
         }
     }
+
+    private static async Task ValidateTransferSchemaAsync(
+        SqliteConnection c, string schema, TransferSchemaRules rules, string origin, string path, CancellationToken ct)
+    {
+        var (expected, historical) = rules;
+        InvalidDataException Rejection(string reason, string key, string? sql)
+        {
+            var error = new InvalidDataException($"{reason}: {key}. Origem: {origin}.");
+            error.Data[TransferSchemaDiagnosticKey] =
+                $"origem={origin}{Environment.NewLine}arquivo={Path.GetFullPath(path)}{Environment.NewLine}" +
+                $"objeto={key}{Environment.NewLine}SQL encontrado:{Environment.NewLine}{sql ?? "(objeto ausente)"}";
+            return error;
+        }
+
+        Dictionary<string, string> actual;
+        try { actual = await TransferSchemaAsync(c, schema, ct); }
+        catch (SqliteException error)
+        {
+            throw new InvalidDataException(
+                $"Não foi possível ler o esquema do {origin}. Arquivo: {Path.GetFullPath(path)}. " +
+                "O SQLite não devolveu as definições SQL.", error);
+        }
+        // sqlite_master already removes CREATE ... IF NOT EXISTS. Preserve quoted
+        // contents exactly: changing a literal or identifier must never match a
+        // trusted definition. Only ASCII SQL whitespace outside quotes is cosmetic.
+        static string Normalize(string sql) => System.Text.RegularExpressions.Regex.Replace(
+            sql, @"('(?:''|[^'])*'|""(?:""""|[^""])*""|`(?:``|[^`])*`|\[[^\]]*\])|[ \t\r\n\f]+",
+            match => match.Groups[1].Success ? match.Value : " ").Trim(' ').TrimEnd(';');
+        foreach (var entry in actual)
+            if ((!expected.TryGetValue(entry.Key, out var ddl) || Normalize(ddl) != Normalize(entry.Value)) &&
+                (!historical.TryGetValue(entry.Key, out var oldDdl) || Normalize(oldDdl) != Normalize(entry.Value)))
+                throw Rejection("Esquema não reconhecido para transferência segura", entry.Key, entry.Value);
+        foreach (var entry in expected)
+            if (!actual.ContainsKey(entry.Key) && entry.Key != "table:quotation_manual_price_divisors")
+                throw Rejection("Estrutura obrigatória ausente", entry.Key, null);
+        foreach (var name in actual.Keys.Where(k => k.StartsWith("table:")).Select(k => k[6..]))
+        {
+            var fts = new[] { "contracts_fts", "items_fts", "catalog_entries_fts", "catalog_description_fts" };
+            if (name != "sqlite_stat1" && !TransferLocalTables.Contains(name) && !TransferResetTables.Contains(name) && !TransferPublicTables.Contains(name) &&
+                !fts.Any(f => name == f || new[] { "_data", "_idx", "_content", "_docsize", "_config" }.Any(s => name == f + s)))
+                throw Rejection("Tabela sem política de transferência", "table:" + name, actual["table:" + name]);
+        }
+    }
+
+    private async Task CheckLocalTransferSchemaAsync(TransferSchemaRules rules, CancellationToken ct)
+    {
+        var target = Path.GetFullPath(repository.DatabasePath);
+        if (!File.Exists(target))
+            throw new FileNotFoundException("Inicialize o banco local antes de importar preços.", target);
+
+        // Observe committed WAL changes and release the reader before extracting a large archive.
+        using var lease = await SqliteDatabaseTransferGate.EnterConnectionAsync(target, ct);
+        await using var local = await TransferConnectionAsync(target, ct, SqliteOpenMode.ReadOnly);
+        await ValidateTransferSchemaAsync(local, "main", rules, "banco local antes da descompactação", target, ct);
+    }
+
     // Only the known historical DDL is an alternative; all other objects still
     // require an exact reviewed definition. ANALYZE runs on this tiny reference DB
     // only, so sqlite_stat1 is optional and has the engine's own trusted definition.
@@ -189,10 +232,11 @@ public sealed partial class BackupService
         await using var cmd = c.CreateCommand(); cmd.CommandText = $"SELECT name FROM {schema}.sqlite_master WHERE type='table';";
         await using var r = await cmd.ExecuteReaderAsync(ct); while (await r.ReadAsync(ct)) result.Add(r.GetString(0)); return result;
     }
-    private static async Task RemoveTransferLocalDataAsync(string path, CancellationToken ct)
+    private async Task RemoveTransferLocalDataAsync(string path, CancellationToken ct)
     {
         await using var c = await TransferConnectionAsync(path, ct);
-        await ValidateTransferSchemaAsync(c, "main", Path.GetDirectoryName(path)!, ct);
+        var rules = await ReadTransferRulesAsync(Path.GetDirectoryName(path)!, ct);
+        await ValidateTransferSchemaAsync(c, "main", rules, "banco local na cópia de exportação", repository.DatabasePath, ct);
         await TransferSqlAsync(c, "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;", ct);
         var tables = await TransferTableNamesAsync(c,"main",ct);
         await using (var tx = c.BeginTransaction())
@@ -221,7 +265,8 @@ public sealed partial class BackupService
         }
         if (prepareWal) await TransferSqlAsync(c,"PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",ct);
     }
-    private async Task<string> InstallPreservingLocalDataAsync(string staged, IProgress<BackupImportProgress>? progress, CancellationToken ct)
+    private async Task<string> InstallPreservingLocalDataAsync(
+        string staged, string packagePath, TransferSchemaRules rules, IProgress<BackupImportProgress>? progress, CancellationToken ct)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("A troca protegida exige Windows.");
         var target = Path.GetFullPath(repository.DatabasePath);
@@ -237,7 +282,7 @@ public sealed partial class BackupService
         Report(progress,BackupImportStage.PreservingCurrentDatabase,80,"Preservando cotações e configurações locais.",isIndeterminate:true);
         await using (var c = await TransferConnectionAsync(staged,ct))
         {
-            await ValidateTransferSchemaAsync(c,"main",Path.GetDirectoryName(staged)!,ct);
+            await ValidateTransferSchemaAsync(c, "main", rules, "pacote de preços", packagePath, ct);
             await using (var attach=c.CreateCommand())
             {
                 attach.CommandText="ATTACH DATABASE $path AS local_data;";
@@ -245,7 +290,8 @@ public sealed partial class BackupService
                 await attach.ExecuteNonQueryAsync(ct);
             }
             await TransferSqlAsync(c,"PRAGMA local_data.cache_size=-32768;",ct);
-            await ValidateTransferSchemaAsync(c,"local_data",Path.GetDirectoryName(staged)!,ct);
+            // The active file or its schema may have changed during extraction. Check again under the swap guard.
+            await ValidateTransferSchemaAsync(c, "local_data", rules, "banco local antes da instalação", target, ct);
             var localTables = await TransferTableNamesAsync(c,"local_data",ct);
             var stagingTables = await TransferTableNamesAsync(c,"main",ct);
             await using var tx = c.BeginTransaction();

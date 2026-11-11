@@ -5,6 +5,8 @@
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/PNCPKing.App/Services/AppDiagnosticLog.cs" Link="AppLogic/AppDiagnosticLog.cs" />
+    <Compile Include="../../src/PNCPKing.App/Services/DiagnosticMail.cs" Link="AppLogic/DiagnosticMail.cs" />
     <Compile Include="../../src/PNCPKing.App/Services/GridText.cs" Link="AppLogic/GridText.cs" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="PdfPig" />

@@ -1,3 +1,4 @@
+using PNCPKing.App.Services;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Windows;
@@ -261,8 +262,8 @@ public sealed partial class MainViewModel
             () => ChangeQuotationBasketPage(QuotationBasketPage + 1),
             () => SelectedQuotationLine is not null &&
                   QuotationBasketPage * QuotationBasketPageSize < SelectedQuotationLine.BasketCount);
-        OpenQuotationReferenceCommand = new RelayCommand<QuotationReferenceDisplay>(
-            OpenQuotationReference,
+        OpenQuotationReferenceCommand = new AsyncRelayCommand<QuotationReferenceDisplay>(
+            OpenQuotationReferenceAsync,
             reference => reference is not null && Uri.TryCreate(reference.Source.PortalUrl, UriKind.Absolute, out _));
         AccessQuotationDocumentsCommand = new AsyncRelayCommand<QuotationReferenceDisplay>(
             AccessQuotationDocumentsAsync,
@@ -802,7 +803,7 @@ public sealed partial class MainViewModel
         }
         catch (Exception exception)
         {
-            MessageBox.Show(exception.Message, $"Exportar Tabela {tableNumber}", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, $"Exportar Tabela {tableNumber}");
         }
         finally { IsFileBusy = false; }
     }
@@ -859,11 +860,7 @@ public sealed partial class MainViewModel
         }
         catch (Exception exception)
         {
-            MessageBox.Show(
-                $"Não foi possível criar o item.\n\n{exception.Message}",
-                "Novo item",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, $"Não foi possível criar o item.\n\n{exception.Message}", "Novo item");
         }
         finally
         {
@@ -1417,7 +1414,7 @@ public sealed partial class MainViewModel
                 run.Id,
                 QuotationAutomationRunState.Failed,
                 exception.Message).ConfigureAwait(true);
-            MessageBox.Show(exception.Message, "Automação com IA", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Automação com IA");
         }
         finally
         {
@@ -1659,11 +1656,7 @@ public sealed partial class MainViewModel
                 run.Id,
                 QuotationAutomationRunState.Failed,
                 exception.Message + preservedWorkbook).ConfigureAwait(true);
-            MessageBox.Show(
-                exception.Message + preservedWorkbook,
-                "Cotação automática",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message + preservedWorkbook, "Cotação automática");
         }
         finally
         {
@@ -1773,11 +1766,7 @@ public sealed partial class MainViewModel
         }
         catch (Exception exception)
         {
-            MessageBox.Show(
-                exception.Message,
-                "Cesta manual",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Cesta manual");
         }
         finally
         {
@@ -1824,11 +1813,7 @@ public sealed partial class MainViewModel
         }
         catch (Exception exception)
         {
-            MessageBox.Show(
-                $"Não foi possível usar a amostra na cotação.\n\n{exception.Message}",
-                "Cotação",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, $"Não foi possível usar a amostra na cotação.\n\n{exception.Message}", "Cotação");
         }
         finally
         {
@@ -1889,7 +1874,7 @@ public sealed partial class MainViewModel
         }
         catch (Exception exception)
         {
-            MessageBox.Show(exception.Message, "Atualizar amostra", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Atualizar amostra");
         }
         finally
         {
@@ -1916,7 +1901,7 @@ public sealed partial class MainViewModel
         }
         catch (Exception exception)
         {
-            MessageBox.Show(exception.Message, "Confirmar cesta", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Confirmar cesta");
         }
     }
 
@@ -2158,7 +2143,7 @@ public sealed partial class MainViewModel
         }
         catch (Exception exception)
         {
-            MessageBox.Show(exception.Message, "Pesos do índice", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Pesos do índice");
         }
         finally
         {
@@ -2234,7 +2219,7 @@ public sealed partial class MainViewModel
                 ? $"A planilha foi salva em:\n{dialog.FileName}\n\n" +
                   $"Não foi possível concluir o relatório de evidências: {exception.Message}"
                 : exception.Message;
-            MessageBox.Show(message, "Exportar cotação", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, message, "Exportar cotação");
         }
         finally
         {
@@ -2617,7 +2602,7 @@ public sealed partial class MainViewModel
                                     ?? QuotationBaskets.FirstOrDefault();
     }
 
-    private static void OpenQuotationReference(QuotationReferenceDisplay? reference)
+    private static async Task OpenQuotationReferenceAsync(QuotationReferenceDisplay? reference)
     {
         if (reference is null || !Uri.TryCreate(reference.Source.PortalUrl, UriKind.Absolute, out var uri))
         {
@@ -2630,7 +2615,7 @@ public sealed partial class MainViewModel
         }
         catch (Exception exception)
         {
-            MessageBox.Show(exception.Message, "Abrir PNCP", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Abrir PNCP");
         }
     }
 

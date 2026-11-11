@@ -187,6 +187,18 @@ public sealed class HistoricalTransferSchemaTests
                 .ExportAsync(path, BackupProfile.FullWithoutQuotations))
             : await Assert.ThrowsAsync<InvalidDataException>(() => service.ImportAsync(path));
         Assert.Contains(rejectedObject, error.Message);
+        var detail = Assert.IsType<string>(error.Data[BackupService.TransferSchemaDiagnosticKey]);
+        var (origin, rejectedPath) = location switch
+        {
+            "export" => ("banco local na cópia de exportação", source.Repository.DatabasePath),
+            "destination" => ("banco local antes da descompactação", destination.Repository.DatabasePath),
+            "package33" => ("pacote de preços antes da migração", path),
+            _ => ("pacote de preços", path)
+        };
+        Assert.Contains("origem=" + origin + Environment.NewLine, detail);
+        Assert.Contains("arquivo=" + rejectedPath + Environment.NewLine, detail);
+        Assert.Contains("objeto=" + rejectedObject, detail);
+        Assert.Contains("SQL encontrado:" + Environment.NewLine + "CREATE ", detail);
         Assert.Equal(sourceBefore, await SnapshotAsync(source.Repository.DatabasePath));
         Assert.Equal(destinationBefore, await SnapshotAsync(destination.Repository.DatabasePath));
         Assert.Empty(service.GetRecoveryBackups());
@@ -206,6 +218,75 @@ public sealed class HistoricalTransferSchemaTests
         }
         else
             await AssertSearchUpdatesAsync(destination.Repository.DatabasePath, 3);
+    }
+
+    [Theory]
+    [InlineData(BackupProfile.PricesPreservingLocalData)]
+    [InlineData(BackupProfile.FullWithoutQuotations)]
+    public async Task LocalFormattingInCommittedWalIsReportedBeforeAnyExtraction(BackupProfile profile)
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        var archive = Path.Combine(source.Directory, "public.pncpking");
+        await new BackupService(source.Repository).ExportAsync(archive, profile);
+        var target = destination.Repository.DatabasePath;
+        await using var writer = new SqliteConnection($"Data Source={target};Mode=ReadWrite;Pooling=False");
+        await writer.OpenAsync();
+        using var cmd = writer.CreateCommand();
+        cmd.CommandText = "SELECT sql FROM sqlite_master WHERE name='contracts_fts_update'";
+        var original = (string)(await cmd.ExecuteScalarAsync())!;
+        var formatted = original.Replace("new.rowid, new.search_text", "new.rowid,new.search_text", StringComparison.Ordinal);
+        Assert.NotEqual(original, formatted);
+        cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA wal_autocheckpoint=0; DROP TRIGGER contracts_fts_update;" + formatted;
+        await cmd.ExecuteNonQueryAsync();
+        Assert.True(new FileInfo(target + "-wal").Length > 0);
+
+        var stages = new List<BackupImportStage>();
+        var progress = new CallbackProgress(p => { stages.Add(p.Stage); Assert.Equal(0L, p.BytesProcessed); });
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            new BackupService(destination.Repository).ImportAsync(archive, progress));
+        Assert.Contains(BackupImportStage.CheckingLocalSchema, stages);
+        Assert.DoesNotContain(BackupImportStage.Extracting, stages);
+        var detail = Assert.IsType<string>(error.Data[BackupService.TransferSchemaDiagnosticKey]);
+        Assert.Contains("origem=banco local antes da descompactação", detail);
+        Assert.Contains("arquivo=" + target, detail);
+        Assert.EndsWith(formatted, detail);
+        Assert.Empty(Directory.GetDirectories(destination.Directory, ".pncpking-import-*"));
+    }
+
+    [Fact]
+    public async Task LocalSchemaChangedDuringExtractionIsRejectedBeforeSwap()
+    {
+        await using var source = await TestDatabase.CreateAsync();
+        await using var destination = await TestDatabase.CreateAsync();
+        await SeedPricesAsync(destination, "existing-local-contract", 1);
+        var archive = Path.Combine(source.Directory, "public.pncpking");
+        await new BackupService(source.Repository).ExportAsync(archive, BackupProfile.FullWithoutQuotations);
+        bool changed = false;
+        var progress = new CallbackProgress(p =>
+        {
+            if (p.Stage != BackupImportStage.VerifyingChecksum || changed) return;
+            changed = true;
+            using var writer = new SqliteConnection($"Data Source={destination.Repository.DatabasePath};Pooling=False");
+            writer.Open();
+            using var cmd = writer.CreateCommand();
+            cmd.CommandText = "CREATE TRIGGER late_trigger AFTER INSERT ON contracts BEGIN SELECT 123; END;";
+            cmd.ExecuteNonQuery();
+        });
+        var service = new BackupService(destination.Repository);
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() => service.ImportAsync(archive, progress));
+        Assert.True(changed);
+        var detail = Assert.IsType<string>(error.Data[BackupService.TransferSchemaDiagnosticKey]);
+        Assert.Contains("origem=banco local antes da instalação", detail);
+        Assert.Contains("CREATE TRIGGER late_trigger", detail);
+        Assert.Empty(service.GetRecoveryBackups());
+        Assert.Equal(1L, await ScalarAsync(destination.Repository.DatabasePath,
+            "SELECT COUNT(*) FROM contracts WHERE pncp_id='existing-local-contract'"));
+    }
+
+    private sealed class CallbackProgress(Action<BackupImportProgress> report) : IProgress<BackupImportProgress>
+    {
+        public void Report(BackupImportProgress value) => report(value);
     }
 
     private const string PublicHistoryForeignKeysSql =

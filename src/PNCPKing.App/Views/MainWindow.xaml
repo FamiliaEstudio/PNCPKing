@@ -102,6 +102,7 @@
                         </MenuItem>
                         <MenuItem Header="_Diagnóstico">
                             <MenuItem Header="Logs de diagnóstico" Command="{Binding OpenDiagnosticLogsCommand}" />
+                            <MenuItem Header="Enviar último erro desta sessão por e-mail…" Command="{Binding SendLastDiagnosticErrorCommand}" />
                             <MenuItem Header="Relatório de desempenho" Command="{Binding ExportPerformanceReportCommand}" />
                             <MenuItem Header="Comparar desempenho" Command="{Binding ComparePerformanceReportCommand}" />
                             <MenuItem Header="Avaliar desempenho deste PC…" Command="{Binding EvaluatePcCommand}" />

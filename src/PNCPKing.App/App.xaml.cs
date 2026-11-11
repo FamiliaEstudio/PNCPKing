@@ -31,6 +31,7 @@ public partial class App : Application
 
     private Mutex? _instanceMutex;
     private AppDiagnosticLog? _diagnosticLog;
+    internal AppDiagnosticLog? DiagnosticLog => _diagnosticLog;
     private AppPerformanceTelemetry? _performanceTelemetry;
     private DispatcherResponsivenessMonitor? _responsivenessMonitor;
     private AdaptiveMaintenanceCoordinator? _maintenanceCoordinator;
@@ -435,13 +436,8 @@ public partial class App : Application
         }
         catch (Exception exception)
         {
-            _diagnosticLog.Error("startup", "Não foi possível iniciar o PNCP King.", exception);
-            MessageBox.Show(
-                $"Não foi possível iniciar o PNCP King.\n\n{exception.Message}\n\n" +
-                $"Log para diagnóstico:\n{_diagnosticLog.FilePath}",
-                "PNCP King",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ReportAsync(_diagnosticLog, "startup",
+                "Não foi possível iniciar o PNCP King.", exception, "PNCP King");
             Shutdown(-1);
         }
     }
@@ -480,7 +476,8 @@ public partial class App : Application
 
     private void HandleRecoverableCommandException(Exception exception)
     {
-        _diagnosticLog?.Error("ui-command", "Falha recuperável em uma ação da interface.", exception);
+        if (_diagnosticLog is not { } log) return;
+        var incident = log.Error("ui-command", "Falha recuperável em uma ação da interface.", exception);
         _performanceTelemetry?.Record(
             "ui",
             "command-error",
@@ -492,21 +489,18 @@ public partial class App : Application
             return;
         }
 
-        Dispatcher.BeginInvoke(() =>
+        Dispatcher.BeginInvoke(new Action(async () =>
         {
             try
             {
-                MessageBox.Show(
-                    $"A ação não pôde ser concluída, mas o PNCP King continuará aberto.\n\n{exception.Message}",
-                    "PNCP King",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error);
+                await DiagnosticEmailDialog.OfferAsync(log,
+                    $"A ação não pôde ser concluída, mas o PNCP King continuará aberto.\n\n{exception.Message}", incident);
             }
             finally
             {
                 Interlocked.Exchange(ref _uiErrorDialogOpen, 0);
             }
-        });
+        }));
     }
 
     private static bool HasAnotherPncpKingProcess()

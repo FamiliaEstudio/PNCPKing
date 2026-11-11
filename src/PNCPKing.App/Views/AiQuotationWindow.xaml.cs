@@ -186,7 +186,7 @@ public partial class AiQuotationWindow : Window
         }
         catch (Exception exception)
         {
-            MessageBox.Show(exception.Message, "Carregar rascunho", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Carregar rascunho");
         }
         finally
         {
@@ -314,7 +314,7 @@ public partial class AiQuotationWindow : Window
         }
         catch (Exception exception)
         {
-            MessageBox.Show(exception.Message, "Preparar PDF", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Preparar PDF");
         }
         finally
         {
@@ -416,11 +416,7 @@ public partial class AiQuotationWindow : Window
         }
         catch (Exception exception)
         {
-            MessageBox.Show(
-                exception.Message + "\n\nA resposta não será corrigida por uma segunda chamada automática.",
-                "Análise com IA",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message + "\n\nA resposta não será corrigida por uma segunda chamada automática.", "Análise com IA");
         }
         finally
         {
@@ -466,7 +462,7 @@ public partial class AiQuotationWindow : Window
         }
         catch (Exception exception)
         {
-            MessageBox.Show(exception.Message, "Credencial de IA", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Credencial de IA");
         }
     }
 
@@ -543,7 +539,7 @@ public partial class AiQuotationWindow : Window
         }
         catch (Exception exception)
         {
-            MessageBox.Show(exception.Message, "Validação local", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Validação local");
         }
     }
 
@@ -675,11 +671,7 @@ public partial class AiQuotationWindow : Window
         }
         catch (Exception exception)
         {
-            MessageBox.Show(
-                exception.Message + "\n\nNenhuma alteração parcial foi aplicada.",
-                "Retrabalhar prompts",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message + "\n\nNenhuma alteração parcial foi aplicada.", "Retrabalhar prompts");
         }
         finally
         {
@@ -890,11 +882,7 @@ public partial class AiQuotationWindow : Window
         }
         catch (Exception exception)
         {
-            MessageBox.Show(
-                "Não foi possível salvar as correções do rascunho: " + exception.Message,
-                "Automação com IA",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, "Não foi possível salvar as correções do rascunho: " + exception.Message, "Automação com IA");
             return;
         }
 
