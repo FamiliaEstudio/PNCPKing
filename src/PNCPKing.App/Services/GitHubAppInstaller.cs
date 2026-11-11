@@ -102,13 +102,25 @@ public static class GitHubAppInstaller
             {
                 foreach (var path in new[] { staged, operation, script, requestPath, requestPath + ".ready",
                     requestPath + ".commit", requestPath + ".result" })
-                {
-                    try { File.Delete(path); }
-                    catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-                    {
-                        // A locked temporary must not mask the installation error or cancellation.
-                    }
-                }
+                    await DeleteTemporaryAsync(path).ConfigureAwait(false);
+            }
+        }
+    }
+
+    internal static async Task DeleteTemporaryAsync(string path)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try { File.Delete(path); return; }
+            catch (IOException e) when ((e.HResult & 0xffff) is 32 or 33 && attempt < 20)
+            {
+                // Sharing/lock violations can briefly persist after process exit on Windows.
+                await Task.Delay(150).ConfigureAwait(false);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                // Keep the original installation error even if another program retains this file.
+                return;
             }
         }
     }
@@ -133,7 +145,7 @@ public static class GitHubAppInstaller
         catch
         {
             // Only this uncommitted child is stopped. Release its handles before cleaning up staging.
-            try { if (!installer.HasExited) installer.Kill(); }
+            try { if (!installer.HasExited) installer.Kill(entireProcessTree: true); }
             catch (InvalidOperationException) when (installer.HasExited) { }
             await installer.WaitForExitAsync().ConfigureAwait(false);
             throw;

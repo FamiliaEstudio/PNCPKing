@@ -153,16 +153,19 @@ public sealed class GitHubInstallerTests
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => handoff);
             Assert.True(helper.HasExited);
             Assert.False(File.Exists(request + ".commit"));
-            File.Delete(staged);
+            await GitHubAppInstaller.DeleteTemporaryAsync(staged);
+            Assert.False(File.Exists(staged));
         }
         finally
         {
             if (helper is not null)
             {
-                if (!helper.HasExited) { helper.Kill(); await helper.WaitForExitAsync(); }
+                if (!helper.HasExited) { helper.Kill(entireProcessTree: true); await helper.WaitForExitAsync(); }
                 helper.Dispose();
             }
-            directory.Delete(true);
+            foreach (var file in directory.EnumerateFiles()) await GitHubAppInstaller.DeleteTemporaryAsync(file.FullName);
+            // Preserve any assertion that failed above if Windows still retains a temporary file.
+            if (!directory.EnumerateFileSystemInfos().Any()) directory.Delete();
         }
     }
 

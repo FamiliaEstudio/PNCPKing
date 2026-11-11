@@ -69,6 +69,10 @@ try {
     Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
 } catch {
     $message = $_.Exception.Message
+    $cause = $_.Exception.GetBaseException()
+    if ($replacementStarted -and -not $replacementFinished -and (($cause.HResult -band 65535) -in 32, 33)) {
+        $message = 'O Windows manteve o executavel em uso. Feche a outra instancia que o esta usando e tente novamente. ' + $message
+    }
     if ($replacementStarted -and -not $replacementFinished -and $backup -and (Test-Path -LiteralPath $backup)) {
         try {
             if (Test-Path -LiteralPath $request.targetPath) { [IO.File]::Replace($backup, $request.targetPath, $null) }
