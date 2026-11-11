@@ -3827,46 +3827,55 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         UpdateManualUpdateProgress();
     }
 
-    private async Task ExportBackupAsync()
-    {
-        var profileChoice = MessageBox.Show(
-            "Escolha o perfil do backup:\n\n" +
-            "SIM — Completo: inclui contratações, itens, preços, snapshots e checkpoints. " +
-            "Você escolherá se leva as cotações.\n\n" +
-            "NÃO — Compacto: preserva os dados permanentes, mas itens e preços reconstruíveis precisarão ser carregados novamente.\n\n" +
-            "CANCELAR — não exportar.",
-            "Perfil do backup .pncpking",
-            MessageBoxButton.YesNoCancel,
-            MessageBoxImage.Question,
-            MessageBoxResult.Yes);
-        if (profileChoice == MessageBoxResult.Cancel)
-        {
-            return;
-        }
+    private Task ExportBackupAsync() => ExportBackupAsync(null);
 
-        var profile = BackupProfile.Compact;
-        if (profileChoice == MessageBoxResult.Yes)
+    private async Task ExportBackupAsync(BackupProfile? requestedProfile)
+    {
+        var profile = requestedProfile ?? BackupProfile.Compact;
+        if (requestedProfile is null)
         {
-            var quotationsChoice = MessageBox.Show(
-                "O backup completo deve incluir as cotações?\n\n" +
-                "SIM — Completo com cotações, para recuperação dos seus dados.\n\n" +
-                "NÃO — Completo sem cotações, para iniciar um banco em outro PC.\n\n" +
+            var profileChoice = MessageBox.Show(
+                "Escolha o perfil do backup:\n\n" +
+                "SIM — Completo: inclui contratações, itens, preços, snapshots e checkpoints. " +
+                "Você escolherá se leva as cotações.\n\n" +
+                "NÃO — Compacto: preserva os dados permanentes, mas itens e preços reconstruíveis precisarão ser carregados novamente.\n\n" +
                 "CANCELAR — não exportar.",
-                "Cotações no backup completo",
+                "Perfil do backup .pncpking",
                 MessageBoxButton.YesNoCancel,
                 MessageBoxImage.Question,
                 MessageBoxResult.Yes);
-            if (quotationsChoice == MessageBoxResult.Cancel) return;
-            profile = quotationsChoice == MessageBoxResult.Yes
-                ? BackupProfile.Full
-                : BackupProfile.FullWithoutQuotations;
+            if (profileChoice == MessageBoxResult.Cancel)
+            {
+                return;
+            }
+
+
+            if (profileChoice == MessageBoxResult.Yes)
+            {
+                var quotationsChoice = MessageBox.Show(
+                    "O backup completo deve incluir as cotações?\n\n" +
+                    "SIM — Completo com cotações, para recuperação dos seus dados.\n\n" +
+                    "NÃO — Completo sem cotações, para iniciar um banco em outro PC.\n\n" +
+                    "CANCELAR — não exportar.",
+                    "Cotações no backup completo",
+                    MessageBoxButton.YesNoCancel,
+                    MessageBoxImage.Question,
+                    MessageBoxResult.Yes);
+                if (quotationsChoice == MessageBoxResult.Cancel) return;
+                profile = quotationsChoice == MessageBoxResult.Yes
+                    ? BackupProfile.Full
+                    : BackupProfile.FullWithoutQuotations;
+            }
+
         }
         var dialog = new SaveFileDialog
         {
-            Title = "Exportar backup do PNCP King",
+            Title = profile == BackupProfile.PricesPreservingLocalData ? "Exportar base completa de preços" : "Exportar backup do PNCP King",
             Filter = "Backup PNCP King (*.pncpking)|*.pncpking",
             DefaultExt = ".pncpking",
-            FileName = profile == BackupProfile.FullWithoutQuotations
+            FileName = profile == BackupProfile.PricesPreservingLocalData
+                ? $"PNCPKing-base-precos-{DateTime.Today:yyyyMMdd}.pncpking"
+                : profile == BackupProfile.FullWithoutQuotations
                 ? $"PNCPKing-sem-cotacoes-{DateTime.Today:yyyyMMdd}.pncpking"
                 : $"PNCPKing-{DateTime.Today:yyyyMMdd}.pncpking"
         };
@@ -3928,6 +3937,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
         var profileLabel = profile switch
         {
+            BackupProfile.PricesPreservingLocalData => "Base completa de preços, preservando os dados locais do destino",
             BackupProfile.Full => "Completo com cotações",
             BackupProfile.FullWithoutQuotations => "Completo sem cotações",
             _ => "Compacto — itens/preços serão reconstruídos"
@@ -4011,11 +4021,13 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    private async Task ImportBackupAsync()
+    private Task ImportBackupAsync() => ImportBackupAsync(false);
+
+    private async Task ImportBackupAsync(bool pricesOnly)
     {
         var dialog = new OpenFileDialog
         {
-            Title = "Importar backup do PNCP King",
+            Title = pricesOnly ? "Importar base completa de preços" : "Importar backup do PNCP King",
             Filter = "Backup PNCP King (*.pncpking)|*.pncpking",
             CheckFileExists = true
         };
@@ -4066,15 +4078,32 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
+        var preservesLocalData = inspection.Profile == BackupProfile.PricesPreservingLocalData;
+        if (pricesOnly && !preservesLocalData)
+        {
+            MessageBox.Show(
+                "Este arquivo é um backup de recuperação, não uma base completa de preços com preservação local. " +
+                "Exporte novamente pela opção Exportar base completa de preços no PC de origem.",
+                "Arquivo incompatível", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        if (preservesLocalData && !CanTransferPriceDatabase)
+        {
+            MessageBox.Show(
+                "Conclua ou pause as operações em andamento e feche as janelas de item da cotação e de avaliação do PC antes de importar.",
+                "Aguarde as operações locais", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
         var profile = inspection.Profile switch
         {
+            BackupProfile.PricesPreservingLocalData => "Base completa de preços, preservando os dados locais do destino",
             BackupProfile.Full => "Completo com cotações",
             BackupProfile.FullWithoutQuotations => "Completo sem cotações — somente para banco sem cotações",
             BackupProfile.Compact => "Compacto com cotações",
             _ => "Legado"
         };
         if (MessageBox.Show(
-                "IMPORTAR BACKUP VALIDADO\n\n" +
+                (preservesLocalData ? "IMPORTAR BASE COMPLETA DE PREÇOS\n\n" : "IMPORTAR BACKUP VALIDADO\n\n") +
                 $"Arquivo: {FormatBytes(inspection.ArchiveBytes)}\n" +
                 $"Banco descompactado: {FormatBytes(inspection.DatabaseBytes)}\n" +
                 $"Esquema: {inspection.SchemaVersion} → {SqliteContractRepository.CurrentSchemaVersion}\n" +
@@ -4085,6 +4114,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 $"Evidências: {inspection.EvidenceCount:N0} ({FormatBytes(inspection.EvidenceBytes)})\n" +
                 $"Staging: {inspection.StagingRoot}\n" +
                 $"Espaço necessário: {FormatBytes(inspection.StagingRequiredBytes)}\n\n" +
+                (preservesLocalData
+                    ? "Cotações, cestas, evidências e configurações deste PC serão preservadas. A base pública de preços será atualizada com o arquivo selecionado. Use uma exportação atualizada da origem.\n\n"
+                    : string.Empty) +
                 "A operação pode levar vários minutos em computadores lentos. O progresso será mostrado e " +
                 "a base atual será preservada por renomeação, sem uma cópia física adicional. " +
                 "Não encerre o programa durante a instalação final. Continuar?",
@@ -4138,9 +4170,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 _diagnosticLog.Info(
                     "backup-import",
                     $"Importação concluída. banco_anterior={recovery}");
-                _calibrationService.Connections.ResetCalibration();
-                _calibrationWindow?.Close();
-                await SaveCalibrationAsync(null).ConfigureAwait(true);
+                if (!preservesLocalData)
+                {
+                    _calibrationService.Connections.ResetCalibration();
+                    _calibrationWindow?.Close();
+                    await SaveCalibrationAsync(null).ConfigureAwait(true);
+                }
                 StatusText = string.IsNullOrEmpty(recovery)
                     ? "Backup importado; não havia uma base anterior para preservar."
                     : $"Backup importado. Base anterior preservada em {recovery}";
@@ -4821,7 +4856,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      OpenPncpCommand, AccessDocumentsCommand, AccessItemDocumentsCommand,
                      ClearDocumentCacheCommand,
                      CancelDocumentOperationCommand,
-                     ExportBackupCommand, ImportBackupCommand, ExportUpdatesCommand, ImportUpdatesCommand, CompactDatabaseCommand, CancelFileOperationCommand, GitHubUpdateCommand,
+                     ExportBackupCommand, ImportBackupCommand, ExportPriceDatabaseCommand, ImportPriceDatabaseCommand, ExportUpdatesCommand, ImportUpdatesCommand, CompactDatabaseCommand, CancelFileOperationCommand, GitHubUpdateCommand,
                      ClearBackupRecoveriesCommand, ClearCacheCommand,
                      ToggleDesktopShortcutCommand,
                      ManageSweetCodesCommand, ToggleContractsPanelCommand,

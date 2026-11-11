@@ -171,7 +171,18 @@ public sealed class SqliteConnectionFactory : ISqliteConnectionFactory
 
     public async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken = default)
     {
+        var transferLease = await SqliteDatabaseTransferGate.EnterConnectionAsync(
+            DatabasePath, cancellationToken).ConfigureAwait(false);
         var connection = new SqliteConnection(_connectionString);
+        // Factory connections are single-use: callers close/dispose them rather than reopening.
+        System.Data.StateChangeEventHandler? releaseOnClose = null;
+        releaseOnClose = (_, args) =>
+        {
+            if (args.CurrentState != System.Data.ConnectionState.Closed) return;
+            connection.StateChange -= releaseOnClose;
+            transferLease.Dispose();
+        };
+        connection.StateChange += releaseOnClose;
         try
         {
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -185,7 +196,15 @@ public sealed class SqliteConnectionFactory : ISqliteConnectionFactory
         }
         catch
         {
-            await connection.DisposeAsync().ConfigureAwait(false);
+            try
+            {
+                await connection.DisposeAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                connection.StateChange -= releaseOnClose;
+                transferLease.Dispose();
+            }
             throw;
         }
     }

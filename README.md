@@ -96,7 +96,23 @@ Na importação, o banco é extraído em staging ao lado do banco ativo, portant
 
 No instante da ativação, o banco atual é renomeado para `nome-do-banco.db.before-import-...bak`, o banco validado assume o caminho oficial e é aberto para confirmação. Se essa etapa falhar, a base anterior é restaurada automaticamente. O cancelamento fica disponível até o começo dessa curta troca. Depois de confirmar que não precisa mais da recuperação, use **Opções → Limpeza → Excluir bases anteriores de importação**; a ação mostra quantidade e tamanho e não alcança arquivos fora do padrão de recuperação do banco atual.
 
-O backup **Completo sem cotações** serve para iniciar um banco em outro PC e exige a versão 1.2.11 ou posterior. Sua importação é recusada quando o banco de destino já contém cotações, para não substituir trabalhos locais. Em PCs em uso, instale a release do programa e importe atualizações PNCP; essas operações preservam as cotações locais.
+O backup **Completo sem cotações** serve para iniciar um banco em outro PC e exige a versão 1.2.11 ou posterior. Sua importação é recusada quando o banco de destino já contém cotações, para não substituir trabalhos locais. Em PCs em uso, prefira a nova **Base completa de preços**, descrita abaixo, ou as atualizações PNCP incrementais; essas operações preservam as cotações locais.
+
+## Base completa de preços entre PCs
+
+Na versão 1.2.44 ou posterior, **Opções → Arquivo → Exportar base completa de preços** cria um `.pncpking` próprio para atualizar computadores que já têm cotações. Esta opção transfere o conteúdo completo disponível na origem, inclusive publicações tardias, sem precisar de pacotes por períodos de 10 ou 20 dias.
+
+1. No PC de origem, atualize a base de preços e use **Exportar base completa de preços**. A exportação não baixa dados novos por conta própria. Aguarde a conclusão antes de copiar o arquivo.
+2. No PC de destino, instale esta versão ou posterior e use **Importar base completa de preços**. Feche as janelas de item de cotação e de avaliação do PC e aguarde ou pause as operações em andamento.
+3. Confira a prévia de tamanho e espaço. O programa prepara a base ao lado do banco ativo, preserva os dados locais e somente então faz a troca com recuperação. O banco anterior é mantido em `.before-import-...bak`; não apague essa cópia antes de conferir o resultado.
+
+Cotações e seus IDs, cestas, conversões, evidências de internet e configurações do destino são preservados. As cotações e informações particulares do emissor não são incluídas no pacote. O novo comando de importação recusa um backup comum de recuperação, para impedir que seja usado por engano como atualização de preços. **Completo sem cotações** continua sendo o perfil legado para iniciar um banco vazio.
+
+O trabalho pesado de compactação e verificação integral fica no emissor. No receptor, a extração calcula SHA-256 no mesmo fluxo e aproveita os índices já prontos; não há `VACUUM`, `PRAGMA integrity_check` nem poda de retenção durante esta transferência. A rotina normal de retenção de 11 meses, executada pelo programa fora da transferência, continua em vigor. O tempo depende do tamanho da base, do volume de dados exclusivos do destino e da velocidade do disco; não equivale a uma cópia instantânea.
+
+Contratações que só existem no destino são conservadas com seus itens e resultados. Para dados presentes nos dois PCs, versões conflitantes só são substituídas quando a origem comprova uma versão mais recente e completa. Se houver preço mais novo no destino ou divergência sem comprovação suficiente, o programa recusa a transferência e pede uma exportação atualizada, sem fazer uma união que possa ressuscitar preços cancelados. A comparação lê os dados existentes, por isso um destino grande também influencia o tempo de importação.
+
+Use NTFS ou exFAT para arquivos grandes. A prévia reserva espaço para staging e preservação; o banco atual não é apagado para abrir espaço. Se houver versão incompatível, concorrência ou espaço insuficiente, a importação é recusada em vez de arriscar os trabalhos locais.
 
 ## Transferência de atualizações entre PCs
 

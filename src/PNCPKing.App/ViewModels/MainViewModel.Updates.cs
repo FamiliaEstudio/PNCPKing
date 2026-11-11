@@ -10,12 +10,18 @@ namespace PNCPKing.App.ViewModels;
 
 public sealed partial class MainViewModel
 {
+    public ICommand ExportPriceDatabaseCommand { get; private set; } = null!;
+    public ICommand ImportPriceDatabaseCommand { get; private set; } = null!;
+    private bool CanTransferPriceDatabase => CanEvaluatePc && _quotationItemWindow is null && _calibrationWindow is null;
+
     public ICommand ExportUpdatesCommand { get; private set; } = null!;
     public ICommand ImportUpdatesCommand { get; private set; } = null!;
     public ICommand CompactDatabaseCommand { get; private set; } = null!;
 
     private void InitializeUpdates()
     {
+        ExportPriceDatabaseCommand = new AsyncRelayCommand(() => ExportBackupAsync(BackupProfile.PricesPreservingLocalData), () => CanTransferPriceDatabase);
+        ImportPriceDatabaseCommand = new AsyncRelayCommand(() => ImportBackupAsync(true), () => CanTransferPriceDatabase);
         GitHubUpdateCommand = new AsyncRelayCommand(() => _gitHubUpdateTask = UpdateFromGitHubAsync(), () => CanEvaluatePc);
         ExportUpdatesCommand = new AsyncRelayCommand(ExportOfficialUpdatesAsync, () => CanEvaluatePc);
         ImportUpdatesCommand = new AsyncRelayCommand(ImportOfficialUpdatesAsync, () => CanEvaluatePc);

@@ -7,6 +7,19 @@ namespace PNCPKing.Tests;
 public sealed class UiBindingTests
 {
     [Fact]
+    public void FullPriceTransferHasSeparateCommandsFromRecoveryAndIncrementalUpdates()
+    {
+        var document = LoadView("MainWindow.xaml");
+        XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        var menus = document.Descendants(presentation + "MenuItem").ToArray();
+        var export = Assert.Single(menus, element => element.Attribute("Command")?.Value == "{Binding ExportPriceDatabaseCommand}");
+        var import = Assert.Single(menus, element => element.Attribute("Command")?.Value == "{Binding ImportPriceDatabaseCommand}");
+        Assert.Contains("base completa de preços", export.Attribute("Header")!.Value);
+        Assert.Contains("base completa de preços", import.Attribute("Header")!.Value);
+        foreach (var command in new[] { "ExportBackupCommand", "ImportBackupCommand", "ExportUpdatesCommand", "ImportUpdatesCommand" })
+            Assert.Single(menus, element => element.Attribute("Command")?.Value == $"{{Binding {command}}}");
+    }
+    [Fact]
     public void QuotationPrices_ExposeHomologationAndPublicationAsSeparateColumns()
     {
         var document = LoadView("QuotationItemWindow.xaml");
@@ -337,6 +350,7 @@ public sealed class UiBindingTests
             ["_Arquivo"] = [
                 "{Binding ExportUpdatesCommand}", "{Binding ImportUpdatesCommand}",
                 "{Binding CompactDatabaseCommand}",
+                "{Binding ExportPriceDatabaseCommand}", "{Binding ImportPriceDatabaseCommand}",
                 "{Binding ExportBackupCommand}",
                 "{Binding ImportBackupCommand}"
             ],
