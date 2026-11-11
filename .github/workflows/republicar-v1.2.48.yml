@@ -13,7 +13,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  testar-cancelamento:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: c4bb38d65bcf800f48cfc5d19585b272078a0117
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+      - name: Conferir o cancelamento com o arquivo aberto
+        run: dotnet test tests/PNCPKing.Tests/PNCPKing.Tests.csproj -c Release --filter FullyQualifiedName~CancelDuringPreparationReleasesTheTemporaryBeforeCleanup --logger "console;verbosity=normal"
+
   republicar:
+    needs: testar-cancelamento
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -23,7 +37,7 @@ jobs:
       - name: Aguardar a validação completa no Windows
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run watch 43084979588 --repo "$GITHUB_REPOSITORY" --exit-status --interval 20 > "$RUNNER_TEMP/windows-status.log"
+        run: gh run watch 43086843211 --repo "$GITHUB_REPOSITORY" --exit-status --interval 20 > "$RUNNER_TEMP/windows-status.log"
       - name: Publicar os artefatos já testados no Windows
         env:
           GH_TOKEN: ${{ github.token }}

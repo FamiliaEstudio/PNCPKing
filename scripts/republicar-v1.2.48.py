@@ -9,8 +9,8 @@ import tempfile
 REPO = "FamiliaEstudio/PNCPKing"
 TAG = "v1.2.48"
 PREVIOUS = "c96c9bd55d0d7f682a8bba5f26bf82aa8784f306"
-REVISION = "0719c2dd3c066e6b04592f4572e52ff9209f5e88"
-RUN = "43084979588"
+REVISION = "c4bb38d65bcf800f48cfc5d19585b272078a0117"
+RUN = "43086843211"
 NAMES = ("PNCPKing.exe", "app-update.json")
 
 
