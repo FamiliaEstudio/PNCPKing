@@ -7,7 +7,8 @@ namespace PNCPKing.App.Services;
 
 public sealed record DownloadedPriceUpdate(string Path, PriceUpdatePackage Package);
 public sealed record PendingGitHubUpdate(string DatabasePath, string AppVersion, DownloadedPriceUpdate? PriceUpdate,
-    GitHubUpdateRelease<PricesUpdateManifest>? DeferredPrices = null, bool UpdatePricesAfterRestart = true);
+    GitHubUpdateRelease<PricesUpdateManifest>? DeferredPrices = null, bool UpdatePricesAfterRestart = true,
+    DrivePriceFile? DrivePrices = null);
 public sealed record AppInstallRequest(int ProcessId, long ProcessStartedUtcTicks, string TargetPath,
     string StagedPath, long Size, string Sha256, string Version, string OperationId);
 

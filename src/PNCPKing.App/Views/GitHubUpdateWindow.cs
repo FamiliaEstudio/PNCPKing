@@ -9,14 +9,17 @@ public sealed class GitHubUpdateWindow : Window
 {
     private readonly CheckBox _updateProgram;
     private readonly CheckBox _updatePrices;
+    private readonly ComboBox? _driveFiles;
+    public DrivePriceFile? SelectedDriveFile => _driveFiles?.SelectedItem as DrivePriceFile;
     public bool UpdateProgram => _updateProgram.IsEnabled && _updateProgram.IsChecked == true;
-    public bool UpdatePrices => _updatePrices.IsEnabled && _updatePrices.IsChecked == true;
+    public bool UpdatePrices => _updatePrices.IsEnabled && _updatePrices.IsChecked == true &&
+        (_driveFiles is null || SelectedDriveFile is not null);
 
     public GitHubUpdateWindow(GitHubUpdatePlan plan, GitHubReleaseNotes? releaseNotes = null,
-        bool pricesRequireProgramUpdate = false)
+        bool pricesRequireProgramUpdate = false, IReadOnlyList<DrivePriceFile>? driveFiles = null)
     {
         SetResourceReference(StyleProperty, "AppWindow");
-        Title = "Atualizar pelo GitHub";
+        Title = driveFiles is null ? "Atualizar pelo GitHub" : "Atualizar programa e preços";
         Width = 660;
         Height = plan.App is null ? 380 : 600;
         MinWidth = 380;
@@ -44,11 +47,27 @@ public sealed class GitHubUpdateWindow : Window
         };
         _updatePrices = new CheckBox
         {
-            Content = "Atualizar os preços", IsEnabled = plan.Package is not null, IsChecked = plan.Package is not null,
+            Content = "Atualizar os preços", IsEnabled = plan.Package is not null || driveFiles?.Count > 0,
+            IsChecked = plan.Package is not null || driveFiles?.Count > 0,
             Margin = new Thickness(0, 0, 0, 8)
         };
         summary.Children.Add(_updateProgram);
         summary.Children.Add(_updatePrices);
+        if (driveFiles is not null)
+        {
+            _driveFiles = new ComboBox
+            {
+                ItemsSource = driveFiles, SelectedIndex = driveFiles.Count == 1 ? 0 : -1,
+                Margin = new Thickness(0, 0, 0, 8),
+                ToolTip = "Pacotes .pncpking da pasta pública do Google Drive. Havendo vários, escolha o arquivo a importar."
+            };
+            summary.Children.Add(new TextBlock
+            {
+                Text = driveFiles.Count > 1 ? "Escolha o pacote do Google Drive:" : "Base completa no Google Drive:",
+                TextWrapping = TextWrapping.Wrap
+            });
+            summary.Children.Add(_driveFiles);
+        }
         var selectionSummary = new TextBlock { TextWrapping = TextWrapping.Wrap };
         summary.Children.Add(selectionSummary);
         panel.Children.Add(new ScrollViewer
@@ -109,6 +128,7 @@ public sealed class GitHubUpdateWindow : Window
         _updateProgram.Unchecked += (_, _) => RefreshSelection();
         _updatePrices.Checked += (_, _) => RefreshSelection();
         _updatePrices.Unchecked += (_, _) => RefreshSelection();
+        if (_driveFiles is not null) _driveFiles.SelectionChanged += (_, _) => RefreshSelection();
         RefreshSelection();
         buttons.Children.Add(update);
         buttons.Children.Add(new Button { Content = "Cancelar", IsCancel = true, Padding = new Thickness(14, 6, 14, 6) });
@@ -118,16 +138,21 @@ public sealed class GitHubUpdateWindow : Window
 
         void RefreshSelection()
         {
-            _updatePrices.IsEnabled = plan.Package is not null && (!pricesRequireProgramUpdate || UpdateProgram);
+            _updatePrices.IsEnabled = (plan.Package is not null || driveFiles?.Count > 0) && (!pricesRequireProgramUpdate || UpdateProgram);
             if (!_updatePrices.IsEnabled) _updatePrices.IsChecked = false;
-            update.IsEnabled = UpdateProgram || UpdatePrices;
-            var size = (UpdateProgram ? plan.App!.File.Size : 0) + (UpdatePrices ? plan.Package!.Download.Size : 0);
+            update.IsEnabled = (UpdateProgram || UpdatePrices) &&
+                !(_driveFiles is not null && _updatePrices.IsChecked == true && SelectedDriveFile is null);
+            var size = (UpdateProgram ? plan.App!.File.Size : 0) + (UpdatePrices ? SelectedDriveFile?.Size ?? plan.Package!.Download.Size : 0);
             selectionSummary.Text = $"Download selecionado: {size / (1024d * 1024):N1} MiB." +
                 (UpdateProgram ? "\nO programa será atualizado e reiniciado." +
                     (UpdatePrices ? " Depois os preços serão baixados e importados automaticamente." : "") :
                     UpdatePrices ? "\nOs preços serão importados sem reiniciar o programa." : "") +
                 (plan.Package is not null && pricesRequireProgramUpdate && !UpdateProgram
                     ? "\nEste pacote de preços exige também a atualização do programa." : "") +
+                (driveFiles?.Count > 1 && _updatePrices.IsChecked == true && SelectedDriveFile is null
+                    ? "\nSelecione um pacote para atualizar os preços." : "") +
+                (driveFiles is not null && UpdatePrices
+                    ? "\nA base pública será substituída pelo pacote. A confirmação e as verificações da importação serão mantidas." : "") +
                 "\nCotações, cestas e configurações serão preservadas.";
         }
     }

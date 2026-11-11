@@ -123,7 +123,7 @@ O formato **Completo sem cotações** é reaproveitado. Pacotes **Base completa 
 
 ## Transferência de atualizações entre PCs
 
-O botão **Atualizar pelo GitHub**, ao lado de **Opções**, verifica novas versões do programa e o pacote móvel de preços publicado em `FamiliaEstudio/PNCPKing`. Ele apresenta uma prévia e reinicia somente quando instala um executável novo. Preços podem ser atualizados independentemente do programa. Preparação das releases, requisitos e retomada: [atualizações pelo GitHub](docs/github-updates.md).
+O botão **Atualizar pelo GitHub**, ao lado de **Opções**, verifica novas versões do programa no GitHub. Na versão **1.2.47 ou posterior**, a opção **Atualizar os preços** procura arquivos `.pncpking` na [pasta pública do Google Drive](https://drive.google.com/drive/folders/1g8N6-G7EnO2Ah_cF8-DDCbLpu2EuTe6g), baixa o pacote e abre a mesma confirmação de importação da base completa. Se houver vários pacotes, escolha qual usar. O download aceita arquivos maiores que 4 GiB e não altera a importação/preservação da 1.2.46. Preços podem ser atualizados independentemente do programa; escolhendo ambos, o programa reinicia antes de baixar os preços. A importação manual continua disponível. Detalhes e requisitos: [atualizações pelo GitHub](docs/github-updates.md).
 
 **Exportar backup** mantém a opção de banco completo `.pncpking`. A transferência `.pncpupdate` é adicional e incorpora apenas dados oficiais, preservando cotações, cestas, evidências particulares e configurações do destino, observada a retenção de 11 meses.
 

@@ -20,6 +20,7 @@
                       SkipGetTargetFrameworkProperties="true" />
   </ItemGroup>
   <ItemGroup>
+    <None Update="Fixtures/drive-*.html" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../scripts/prepare-github-prices.ps1" Link="Scripts/prepare-github-prices.ps1" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../scripts/read-release-notes.ps1" Link="Scripts/read-release-notes.ps1" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../src/PNCPKing.App/Services/InstallGitHubUpdate.ps1" Link="Scripts/InstallGitHubUpdate.ps1" CopyToOutputDirectory="PreserveNewest" />

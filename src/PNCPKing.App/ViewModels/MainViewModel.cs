@@ -4023,24 +4023,28 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private Task ImportBackupAsync() => ImportBackupAsync(false);
 
-    private async Task ImportBackupAsync(bool pricesOnly)
+    private async Task ImportBackupAsync(bool pricesOnly, string? sourcePath = null)
     {
-        var dialog = new OpenFileDialog
+        if (sourcePath is null)
         {
-            Title = pricesOnly ? "Importar base completa de preços" : "Importar backup do PNCP King",
-            Filter = "Backup PNCP King (*.pncpking)|*.pncpking",
-            CheckFileExists = true
-        };
-        if (dialog.ShowDialog() != true)
-        {
-            return;
+            var dialog = new OpenFileDialog
+            {
+                Title = pricesOnly ? "Importar base completa de preços" : "Importar backup do PNCP King",
+                Filter = "Backup PNCP King (*.pncpking)|*.pncpking",
+                CheckFileExists = true
+            };
+            if (dialog.ShowDialog() != true)
+            {
+                return;
+            }
+            sourcePath = dialog.FileName;
         }
 
         BackupInspection inspection;
         try
         {
             StatusText = "Inspecionando o backup e o espaço disponível…";
-            inspection = await Task.Run(() => _backupService.InspectAsync(dialog.FileName))
+            inspection = await Task.Run(() => _backupService.InspectAsync(sourcePath))
                 .ConfigureAwait(true);
             _diagnosticLog.Info(
                 "backup-import",
@@ -4162,7 +4166,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 _diagnosticLog.Info("backup-import", "Importação autorizada pelo usuário e iniciada.");
                 var recovery = await Task.Run(
                         () => _backupService.ImportAsync(
-                            dialog.FileName,
+                            sourcePath,
                             importProgress,
                             cancellationToken),
                         cancellationToken)
