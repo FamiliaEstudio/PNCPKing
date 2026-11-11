@@ -356,6 +356,7 @@ public sealed class UiBindingTests
             ],
             ["_Diagnóstico"] = [
                 "{Binding OpenDiagnosticLogsCommand}",
+                "{Binding SendLastDiagnosticErrorCommand}",
                 "{Binding ExportPerformanceReportCommand}",
                 "{Binding ComparePerformanceReportCommand}",
                 "{Binding EvaluatePcCommand}"
