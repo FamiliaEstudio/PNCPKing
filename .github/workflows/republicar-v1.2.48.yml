@@ -1,0 +1,30 @@
+name: Republicar a revisão 1.2.48.1
+
+on:
+  push:
+    branches: ['ops/republicar-v1.2.48']
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: republicar-pncpking-v1.2.48
+  cancel-in-progress: false
+
+jobs:
+  republicar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Aguardar a validação completa no Windows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run watch 43084979588 --repo "$GITHUB_REPOSITORY" --exit-status --interval 20 > "$RUNNER_TEMP/windows-status.log"
+      - name: Publicar os artefatos já testados no Windows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/republicar-v1.2.48.py
