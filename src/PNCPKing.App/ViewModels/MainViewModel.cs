@@ -3855,7 +3855,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 var quotationsChoice = MessageBox.Show(
                     "O backup completo deve incluir as cotações?\n\n" +
                     "SIM — Completo com cotações, para recuperação dos seus dados.\n\n" +
-                    "NÃO — Completo sem cotações, para iniciar um banco em outro PC.\n\n" +
+                    "NÃO — Completo sem cotações, para substituir os preços de outro PC preservando as cotações dele.\n\n" +
                     "CANCELAR — não exportar.",
                     "Cotações no backup completo",
                     MessageBoxButton.YesNoCancel,
@@ -4078,12 +4078,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        var preservesLocalData = inspection.Profile == BackupProfile.PricesPreservingLocalData;
+        var preservesLocalData = inspection.Profile is BackupProfile.FullWithoutQuotations or BackupProfile.PricesPreservingLocalData;
         if (pricesOnly && !preservesLocalData)
         {
             MessageBox.Show(
-                "Este arquivo é um backup de recuperação, não uma base completa de preços com preservação local. " +
-                "Exporte novamente pela opção Exportar base completa de preços no PC de origem.",
+                "Este arquivo inclui cotações e é um backup de recuperação. " +
+                "Exporte novamente com o perfil Completo sem cotações no PC de origem.",
                 "Arquivo incompatível", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
@@ -4098,7 +4098,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         {
             BackupProfile.PricesPreservingLocalData => "Base completa de preços, preservando os dados locais do destino",
             BackupProfile.Full => "Completo com cotações",
-            BackupProfile.FullWithoutQuotations => "Completo sem cotações — somente para banco sem cotações",
+            BackupProfile.FullWithoutQuotations => "Completo sem cotações — preserva as cotações deste PC",
             BackupProfile.Compact => "Compacto com cotações",
             _ => "Legado"
         };
@@ -4115,7 +4115,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 $"Staging: {inspection.StagingRoot}\n" +
                 $"Espaço necessário: {FormatBytes(inspection.StagingRequiredBytes)}\n\n" +
                 (preservesLocalData
-                    ? "Cotações, cestas, evidências e configurações deste PC serão preservadas. A base pública de preços será atualizada com o arquivo selecionado. Use uma exportação atualizada da origem.\n\n"
+                    ? "Cotações, cestas, evidências e configurações deste PC serão preservadas. Toda a base pública de preços será substituída pelo arquivo selecionado, sem comparação ou mesclagem. Preços exclusivos deste PC sairão da base ativa; referências já salvas nas cotações continuarão preservadas. Use uma exportação atualizada da origem.\n\n"
                     : string.Empty) +
                 "A operação pode levar vários minutos em computadores lentos. O progresso será mostrado e " +
                 "a base atual será preservada por renomeação, sem uma cópia física adicional. " +

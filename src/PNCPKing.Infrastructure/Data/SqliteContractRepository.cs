@@ -9,7 +9,7 @@ namespace PNCPKing.Infrastructure.Data;
 
 public sealed partial class SqliteContractRepository : IContractRepository, ICoverageRepository
 {
-    public const int CurrentSchemaVersion = 33;
+    public const int CurrentSchemaVersion = 34;
 
     private const string GeographicGroupExpression = "CASE WHEN c.geo_layer = 0 " +
         "THEN COALESCE(c.municipality_distance_rank, 999999) " +
@@ -821,6 +821,36 @@ public sealed partial class SqliteContractRepository : IContractRepository, ICov
             await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             version = 33;
+        }
+
+        if (version < 34)
+        {
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var migration = connection.CreateCommand();
+            migration.Transaction = transaction;
+            // This is local search history, not a child of the replaceable public dataset.
+            // Rebuild only this small table, preserving its quotation ownership and all rows.
+            migration.CommandText = """
+                CREATE TABLE quotation_processed_contracts_v34(
+                    run_id TEXT NOT NULL REFERENCES quotation_automation_runs(id) ON DELETE CASCADE,
+                    contract_id TEXT NOT NULL,
+                    prompt_order INTEGER NOT NULL,
+                    processed_at TEXT NOT NULL,
+                    matched_items INTEGER NOT NULL DEFAULT 0,
+                    revealed_prices INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(run_id, contract_id)
+                );
+                INSERT INTO quotation_processed_contracts_v34
+                    SELECT * FROM quotation_processed_contracts;
+                DROP TABLE quotation_processed_contracts;
+                ALTER TABLE quotation_processed_contracts_v34 RENAME TO quotation_processed_contracts;
+                CREATE INDEX idx_processed_contracts_run_time
+                    ON quotation_processed_contracts(run_id, processed_at, contract_id);
+                UPDATE schema_info SET version = 34 WHERE id = 1;
+                """;
+            await migration.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            version = 34;
         }
 
         stopwatch.Stop();

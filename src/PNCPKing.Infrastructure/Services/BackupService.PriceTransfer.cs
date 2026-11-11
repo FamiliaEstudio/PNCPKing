@@ -17,9 +17,12 @@ public sealed partial class BackupService
         "quotation_internet_price_drafts", "quotation_internet_price_evidence", "quotation_line_search_prompts",
         "quotation_contract_search_prompts", "quotation_processed_contracts", "quotation_prompt_revalidations",
         "sweet_code_settings", "sweet_codes", "catalog_equivalence_rules", "catalog_entries_stage", "catalog_sync_state",
-        "guard_master", "guard_workers", "guard_campaigns", "guard_imported_packages",
-        "official_update_packages", "official_update_chunks", "sync_runs", "sync_partitions"
+        "guard_master", "guard_workers", "guard_campaigns", "sync_runs"
     ];
+    // Completion receipts describe prices in the old public database, not user work.
+    // Keeping them would make later updates skip data removed by total replacement.
+    private static readonly string[] TransferResetTables =
+    ["official_update_chunks", "official_update_packages", "guard_imported_packages", "sync_partitions"];
     private static readonly string[] TransferPublicTables =
     [
         "schema_info", "dataset", "contracts", "items", "item_results", "contract_item_snapshots",
@@ -85,7 +88,7 @@ public sealed partial class BackupService
             foreach (var name in actual.Keys.Where(k => k.StartsWith("table:")).Select(k => k[6..]))
             {
                 var fts = new[] { "contracts_fts", "items_fts", "catalog_entries_fts", "catalog_description_fts" };
-                if (!TransferLocalTables.Contains(name) && !TransferPublicTables.Contains(name) &&
+                if (!TransferLocalTables.Contains(name) && !TransferResetTables.Contains(name) && !TransferPublicTables.Contains(name) &&
                     !fts.Any(f => name == f || new[] { "_data", "_idx", "_content", "_docsize", "_config" }.Any(s => name == f + s)))
                     throw new InvalidDataException($"Tabela sem política de transferência: {name}.");
             }
@@ -126,7 +129,10 @@ public sealed partial class BackupService
         await using (var tx = c.BeginTransaction())
         {
             var triggers = await SuspendLocalTriggersAsync(c,tx,ct);
-            foreach (var table in TransferLocalTables.Where(tables.Contains)) await TransferSqlAsync(c,$"DELETE FROM {Q(table)};",ct,tx);
+            // Count the public dictionary on the exporting PC, not on the old receiver.
+            await TransferSqlAsync(c,"CREATE TEMP TABLE transfer_catalog_counts AS SELECT catalog_kind,COUNT(*) AS active_records FROM catalog_entries WHERE active=1 GROUP BY catalog_kind;",ct,tx);
+            foreach (var table in TransferLocalTables.Concat(TransferResetTables).Where(tables.Contains)) await TransferSqlAsync(c,$"DELETE FROM {Q(table)};",ct,tx);
+            await TransferSqlAsync(c,"INSERT INTO catalog_sync_state(catalog_kind,active_records) SELECT catalog_kind,active_records FROM transfer_catalog_counts; INSERT OR IGNORE INTO catalog_sync_state(catalog_kind) VALUES(1),(2);",ct,tx);
             await TransferSqlAsync(c,"UPDATE price_cache_contracts SET user_pinned=0,background_owned=0; UPDATE price_cache_control SET authorized=0,enabled=0,paused=0,authorized_at=NULL; UPDATE national_price_index_control SET authorized=0,enabled=0,paused=0,authorized_at=NULL;",ct,tx);
             foreach (var trigger in triggers) await TransferSqlAsync(c,trigger.Sql,ct,tx);
             await tx.CommitAsync(ct);
@@ -172,27 +178,35 @@ public sealed partial class BackupService
             await ValidateTransferSchemaAsync(c,"local_data",Path.GetDirectoryName(staged)!,ct);
             var localTables = await TransferTableNamesAsync(c,"local_data",ct);
             var stagingTables = await TransferTableNamesAsync(c,"main",ct);
-            foreach (var table in TransferLocalTables.Where(stagingTables.Contains))
-                if (await TransferScalarAsync(c,$"SELECT EXISTS(SELECT 1 FROM main.{Q(table)});",ct)!=0)
-                    throw new InvalidDataException($"O pacote de preços contém dados locais: {table}.");
             await using var tx = c.BeginTransaction();
             if (localTables.Contains("quotation_manual_price_divisors") && !stagingTables.Contains("quotation_manual_price_divisors"))
                 await SqliteQuotationRepository.EnsurePriceDivisorsTableAsync(c,tx,ct);
             var triggers=await SuspendLocalTriggersAsync(c,tx,ct);
-            await PreservePublicRowsAsync(c,tx,ct);
+            foreach (var table in TransferResetTables) await TransferSqlAsync(c,$"DELETE FROM main.{Q(table)};",ct,tx);
+            // The incoming public database is authoritative. Save only its tiny catalogue
+            // counters before replacing the destination's private synchronization state.
+            await TransferSqlAsync(c,"CREATE TEMP TABLE transfer_catalog_counts AS SELECT catalog_kind,active_records FROM main.catalog_sync_state;",ct,tx);
+            if (await TransferScalarAsync(c,"SELECT COUNT(*) FROM transfer_catalog_counts;",ct,tx)==0)
+                // Version 1.2.44 exported no catalogue counters. This compatibility fallback
+                // reads only the incoming dictionary, never destination contracts/items/prices.
+                await TransferSqlAsync(c,"INSERT INTO transfer_catalog_counts SELECT catalog_kind,COUNT(*) FROM main.catalog_entries WHERE active=1 GROUP BY catalog_kind;",ct,tx);
             foreach (var table in TransferLocalTables)
             {
+                if (stagingTables.Contains(table)) await TransferSqlAsync(c,$"DELETE FROM main.{Q(table)};",ct,tx);
                 if (!localTables.Contains(table)) continue;
-                await TransferSqlAsync(c,$"DELETE FROM main.{Q(table)}; INSERT INTO main.{Q(table)} SELECT * FROM local_data.{Q(table)};",ct,tx);
+                await TransferSqlAsync(c,$"INSERT INTO main.{Q(table)} SELECT * FROM local_data.{Q(table)};",ct,tx);
                 if (await TransferScalarAsync(c,$"SELECT EXISTS(SELECT * FROM main.{Q(table)} EXCEPT SELECT * FROM local_data.{Q(table)}) OR EXISTS(SELECT * FROM local_data.{Q(table)} EXCEPT SELECT * FROM main.{Q(table)});",ct,tx)!=0)
                     throw new InvalidDataException($"Não foi possível preservar integralmente {table}.");
             }
             // Active catalogue rows describe the incoming public dictionary, not the
             // destination's in-progress staging generation. Keep the latter intact.
-            await TransferSqlAsync(c,"UPDATE main.catalog_sync_state SET active_records=(SELECT COUNT(*) FROM main.catalog_entries e WHERE e.catalog_kind=catalog_sync_state.catalog_kind AND e.active=1);",ct,tx);
+            await TransferSqlAsync(c,"UPDATE main.catalog_sync_state SET active_records=COALESCE((SELECT active_records FROM transfer_catalog_counts t WHERE t.catalog_kind=catalog_sync_state.catalog_kind),0);",ct,tx);
             foreach(var control in new[]{"price_cache_control","national_price_index_control"})
                 await TransferSqlAsync(c,$"UPDATE main.{control} SET (authorized,enabled,paused,authorized_at)=(SELECT authorized,enabled,paused,authorized_at FROM local_data.{control} WHERE id=1) WHERE id=1;",ct,tx);
-            await TransferSqlAsync(c,"UPDATE main.price_cache_contracts SET (user_pinned,background_owned)=(SELECT user_pinned,background_owned FROM local_data.price_cache_contracts l WHERE l.contract_id=price_cache_contracts.contract_id) WHERE contract_id IN(SELECT contract_id FROM local_data.price_cache_contracts);",ct,tx);
+            // Legacy complete-without-quotations packages retained the sender's pins.
+            // Clear only marked rows via the ownership index before restoring local choices.
+            await TransferSqlAsync(c,"UPDATE main.price_cache_contracts SET user_pinned=0,background_owned=0 WHERE contract_id IN(SELECT contract_id FROM main.price_cache_contracts WHERE background_owned=1 UNION ALL SELECT contract_id FROM main.price_cache_contracts WHERE background_owned=0 AND user_pinned=1);",ct,tx);
+            await TransferSqlAsync(c,"UPDATE main.price_cache_contracts SET (user_pinned,background_owned)=(SELECT user_pinned,background_owned FROM local_data.price_cache_contracts l WHERE l.contract_id=price_cache_contracts.contract_id) WHERE contract_id IN(SELECT contract_id FROM local_data.price_cache_contracts WHERE background_owned=1 UNION ALL SELECT contract_id FROM local_data.price_cache_contracts WHERE background_owned=0 AND user_pinned=1);",ct,tx);
             foreach(var table in TransferLocalTables.Where(localTables.Contains))
                 if(await TransferScalarAsync(c,$"SELECT COUNT(*) FROM pragma_foreign_key_check('{table}');",ct,tx)!=0)
                     throw new InvalidDataException($"Referências locais inválidas: {table}.");
@@ -213,50 +227,4 @@ public sealed partial class BackupService
         return recovery;
     }
 
-    private static async Task<string[]> TransferColumnsAsync(SqliteConnection c, string table, SqliteTransaction tx, CancellationToken ct)
-    {
-        var names=new List<string>(); await using var cmd=c.CreateCommand(); cmd.Transaction=tx;
-        cmd.CommandText=$"PRAGMA main.table_info({Q(table)});";
-        await using var r=await cmd.ExecuteReaderAsync(ct); while(await r.ReadAsync(ct)) names.Add(r.GetString(1));
-        return names.ToArray();
-    }
-    private static async Task PreservePublicRowsAsync(SqliteConnection c, SqliteTransaction tx, CancellationToken ct)
-    {
-        // Copy whole absent contract trees only. Never union children of an existing
-        // contract: absence can be an authoritative PNCP deletion/cancellation.
-        await TransferSqlAsync(c,"CREATE TEMP TABLE transfer_missing_contracts(id TEXT PRIMARY KEY); INSERT INTO transfer_missing_contracts SELECT l.pncp_id FROM local_data.contracts l WHERE NOT EXISTS(SELECT 1 FROM main.contracts s WHERE s.pncp_id=l.pncp_id);",ct,tx);
-        const string newerParent="COALESCE(julianday(sc.global_updated_at)>julianday(lc.global_updated_at),0)";
-        const string completeParent="EXISTS(SELECT 1 FROM main.contract_item_snapshots cs WHERE cs.contract_id=sc.pncp_id AND cs.source_global_updated_at IS sc.global_updated_at AND cs.item_count=(SELECT COUNT(*) FROM main.items ci WHERE ci.contract_id=sc.pncp_id))";
-        const string newerItem="COALESCE(julianday(si.source_updated_at)>julianday(li.source_updated_at),0)";
-        const string completeResults="EXISTS(SELECT 1 FROM main.official_result_snapshots rs WHERE rs.contract_id=si.contract_id AND rs.item_number=si.item_number AND rs.parent_version IS sc.global_updated_at AND rs.item_version IS si.source_updated_at AND rs.result_count=(SELECT COUNT(*) FROM main.item_results rr WHERE rr.contract_id=si.contract_id AND rr.item_number=si.item_number))";
-        async Task RejectAsync(string sql,string message)
-        { if(await TransferScalarAsync(c,sql,ct,tx)!=0) throw new InvalidDataException(message); }
-        await RejectAsync($"SELECT EXISTS(SELECT 1 FROM local_data.contracts lc JOIN main.contracts sc ON sc.pncp_id=lc.pncp_id WHERE lc.global_updated_at IS NOT sc.global_updated_at AND NOT({newerParent} AND {completeParent}));",
-            "Há contratos locais com versão mais recente ou divergência sem snapshot completo na origem. Atualize e reexporte a base.");
-        await RejectAsync($"SELECT EXISTS(SELECT 1 FROM local_data.items li JOIN local_data.contracts lc ON lc.pncp_id=li.contract_id JOIN main.contracts sc ON sc.pncp_id=li.contract_id LEFT JOIN main.items si ON si.contract_id=li.contract_id AND si.item_number=li.item_number WHERE (si.contract_id IS NULL AND NOT({newerParent} AND {completeParent})) OR (si.contract_id IS NOT NULL AND li.source_updated_at IS NOT si.source_updated_at AND NOT({newerItem} AND {completeResults})));",
-            "Há itens locais ausentes ou divergentes sem versão completa mais recente na origem. Atualize e reexporte a base.");
-        var contractColumns=await TransferColumnsAsync(c,"contracts",tx,ct);
-        var differentContract="EXISTS(SELECT "+string.Join(",",contractColumns.Select(n=>"lc."+Q(n)))+" EXCEPT SELECT "+string.Join(",",contractColumns.Select(n=>"sc."+Q(n)))+")";
-        await RejectAsync($"SELECT EXISTS(SELECT 1 FROM local_data.contracts lc JOIN main.contracts sc ON sc.pncp_id=lc.pncp_id WHERE {differentContract} AND NOT({newerParent} AND {completeParent}));",
-            "Há conteúdo de contrato divergente sem versão completa mais recente na origem. Nada foi substituído.");
-        var itemColumns=(await TransferColumnsAsync(c,"items",tx,ct)).Where(n=>n is not ("hydration_status" or "last_error" or "cache_updated_at")).ToArray();
-        var differentItem="EXISTS(SELECT "+string.Join(",",itemColumns.Select(n=>"li."+Q(n)))+" EXCEPT SELECT "+string.Join(",",itemColumns.Select(n=>"si."+Q(n)))+")";
-        await RejectAsync($"SELECT EXISTS(SELECT 1 FROM local_data.items li JOIN local_data.contracts lc ON lc.pncp_id=li.contract_id JOIN main.contracts sc ON sc.pncp_id=li.contract_id JOIN main.items si ON si.contract_id=li.contract_id AND si.item_number=li.item_number WHERE {differentItem} AND NOT(({newerParent} AND {completeParent}) OR ({newerItem} AND {completeResults})));",
-            "Há conteúdo de item divergente sem versão completa mais recente na origem. Nada foi substituído.");
-        var resultColumns=await TransferColumnsAsync(c,"item_results",tx,ct);
-        var differentResults="EXISTS(SELECT "+string.Join(",",resultColumns.Select(n=>"lr."+Q(n)))+" EXCEPT SELECT "+string.Join(",",resultColumns.Select(n=>"sr."+Q(n)))+")";
-        await RejectAsync($"SELECT EXISTS(SELECT 1 FROM local_data.item_results lr JOIN local_data.items li ON li.contract_id=lr.contract_id AND li.item_number=lr.item_number JOIN local_data.contracts lc ON lc.pncp_id=lr.contract_id JOIN main.contracts sc ON sc.pncp_id=lr.contract_id LEFT JOIN main.items si ON si.contract_id=lr.contract_id AND si.item_number=lr.item_number LEFT JOIN main.item_results sr ON sr.contract_id=lr.contract_id AND sr.item_number=lr.item_number AND sr.result_sequence=lr.result_sequence WHERE (sr.contract_id IS NULL OR {differentResults}) AND NOT ((si.contract_id IS NULL AND {newerParent} AND {completeParent}) OR (si.contract_id IS NOT NULL AND ({newerParent} OR {newerItem}) AND {completeResults})));",
-            "Há preços locais diferentes ou ausentes sem comprovação de uma versão completa mais recente na origem. Nada foi substituído.");
-        await TransferSqlAsync(c,"INSERT INTO main.contracts SELECT l.* FROM local_data.contracts l JOIN transfer_missing_contracts m ON m.id=l.pncp_id; UPDATE main.dataset_statistics SET contract_count=contract_count+changes() WHERE id=1;",ct,tx);
-        foreach(var table in new[]{"items","item_results","contract_item_snapshots","official_result_snapshots"})
-            await TransferSqlAsync(c,$"INSERT INTO main.{table} SELECT l.* FROM local_data.{table} l JOIN transfer_missing_contracts m ON m.id=l.contract_id;",ct,tx);
-        // Contracts/snapshot triggers create provisional cache rows. Replace only those
-        // belonging to trees absent from the incoming snapshot, keeping cache statistics triggers.
-        await TransferSqlAsync(c,"DELETE FROM main.price_cache_contracts WHERE contract_id IN(SELECT id FROM transfer_missing_contracts); INSERT INTO main.price_cache_contracts SELECT l.* FROM local_data.price_cache_contracts l JOIN transfer_missing_contracts m ON m.id=l.contract_id;",ct,tx);
-        await TransferSqlAsync(c,"INSERT INTO main.coverage_day_modalities SELECT l.* FROM local_data.coverage_day_modalities l WHERE NOT EXISTS(SELECT 1 FROM main.coverage_day_modalities s WHERE s.coverage_date=l.coverage_date AND s.modality_id=l.modality_id AND s.uf=l.uf);",ct,tx);
-        // Do not regress a more recent completed local checkpoint to an older partial source checkpoint.
-        // A newer partial source checkpoint may represent work still needed, so it stays partial.
-        await TransferSqlAsync(c,"UPDATE main.coverage_day_modalities AS s SET (status,records_count,updated_at,last_error)=(SELECT l.status,l.records_count,l.updated_at,l.last_error FROM local_data.coverage_day_modalities l WHERE l.coverage_date=s.coverage_date AND l.modality_id=s.modality_id AND l.uf=s.uf) WHERE s.status NOT IN(3,4) AND EXISTS(SELECT 1 FROM local_data.coverage_day_modalities l WHERE l.coverage_date=s.coverage_date AND l.modality_id=s.modality_id AND l.uf=s.uf AND l.status IN(3,4) AND julianday(l.updated_at)>=julianday(s.updated_at));",ct,tx);
-        await TransferSqlAsync(c,"INSERT INTO main.catalog_entries SELECT l.* FROM local_data.catalog_entries l WHERE NOT EXISTS(SELECT 1 FROM main.catalog_entries s WHERE s.catalog_kind=l.catalog_kind AND s.code=l.code);",ct,tx);
-    }
 }

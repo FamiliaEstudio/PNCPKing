@@ -20,7 +20,7 @@ public sealed partial class MainViewModel
 
     private void InitializeUpdates()
     {
-        ExportPriceDatabaseCommand = new AsyncRelayCommand(() => ExportBackupAsync(BackupProfile.PricesPreservingLocalData), () => CanTransferPriceDatabase);
+        ExportPriceDatabaseCommand = new AsyncRelayCommand(() => ExportBackupAsync(BackupProfile.FullWithoutQuotations), () => CanTransferPriceDatabase);
         ImportPriceDatabaseCommand = new AsyncRelayCommand(() => ImportBackupAsync(true), () => CanTransferPriceDatabase);
         GitHubUpdateCommand = new AsyncRelayCommand(() => _gitHubUpdateTask = UpdateFromGitHubAsync(), () => CanEvaluatePc);
         ExportUpdatesCommand = new AsyncRelayCommand(ExportOfficialUpdatesAsync, () => CanEvaluatePc);

@@ -69,7 +69,7 @@ public sealed class QuotationDivisorTests
     }
 
     [Fact]
-    public async Task OptionalTableIsCreatedOnlyOnFirstDivisorAndKeepsSchema33()
+    public async Task OptionalTableIsCreatedOnlyOnFirstDivisorAndKeepsCurrentSchema()
     {
         await using var db = await TestDatabase.CreateAsync();
         var repo = new SqliteQuotationRepository(db.Repository.DatabasePath);
@@ -81,7 +81,7 @@ public sealed class QuotationDivisorTests
         await repo.SetManualBasketConversionFactorAsync(basket.Id, "a", 0.333333m);
         await repo.ConfirmBasketAsync(lineId, basket.Key);
         Assert.Empty((await db.Repository.InitializeAsync()).AppliedMigrations);
-        Assert.Equal(33L, await ScalarAsync(db.Repository.DatabasePath, "SELECT version FROM schema_info;"));
+        Assert.Equal((long)SqliteContractRepository.CurrentSchemaVersion, await ScalarAsync(db.Repository.DatabasePath, "SELECT version FROM schema_info;"));
         Assert.Null(await ScalarAsync(db.Repository.DatabasePath,
             "SELECT 1 FROM sqlite_master WHERE name = 'quotation_manual_price_divisors';"));
         var service = new QuotationService(repo, new QuotationAnalyzer());
@@ -90,7 +90,7 @@ public sealed class QuotationDivisorTests
         Assert.Equal(9.99m, legacy.SelectedBasket!.PriceEntries.Single(value => value.Reference.Id == "a").EffectiveUnitPrice);
         Assert.Null(legacy.SelectedBasket.PriceEntries.Single(value => value.Reference.Id == "a").PriceDivisor);
         await repo.SetManualBasketPriceDivisorAsync(basket.Id, "a", 3);
-        Assert.Equal(33L, await ScalarAsync(db.Repository.DatabasePath, "SELECT version FROM schema_info;"));
+        Assert.Equal((long)SqliteContractRepository.CurrentSchemaVersion, await ScalarAsync(db.Repository.DatabasePath, "SELECT version FROM schema_info;"));
         Assert.Equal(1L, await ScalarAsync(db.Repository.DatabasePath,
             "SELECT 1 FROM sqlite_master WHERE name = 'quotation_manual_price_divisors';"));
         Assert.Empty((await db.Repository.InitializeAsync()).AppliedMigrations);
@@ -165,6 +165,18 @@ public sealed class QuotationDivisorTests
         await repo.ConfirmBasketAsync(lineId, basket.Key);
         var path = Path.Combine(source.Directory, "legado.pncpcotacao");
         await new QuotationPackageService(source.Repository.DatabasePath, source.Directory).ExportAsync(path, project.Id);
+        // This payload has no automation history or new columns; retain a genuine schema-33 manifest.
+        using (var archive = ZipFile.Open(path, ZipArchiveMode.Update))
+        {
+            var entry = archive.GetEntry("manifest.json")!;
+            JsonObject manifest;
+            using (var reader = new StreamReader(entry.Open()))
+                manifest = JsonNode.Parse(await reader.ReadToEndAsync())!.AsObject();
+            manifest["databaseSchemaVersion"] = 33;
+            entry.Delete();
+            using var writer = new StreamWriter(archive.CreateEntry("manifest.json").Open());
+            await writer.WriteAsync(manifest.ToJsonString());
+        }
         using (var archive = ZipFile.OpenRead(path))
         using (var reader = new StreamReader(archive.GetEntry("manifest.json")!.Open()))
         {
@@ -202,7 +214,7 @@ public sealed class QuotationDivisorTests
         {
             var manifest = System.Text.Json.JsonSerializer.Deserialize<DatasetManifest>(await reader.ReadToEndAsync())!;
             Assert.Equal(format, manifest.ArchiveFormatVersion);
-            Assert.Equal(33, manifest.SchemaVersion);
+            Assert.Equal(SqliteContractRepository.CurrentSchemaVersion, manifest.SchemaVersion);
         }
         var importer = new BackupService(destination.Repository);
         Assert.False((await importer.InspectAsync(path)).RequiresMigration);
