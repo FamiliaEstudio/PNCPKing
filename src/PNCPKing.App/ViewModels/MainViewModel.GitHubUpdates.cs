@@ -66,11 +66,9 @@ public sealed partial class MainViewModel
                 var executable = await downloads.DownloadAsync(check.App!.Tag,
                     new(app.File.Size, app.File.Sha256, [app.File]), GitHubAppInstaller.CacheDirectory,
                     CreateDownloadProgress(), ct);
-                FileOperationProgressText = "Validando a versão do programa…";
-                await GitHubAppInstaller.ValidateBinaryAsync(executable, app, ct);
                 var pending = new PendingGitHubUpdate(_calibrationService.Connections.DatabasePath, app.Version,
                     null, UpdatePricesAfterRestart: prices is not null, DrivePrices: prices);
-                FileOperationProgressText = "Preparando instalação e reinício do programa…";
+                FileOperationProgressText = "Preparando e verificando o executável da atualização…";
                 await GitHubAppInstaller.PrepareAsync(executable, app, pending, ct);
                 CanCancelFileOperation = false;
                 restart = true;

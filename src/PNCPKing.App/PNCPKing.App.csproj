@@ -9,6 +9,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\Branding\PNCPKing.ico</ApplicationIcon>
     <Version>1.2.48</Version>
+    <AssemblyVersion Condition="'$(Version)' == '1.2.48'">1.2.48.1</AssemblyVersion>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="Services/InstallGitHubUpdate.ps1"
