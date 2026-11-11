@@ -36,6 +36,15 @@ public sealed class DrivePriceUpdateService(HttpClient client)
 
     public static IReadOnlyList<DrivePriceFile> ParseListing(string html)
     {
+        try { return ParseListingCore(html); }
+        catch (JsonException e)
+        {
+            throw new InvalidDataException("Formato inesperado na listagem do Google Drive. Use a importação manual.", e);
+        }
+    }
+
+    private static IReadOnlyList<DrivePriceFile> ParseListingCore(string html)
+    {
         var match = Regex.Match(html, @"window\['_DRIVE_ivd'\]\s*=\s*'((?:\\.|[^'\\])*)'",
             RegexOptions.CultureInvariant, RegexTimeout);
         if (!match.Success)
@@ -47,7 +56,13 @@ public sealed class DrivePriceUpdateService(HttpClient client)
             ?? throw new InvalidDataException("Listagem vazia do Google Drive.");
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
-        if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() != 1 ||
+        // Public Drive pages currently append three empty continuation fields and an
+        // auxiliary settings array. These are not file rows; non-empty continuation
+        // fields still fail closed instead of silently offering a partial listing.
+        if (root.ValueKind != JsonValueKind.Array ||
+            !(root.GetArrayLength() == 1 || root.GetArrayLength() == 5 &&
+                root[1].ValueKind == JsonValueKind.Null && root[2].ValueKind == JsonValueKind.Null &&
+                root[3].ValueKind == JsonValueKind.Null && root[4].ValueKind == JsonValueKind.Array) ||
             root[0].ValueKind != JsonValueKind.Array || root[0].GetArrayLength() >= 50)
             throw new InvalidDataException("A listagem do Google Drive mudou ou está incompleta. Use a importação manual.");
         var files = new List<DrivePriceFile>();

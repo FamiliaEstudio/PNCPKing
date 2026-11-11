@@ -48,7 +48,10 @@ public sealed class DrivePriceUpdateTests : IDisposable
     [Theory]
     [InlineData("<html>Sign in</html>")]
     [InlineData("<html>Too many downloads</html>")]
-    [InlineData("<script>window['_DRIVE_ivd']='[[],\"next-page\"]';</script>")]
+    [InlineData("<script>window['_DRIVE_ivd']='not-json';</script>")]
+    [InlineData("<script>window['_DRIVE_ivd']='[[],null,null,1,[]]';</script>")]
+    [InlineData("<script>window['_DRIVE_ivd']='[[],null,1,null,[]]';</script>")]
+    [InlineData("<script>window['_DRIVE_ivd']='[[],\\x22next-page\\x22]';</script>")]
     public void UnexpectedOrIncompleteListingFailsClosed(string html) =>
         Assert.Throws<InvalidDataException>(() => DrivePriceUpdateService.ParseListing(html));
 
