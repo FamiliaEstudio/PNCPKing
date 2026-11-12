@@ -221,7 +221,7 @@ public sealed class DrivePriceUpdateTests : IDisposable
     }
 
     [Fact]
-    public async Task DownloadedFullArchiveUsesExistingImporterAndPreservesLocalQuotation()
+    public async Task DownloadedFullArchiveAcceptsLegacyFtsFormattingAndPreservesLocalQuotation()
     {
         await using var source = await TestDatabase.CreateAsync();
         await using var destination = await TestDatabase.CreateAsync();
@@ -229,6 +229,7 @@ public sealed class DrivePriceUpdateTests : IDisposable
         await source.Repository.UpsertContractsAsync([contract]);
         var localQuotations = new SqliteQuotationRepository(destination.Repository.DatabasePath);
         var local = await localQuotations.CreateProjectAsync("Cotação local preservada");
+        await HistoricalTransferSchemaTests.ReformatFtsTriggerAsync(destination.Repository.DatabasePath, "contracts_fts_update");
         var sourcePath = Path.Combine(source.Directory, "source.pncpking");
         await new BackupService(source.Repository).ExportAsync(sourcePath, BackupProfile.FullWithoutQuotations);
         var file = File with { Size = new FileInfo(sourcePath).Length };

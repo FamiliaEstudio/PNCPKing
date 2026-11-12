@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 using PNCPKing.Core.Models;
 using PNCPKing.Infrastructure.Data;
@@ -58,7 +59,11 @@ public sealed partial class BackupService
     private static async Task<Dictionary<string, string>> TransferSchemaAsync(SqliteConnection c, string schema, CancellationToken ct)
     {
         await using var cmd = c.CreateCommand();
-        cmd.CommandText = $"SELECT type||':'||name, sql FROM {schema}.sqlite_master WHERE sql IS NOT NULL AND type IN ('table','trigger','view','index') ORDER BY name;";
+        cmd.CommandText = $"""
+            SELECT type||':'||CASE WHEN type='trigger' AND name COLLATE NOCASE IN ('contracts_fts_update','items_fts_update')
+                                    THEN lower(name) ELSE name END, sql
+            FROM {schema}.sqlite_master WHERE sql IS NOT NULL AND type IN ('table','trigger','view','index') ORDER BY name;
+            """;
         var result = new Dictionary<string,string>(StringComparer.Ordinal);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct)) result.Add(reader.GetString(0), reader.GetString(1));
@@ -98,7 +103,32 @@ public sealed partial class BackupService
         }
     }
 
-    private static async Task ValidateTransferSchemaAsync(
+    // The two reviewed FTS triggers use only ASCII words, punctuation and the literal 'delete'.
+    // Keep tokens separate: whitespace or a comment cannot join words or hide an extra statement.
+    private static readonly Regex FtsSqlTokens = new(
+        """--[^\n]*|/\*[\s\S]*?\*/|'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|[A-Za-z_][A-Za-z0-9_$]*|[^ \t\r\n\f]""",
+        RegexOptions.NonBacktracking);
+
+    private static IEnumerable<string> ReadFtsTokens(string sql)
+    {
+        foreach (Match match in FtsSqlTokens.Matches(sql))
+        {
+            var token = match.Value;
+            if (token.StartsWith("--", StringComparison.Ordinal) || token.StartsWith("/*", StringComparison.Ordinal))
+                continue;
+            if (token.Length > 2 && token[0] is '"' or '`' or '[')
+            {
+                var name = token[1..^1];
+                if (name.All(char.IsAscii) && name.ToLowerInvariant() is
+                    "contracts_fts_update" or "items_fts_update" or "contracts" or "items" or
+                    "contracts_fts" or "items_fts" or "old" or "new" or "rowid" or "search_text")
+                    token = name;
+            }
+            yield return char.IsAsciiLetter(token[0]) ? token.ToLowerInvariant() : token;
+        }
+    }
+
+    private static async Task<List<(string Name, string Sql)>> ValidateTransferSchemaAsync(
         SqliteConnection c, string schema, TransferSchemaRules rules, string origin, string path, CancellationToken ct)
     {
         var (expected, historical) = rules;
@@ -119,16 +149,31 @@ public sealed partial class BackupService
                 $"Não foi possível ler o esquema do {origin}. Arquivo: {Path.GetFullPath(path)}. " +
                 "O SQLite não devolveu as definições SQL.", error);
         }
-        // sqlite_master already removes CREATE ... IF NOT EXISTS. Preserve quoted
-        // contents exactly: changing a literal or identifier must never match a
-        // trusted definition. Only ASCII SQL whitespace outside quotes is cosmetic.
-        static string Normalize(string sql) => System.Text.RegularExpressions.Regex.Replace(
+        // For other schema objects, keep the existing comparison. sqlite_master removes
+        // CREATE ... IF NOT EXISTS; only runs of ASCII whitespace outside quotes collapse.
+        static string Normalize(string sql) => Regex.Replace(
             sql, @"('(?:''|[^'])*'|""(?:""""|[^""])*""|`(?:``|[^`])*`|\[[^\]]*\])|[ \t\r\n\f]+",
             match => match.Groups[1].Success ? match.Value : " ").Trim(' ').TrimEnd(';');
-        foreach (var entry in actual)
-            if ((!expected.TryGetValue(entry.Key, out var ddl) || Normalize(ddl) != Normalize(entry.Value)) &&
-                (!historical.TryGetValue(entry.Key, out var oldDdl) || Normalize(oldDdl) != Normalize(entry.Value)))
-                throw Rejection("Esquema não reconhecido para transferência segura", entry.Key, entry.Value);
+        var repairs = new List<(string Name, string Sql)>();
+        foreach (var (key, sql) in actual)
+        {
+            expected.TryGetValue(key, out var current);
+            historical.TryGetValue(key, out var legacy);
+            if (sql == current || sql == legacy) continue;
+            if (key is "trigger:contracts_fts_update" or "trigger:items_fts_update")
+            {
+                var trusted = new[] { current, legacy }.FirstOrDefault(ddl => ddl is not null &&
+                    !sql.Contains('\0') && ReadFtsTokens(ddl).SequenceEqual(ReadFtsTokens(sql), StringComparer.Ordinal));
+                if (trusted is not null)
+                {
+                    repairs.Add((key["trigger:".Length..], trusted));
+                    continue;
+                }
+            }
+            else if ((current is not null && Normalize(current) == Normalize(sql)) ||
+                     (legacy is not null && Normalize(legacy) == Normalize(sql))) continue;
+            throw Rejection("Esquema não reconhecido para transferência segura", key, sql);
+        }
         foreach (var entry in expected)
             if (!actual.ContainsKey(entry.Key) && entry.Key != "table:quotation_manual_price_divisors")
                 throw Rejection("Estrutura obrigatória ausente", entry.Key, null);
@@ -139,6 +184,16 @@ public sealed partial class BackupService
                 !fts.Any(f => name == f || new[] { "_data", "_idx", "_content", "_docsize", "_config" }.Any(s => name == f + s)))
                 throw Rejection("Tabela sem política de transferência", "table:" + name, actual["table:" + name]);
         }
+        return repairs;
+    }
+
+    private static async Task RepairTransferFtsAsync(SqliteConnection c, SqliteTransaction tx,
+        List<(string Name, string Sql)> repairs, CancellationToken ct)
+    {
+        // Called only on the disposable copy, after complete schema validation. Keep the matched
+        // historical WHEN guard, use program-owned SQL and leave the existing FTS index in place.
+        foreach (var (name, trustedSql) in repairs)
+            await TransferSqlAsync(c, $"DROP TRIGGER main.{Q(name)}; {trustedSql}", ct, tx);
     }
 
     private async Task CheckLocalTransferSchemaAsync(TransferSchemaRules rules, CancellationToken ct)
@@ -236,11 +291,12 @@ public sealed partial class BackupService
     {
         await using var c = await TransferConnectionAsync(path, ct);
         var rules = await ReadTransferRulesAsync(Path.GetDirectoryName(path)!, ct);
-        await ValidateTransferSchemaAsync(c, "main", rules, "banco local na cópia de exportação", repository.DatabasePath, ct);
+        var repairs = await ValidateTransferSchemaAsync(c, "main", rules, "banco local na cópia de exportação", repository.DatabasePath, ct);
         await TransferSqlAsync(c, "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;", ct);
         var tables = await TransferTableNamesAsync(c,"main",ct);
         await using (var tx = c.BeginTransaction())
         {
+            await RepairTransferFtsAsync(c, tx, repairs, ct);
             await NormalizeTransferHistoryAsync(c,tx,ct);
             var triggers = await SuspendLocalTriggersAsync(c,tx,ct);
             // Count the public dictionary on the exporting PC, not on the old receiver.
@@ -282,7 +338,7 @@ public sealed partial class BackupService
         Report(progress,BackupImportStage.PreservingCurrentDatabase,80,"Preservando cotações e configurações locais.",isIndeterminate:true);
         await using (var c = await TransferConnectionAsync(staged,ct))
         {
-            await ValidateTransferSchemaAsync(c, "main", rules, "pacote de preços", packagePath, ct);
+            var repairs = await ValidateTransferSchemaAsync(c, "main", rules, "pacote de preços", packagePath, ct);
             await using (var attach=c.CreateCommand())
             {
                 attach.CommandText="ATTACH DATABASE $path AS local_data;";
@@ -295,6 +351,7 @@ public sealed partial class BackupService
             var localTables = await TransferTableNamesAsync(c,"local_data",ct);
             var stagingTables = await TransferTableNamesAsync(c,"main",ct);
             await using var tx = c.BeginTransaction();
+            await RepairTransferFtsAsync(c, tx, repairs, ct);
             if (localTables.Contains("quotation_manual_price_divisors") && !stagingTables.Contains("quotation_manual_price_divisors"))
                 await SqliteQuotationRepository.EnsurePriceDivisorsTableAsync(c,tx,ct);
             await NormalizeTransferHistoryAsync(c,tx,ct);

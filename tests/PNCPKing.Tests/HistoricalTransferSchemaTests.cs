@@ -27,10 +27,13 @@ public sealed class HistoricalTransferSchemaTests
             Assert.Equal(33, result.PreviousVersion);
             Assert.Equal(34, result.CurrentVersion);
         }
+        var trusted = await ReformatFtsTriggerAsync(source.Repository.DatabasePath, "contracts_fts_update");
         var before = await SnapshotAsync(source.Repository.DatabasePath);
         var path = Path.Combine(source.Directory, "historical.pncpking");
         await new BackupService(source.Repository).ExportAsync(path, BackupProfile.FullWithoutQuotations);
-        Assert.True(File.Exists(path));
+        var exported = Path.Combine(source.Directory, "exported.db");
+        using (var archive = ZipFile.OpenRead(path)) archive.GetEntry("data.db")!.ExtractToFile(exported);
+        Assert.Equal(trusted, await ReadTriggerAsync(exported, "contracts_fts_update"));
         Assert.Equal(before, await SnapshotAsync(source.Repository.DatabasePath));
     }
 
@@ -106,9 +109,12 @@ public sealed class HistoricalTransferSchemaTests
         var sourceBefore = await SnapshotAsync(source.Repository.DatabasePath);
         var path = Path.Combine(source.Directory, "incoming-history.pncpking");
         await new BackupService(source.Repository).ExportAsync(path, profile);
+        var expectedTriggers = new Dictionary<string, string>();
         await RewritePackageAsync(path, async db =>
         {
             await SetHistoricalSchemaAsync(db, mixedGuards);
+            foreach (var name in new[] { "contracts_fts_update", "items_fts_update" })
+                expectedTriggers[name] = await ReformatFtsTriggerAsync(db, name);
             await SqlAsync(db, $"UPDATE schema_info SET version={version} WHERE id=1; ANALYZE;");
             Assert.Equal(1L, await ScalarAsync(db, PublicHistoryForeignKeysSql));
         });
@@ -118,6 +124,8 @@ public sealed class HistoricalTransferSchemaTests
         Assert.Equal(before, await SnapshotAsync(destination.Repository.DatabasePath, localOnly: true));
         Assert.Equal(sourceBefore, await SnapshotAsync(source.Repository.DatabasePath));
         Assert.Equal(hash, SHA256.HashData(await File.ReadAllBytesAsync(path)));
+        foreach (var (name, ddl) in expectedTriggers)
+            Assert.Equal(ddl, await ReadTriggerAsync(destination.Repository.DatabasePath, name));
         await AssertReplacementAndLocalHistoryAsync(destination.Repository.DatabasePath);
         await AssertSearchUpdatesAsync(destination.Repository.DatabasePath, 2);
         Assert.Null(await ScalarAsync(destination.Repository.DatabasePath, "PRAGMA foreign_key_check"));
@@ -132,6 +140,7 @@ public sealed class HistoricalTransferSchemaTests
     [InlineData("export", "non-ascii-space", "table:official_update_chunks")]
     [InlineData("package", "known-trigger", "trigger:contracts_fts_update")]
     [InlineData("package", "trigger-literal", "trigger:contracts_fts_update")]
+    [InlineData("package", "comment-hides-insert", "trigger:contracts_fts_update")]
     [InlineData("package", "unknown-trigger", "trigger:unrecognized_history_trigger")]
     [InlineData("package", "unexpected-column", "table:quotation_processed_contracts")]
     [InlineData("package", "unexpected-chunk-column", "table:official_update_chunks")]
@@ -221,9 +230,11 @@ public sealed class HistoricalTransferSchemaTests
     }
 
     [Theory]
-    [InlineData(BackupProfile.PricesPreservingLocalData)]
-    [InlineData(BackupProfile.FullWithoutQuotations)]
-    public async Task LocalFormattingInCommittedWalIsReportedBeforeAnyExtraction(BackupProfile profile)
+    [InlineData(BackupProfile.PricesPreservingLocalData, false)]
+    [InlineData(BackupProfile.FullWithoutQuotations, false)]
+    [InlineData(BackupProfile.PricesPreservingLocalData, true)]
+    [InlineData(BackupProfile.FullWithoutQuotations, true)]
+    public async Task LocalTriggerInCommittedWalIsCheckedBeforeExtraction(BackupProfile profile, bool compatible)
     {
         await using var source = await TestDatabase.CreateAsync();
         await using var destination = await TestDatabase.CreateAsync();
@@ -237,14 +248,30 @@ public sealed class HistoricalTransferSchemaTests
         var original = (string)(await cmd.ExecuteScalarAsync())!;
         var formatted = original.Replace("new.rowid, new.search_text", "new.rowid,new.search_text", StringComparison.Ordinal);
         Assert.NotEqual(original, formatted);
+        if (!compatible) formatted = formatted.Replace("END", "SELECT 1; END", StringComparison.Ordinal);
         cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA wal_autocheckpoint=0; DROP TRIGGER contracts_fts_update;" + formatted;
         await cmd.ExecuteNonQueryAsync();
         Assert.True(new FileInfo(target + "-wal").Length > 0);
 
         var stages = new List<BackupImportStage>();
-        var progress = new CallbackProgress(p => { stages.Add(p.Stage); Assert.Equal(0L, p.BytesProcessed); });
-        var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
-            new BackupService(destination.Repository).ImportAsync(archive, progress));
+        var progress = new CallbackProgress(p =>
+        {
+            stages.Add(p.Stage);
+            if (!compatible) Assert.Equal(0L, p.BytesProcessed);
+            if (p.Stage == BackupImportStage.Extracting && writer.State == System.Data.ConnectionState.Open)
+                writer.Close(); // Keep the WAL live through preflight, then release the Windows swap lock.
+        });
+        var service = new BackupService(destination.Repository);
+        if (compatible)
+        {
+            var recovery = await service.ImportAsync(archive, progress);
+            Assert.Contains(BackupImportStage.CheckingLocalSchema, stages);
+            Assert.Contains(BackupImportStage.Extracting, stages);
+            Assert.Equal(formatted, await ReadTriggerAsync(recovery, "contracts_fts_update"));
+            Assert.Equal(original, await ReadTriggerAsync(target, "contracts_fts_update"));
+            return;
+        }
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() => service.ImportAsync(archive, progress));
         Assert.Contains(BackupImportStage.CheckingLocalSchema, stages);
         Assert.DoesNotContain(BackupImportStage.Extracting, stages);
         var detail = Assert.IsType<string>(error.Data[BackupService.TransferSchemaDiagnosticKey]);
@@ -404,6 +431,14 @@ public sealed class HistoricalTransferSchemaTests
                     INSERT INTO contracts_fts(rowid,search_text) VALUES(new.rowid,new.search_text);
                 END;
                 """,
+            "comment-hides-insert" => """
+                DROP TRIGGER contracts_fts_update;
+                CREATE TRIGGER contracts_fts_update AFTER UPDATE OF search_text ON contracts
+                WHEN old.search_text IS NOT new.search_text BEGIN
+                    INSERT INTO contracts_fts(contracts_fts,rowid,search_text) VALUES('delete',old.rowid,old.search_text);
+                    -- INSERT INTO contracts_fts(rowid,search_text) VALUES(new.rowid,new.search_text);
+                END;
+                """,
             // This trigger would disappear if normalization dropped the historical table before validation.
             "unknown-trigger" => """
                 CREATE TRIGGER unrecognized_history_trigger AFTER INSERT ON quotation_processed_contracts
@@ -413,6 +448,23 @@ public sealed class HistoricalTransferSchemaTests
             "unexpected-chunk-column" => "ALTER TABLE official_update_chunks ADD COLUMN unexpected TEXT;",
             _ => throw new ArgumentOutOfRangeException(nameof(mutation))
         });
+    }
+
+    private static async Task<string> ReadTriggerAsync(string path, string name) =>
+        (string)(await ScalarAsync(path, $"SELECT sql FROM sqlite_master WHERE type='trigger' AND name='{name}' COLLATE NOCASE"))!;
+
+    internal static async Task<string> ReformatFtsTriggerAsync(string path, string name)
+    {
+        var original = await ReadTriggerAsync(path, name);
+        var formatted = original.Replace($"TRIGGER {name}", $"TRIGGER [{name.ToUpperInvariant()}]", StringComparison.Ordinal)
+            .Replace("AFTER UPDATE OF search_text", "after /* legacy */ update of \"search_text\"", StringComparison.Ordinal)
+            .Replace(", ", ",", StringComparison.Ordinal)
+            .Replace("old.rowid", "[OLD] . `rowid`", StringComparison.Ordinal)
+            .Replace("new.search_text", "NEW.\"search_text\"", StringComparison.Ordinal)
+            .Replace("INSERT INTO", "-- FTS\ninsert into", StringComparison.Ordinal);
+        Assert.NotEqual(original, formatted);
+        await SqlAsync(path, $"DROP TRIGGER {name}; {formatted}");
+        return original;
     }
 
     private static async Task RewritePackageAsync(string path, Func<string, Task> change)
