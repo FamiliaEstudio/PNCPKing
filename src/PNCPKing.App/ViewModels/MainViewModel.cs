@@ -412,7 +412,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         ClearBackupRecoveriesCommand = new AsyncRelayCommand(
             ClearBackupRecoveriesAsync,
             () => !IsFileBusy);
-        OpenDiagnosticLogsCommand = new RelayCommand(OpenDiagnosticLogs);
+        OpenDiagnosticLogsCommand = new AsyncRelayCommand(OpenDiagnosticLogsAsync);
+        SendLastDiagnosticErrorCommand = new AsyncRelayCommand(SendLastDiagnosticErrorAsync);
         EvaluatePcCommand = new AsyncRelayCommand(EvaluatePcAsync, () => _calibrationWindow is not null || CanEvaluatePc);
         SelectResourceProfileCommand = new AsyncRelayCommand<string>(SelectResourceProfileAsync);
         ExportPerformanceReportCommand = new AsyncRelayCommand(
@@ -488,6 +489,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public ICommand CancelFileOperationCommand { get; }
     public ICommand ClearBackupRecoveriesCommand { get; }
     public ICommand OpenDiagnosticLogsCommand { get; }
+    public ICommand SendLastDiagnosticErrorCommand { get; }
     public ICommand ExportPerformanceReportCommand { get; }
     public ICommand ComparePerformanceReportCommand { get; }
     public ICommand ClearCacheCommand { get; }
@@ -3545,7 +3547,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
             if (showErrorDialog)
             {
-                MessageBox.Show(message, "PNCP King", MessageBoxButton.OK, MessageBoxImage.Error);
+                await DiagnosticEmailDialog.ShowErrorAsync(exception, message, "PNCP King");
             }
         }
         finally
@@ -3827,46 +3829,55 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         UpdateManualUpdateProgress();
     }
 
-    private async Task ExportBackupAsync()
-    {
-        var profileChoice = MessageBox.Show(
-            "Escolha o perfil do backup:\n\n" +
-            "SIM — Completo: inclui contratações, itens, preços, snapshots e checkpoints. " +
-            "Você escolherá se leva as cotações.\n\n" +
-            "NÃO — Compacto: preserva os dados permanentes, mas itens e preços reconstruíveis precisarão ser carregados novamente.\n\n" +
-            "CANCELAR — não exportar.",
-            "Perfil do backup .pncpking",
-            MessageBoxButton.YesNoCancel,
-            MessageBoxImage.Question,
-            MessageBoxResult.Yes);
-        if (profileChoice == MessageBoxResult.Cancel)
-        {
-            return;
-        }
+    private Task ExportBackupAsync() => ExportBackupAsync(null);
 
-        var profile = BackupProfile.Compact;
-        if (profileChoice == MessageBoxResult.Yes)
+    private async Task ExportBackupAsync(BackupProfile? requestedProfile)
+    {
+        var profile = requestedProfile ?? BackupProfile.Compact;
+        if (requestedProfile is null)
         {
-            var quotationsChoice = MessageBox.Show(
-                "O backup completo deve incluir as cotações?\n\n" +
-                "SIM — Completo com cotações, para recuperação dos seus dados.\n\n" +
-                "NÃO — Completo sem cotações, para iniciar um banco em outro PC.\n\n" +
+            var profileChoice = MessageBox.Show(
+                "Escolha o perfil do backup:\n\n" +
+                "SIM — Completo: inclui contratações, itens, preços, snapshots e checkpoints. " +
+                "Você escolherá se leva as cotações.\n\n" +
+                "NÃO — Compacto: preserva os dados permanentes, mas itens e preços reconstruíveis precisarão ser carregados novamente.\n\n" +
                 "CANCELAR — não exportar.",
-                "Cotações no backup completo",
+                "Perfil do backup .pncpking",
                 MessageBoxButton.YesNoCancel,
                 MessageBoxImage.Question,
                 MessageBoxResult.Yes);
-            if (quotationsChoice == MessageBoxResult.Cancel) return;
-            profile = quotationsChoice == MessageBoxResult.Yes
-                ? BackupProfile.Full
-                : BackupProfile.FullWithoutQuotations;
+            if (profileChoice == MessageBoxResult.Cancel)
+            {
+                return;
+            }
+
+
+            if (profileChoice == MessageBoxResult.Yes)
+            {
+                var quotationsChoice = MessageBox.Show(
+                    "O backup completo deve incluir as cotações?\n\n" +
+                    "SIM — Completo com cotações, para recuperação dos seus dados.\n\n" +
+                    "NÃO — Completo sem cotações, para substituir os preços de outro PC preservando as cotações dele.\n\n" +
+                    "CANCELAR — não exportar.",
+                    "Cotações no backup completo",
+                    MessageBoxButton.YesNoCancel,
+                    MessageBoxImage.Question,
+                    MessageBoxResult.Yes);
+                if (quotationsChoice == MessageBoxResult.Cancel) return;
+                profile = quotationsChoice == MessageBoxResult.Yes
+                    ? BackupProfile.Full
+                    : BackupProfile.FullWithoutQuotations;
+            }
+
         }
         var dialog = new SaveFileDialog
         {
-            Title = "Exportar backup do PNCP King",
+            Title = profile == BackupProfile.PricesPreservingLocalData ? "Exportar base completa de preços" : "Exportar backup do PNCP King",
             Filter = "Backup PNCP King (*.pncpking)|*.pncpking",
             DefaultExt = ".pncpking",
-            FileName = profile == BackupProfile.FullWithoutQuotations
+            FileName = profile == BackupProfile.PricesPreservingLocalData
+                ? $"PNCPKing-base-precos-{DateTime.Today:yyyyMMdd}.pncpking"
+                : profile == BackupProfile.FullWithoutQuotations
                 ? $"PNCPKing-sem-cotacoes-{DateTime.Today:yyyyMMdd}.pncpking"
                 : $"PNCPKing-{DateTime.Today:yyyyMMdd}.pncpking"
         };
@@ -3884,12 +3895,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception)
         {
-            _diagnosticLog.Error("backup-export", "Falha na prévia da exportação.", exception);
-            MessageBox.Show(
-                $"Não foi possível preparar o backup.\n\n{exception.Message}",
-                "Exportar backup",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ReportAsync(_diagnosticLog, "backup-export",
+                "Falha na prévia da exportação.", exception, "Exportar backup");
             return;
         }
 
@@ -3928,6 +3935,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
         var profileLabel = profile switch
         {
+            BackupProfile.PricesPreservingLocalData => "Base completa de preços, preservando os dados locais do destino",
             BackupProfile.Full => "Completo com cotações",
             BackupProfile.FullWithoutQuotations => "Completo sem cotações",
             _ => "Compacto — itens/preços serão reconstruídos"
@@ -4011,24 +4019,30 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    private async Task ImportBackupAsync()
+    private Task ImportBackupAsync() => ImportBackupAsync(false);
+
+    private async Task ImportBackupAsync(bool pricesOnly, string? sourcePath = null)
     {
-        var dialog = new OpenFileDialog
+        if (sourcePath is null)
         {
-            Title = "Importar backup do PNCP King",
-            Filter = "Backup PNCP King (*.pncpking)|*.pncpking",
-            CheckFileExists = true
-        };
-        if (dialog.ShowDialog() != true)
-        {
-            return;
+            var dialog = new OpenFileDialog
+            {
+                Title = pricesOnly ? "Importar base completa de preços" : "Importar backup do PNCP King",
+                Filter = "Backup PNCP King (*.pncpking)|*.pncpking",
+                CheckFileExists = true
+            };
+            if (dialog.ShowDialog() != true)
+            {
+                return;
+            }
+            sourcePath = dialog.FileName;
         }
 
         BackupInspection inspection;
         try
         {
             StatusText = "Inspecionando o backup e o espaço disponível…";
-            inspection = await Task.Run(() => _backupService.InspectAsync(dialog.FileName))
+            inspection = await Task.Run(() => _backupService.InspectAsync(sourcePath))
                 .ConfigureAwait(true);
             _diagnosticLog.Info(
                 "backup-import",
@@ -4038,13 +4052,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception)
         {
-            _diagnosticLog.Error("backup-import", "Falha ao inspecionar o backup.", exception);
-            MessageBox.Show(
-                $"Não foi possível inspecionar o backup.\n\n{exception.Message}\n\n" +
-                $"Log: {_diagnosticLog.FilePath}",
-                "Importar backup",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ReportAsync(_diagnosticLog, "backup-import",
+                "Falha ao inspecionar o backup.", exception, "Importar backup");
             return;
         }
 
@@ -4066,15 +4075,32 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
+        var preservesLocalData = inspection.Profile is BackupProfile.FullWithoutQuotations or BackupProfile.PricesPreservingLocalData;
+        if (pricesOnly && !preservesLocalData)
+        {
+            MessageBox.Show(
+                "Este arquivo inclui cotações e é um backup de recuperação. " +
+                "Exporte novamente com o perfil Completo sem cotações no PC de origem.",
+                "Arquivo incompatível", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        if (preservesLocalData && !CanTransferPriceDatabase)
+        {
+            MessageBox.Show(
+                "Conclua ou pause as operações em andamento e feche as janelas de item da cotação e de avaliação do PC antes de importar.",
+                "Aguarde as operações locais", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
         var profile = inspection.Profile switch
         {
+            BackupProfile.PricesPreservingLocalData => "Base completa de preços, preservando os dados locais do destino",
             BackupProfile.Full => "Completo com cotações",
-            BackupProfile.FullWithoutQuotations => "Completo sem cotações — somente para banco sem cotações",
+            BackupProfile.FullWithoutQuotations => "Completo sem cotações — preserva as cotações deste PC",
             BackupProfile.Compact => "Compacto com cotações",
             _ => "Legado"
         };
         if (MessageBox.Show(
-                "IMPORTAR BACKUP VALIDADO\n\n" +
+                (preservesLocalData ? "IMPORTAR BASE COMPLETA DE PREÇOS\n\n" : "IMPORTAR BACKUP VALIDADO\n\n") +
                 $"Arquivo: {FormatBytes(inspection.ArchiveBytes)}\n" +
                 $"Banco descompactado: {FormatBytes(inspection.DatabaseBytes)}\n" +
                 $"Esquema: {inspection.SchemaVersion} → {SqliteContractRepository.CurrentSchemaVersion}\n" +
@@ -4085,6 +4111,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 $"Evidências: {inspection.EvidenceCount:N0} ({FormatBytes(inspection.EvidenceBytes)})\n" +
                 $"Staging: {inspection.StagingRoot}\n" +
                 $"Espaço necessário: {FormatBytes(inspection.StagingRequiredBytes)}\n\n" +
+                (preservesLocalData
+                    ? "Cotações, cestas, evidências e configurações deste PC serão preservadas. Toda a base pública de preços será substituída pelo arquivo selecionado, sem comparação ou mesclagem. Preços exclusivos deste PC sairão da base ativa; referências já salvas nas cotações continuarão preservadas. Use uma exportação atualizada da origem.\n\n"
+                    : string.Empty) +
                 "A operação pode levar vários minutos em computadores lentos. O progresso será mostrado e " +
                 "a base atual será preservada por renomeação, sem uma cópia física adicional. " +
                 "Não encerre o programa durante a instalação final. Continuar?",
@@ -4130,7 +4159,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 _diagnosticLog.Info("backup-import", "Importação autorizada pelo usuário e iniciada.");
                 var recovery = await Task.Run(
                         () => _backupService.ImportAsync(
-                            dialog.FileName,
+                            sourcePath,
                             importProgress,
                             cancellationToken),
                         cancellationToken)
@@ -4138,9 +4167,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 _diagnosticLog.Info(
                     "backup-import",
                     $"Importação concluída. banco_anterior={recovery}");
-                _calibrationService.Connections.ResetCalibration();
-                _calibrationWindow?.Close();
-                await SaveCalibrationAsync(null).ConfigureAwait(true);
+                if (!preservesLocalData)
+                {
+                    _calibrationService.Connections.ResetCalibration();
+                    _calibrationWindow?.Close();
+                    await SaveCalibrationAsync(null).ConfigureAwait(true);
+                }
                 StatusText = string.IsNullOrEmpty(recovery)
                     ? "Backup importado; não havia uma base anterior para preservar."
                     : $"Backup importado. Base anterior preservada em {recovery}";
@@ -4283,13 +4315,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception)
         {
-            _diagnosticLog.Error("file-operation", "Falha em operação de arquivo.", exception);
             StatusText = $"Falha: {exception.Message}";
-            MessageBox.Show(
-                $"{exception.Message}\n\nLog para diagnóstico:\n{_diagnosticLog.FilePath}",
-                "PNCP King",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ReportAsync(_diagnosticLog, "file-operation",
+                "Falha em operação de arquivo.", exception, "PNCP King");
         }
         finally
         {
@@ -4302,7 +4330,15 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    private void OpenDiagnosticLogs()
+    private Task SendLastDiagnosticErrorAsync()
+    {
+        if (_diagnosticLog.LastError is { } incident)
+            return DiagnosticEmailDialog.OfferAsync(_diagnosticLog, incident.Split(Environment.NewLine, 2)[0], incident);
+        MessageBox.Show("Ainda não há erro registrado nesta sessão.", "Diagnóstico");
+        return Task.CompletedTask;
+    }
+
+    private async Task OpenDiagnosticLogsAsync()
     {
         try
         {
@@ -4316,12 +4352,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception)
         {
-            _diagnosticLog.Error("diagnostics", "Não foi possível abrir a pasta de logs.", exception);
-            MessageBox.Show(
-                $"Não foi possível abrir a pasta de logs.\n\n{_diagnosticLog.DirectoryPath}\n\n{exception.Message}",
-                "Logs de diagnóstico",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ReportAsync(_diagnosticLog, "diagnostics",
+                "Não foi possível abrir a pasta de logs.", exception, "Logs de diagnóstico");
         }
     }
 
@@ -4347,12 +4379,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception)
         {
-            _diagnosticLog.Error("performance", "Não foi possível exportar o relatório.", exception);
-            MessageBox.Show(
-                exception.Message,
-                "Relatório de desempenho",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ReportAsync(_diagnosticLog, "performance",
+                "Não foi possível exportar o relatório.", exception, "Relatório de desempenho");
         }
         finally
         {
@@ -4396,12 +4424,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception)
         {
-            _diagnosticLog.Error("performance", "Não foi possível comparar os relatórios.", exception);
-            MessageBox.Show(
-                exception.Message,
-                "Comparar desempenho",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ReportAsync(_diagnosticLog, "performance",
+                "Não foi possível comparar os relatórios.", exception, "Comparar desempenho");
         }
         finally
         {
@@ -4577,7 +4601,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         catch (Exception exception)
         {
             DocumentProgressText = "Documentos: falha";
-            MessageBox.Show(exception.Message, "Documentos PNCP", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Documentos PNCP");
         }
         finally
         {
@@ -4617,7 +4641,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         catch (Exception exception)
         {
             DocumentProgressText = "Documentos: falha ao limpar o cache";
-            MessageBox.Show(exception.Message, "Limpar cache de documentos", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "Limpar cache de documentos");
         }
         finally
         {
@@ -4821,7 +4845,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                      OpenPncpCommand, AccessDocumentsCommand, AccessItemDocumentsCommand,
                      ClearDocumentCacheCommand,
                      CancelDocumentOperationCommand,
-                     ExportBackupCommand, ImportBackupCommand, ExportUpdatesCommand, ImportUpdatesCommand, CompactDatabaseCommand, CancelFileOperationCommand, GitHubUpdateCommand,
+                     ExportBackupCommand, ImportBackupCommand, ExportPriceDatabaseCommand, ImportPriceDatabaseCommand, ExportUpdatesCommand, ImportUpdatesCommand, CompactDatabaseCommand, CancelFileOperationCommand, GitHubUpdateCommand,
                      ClearBackupRecoveriesCommand, ClearCacheCommand,
                      ToggleDesktopShortcutCommand,
                      ManageSweetCodesCommand, ToggleContractsPanelCommand,

@@ -10,12 +10,18 @@ public sealed class AppDiagnosticLog
 {
     private readonly object _gate = new();
     private readonly ISystemResourceProbe _resourceProbe;
+    private string? _lastError;
+
+    public string? LastError => Volatile.Read(ref _lastError);
 
     public AppDiagnosticLog(ISystemResourceProbe? resourceProbe = null)
+        : this(resourceProbe, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "PNCP King", "logs")) { }
+
+    internal AppDiagnosticLog(ISystemResourceProbe? resourceProbe, string directoryPath)
     {
         _resourceProbe = resourceProbe ?? new SystemResourceProbe();
-        var applicationData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        DirectoryPath = Path.Combine(applicationData, "PNCP King", "logs");
+        DirectoryPath = directoryPath;
         Directory.CreateDirectory(DirectoryPath);
         CleanupOldLogs();
         FilePath = Path.Combine(
@@ -46,39 +52,48 @@ public sealed class AppDiagnosticLog
 
     public void Warning(string area, string message) => Write("WARN", area, message, exception: null);
 
-    public void Error(string area, string message, Exception exception) =>
+    public string Error(string area, string message, Exception exception) =>
         Write("ERROR", area, message, exception);
 
-    private void Write(string level, string area, string message, Exception? exception)
+    private string Write(string level, string area, string message, Exception? exception)
     {
-        try
+        var builder = new StringBuilder()
+            .Append(DateTimeOffset.Now.ToString("O", CultureInfo.InvariantCulture))
+            .Append(" [").Append(level).Append("] [")
+            .Append(area.Trim()).Append("] ")
+            .AppendLine(message.Trim());
+        if (exception is not null)
         {
-            var builder = new StringBuilder()
-                .Append(DateTimeOffset.Now.ToString("O", CultureInfo.InvariantCulture))
-                .Append(" [").Append(level).Append("] [")
-                .Append(area.Trim()).Append("] ")
-                .AppendLine(message.Trim());
-            if (exception is not null)
+            builder.AppendLine(exception.ToString());
+            for (var cause = exception; cause is not null; cause = cause.InnerException)
             {
-                builder.AppendLine(exception.ToString());
+                if (cause.Data[BackupService.TransferSchemaDiagnosticKey] is string definition)
+                    builder.AppendLine(definition);
+                if (cause.Data[QuotationEvidenceExportService.DiagnosticKey] is string evidence)
+                    builder.AppendLine(evidence);
             }
+        }
 
-            lock (_gate)
+        var entry = builder.ToString();
+        lock (_gate)
+        {
+            if (exception is not null) Volatile.Write(ref _lastError, entry);
+            try { File.AppendAllText(FilePath, entry, Encoding.UTF8); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or NotSupportedException)
             {
-                File.AppendAllText(FilePath, builder.ToString(), Encoding.UTF8);
+                // A logging failure must not hide the incident or prevent shutdown.
             }
         }
-        catch (Exception logException) when (
-            logException is IOException or UnauthorizedAccessException or NotSupportedException)
-        {
-            // O diagnóstico nunca deve impedir a abertura ou o encerramento do aplicativo.
-        }
+        return entry;
     }
 
     private void CleanupOldLogs()
     {
         var threshold = DateTime.UtcNow.AddDays(-30);
-        foreach (var path in Directory.EnumerateFiles(DirectoryPath, "pncpking-*.log"))
+        var files = Directory.EnumerateFiles(DirectoryPath, "pncpking-*.log")
+            .Concat(Directory.EnumerateFiles(DirectoryPath, "pncpking-erro-*.txt"))
+            .Concat(Directory.EnumerateFiles(DirectoryPath, "pncpking-erro-*.eml"));
+        foreach (var path in files)
         {
             try
             {

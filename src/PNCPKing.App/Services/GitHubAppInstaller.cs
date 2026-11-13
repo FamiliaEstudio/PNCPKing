@@ -7,7 +7,8 @@ namespace PNCPKing.App.Services;
 
 public sealed record DownloadedPriceUpdate(string Path, PriceUpdatePackage Package);
 public sealed record PendingGitHubUpdate(string DatabasePath, string AppVersion, DownloadedPriceUpdate? PriceUpdate,
-    GitHubUpdateRelease<PricesUpdateManifest>? DeferredPrices = null, bool UpdatePricesAfterRestart = true);
+    GitHubUpdateRelease<PricesUpdateManifest>? DeferredPrices = null, bool UpdatePricesAfterRestart = true,
+    DrivePriceFile? DrivePrices = null);
 public sealed record AppInstallRequest(int ProcessId, long ProcessStartedUtcTicks, string TargetPath,
     string StagedPath, long Size, string Sha256, string Version, string OperationId);
 
@@ -61,7 +62,6 @@ public static class GitHubAppInstaller
         CancellationToken ct)
     {
         CheckDestination();
-        await ValidateBinaryAsync(downloaded, manifest, ct).ConfigureAwait(false);
         var target = Environment.ProcessPath!;
         GitHubUpdateService.EnsureSpace(Path.GetDirectoryName(target)!, manifest.File.Size);
         var id = Guid.NewGuid().ToString("N");
@@ -77,6 +77,7 @@ public static class GitHubAppInstaller
             await using (var output = new FileStream(staged, FileMode.CreateNew, FileAccess.Write, FileShare.None,
                 128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
                 await input.CopyToAsync(output, ct).ConfigureAwait(false);
+            await ValidateBinaryAsync(staged, manifest, ct).ConfigureAwait(false);
             await using (var input = Assembly.GetExecutingAssembly().GetManifestResourceStream("PNCPKing.App.InstallGitHubUpdate.ps1")
                 ?? throw new IOException("Instalador incorporado ausente."))
             await using (var output = File.Create(script))
@@ -92,26 +93,62 @@ public static class GitHubAppInstaller
             foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-RequestPath", requestPath })
                 info.ArgumentList.Add(arg);
             using var installer = Process.Start(info) ?? throw new IOException("Não foi possível iniciar o instalador.");
-            // Slow HDDs and antivirus scanning can make validation of the ~200 MB staged executable take well over 10 seconds.
-            // Keep the helper liveness check, but allow up to two minutes for the validated handoff marker.
-            for (var attempt = 0; attempt < 1200 && !File.Exists(requestPath + ".ready"); attempt++)
-            {
-                if (installer.HasExited) throw new IOException("O instalador foi interrompido antes do encerramento do programa.");
-                await Task.Delay(100, ct).ConfigureAwait(false);
-            }
-            if (!File.Exists(requestPath + ".ready")) throw new IOException("O instalador não respondeu; o programa continuará aberto.");
-            ct.ThrowIfCancellationRequested();
-            await File.WriteAllTextAsync(requestPath + ".commit", "ready", ct).ConfigureAwait(false);
+            await ConfirmInstallerAsync(installer, requestPath, ct).ConfigureAwait(false);
             handedOff = true;
         }
         finally
         {
             if (!handedOff)
             {
-                File.Delete(staged);
-                File.Delete(operation);
-                File.Delete(requestPath + ".commit");
+                foreach (var path in new[] { staged, operation, script, requestPath, requestPath + ".ready",
+                    requestPath + ".commit", requestPath + ".result" })
+                    await DeleteTemporaryAsync(path).ConfigureAwait(false);
             }
+        }
+    }
+
+    internal static async Task DeleteTemporaryAsync(string path)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try { File.Delete(path); return; }
+            catch (IOException e) when ((e.HResult & 0xffff) is 32 or 33 && attempt < 20)
+            {
+                // Sharing/lock violations can briefly persist after process exit on Windows.
+                await Task.Delay(150).ConfigureAwait(false);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                // Keep the original installation error even if another program retains this file.
+                return;
+            }
+        }
+    }
+
+    internal static async Task ConfirmInstallerAsync(Process installer, string requestPath, CancellationToken ct)
+    {
+        try
+        {
+            while (!File.Exists(requestPath + ".ready") && !installer.HasExited)
+                await Task.Delay(200, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            if (installer.HasExited)
+            {
+                var result = requestPath + ".result";
+                var detail = File.Exists(result) ? await File.ReadAllTextAsync(result, ct).ConfigureAwait(false)
+                    : $"Código de saída {installer.ExitCode}.";
+                throw new IOException($"O instalador foi interrompido antes de fechar o PNCP King. {detail}");
+            }
+            // A marker is complete as soon as it exists. Cancellation cannot leave a partial commitment.
+            using var commit = new FileStream(requestPath + ".commit", FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+        }
+        catch
+        {
+            // Only this uncommitted child is stopped. Release its handles before cleaning up staging.
+            try { if (!installer.HasExited) installer.Kill(entireProcessTree: true); }
+            catch (InvalidOperationException) when (installer.HasExited) { }
+            await installer.WaitForExitAsync().ConfigureAwait(false);
+            throw;
         }
     }
 

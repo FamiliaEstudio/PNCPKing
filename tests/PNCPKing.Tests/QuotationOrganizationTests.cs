@@ -755,7 +755,7 @@ public sealed partial class QuotationOrganizationTests
             await command.ExecuteNonQueryAsync();
         }
         var migration = await database.Repository.InitializeAsync();
-        Assert.Equal([32, 33], migration.AppliedMigrations);
+        Assert.Equal(Enumerable.Range(32, SqliteContractRepository.CurrentSchemaVersion - 31), migration.AppliedMigrations);
         var report = await new QuotationService(repo, new QuotationAnalyzer()).GetReportAsync(project.Id);
         Assert.Null(report.Project.Organization); Assert.Equal(1.5m, Assert.Single(report.Lines).Line.RequestedQuantity);
         Assert.Throws<InvalidOperationException>(report.ValidateExport);

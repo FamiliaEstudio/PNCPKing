@@ -9,11 +9,11 @@ using PNCPKing.Infrastructure.Data;
 
 namespace PNCPKing.Infrastructure.Services;
 
-public sealed class BackupService(
+public sealed partial class BackupService(
     IContractRepository repository,
     IPerformanceTelemetry? performance = null)
 {
-    private const int CurrentArchiveFormatVersion = 4;
+    private const int CurrentArchiveFormatVersion = 5;
     private const long Fat32MaximumFileBytes = 4L * 1024 * 1024 * 1024 - 1;
     private const long ImportSafetyReserveBytes = 1L * 1024 * 1024 * 1024;
     private const long ArchiveSafetyReserveBytes = 64L * 1024 * 1024;
@@ -57,14 +57,14 @@ public sealed class BackupService(
             : 0L;
         var snapshot = await ReadSnapshotMetadataAsync(repository.DatabasePath, cancellationToken)
             .ConfigureAwait(false);
-        var evidence = profile == BackupProfile.FullWithoutQuotations
+        var evidence = (profile is BackupProfile.FullWithoutQuotations or BackupProfile.PricesPreservingLocalData)
             ? []
             : await ReadReferencedEvidenceAssetsAsync(repository.DatabasePath, cancellationToken)
                 .ConfigureAwait(false);
         var evidenceBytes = evidence.Aggregate(
             0L,
             (total, asset) => AddSaturated(total, asset.ByteLength));
-        var stagingWorkingBytes = profile is BackupProfile.Compact or BackupProfile.FullWithoutQuotations
+        var stagingWorkingBytes = profile is BackupProfile.Compact or BackupProfile.FullWithoutQuotations or BackupProfile.PricesPreservingLocalData
             ? AddSaturated(databaseBytes, databaseBytes, ImportSafetyReserveBytes)
             : AddSaturated(databaseBytes, ImportSafetyReserveBytes);
         var destinationRequiredBytes = AddSaturated(
@@ -200,15 +200,12 @@ public sealed class BackupService(
                 await CompactSnapshotAsync(snapshotPath, cancellationToken).ConfigureAwait(false);
                 compactSpan.Complete(bytes: new FileInfo(snapshotPath).Length);
             }
-            else if (profile == BackupProfile.FullWithoutQuotations)
+            else if (profile is BackupProfile.FullWithoutQuotations or BackupProfile.PricesPreservingLocalData)
             {
-                ReportExport(
-                    progress,
-                    BackupExportStage.Compacting,
-                    30,
-                    "Removendo cotações somente do snapshot…",
+                ReportExport(progress, BackupExportStage.Compacting, 30,
+                    "Preparando a base de preços sem dados particulares e compactando na origem.",
                     isIndeterminate: true);
-                await RemoveSnapshotQuotationsAsync(snapshotPath, cancellationToken).ConfigureAwait(false);
+                await RemoveTransferLocalDataAsync(snapshotPath, cancellationToken).ConfigureAwait(false);
             }
 
             ReportExport(
@@ -298,9 +295,9 @@ public sealed class BackupService(
 
                 var manifest = new DatasetManifest
                 {
-                    ArchiveFormatVersion = profile == BackupProfile.FullWithoutQuotations
+                    ArchiveFormatVersion = profile == BackupProfile.PricesPreservingLocalData ? 5 : profile == BackupProfile.FullWithoutQuotations
                         ? 3 : await HasSnapshotPriceDivisorsAsync(snapshotPath, cancellationToken).ConfigureAwait(false)
-                            ? CurrentArchiveFormatVersion : 2,
+                            ? 4 : 2,
                     SchemaVersion = SqliteContractRepository.CurrentSchemaVersion,
                     AppVersion = typeof(BackupService).Assembly.GetName().Version?.ToString() ?? "1.0.0",
                     StartDate = snapshotMetadata.StartDate,
@@ -467,6 +464,8 @@ public sealed class BackupService(
             evidenceBytes,
             ImportSafetyReserveBytes,
             migrationAllowance);
+        if (manifest.BackupProfile is BackupProfile.FullWithoutQuotations or BackupProfile.PricesPreservingLocalData)
+            dataRequired = AddSaturated(dataRequired, existingDatabaseBytes, existingDatabaseBytes);
         var dataAvailable = GetAvailableBytes(dataRoot);
 
         return new BackupInspection
@@ -507,10 +506,6 @@ public sealed class BackupService(
         CleanupStaleTemporaryDirectories(TimeSpan.FromMinutes(5));
         CleanupStaleDatabaseStagingDirectories(TimeSpan.FromHours(24));
         var inspection = await InspectAsync(sourcePath, cancellationToken).ConfigureAwait(false);
-        if (inspection.Profile == BackupProfile.FullWithoutQuotations)
-        {
-            await EnsureNoDestinationQuotationsAsync(cancellationToken).ConfigureAwait(false);
-        }
         if (!inspection.HasEnoughSpace)
         {
             throw new IOException(
@@ -526,7 +521,7 @@ public sealed class BackupService(
             var stagedEvidenceFolder = Path.Combine(temporaryDirectory, "internet-evidence");
             DatasetManifest manifest;
             string actualHash;
-            using var extractionSpan = _performance.Begin("backup", "import-extraction");
+            TransferSchemaRules? transferRules = null;
             using (var archive = ZipFile.OpenRead(sourcePath))
             {
                 var manifestEntry = archive.GetEntry("manifest.json")
@@ -570,6 +565,16 @@ public sealed class BackupService(
                     ValidateEvidenceManifestEntry(asset);
                 }
 
+                if (manifest.BackupProfile is BackupProfile.FullWithoutQuotations or BackupProfile.PricesPreservingLocalData)
+                {
+                    Report(progress, BackupImportStage.CheckingLocalSchema, 3,
+                        "Conferindo o esquema do banco local antes de descompactar o pacote…", isIndeterminate: true);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    transferRules = await ReadTransferRulesAsync(temporaryDirectory, cancellationToken).ConfigureAwait(false);
+                    await CheckLocalTransferSchemaAsync(transferRules, cancellationToken).ConfigureAwait(false);
+                }
+
+                using var extractionSpan = _performance.Begin("backup", "import-extraction");
                 var extractionTotal = manifestAssets.Aggregate(
                     databaseEntry.Length,
                     (total, asset) => AddSaturated(total, asset.ByteLength));
@@ -636,10 +641,8 @@ public sealed class BackupService(
 
                     extractedBytes = AddSaturated(extractedBytes, entry.Length);
                 }
+                extractionSpan.Complete(bytes: AddSaturated(inspection.DatabaseBytes, inspection.EvidenceBytes));
             }
-            extractionSpan.Complete(bytes: AddSaturated(
-                inspection.DatabaseBytes,
-                inspection.EvidenceBytes));
 
             Report(progress, BackupImportStage.VerifyingChecksum, 43, "Checksum calculado durante a extração.");
             if (!CryptographicOperations.FixedTimeEquals(
@@ -668,7 +671,7 @@ public sealed class BackupService(
                 BackupImportStage.CheckingIntegrity,
                 58,
                 "Integridade confirmada na origem e protegida pelo checksum SHA-256.");
-            if (manifest.BackupProfile == BackupProfile.FullWithoutQuotations &&
+            if ((manifest.BackupProfile is BackupProfile.FullWithoutQuotations or BackupProfile.PricesPreservingLocalData) &&
                 await HasQuotationRowsAsync(importedDatabase, cancellationToken).ConfigureAwait(false))
             {
                 throw new InvalidDataException("O backup marcado como sem cotações contém dados de cotação.");
@@ -700,6 +703,13 @@ public sealed class BackupService(
             // only the resulting schema version and never repeats integrity_check.
             if (manifest.SchemaVersion < SqliteContractRepository.CurrentSchemaVersion)
             {
+                if (transferRules is not null)
+                {
+                    // Check known legacy shapes before a migration can execute any
+                    // triggers from an imported database. No public-row scan is needed.
+                    await using var legacy = await TransferConnectionAsync(importedDatabase, cancellationToken);
+                    await ValidateTransferSchemaAsync(legacy, "main", transferRules, "pacote de preços antes da migração", sourcePath, cancellationToken);
+                }
                 Report(
                     progress,
                     BackupImportStage.Migrating,
@@ -727,6 +737,14 @@ public sealed class BackupService(
                         cancellationToken: cancellationToken).ConfigureAwait(false);
                     validationSpan.Complete(bytes: inspection.DatabaseBytes);
                 }
+            }
+
+            if (transferRules is not null)
+            {
+                var recovery = await InstallPreservingLocalDataAsync(
+                    importedDatabase, sourcePath, transferRules, progress, cancellationToken).ConfigureAwait(false);
+                try { span.Complete(bytes: inspection.DatabaseBytes); } catch (Exception) { /* Already committed. */ }
+                return recovery;
             }
 
             if (manifest.BackupProfile == BackupProfile.Compact)
@@ -767,10 +785,6 @@ public sealed class BackupService(
             cancellationToken.ThrowIfCancellationRequested();
             await repository.CheckpointWalAsync(cancellationToken).ConfigureAwait(false);
             SqliteConnection.ClearAllPools();
-            if (manifest.BackupProfile == BackupProfile.FullWithoutQuotations)
-            {
-                await EnsureNoDestinationQuotationsAsync(cancellationToken).ConfigureAwait(false);
-            }
             var recoverableBackup = BuildRecoveryPath();
             DeleteSidecar(repository.DatabasePath, "-wal");
             DeleteSidecar(repository.DatabasePath, "-shm");
@@ -863,9 +877,14 @@ public sealed class BackupService(
         }
         finally
         {
-            if (Directory.Exists(temporaryDirectory))
+            try
             {
-                Directory.Delete(temporaryDirectory, true);
+                if (Directory.Exists(temporaryDirectory)) Directory.Delete(temporaryDirectory, true);
+            }
+            catch (Exception exception) when ((inspection.Profile is BackupProfile.FullWithoutQuotations or BackupProfile.PricesPreservingLocalData) &&
+                exception is IOException or UnauthorizedAccessException)
+            {
+                // Staging cleanup must not turn a durable replacement into an apparent failure.
             }
         }
     }
@@ -985,57 +1004,6 @@ public sealed class BackupService(
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT 1 FROM quotation_manual_price_divisors LIMIT 1;";
         return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
-    }
-
-    private static async Task RemoveSnapshotQuotationsAsync(
-        string databasePath,
-        CancellationToken cancellationToken)
-    {
-        var connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = databasePath,
-            Mode = SqliteOpenMode.ReadWrite,
-            Pooling = false,
-            ForeignKeys = true
-        }.ToString();
-        await using (var connection = new SqliteConnection(connectionString))
-        {
-            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-            await using (var journal = connection.CreateCommand())
-            {
-                journal.CommandText = "PRAGMA journal_mode=DELETE;";
-                var mode = await journal.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-                if (!string.Equals(Convert.ToString(mode, CultureInfo.InvariantCulture),
-                        "delete", StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidDataException("Não foi possível consolidar o snapshot sem cotações.");
-            }
-            await using (var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false))
-            {
-                await using var remove = connection.CreateCommand();
-                remove.Transaction = (SqliteTransaction)transaction;
-                remove.CommandText = """
-                    DELETE FROM quotation_projects;
-                    DELETE FROM quotation_internet_evidence_assets;
-                    """;
-                await remove.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            }
-            await using var vacuum = connection.CreateCommand();
-            vacuum.CommandText = "VACUUM;";
-            await vacuum.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        if (File.Exists(databasePath + "-wal") ||
-            await HasQuotationRowsAsync(databasePath, cancellationToken).ConfigureAwait(false))
-            throw new InvalidDataException("O snapshot ainda contém dados de cotação.");
-    }
-
-    private async Task EnsureNoDestinationQuotationsAsync(CancellationToken cancellationToken)
-    {
-        if (await HasQuotationRowsAsync(repository.DatabasePath, cancellationToken).ConfigureAwait(false))
-            throw new InvalidOperationException(
-                "Este banco já contém cotações. O backup sem cotações é apenas para iniciar um banco novo; " +
-                "para atualizar este computador, use Atualizar pelo GitHub ou Importar atualizações PNCP.");
     }
 
     private static async Task<bool> HasQuotationRowsAsync(
@@ -1434,6 +1402,10 @@ public sealed class BackupService(
         }
         if (manifest.BackupProfile is { } profile && !Enum.IsDefined(profile))
             throw new InvalidDataException("O manifesto contém um perfil de backup inválido.");
+        if ((manifest.BackupProfile is BackupProfile.FullWithoutQuotations or BackupProfile.PricesPreservingLocalData) && manifest.SchemaVersion < 33)
+            throw new InvalidDataException("Para substituir a base sem reconstruir preços no receptor, reexporte o arquivo completo sem cotações com a versão 1.2.45 ou posterior no PC de origem.");
+        if ((manifest.ArchiveFormatVersion == 5) != (manifest.BackupProfile == BackupProfile.PricesPreservingLocalData))
+            throw new InvalidDataException("O formato não corresponde à transferência de preços.");
         if ((manifest.ArchiveFormatVersion == 3) !=
             (manifest.BackupProfile == BackupProfile.FullWithoutQuotations))
             throw new InvalidDataException("O formato do backup não corresponde ao perfil declarado.");

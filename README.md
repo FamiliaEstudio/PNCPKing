@@ -88,7 +88,7 @@ A suíte automatizada cobre pesquisa por objeto e item, geografia, faixa de pre�
 
 ## Backup e importação de bancos grandes
 
-Em **Opções → Arquivo → Exportar backup**, o perfil **Completo com cotações** preserva o banco integral, inclusive relações de itens, todos os resultados homologados, snapshots de atualização, índices nacionais, checkpoints, cotações, cestas, CATMAT/CATSER, Sweet Codes e referências de evidências web. **Completo sem cotações** mantém o histórico e o cache de preços, mas remove projetos, itens, cestas, referências e evidências das cotações somente da cópia exportada; o banco de origem permanece intacto. O perfil **Compacto** preserva os dados permanentes, inclusive cotações, mas remove do snapshot descartável os itens, preços, FTS e checkpoints de cache que podem ser reconstruídos.
+Em **Opções → Arquivo → Exportar backup**, o perfil **Completo com cotações** preserva o banco integral, inclusive relações de itens, todos os resultados homologados, snapshots de atualização, índices nacionais, checkpoints, cotações, cestas, CATMAT/CATSER, Sweet Codes e referências de evidências web. **Completo sem cotações** mantém toda a base pública de preços e remove os dados particulares somente da cópia exportada. Ao importar na versão 1.2.45 ou posterior, substitui toda a base pública e preserva as cotações e os dados locais do destino; o banco de origem permanece intacto. O perfil **Compacto** preserva os dados permanentes, inclusive cotações, mas remove do snapshot descartável os itens, preços, FTS e checkpoints de cache que podem ser reconstruídos.
 
 Antes da exportação, a prévia mostra perfil, contagens materializadas, tamanho descompactado, evidências, unidades usadas e espaço necessário. O perfil completo precisa de espaço para o snapshot e para o arquivo `.partial`; o compacto e o completo sem cotações também reservam espaço adicional para o `VACUUM`. A exportação cria um único `.pncpking` com ZIP64, calcula SHA-256 durante a própria compactação e executa uma única verificação integral `PRAGMA integrity_check` no snapshot. Destinos FAT32 são recusados quando o arquivo pode ultrapassar 4 GiB; use NTFS ou exFAT.
 
@@ -96,11 +96,34 @@ Na importação, o banco é extraído em staging ao lado do banco ativo, portant
 
 No instante da ativação, o banco atual é renomeado para `nome-do-banco.db.before-import-...bak`, o banco validado assume o caminho oficial e é aberto para confirmação. Se essa etapa falhar, a base anterior é restaurada automaticamente. O cancelamento fica disponível até o começo dessa curta troca. Depois de confirmar que não precisa mais da recuperação, use **Opções → Limpeza → Excluir bases anteriores de importação**; a ação mostra quantidade e tamanho e não alcança arquivos fora do padrão de recuperação do banco atual.
 
-O backup **Completo sem cotações** serve para iniciar um banco em outro PC e exige a versão 1.2.11 ou posterior. Sua importação é recusada quando o banco de destino já contém cotações, para não substituir trabalhos locais. Em PCs em uso, instale a release do programa e importe atualizações PNCP; essas operações preservam as cotações locais.
+## Base completa sem cotações entre PCs
+
+Use a versão **1.2.46 ou posterior** se um banco antigo apresentar o erro de esquema `trigger:contracts_fts_update`. Ela reconhece as estruturas históricas legítimas sem liberar objetos desconhecidos.
+
+Na versão **1.2.45 ou posterior**, use **Opções → Arquivo → Exportar backup → Completo → Sem cotações**, ou o atalho **Exportar base completa de preços**. As duas opções usam o mesmo pacote e o mesmo mecanismo. No outro PC, use **Importar backup** ou **Importar base completa de preços**.
+
+1. Atualize o programa nos dois PCs. No PC de origem, atualize a base de preços antes de exportar. A exportação não baixa dados novos por conta própria.
+2. Copie o único arquivo `.pncpking` concluído para o destino. Feche as janelas de item de cotação e de avaliação do PC e pause ou conclua as operações em andamento.
+3. Confira a prévia e confirme a **substituição total da base pública**. O programa prepara o banco recebido ao lado do ativo, copia as cotações e dados locais para ele e faz a troca recuperável. Não apaga antecipadamente o banco ativo.
+
+**O arquivo recebido passa a ser a base pública definitiva.** Contratos, itens, preços, histórico, cobertura e catálogo exclusivos do destino deixam de constar da base ativa. Não há comparação de versões nem mesclagem de contratos/itens/resultados. Use uma exportação atualizada e completa: o programa não tenta corrigir uma origem incompleta ou desatualizada.
+
+Cotações e seus IDs, cestas, conversões, evidências, rascunhos, histórico de processamento e configurações locais são preservados. Os preços já salvos nas cotações são snapshots independentes e continuam nos cálculos/relatórios mesmo quando o contrato, item ou resultado não existe no banco recebido. Isso não recria o preço no catálogo público. Consultas de detalhes públicos dependem do conteúdo da nova base. A migração do esquema 33 para 34 remove apenas o vínculo do histórico de processamento ao contrato público, sem apagar esse histórico.
+
+Compactação e verificação integral ficam no emissor. No receptor, o SHA-256 é calculado durante a extração; os índices chegam prontos, sem `VACUUM`, `PRAGMA integrity_check` ou poda de retenção durante esta transferência. O trabalho adicional se limita à preservação e conferência dos dados locais, configurações e marcações selecionadas. Pacotes legados sem contadores de catálogo exigem somente a contagem do catálogo recebido, nunca a comparação da base de preços antiga. A retenção normal de 11 meses continua fora da transferência.
+
+O banco anterior permanece em `.before-import-...bak`. Falhas/cancelamento antes da troca mantêm a base ativa; a troca final não pode ser cancelada. Não remova a recuperação antes de conferir o resultado. A prévia reserva espaço para preparação e preservação, sem apagar dados para abrir espaço. Para arquivos grandes, use NTFS ou exFAT.
+
+Os recibos de atualizações/Guard e as partições de coleta da base anterior são reiniciados, para não fazer futuras atualizações pularem dados descartados. Campanhas, configurações e histórico de tarefas locais são mantidos.
+
+Para esta substituição, pacotes de esquema anterior a 33 devem ser reexportados no PC de origem. Isso evita migrações antigas que reconstruíam índices ou aplicavam retenção no receptor. Backups de recuperação com cotações mantêm seu suporte de migração.
+
+O formato **Completo sem cotações** é reaproveitado. Pacotes **Base completa de preços** da versão 1.2.44 também usam a nova substituição total quando importados pela 1.2.45. Backups **Completo com cotações** e **Compacto** continuam sendo backups de recuperação e conservam seu comportamento anterior.
+
 
 ## Transferência de atualizações entre PCs
 
-O botão **Atualizar pelo GitHub**, ao lado de **Opções**, verifica novas versões do programa e o pacote móvel de preços publicado em `FamiliaEstudio/PNCPKing`. Ele apresenta uma prévia e reinicia somente quando instala um executável novo. Preços podem ser atualizados independentemente do programa. Preparação das releases, requisitos e retomada: [atualizações pelo GitHub](docs/github-updates.md).
+O botão **Atualizar pelo GitHub**, ao lado de **Opções**, verifica novas versões do programa no GitHub. Na versão **1.2.47 ou posterior**, a opção **Atualizar os preços** procura arquivos `.pncpking` na [pasta pública do Google Drive](https://drive.google.com/drive/folders/1g8N6-G7EnO2Ah_cF8-DDCbLpu2EuTe6g), baixa o pacote e abre a mesma confirmação de importação da base completa. Se houver vários pacotes, escolha qual usar. O download aceita arquivos maiores que 4 GiB e não altera a importação/preservação da 1.2.46. Preços podem ser atualizados independentemente do programa; escolhendo ambos, o programa reinicia antes de baixar os preços. A importação manual continua disponível. Detalhes e requisitos: [atualizações pelo GitHub](docs/github-updates.md).
 
 **Exportar backup** mantém a opção de banco completo `.pncpking`. A transferência `.pncpupdate` é adicional e incorpora apenas dados oficiais, preservando cotações, cestas, evidências particulares e configurações do destino, observada a retenção de 11 meses.
 

@@ -40,7 +40,7 @@ internal sealed class EvidencePdfWriter : IDisposable
         using var canvas = new SKCanvas(bitmap);
         canvas.Scale(OutputScale);
         var contentTop = DrawPageHeader(canvas, heading, lines);
-        using var source = SKBitmap.Decode(rendered.PngBytes)
+        using var source = SKImage.FromEncodedData(rendered.PngBytes)
                            ?? throw new InvalidDataException("A página renderizada não pôde ser lida.");
 
         var sourceRectangle = new SKRect(
@@ -50,7 +50,7 @@ internal sealed class EvidencePdfWriter : IDisposable
             source.Height);
         var available = new SKRect(70, contentTop + 35, CanvasWidth - 70, CanvasHeight - 120);
         var fitted = Fit(sourceRectangle, available);
-        canvas.DrawBitmap(source, sourceRectangle, fitted);
+        canvas.DrawImage(source, sourceRectangle, fitted);
 
         AddBitmapPage(bitmap, portalUrl);
     }
@@ -69,12 +69,12 @@ internal sealed class EvidencePdfWriter : IDisposable
             canvas,
             heading,
             lines.Append(caption).ToArray());
-        using var source = SKBitmap.Decode(pngBytes.Span)
+        using var source = SKImage.FromEncodedData(pngBytes.Span)
                            ?? throw new InvalidDataException("O print não pôde ser lido.");
         var sourceRectangle = new SKRect(0, 0, source.Width, source.Height);
         var available = new SKRect(55, contentTop + 25, CanvasWidth - 55, CanvasHeight - 110);
         var fitted = Fit(sourceRectangle, available);
-        canvas.DrawBitmap(source, sourceRectangle, fitted);
+        canvas.DrawImage(source, sourceRectangle, fitted);
         AddBitmapPage(bitmap, sourceUrl);
     }
 
@@ -127,13 +127,12 @@ internal sealed class EvidencePdfWriter : IDisposable
 
     private void AddBitmapPage(SKBitmap bitmap, string? portalUrl)
     {
-        _pageNumber++;
         using var footerPaint = CreateTextStyle(16, new SKColor(90, 90, 90));
         using (var canvas = new SKCanvas(bitmap))
         {
             canvas.Scale(OutputScale);
             canvas.DrawText(
-                $"PNCP King · Página {_pageNumber:N0}",
+                $"PNCP King · Página {_pageNumber + 1:N0}",
                 55,
                 CanvasHeight - 45,
                 SKTextAlign.Left,
@@ -145,21 +144,31 @@ internal sealed class EvidencePdfWriter : IDisposable
         using var memory = new MemoryStream(data.ToArray());
         using var image = XImage.FromStream(memory);
         var page = _document.AddPage();
-        page.Width = XUnit.FromMillimeter(210);
-        page.Height = XUnit.FromMillimeter(297);
-        using (var graphics = XGraphics.FromPdfPage(page))
+        try
         {
-            graphics.DrawImage(image, 0, 0, page.Width.Point, page.Height.Point);
-        }
+            page.Width = XUnit.FromMillimeter(210);
+            page.Height = XUnit.FromMillimeter(297);
+            using (var graphics = XGraphics.FromPdfPage(page))
+            {
+                graphics.DrawImage(image, 0, 0, page.Width.Point, page.Height.Point);
+            }
 
-        if (Uri.TryCreate(portalUrl, UriKind.Absolute, out var uri))
+            if (Uri.TryCreate(portalUrl, UriKind.Absolute, out var uri))
+            {
+                var rectangle = new PdfRectangle(new XRect(
+                    20,
+                    20,
+                    page.Width.Point - 40,
+                    85));
+                page.Annotations.Add(PdfLinkAnnotation.CreateWebLink(rectangle, uri.AbsoluteUri));
+            }
+
+            _pageNumber++;
+        }
+        catch
         {
-            var rectangle = new PdfRectangle(new XRect(
-                20,
-                20,
-                page.Width.Point - 40,
-                85));
-            page.Annotations.Add(PdfLinkAnnotation.CreateWebLink(rectangle, uri.AbsoluteUri));
+            _document.Pages.Remove(page);
+            throw;
         }
     }
 

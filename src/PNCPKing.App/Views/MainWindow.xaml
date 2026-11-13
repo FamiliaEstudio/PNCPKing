@@ -72,6 +72,9 @@
                             <MenuItem Header="Importar atualizações PNCP…" Command="{Binding ImportUpdatesCommand}" />
                             <Separator />
                             <MenuItem Header="Compactar banco…" Command="{Binding CompactDatabaseCommand}" />
+                            <MenuItem Header="Exportar base completa de preços..." Command="{Binding ExportPriceDatabaseCommand}" ToolTip="Transfere a base inteira sem cotações da origem. Aguarde operações ativas e feche as janelas de item e de avaliação do PC." />
+                            <MenuItem Header="Importar base completa de preços..." Command="{Binding ImportPriceDatabaseCommand}" ToolTip="Atualiza os preços preservando cotações e configurações locais. Use um arquivo exportado pelo comando de base completa." />
+                            <Separator />
                             <MenuItem Header="Exportar backup" Command="{Binding ExportBackupCommand}" />
                             <MenuItem Header="Importar backup" Command="{Binding ImportBackupCommand}" />
                         </MenuItem>
@@ -99,6 +102,7 @@
                         </MenuItem>
                         <MenuItem Header="_Diagnóstico">
                             <MenuItem Header="Logs de diagnóstico" Command="{Binding OpenDiagnosticLogsCommand}" />
+                            <MenuItem Header="Enviar último erro desta sessão por e-mail…" Command="{Binding SendLastDiagnosticErrorCommand}" />
                             <MenuItem Header="Relatório de desempenho" Command="{Binding ExportPerformanceReportCommand}" />
                             <MenuItem Header="Comparar desempenho" Command="{Binding ComparePerformanceReportCommand}" />
                             <MenuItem Header="Avaliar desempenho deste PC…" Command="{Binding EvaluatePcCommand}" />

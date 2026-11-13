@@ -1,3 +1,4 @@
+using PNCPKing.App.Services;
 using System.Globalization;
 using System.Windows;
 using Microsoft.Win32;
@@ -61,7 +62,7 @@ public partial class GuardWindow : Window
         }
         catch (Exception exception)
         {
-            MessageBox.Show(this, exception.Message, "PNCP Guard", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "PNCP Guard", this);
             StatusTextBlock.Text = "A campanha não foi criada.";
         }
         finally
@@ -93,7 +94,7 @@ public partial class GuardWindow : Window
         }
         catch (Exception exception)
         {
-            MessageBox.Show(this, exception.Message, "PNCP Guard", MessageBoxButton.OK, MessageBoxImage.Error);
+            await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "PNCP Guard", this);
             StatusTextBlock.Text = "A importação não foi concluída.";
         }
         finally

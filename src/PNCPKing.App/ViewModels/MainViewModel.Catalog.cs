@@ -466,11 +466,7 @@ public sealed partial class MainViewModel
             CatalogProgressText = $"Falha no catálogo: {exception.Message}";
             if (showErrorDialog)
             {
-                System.Windows.MessageBox.Show(
-                    exception.Message,
-                    "CATMAT/CATSER",
-                    System.Windows.MessageBoxButton.OK,
-                    System.Windows.MessageBoxImage.Error);
+                await DiagnosticEmailDialog.ShowErrorAsync(exception, exception.Message, "CATMAT/CATSER");
             }
         }
         finally

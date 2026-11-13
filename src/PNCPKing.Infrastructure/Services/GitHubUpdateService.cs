@@ -25,6 +25,12 @@ public sealed class GitHubUpdateService(HttpClient client)
             app.Result.Error ?? "Programa disponível.", prices.Result.Error ?? "Preços disponíveis.");
     }
 
+    public async Task<GitHubUpdateCheck> CheckProgramAsync(CancellationToken cancellationToken = default)
+    {
+        var app = await ReadChannelAsync<AppUpdateManifest>("latest", "app-update.json", cancellationToken).ConfigureAwait(false);
+        return new(app.Release, null, app.Error ?? "Programa disponível.", string.Empty);
+    }
+
     public async Task<GitHubUpdateRelease<PricesUpdateManifest>?> GetPricesAfterRestartAsync(
         Version currentVersion, int currentSchema, OfficialTransferStatus state,
         CancellationToken cancellationToken = default)

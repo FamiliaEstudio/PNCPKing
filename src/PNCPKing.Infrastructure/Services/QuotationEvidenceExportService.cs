@@ -1,4 +1,8 @@
+using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
+using System.Text;
 using PdfSharp.Pdf.IO;
 using PNCPKing.Core.Interfaces;
 using PNCPKing.Core.Models;
@@ -8,24 +12,29 @@ namespace PNCPKing.Infrastructure.Services;
 
 public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportService
 {
+    public const string DiagnosticKey = "PNCPKing.EvidenceExportDiagnostic";
+    internal const string ImageUnavailableMessage = "Não foi possível obter a imagem pelo arquivo.";
     private readonly IContractDocumentService _documents;
     private readonly IPdfTextIndexService _indexes;
     private readonly IPdfPageRasterizer _rasterizer;
     private readonly IQuotationRepository? _quotations;
     private readonly IInternetEvidenceStore? _internetEvidence;
+    private readonly Action<string, Exception?>? _diagnostic;
 
     public QuotationEvidenceExportService(
         IContractDocumentService documents,
         IPdfTextIndexService indexes,
         IPdfPageRasterizer rasterizer,
         IQuotationRepository? quotations = null,
-        IInternetEvidenceStore? internetEvidence = null)
+        IInternetEvidenceStore? internetEvidence = null,
+        Action<string, Exception?>? diagnostic = null)
     {
         _documents = documents;
         _indexes = indexes;
         _rasterizer = rasterizer;
         _quotations = quotations;
         _internetEvidence = internetEvidence;
+        _diagnostic = diagnostic;
     }
 
     public async Task<QuotationEvidenceResult> ExportAsync(
@@ -45,7 +54,10 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
         Directory.CreateDirectory(temporaryRoot);
         var warnings = new List<string>();
         var bundles = new Dictionary<string, DocumentBundleResult>(StringComparer.Ordinal);
-        var renderCache = new Dictionary<(string Hash, int Page), RenderedPdfPage>();
+        var renderCache = new EvidenceRenderCache();
+        var exportId = Guid.NewGuid();
+        var started = Stopwatch.GetTimestamp();
+        var completed = false;
         var itemCount = 0;
         var referenceCount = 0;
         var occurrenceCount = 0;
@@ -87,7 +99,6 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
                         $"Item {report.ItemNumbers(itemIndex)}, preço {referenceIndex + 1:N0}: pesquisando documentos…"));
                     var heading = $"{itemTitle} · Preço {referenceIndex + 1:N0}";
                     var lines = BuildReferenceLines(reference);
-                    var referenceNotes = new List<string>();
                     var unitPath = GetUnitPath(temporaryRoot, units.Count);
                     using var unitWriter = new EvidencePdfWriter();
                     if (reference.Source == QuotationReferenceSource.InternetIncisoIII)
@@ -101,31 +112,38 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
                             units.Add(new EvidenceUnit(unitPath, unitWriter.PageCount));
                             continue;
                         }
-                        var priceImage = await _internetEvidence!.ReadVerifiedAsync(
-                            evidence.PriceImage,
-                            cancellationToken).ConfigureAwait(false);
-                        var taxIdImage = await _internetEvidence.ReadVerifiedAsync(
-                            evidence.TaxIdImage,
-                            cancellationToken).ConfigureAwait(false);
                         var imageLines = lines.Concat(
                         [
                             "Fonte legal: INCISO III",
                             $"Capturado em: {evidence.CapturedAt.LocalDateTime:dd/MM/yyyy HH:mm}",
                             "Os dois prints foram fornecidos pelo usuário e validados por SHA-256."
                         ]).ToArray();
-                        unitWriter.AddImageEvidencePage(
-                            heading,
-                            imageLines,
-                            reference.PortalUrl,
-                            priceImage,
-                            "Evidência 1 de 2 — print do preço");
-                        unitWriter.AddImageEvidencePage(
-                            heading,
-                            imageLines,
-                            reference.PortalUrl,
-                            taxIdImage,
-                            "Evidência 2 de 2 — print do CNPJ");
-                        occurrenceCount += 2;
+                        var images = new[]
+                        {
+                            (Image: evidence.PriceImage, Caption: "Evidência 1 de 2 — print do preço"),
+                            (Image: evidence.TaxIdImage, Caption: "Evidência 2 de 2 — print do CNPJ")
+                        };
+                        foreach (var (image, caption) in images)
+                        {
+                            var stage = "ler_print";
+                            try
+                            {
+                                var png = await _internetEvidence!.ReadVerifiedAsync(image, cancellationToken)
+                                    .ConfigureAwait(false);
+                                stage = "inserir_print";
+                                unitWriter.AddImageEvidencePage(
+                                    heading, imageLines, reference.PortalUrl, png, caption);
+                                occurrenceCount++;
+                            }
+                            catch (Exception exception) when (exception is not OperationCanceledException)
+                            {
+                                RecordFailure(exception, stage, exportId, report, report.ItemNumbers(itemIndex),
+                                    referenceIndex + 1, reference, renderCache, image: image);
+                                warnings.Add($"{heading}: {ImageUnavailableMessage}");
+                                unitWriter.AddTextPage(heading,
+                                    lines.Concat([caption, ImageUnavailableMessage]).ToArray(), reference.PortalUrl);
+                            }
+                        }
                         unitWriter.Save(unitPath);
                         units.Add(new EvidenceUnit(unitPath, unitWriter.PageCount));
                         continue;
@@ -158,159 +176,120 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
                         }
                         catch (Exception exception) when (exception is not OperationCanceledException)
                         {
-                            var warning =
-                                $"{contract.PncpId}: falha ao obter documentos ({exception.Message}).";
-                            warnings.Add(warning);
-                            unitWriter.AddTextPage(heading, lines.Append(warning).ToArray(), reference.PortalUrl);
+                            RecordFailure(exception, "obter_documentos", exportId, report,
+                                report.ItemNumbers(itemIndex), referenceIndex + 1, reference, renderCache);
+                            warnings.Add($"{heading}: {ImageUnavailableMessage}");
+                            unitWriter.AddTextPage(heading, lines.Append(ImageUnavailableMessage).ToArray(),
+                                reference.PortalUrl);
                             unitWriter.Save(unitPath);
                             units.Add(new EvidenceUnit(unitPath, unitWriter.PageCount));
                             continue;
                         }
                     }
 
-                    referenceNotes.AddRange(
-                        bundle.Warnings.Select(warning => $"{contract.PncpId}: {warning}"));
                     var referenceOccurrences = 0;
-                    var indexedDocuments = new List<IndexedEvidenceDocument>();
-                    for (var documentOrder = 0; documentOrder < bundle.Pdfs.Count; documentOrder++)
+                    var imageFailed = false;
+                    var failureNoted = false;
+                    // Reuse indexes while trying fallback expressions, but open later documents only if needed.
+                    var indexedDocuments = new Dictionary<string, DocumentTextIndex?>(StringComparer.Ordinal);
+                    var attemptedPages = new HashSet<(string Hash, int Page)>();
+                    foreach (var expression in BuildSearchExpressions(analysis, reference))
                     {
-                        var pdf = bundle.Pdfs[documentOrder];
-                        cancellationToken.ThrowIfCancellationRequested();
-                        DocumentTextIndex index;
-                        try
+                        var expressionMatched = false;
+                        for (var documentOrder = 0; documentOrder < bundle.Pdfs.Count; documentOrder++)
                         {
-                            index = await _indexes.BuildAsync(pdf, progress, cancellationToken)
-                                .ConfigureAwait(false);
-                            var indexWarnings = index.Warnings
-                                .Select(warning =>
-                                    $"{contract.PncpId}/{GetDocumentLabel(pdf)}: {warning}")
-                                .ToArray();
-                            warnings.AddRange(indexWarnings);
-                            referenceNotes.AddRange(indexWarnings);
-                        }
-                        catch (Exception exception) when (exception is not OperationCanceledException)
-                        {
-                            var warning =
-                                $"{contract.PncpId}/{GetDocumentLabel(pdf)}: PDF ilegível " +
-                                $"({DocumentExceptionDiagnostics.Describe(exception)}).";
-                            warnings.Add(warning);
-                            referenceNotes.Add(warning);
-                            continue;
-                        }
-
-                        indexedDocuments.Add(new IndexedEvidenceDocument(pdf, index, documentOrder));
-                    }
-
-                    var searchExpressions = BuildSearchExpressions(analysis, reference);
-                    EvidenceSearchExpression? matchedExpression = null;
-                    IReadOnlyList<EvidencePageMatch> pageMatches = [];
-                    foreach (var expression in searchExpressions)
-                    {
-                        var candidateMatches = indexedDocuments
-                            .SelectMany(document => document.Index.Pages.Select(page => new EvidencePageMatch(
-                                document.Pdf,
-                                page,
-                                FlexiblePhraseMatcher.Find(expression.Text, page),
-                                document.DocumentOrder)))
-                            .Where(match => match.Occurrences.Count > 0)
-                            .GroupBy(
-                                match => (match.Pdf.Sha256, match.Page.PageNumber),
-                                match => match)
-                            .Select(group =>
-                            {
-                                var first = group.First();
-                                return first with
-                                {
-                                    Occurrences = group
-                                        .SelectMany(match => match.Occurrences)
-                                        .DistinctBy(occurrence =>
-                                            $"{occurrence.PageNumber}:{string.Join(',', occurrence.WordIndexes)}")
-                                        .ToArray()
-                                };
-                            })
-                            .ToArray();
-                        if (candidateMatches.Length == 0)
-                        {
-                            continue;
-                        }
-
-                        matchedExpression = expression;
-                        pageMatches = candidateMatches;
-                        break;
-                    }
-
-                    if (matchedExpression is not null)
-                    {
-                        var rankedPages = pageMatches
-                            .OrderBy(match => match.Page.Source == DocumentTextSource.Native ? 0 : 1)
-                            .ThenByDescending(match => match.Occurrences.Count)
-                            .ThenBy(match => match.DocumentOrder)
-                            .ThenBy(match => match.Page.PageNumber)
-                            .ToArray();
-                        var renderedSelections = new List<(EvidencePageMatch Match, RenderedPdfPage Rendered)>();
-                        foreach (var pageMatch in rankedPages)
-                        {
-                            if (renderedSelections.Count == 2) break;
+                            if (unitWriter.PageCount == 2) break;
                             cancellationToken.ThrowIfCancellationRequested();
-                            try
+                            var pdf = bundle.Pdfs[documentOrder];
+                            if (!indexedDocuments.TryGetValue(pdf.Sha256, out var index))
                             {
-                                if (!renderCache.TryGetValue(
-                                        (pageMatch.Pdf.Sha256, pageMatch.Page.PageNumber),
-                                        out var rendered))
+                                try
                                 {
-                                    rendered = await _rasterizer.RenderAsync(
-                                        pageMatch.Pdf.LocalPath,
-                                        pageMatch.Page.PageNumber,
-                                        cancellationToken: cancellationToken).ConfigureAwait(false);
-                                    renderCache[(pageMatch.Pdf.Sha256, pageMatch.Page.PageNumber)] = rendered;
+                                    index = await _indexes.BuildAsync(pdf, progress, cancellationToken)
+                                        .ConfigureAwait(false);
+                                    warnings.AddRange(index.Warnings.Select(warning =>
+                                        $"{contract.PncpId}/{GetDocumentLabel(pdf)}: {warning}"));
                                 }
-
-                                renderedSelections.Add((pageMatch, rendered));
+                                catch (Exception exception) when (exception is not OperationCanceledException)
+                                {
+                                    imageFailed = true;
+                                    RecordFailure(exception, "ler_pdf", exportId, report,
+                                        report.ItemNumbers(itemIndex), referenceIndex + 1, reference, renderCache, pdf);
+                                    warnings.Add($"{heading}: {ImageUnavailableMessage}");
+                                    index = null;
+                                }
+                                indexedDocuments.Add(pdf.Sha256, index);
                             }
-                            catch (Exception exception) when (exception is not OperationCanceledException)
+                            if (index is null) continue;
+
+                            var rankedPages = index.Pages
+                                .Select(page => new EvidencePageMatch(pdf, page,
+                                    FlexiblePhraseMatcher.Find(expression.Text, page), documentOrder))
+                                .Where(match => match.Occurrences.Count > 0)
+                                .OrderBy(match => match.Page.Source == DocumentTextSource.Native ? 0 : 1)
+                                .ThenByDescending(match => match.Occurrences.Count)
+                                .ThenBy(match => match.Page.PageNumber);
+                            foreach (var pageMatch in rankedPages)
                             {
-                                var warning =
-                                    $"{contract.PncpId}/{pageMatch.Pdf.DocumentTitle}, " +
-                                    $"página {pageMatch.Page.PageNumber:N0}: " +
-                                    "não foi possível incluir a página inteira " +
-                                    $"({DocumentExceptionDiagnostics.Describe(exception)}).";
-                                warnings.Add(warning);
-                                referenceNotes.Add(warning);
+                                if (unitWriter.PageCount == 2) break;
+                                expressionMatched = true;
+                                var key = (pdf.Sha256, pageMatch.Page.PageNumber);
+                                if (!attemptedPages.Add(key)) continue;
+                                cancellationToken.ThrowIfCancellationRequested();
+                                RenderedPdfPage? rendered = null;
+                                var stage = "renderizar_pagina";
+                                var cacheHit = false;
+                                try
+                                {
+                                    cacheHit = renderCache.TryGetValue(key, out rendered);
+                                    if (!cacheHit)
+                                    {
+                                        rendered = await _rasterizer.RenderAsync(pdf.LocalPath,
+                                            pageMatch.Page.PageNumber, cancellationToken: cancellationToken)
+                                            .ConfigureAwait(false);
+                                    }
+                                    var evidenceLines = lines.Concat(
+                                    [
+                                        $"Documento: {pdf.DocumentTitle}" +
+                                        (pdf.ArchivePath.Length == 0 ? string.Empty : $" · {pdf.ArchivePath}"),
+                                        $"Página original: {pageMatch.Page.PageNumber:N0} · leitura: " +
+                                        (pageMatch.Page.Source == DocumentTextSource.Native ? "texto nativo" : "OCR")
+                                    ]);
+                                    if (imageFailed) evidenceLines = evidenceLines.Append(ImageUnavailableMessage);
+                                    stage = "inserir_imagem";
+                                    unitWriter.AddDocumentPage(heading, evidenceLines.ToArray(),
+                                        reference.PortalUrl, rendered!);
+                                    if (!cacheHit) renderCache.Add(key, rendered!);
+                                    failureNoted |= imageFailed;
+                                    referenceOccurrences += pageMatch.Occurrences.Count;
+                                    occurrenceCount += pageMatch.Occurrences.Count;
+                                }
+                                catch (Exception exception) when (exception is not OperationCanceledException)
+                                {
+                                    imageFailed = true;
+                                    renderCache.Remove(key);
+                                    RecordFailure(exception, stage, exportId, report, report.ItemNumbers(itemIndex),
+                                        referenceIndex + 1, reference, renderCache, pdf, pageMatch.Page.PageNumber,
+                                        rendered, cacheHit);
+                                    warnings.Add($"{heading}: {ImageUnavailableMessage}");
+                                }
                             }
                         }
-
-                        foreach (var (pageMatch, rendered) in renderedSelections)
-                        {
-                            var evidenceLines = lines.Concat(
-                            [
-                                $"Documento: {pageMatch.Pdf.DocumentTitle}" +
-                                (pageMatch.Pdf.ArchivePath.Length == 0
-                                    ? string.Empty
-                                    : $" · {pageMatch.Pdf.ArchivePath}"),
-                                $"Página original: {pageMatch.Page.PageNumber:N0} · leitura: " +
-                                (pageMatch.Page.Source == DocumentTextSource.Native ? "texto nativo" : "OCR"),
-                                $"Páginas incluídas: {renderedSelections.Count:N0} de {rankedPages.Length:N0} páginas localizadas."
-                            ]).Concat(referenceNotes.Distinct(StringComparer.Ordinal).Take(1).Select(note => $"Aviso: {note}"))
-                            .ToArray();
-                            unitWriter.AddDocumentPage(
-                                heading,
-                                evidenceLines,
-                                reference.PortalUrl,
-                                rendered);
-                            referenceOccurrences += pageMatch.Occurrences.Count;
-                            occurrenceCount += pageMatch.Occurrences.Count;
-                        }
+                        // Keep the existing priority of exact descriptions over broader fallback terms.
+                        if (expressionMatched) break;
                     }
 
-                    if (referenceOccurrences == 0)
+                    if (imageFailed && !failureNoted && unitWriter.PageCount < 2)
+                    {
+                        unitWriter.AddTextPage(heading, lines.Append(ImageUnavailableMessage).ToArray(),
+                            reference.PortalUrl);
+                    }
+                    else if (referenceOccurrences == 0)
                     {
                         var message = bundle.Pdfs.Count == 0
                             ? "Nenhum PDF processável foi encontrado nesta contratação."
                             : "Nenhuma página relevante foi localizada nos documentos da contratação.";
-                        unitWriter.AddTextPage(
-                            heading,
-                            lines.Concat(referenceNotes.Distinct(StringComparer.Ordinal)).Append(message).ToArray(),
-                            reference.PortalUrl);
+                        unitWriter.AddTextPage(heading, lines.Append(message).ToArray(), reference.PortalUrl);
                     }
 
                     unitWriter.Save(unitPath);
@@ -376,6 +355,7 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
             }
 
             PublishParts(fullDestination, reportPaths, temporaryParts, temporaryRoot);
+            completed = true;
             return new QuotationEvidenceResult(
                 reportPaths[0],
                 itemCount,
@@ -388,11 +368,58 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
         }
         finally
         {
+            WriteDiagnostic($"exportacao={exportId}; projeto={report.Project.Id}; concluida={completed}; " +
+                $"duracao_ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}; " +
+                $"precos={referenceCount}; cache_limite_bytes={renderCache.MaximumBytes}; " +
+                $"cache_pico_bytes={renderCache.PeakBytes}; cache_paginas={renderCache.Count}; " +
+                $"cache_acertos={renderCache.Hits}; cache_faltas={renderCache.Misses}; " +
+                $"cache_descartes={renderCache.Evictions}; cache_paginas_grandes={renderCache.OversizedPages}", null);
             if (Directory.Exists(temporaryRoot))
             {
                 Directory.Delete(temporaryRoot, recursive: true);
             }
         }
+    }
+
+    private void RecordFailure(
+        Exception exception, string stage, Guid exportId, QuotationProjectReport report,
+        string itemNumber, int priceNumber, QuotationReference reference, EvidenceRenderCache cache,
+        CachedPdfDocument? pdf = null, int? pageNumber = null, RenderedPdfPage? rendered = null,
+        bool cacheHit = false, EvidenceImageDescriptor? image = null)
+    {
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            var resources = new SystemResourceProbe().GetSnapshot();
+            var detail = new StringBuilder()
+                .AppendLine($"exportacao={exportId}; etapa={stage}")
+                .AppendLine($"projeto={report.Project.Id}; nome={report.Project.Name}; item={itemNumber}; preco={priceNumber}")
+                .AppendLine($"linha={reference.LineId}; referencia={reference.Id}; contratacao={reference.ContractId}; url={reference.PortalUrl}")
+                .AppendLine($"arquivo={pdf?.LocalPath ?? image?.RelativePath}; titulo={pdf?.DocumentTitle}; arquivo_interno={pdf?.ArchivePath}; sha256={pdf?.Sha256 ?? image?.Sha256}; pagina={pageNumber}")
+                .AppendLine($"png_bytes={rendered?.PngBytes.LongLength ?? image?.ByteLength}; pixels={rendered?.PixelWidth ?? image?.PixelWidth}x{rendered?.PixelHeight ?? image?.PixelHeight}; pdf_pontos={rendered?.PdfWidth}x{rendered?.PdfHeight}; dpi=300")
+                .AppendLine($"cache_acerto={cacheHit}; cache_bytes={cache.Bytes}; cache_pico_bytes={cache.PeakBytes}; cache_limite_bytes={cache.MaximumBytes}")
+                .AppendLine($"memoria_privada={process.PrivateMemorySize64}; working_set={process.WorkingSet64}; heap_gc={GC.GetTotalMemory(false)}; limite_gc={GC.GetGCMemoryInfo().TotalAvailableMemoryBytes}")
+                .AppendLine($"ram_total={resources.TotalPhysicalMemoryBytes}; ram_livre={resources.AvailablePhysicalMemoryBytes}; carga_memoria={resources.MemoryLoadPercent}")
+                .AppendLine($"so={RuntimeInformation.OSDescription}; arquitetura={RuntimeInformation.ProcessArchitecture}; runtime={RuntimeInformation.FrameworkDescription}; skia={typeof(SkiaSharp.SKImage).Assembly.GetName().Version}")
+                .AppendLine($"cpu_sse2={Sse2.IsSupported}; cpu_sse41={Sse41.IsSupported}; cpu_sse42={Sse42.IsSupported}; cpu_avx={Avx.IsSupported}; cpu_avx2={Avx2.IsSupported}");
+            for (var cause = exception; cause is not null; cause = cause.InnerException)
+                detail.AppendLine($"excecao={cause.GetType().FullName}; hresult=0x{cause.HResult:X8}; mensagem={cause.Message}");
+            exception.Data[DiagnosticKey] = detail.ToString();
+            WriteDiagnostic($"Falha na evidência: exportacao={exportId}; etapa={stage}; item={itemNumber}; preco={priceNumber}.", exception);
+        }
+        catch
+        {
+            // Diagnostics must never turn a recoverable page failure into a failed export.
+            WriteDiagnostic($"Falha na evidência: exportacao={exportId}; etapa={stage}; " +
+                $"item={itemNumber}; preco={priceNumber}; arquivo={pdf?.LocalPath ?? image?.RelativePath}; " +
+                $"pagina={pageNumber}; referencia={reference.Id}; hresult=0x{exception.HResult:X8}.", exception);
+        }
+    }
+
+    private void WriteDiagnostic(string message, Exception? exception)
+    {
+        try { _diagnostic?.Invoke(message, exception); }
+        catch { /* A logging failure must not interrupt evidence publication. */ }
     }
 
     private static string BuildItemTitle(string itemNumber, QuotationLine line)
@@ -738,11 +765,6 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
     };
 
     private sealed record EvidenceSearchExpression(string Label, string Text);
-
-    private sealed record IndexedEvidenceDocument(
-        CachedPdfDocument Pdf,
-        DocumentTextIndex Index,
-        int DocumentOrder);
 
     private sealed record EvidencePageMatch(
         CachedPdfDocument Pdf,

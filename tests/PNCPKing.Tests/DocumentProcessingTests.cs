@@ -904,6 +904,237 @@ public sealed class DocumentProcessingTests
         }
     }
 
+    [Fact]
+    public async Task EvidenceReport_ImageInsertionFailureKeepsOtherPagesAndPricesAndLogsExactContext()
+    {
+        var root = CreateTemporaryFolder();
+        try
+        {
+            var source = Path.Combine(root, "origem.pdf");
+            await File.WriteAllBytesAsync(source, BuildPdfPages("cafe torrado", "cafe torrado", "cafe torrado"));
+            var reference = Reference();
+            var references = new[] { reference, reference with { Id = "reference-2", ResultSequence = 2 } };
+            var diagnostics = new List<(string Message, Exception? Error)>();
+            var rasterizer = new CallbackRasterizer((page, call) => page == 1 && call == 1
+                ? new RenderedPdfPage([1, 2, 3], 100, 100, 595, 842)
+                : ValidRenderedPage());
+            var service = new QuotationEvidenceExportService(
+                new FakeContractDocumentService(Cached(source)),
+                new StaticTextIndexService(EvidenceIndex(source, 3)), rasterizer,
+                diagnostic: (message, error) => diagnostics.Add((message, error)));
+            var destination = Path.Combine(root, "recuperado.pdf");
+
+            var result = await service.ExportAsync(destination, Report(references));
+
+            Assert.Equal(4, result.Occurrences);
+            var warning = Assert.Single(result.Warnings);
+            Assert.EndsWith(QuotationEvidenceExportService.ImageUnavailableMessage, warning);
+            Assert.DoesNotContain("Exception", warning);
+            Assert.DoesNotContain(source, warning);
+            var failure = Assert.Single(diagnostics, entry => entry.Error is not null);
+            var detail = Assert.IsType<string>(failure.Error!.Data[QuotationEvidenceExportService.DiagnosticKey]);
+            Assert.Contains("etapa=inserir_imagem", detail);
+            Assert.Contains("preco=1", detail);
+            Assert.Contains("referencia=reference-1", detail);
+            Assert.Contains("pagina=1", detail);
+            Assert.Contains(source, detail);
+            Assert.Contains(Cached(source).Sha256, detail);
+            Assert.Contains("png_bytes=3", detail);
+            Assert.Contains("memoria_privada=", detail);
+            Assert.Contains("ram_livre=", detail);
+            Assert.Contains("hresult=0x", detail);
+            Assert.Equal(1, rasterizer.Pages.Count(page => page == 2)); // Reused for the second price.
+            Assert.Equal(1, rasterizer.Pages.Count(page => page == 3));
+            using var pdf = UglyToad.PdfPig.PdfDocument.Open(destination);
+            Assert.Equal(5, pdf.NumberOfPages);
+            Assert.Empty(Directory.GetDirectories(root, ".pncpking-evidencias-*"));
+        }
+        finally { DeleteDirectory(root); }
+    }
+
+    [Fact]
+    public async Task EvidenceReport_LaterImageFailurePreservesTheFirstImageAndAddsAShortNotice()
+    {
+        var root = CreateTemporaryFolder();
+        try
+        {
+            var source = Path.Combine(root, "origem.pdf");
+            await File.WriteAllBytesAsync(source, BuildPdfPages("cafe torrado", "cafe torrado"));
+            var service = new QuotationEvidenceExportService(
+                new FakeContractDocumentService(Cached(source)),
+                new StaticTextIndexService(EvidenceIndex(source, 2)),
+                new CallbackRasterizer((page, _) => page == 1
+                    ? ValidRenderedPage()
+                    : new RenderedPdfPage([1], 100, 100, 595, 842)));
+
+            var result = await service.ExportAsync(Path.Combine(root, "parcial.pdf"), Report(Reference()));
+
+            Assert.Equal(1, result.Occurrences);
+            Assert.EndsWith(QuotationEvidenceExportService.ImageUnavailableMessage, Assert.Single(result.Warnings));
+            using var pdf = UglyToad.PdfPig.PdfDocument.Open(result.ReportPath);
+            Assert.Equal(3, pdf.NumberOfPages);
+            var image = Assert.Single(pdf.GetPage(2).GetImages());
+            using var bitmap = SKBitmap.Decode(image.RawBytes.ToArray());
+            Assert.NotNull(bitmap);
+            Assert.Contains(bitmap.Pixels, color => color.Red > 210 && color.Blue > 210 && color.Green < 80);
+        }
+        finally { DeleteDirectory(root); }
+    }
+
+    [Fact]
+    public async Task EvidenceReport_AllImagesFailStillPublishesThePriceWithOnlyTheShortWarning()
+    {
+        var root = CreateTemporaryFolder();
+        try
+        {
+            var source = Path.Combine(root, "origem.pdf");
+            await File.WriteAllBytesAsync(source, BuildPdf("cafe torrado"));
+            var reference = Reference();
+            Exception? logged = null;
+            var service = new QuotationEvidenceExportService(
+                new FakeContractDocumentService(Cached(source)),
+                new StaticTextIndexService(EvidenceIndex(source, 1)),
+                new CallbackRasterizer((_, _) => throw new System.Runtime.InteropServices.SEHException("falha nativa simulada")),
+                diagnostic: (_, error) => { if (error is not null) logged = error; });
+            var destination = Path.Combine(root, "indisponivel.pdf");
+
+            var result = await service.ExportAsync(destination, Report(reference));
+
+            Assert.Equal(0, result.Occurrences);
+            Assert.EndsWith(QuotationEvidenceExportService.ImageUnavailableMessage, Assert.Single(result.Warnings));
+            Assert.IsType<System.Runtime.InteropServices.SEHException>(logged);
+            var detail = Assert.IsType<string>(logged!.Data[QuotationEvidenceExportService.DiagnosticKey]);
+            Assert.Contains("etapa=renderizar_pagina", detail);
+            Assert.Contains("hresult=0x80004005", detail);
+            Assert.Contains("falha nativa simulada", logged.ToString());
+            using var pdf = UglyToad.PdfPig.PdfDocument.Open(destination);
+            Assert.Equal(2, pdf.NumberOfPages);
+        }
+        finally { DeleteDirectory(root); }
+    }
+
+    [Fact]
+    public async Task EvidenceReport_StopsBeforeIndexingLaterDocumentsOnceTwoImagesWereIncluded()
+    {
+        var root = CreateTemporaryFolder();
+        try
+        {
+            var source = Path.Combine(root, "primeiro.pdf");
+            await File.WriteAllBytesAsync(source, BuildPdfPages("cafe torrado", "cafe torrado", "cafe torrado"));
+            var unused = Cached(source) with { LocalPath = Path.Combine(root, "nao-deve-ser-aberto.pdf"), Sha256 = "outro" };
+            var indexes = new CallbackIndexService(pdf => pdf.LocalPath == source
+                ? EvidenceIndex(source, 3)
+                : throw new InvalidOperationException("O documento seguinte não deve ser aberto."));
+            var rasterizer = new CallbackRasterizer((_, _) => ValidRenderedPage());
+            var service = new QuotationEvidenceExportService(
+                new MultipleDocumentService([Cached(source), unused]), indexes, rasterizer);
+
+            var result = await service.ExportAsync(Path.Combine(root, "rapido.pdf"), Report(Reference()));
+
+            Assert.Empty(result.Warnings);
+            Assert.Equal(1, indexes.Calls);
+            Assert.Equal([1, 2], rasterizer.Pages);
+            Assert.Equal(2, result.Occurrences);
+        }
+        finally { DeleteDirectory(root); }
+    }
+
+    [Fact]
+    public async Task EvidenceReport_FallbackReusesIndexesAndCancellationDuringRenderingPreservesOldReport()
+    {
+        var root = CreateTemporaryFolder();
+        try
+        {
+            var source = Path.Combine(root, "origem.pdf");
+            await File.WriteAllBytesAsync(source, BuildPdf("cafe"));
+            var indexes = new CallbackIndexService(_ => new DocumentTextIndex
+            {
+                PdfSha256 = Cached(source).Sha256,
+                SourcePath = source,
+                Pages = [IndexedPage(1, "cafe")]
+            });
+            var destination = Path.Combine(root, "anterior.pdf");
+            var previous = "relatório anterior"u8.ToArray();
+            await File.WriteAllBytesAsync(destination, previous);
+            var service = new QuotationEvidenceExportService(
+                new FakeContractDocumentService(Cached(source)), indexes,
+                new CallbackRasterizer((_, _) => throw new OperationCanceledException()));
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.ExportAsync(destination, Report(Reference())));
+
+            Assert.Equal(1, indexes.Calls);
+            Assert.Equal(previous, await File.ReadAllBytesAsync(destination));
+            Assert.Empty(Directory.GetDirectories(root, ".pncpking-evidencias-*"));
+        }
+        finally { DeleteDirectory(root); }
+    }
+
+    [Fact]
+    public async Task EvidenceReport_DiagnosticFailureDoesNotPreventRecoveringAnImageFailure()
+    {
+        var root = CreateTemporaryFolder();
+        try
+        {
+            var source = Path.Combine(root, "origem.pdf");
+            await File.WriteAllBytesAsync(source, BuildPdf("cafe torrado"));
+            var service = new QuotationEvidenceExportService(
+                new FakeContractDocumentService(Cached(source)),
+                new StaticTextIndexService(EvidenceIndex(source, 1)),
+                new CallbackRasterizer((_, _) => new RenderedPdfPage([1], 100, 100, 595, 842)),
+                diagnostic: (_, _) => throw new IOException("Log indisponível"));
+
+            var result = await service.ExportAsync(Path.Combine(root, "sem-log.pdf"), Report(Reference()));
+
+            Assert.True(File.Exists(result.ReportPath));
+            Assert.Single(result.Warnings);
+        }
+        finally { DeleteDirectory(root); }
+    }
+
+    private static DocumentTextIndex EvidenceIndex(string source, int pages) => new()
+    {
+        PdfSha256 = Cached(source).Sha256,
+        SourcePath = source,
+        Pages = Enumerable.Range(1, pages).Select(page => IndexedPage(page, "cafe", "torrado")).ToArray()
+    };
+
+    private static RenderedPdfPage ValidRenderedPage() =>
+        new(EvidenceRasterizer.FullPagePng, 100, 100, 595, 842);
+
+    private sealed class CallbackRasterizer(Func<int, int, RenderedPdfPage> render) : IPdfPageRasterizer
+    {
+        public List<int> Pages { get; } = [];
+        public Task<RenderedPdfPage> RenderAsync(string pdfPath, int pageNumber, int dpi = 300,
+            CancellationToken cancellationToken = default)
+        {
+            Assert.Equal(300, dpi);
+            Pages.Add(pageNumber);
+            return Task.FromResult(render(pageNumber, Pages.Count));
+        }
+    }
+
+    private sealed class CallbackIndexService(Func<CachedPdfDocument, DocumentTextIndex> build) : IPdfTextIndexService
+    {
+        public int Calls { get; private set; }
+        public Task<DocumentTextIndex> BuildAsync(CachedPdfDocument pdf,
+            IProgress<DocumentProcessingProgress>? progress = null, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return Task.FromResult(build(pdf));
+        }
+    }
+
+    private sealed class MultipleDocumentService(IReadOnlyList<CachedPdfDocument> pdfs) : IContractDocumentService
+    {
+        public Task<DocumentBundleResult> PrepareAsync(PncpContractKey contract,
+            IProgress<DocumentProcessingProgress>? progress = null, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new DocumentBundleResult { Contract = contract, Pdfs = pdfs });
+        public Task<DocumentBundleResult> CreateConsolidatedPdfAsync(PncpContractKey contract, string destinationPath,
+            IProgress<DocumentProcessingProgress>? progress = null, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        public Task<long> ClearCacheAsync(CancellationToken cancellationToken = default) => Task.FromResult(0L);
+    }
+
     private static DocumentPageIndex Page(params string[] values) =>
         new()
         {
@@ -1271,7 +1502,7 @@ public sealed class DocumentProcessingTests
 
     private sealed class EvidenceRasterizer : IPdfPageRasterizer
     {
-        private static readonly byte[] FullPagePng = CreateFullPagePng();
+        internal static readonly byte[] FullPagePng = CreateFullPagePng();
         public int LastDpi { get; private set; }
         public List<int> Pages { get; } = [];
 

@@ -12,7 +12,7 @@ namespace PNCPKing.Tests;
 public sealed class BackupTests
 {
     [Fact]
-    public async Task FullBackupWithoutQuotationsKeepsHistoryButCannotReplaceLocalQuotations()
+    public async Task FullBackupWithoutQuotationsReplacesPricesAndPreservesLocalQuotations()
     {
         await using var source = await TestDatabase.CreateAsync();
         await using var destination = await TestDatabase.CreateAsync();
@@ -59,15 +59,12 @@ public sealed class BackupTests
         var destinationQuotations = new SqliteQuotationRepository(destination.Repository.DatabasePath);
         var localProject = await destinationQuotations.CreateProjectAsync("Cotação local preservada");
         var importer = new BackupService(destination.Repository);
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => importer.ImportAsync(path));
-        Assert.Contains("já contém cotações", error.Message);
+        await importer.ImportAsync(path);
         Assert.Equal(localProject.Id, Assert.Single(await destinationQuotations.GetProjectsAsync()).Id);
 
-        await destinationQuotations.DeleteProjectAsync(localProject.Id);
-        await importer.ImportAsync(path);
         Assert.NotNull(await destination.Repository.GetContractAsync(contract.PncpId));
         Assert.Single((await destination.Repository.GetCachedItemResultsAsync(contract.PncpId, 1))!.Results);
-        Assert.Empty(await destinationQuotations.GetProjectsAsync());
+        Assert.Equal(localProject.Id, Assert.Single(await destinationQuotations.GetProjectsAsync()).Id);
     }
 
     [Theory]

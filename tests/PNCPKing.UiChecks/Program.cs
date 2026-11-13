@@ -488,8 +488,53 @@ internal static partial class Program
                     "Preços disponíveis precisam funcionar sem uma nova versão do programa.");
             }
             finally { priceOnly.Close(); }
+            var driveFile = new DrivePriceFile("drivefile123456", "base-atual.pncpking", 4484945638L, 1794398450761L);
+            var drivePlan = plan with { Package = null };
+            var driveWindow = new PNCPKing.App.Views.GitHubUpdateWindow(drivePlan, notes, driveFiles: [driveFile]);
+            try
+            {
+                driveWindow.Show();
+                Require(driveWindow.UpdatePrices && driveWindow.SelectedDriveFile == driveFile,
+                    "Um único arquivo do Drive precisa ser selecionado automaticamente, inclusive acima de 4 GiB.");
+                var driveChoices = VisualChildren(driveWindow).OfType<CheckBox>().ToArray();
+                driveChoices.Single(value => Equals(value.Content, "Atualizar o programa")).IsChecked = false;
+                Require(driveWindow.UpdatePrices && !driveWindow.UpdateProgram, "Preços do Drive devem funcionar sem atualizar o programa.");
+                driveChoices.Single(value => Equals(value.Content, "Atualizar os preços")).IsChecked = false;
+                Require(!driveWindow.UpdatePrices, "Desmarcar preços não pode manter download do Drive selecionado.");
+                Require(VisualChildren(driveWindow).OfType<Button>().Any(b => b.IsCancel), "O Drive precisa permitir cancelar a prévia.");
+            }
+            finally { driveWindow.Close(); }
+            var multipleDrive = new PNCPKing.App.Views.GitHubUpdateWindow(drivePlan,
+                driveFiles: [driveFile, driveFile with { Id = "secondfile12345", Name = "segunda-base.pncpking" }]);
+            try
+            {
+                multipleDrive.Show();
+                Require(!multipleDrive.UpdatePrices && multipleDrive.SelectedDriveFile is null,
+                    "Vários arquivos do Drive exigem escolha explícita.");
+                var multipleUpdate = VisualChildren(multipleDrive).OfType<Button>().Single(b => Equals(b.Content, "Atualizar agora"));
+                Require(!multipleUpdate.IsEnabled, "Preços marcados sem pacote não podem virar atualização somente do programa.");
+                var multiplePrices = VisualChildren(multipleDrive).OfType<CheckBox>().Single(b => Equals(b.Content, "Atualizar os preços"));
+                multiplePrices.IsChecked = false;
+                Require(multipleUpdate.IsEnabled, "Desmarcar preços deve permitir atualizar somente o programa.");
+                multiplePrices.IsChecked = true;
+                var picker = VisualChildren(multipleDrive).OfType<ComboBox>().Single();
+                picker.SelectedIndex = 1;
+                Require(multipleDrive.UpdatePrices && multipleDrive.SelectedDriveFile?.Id == "secondfile12345",
+                    "A escolha precisa usar exatamente o arquivo selecionado.");
+                picker.SelectedIndex = -1;
+                Require(!multipleDrive.UpdatePrices, "Limpar a seleção deve impedir download sem pacote.");
+            }
+            finally { multipleDrive.Close(); }
+            var unavailableDrive = new PNCPKing.App.Views.GitHubUpdateWindow(drivePlan, driveFiles: []);
+            try
+            {
+                unavailableDrive.Show();
+                Require(unavailableDrive.UpdateProgram && !unavailableDrive.UpdatePrices,
+                    "Drive indisponível não pode bloquear a atualização somente do programa.");
+            }
+            finally { unavailableDrive.Close(); }
             return new { passed = true, programOnly = true, pricesOnly = true, both = true,
-                compatibilityRequired = true, cancelAvailable = true, window.ActualHeight };
+                compatibilityRequired = true, cancelAvailable = true, driveSelection = true, window.ActualHeight };
         }
         finally { window.Close(); }
     }

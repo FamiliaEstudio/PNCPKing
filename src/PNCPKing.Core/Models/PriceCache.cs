@@ -201,5 +201,6 @@ public enum BackupProfile
 {
     Compact = 0,
     Full = 1,
-    FullWithoutQuotations = 2
+    FullWithoutQuotations = 2,
+    PricesPreservingLocalData = 3
 }

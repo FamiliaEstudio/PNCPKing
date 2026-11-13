@@ -1,3 +1,21 @@
+# Atualização de programa e preços
+
+## Base completa pelo Google Drive (1.2.47 ou posterior)
+
+Em **Atualizar pelo GitHub**, marque **Atualizar os preços**. O programa consulta diretamente, sem conta Google, a pasta pública configurada: https://drive.google.com/drive/folders/1g8N6-G7EnO2Ah_cF8-DDCbLpu2EuTe6g.
+
+- Um único `.pncpking` é selecionado automaticamente. Havendo vários, a escolha é explícita; os nomes são mostrados por data de modificação, do mais recente ao mais antigo. Não há busca recursiva nas subpastas.
+- O download é sequencial, com buffer de 128 KiB e contadores de 64 bits, sem o limite de 2 GiB do canal incremental. A confirmação de arquivo grande do Google Drive é tratada automaticamente. O pacote atual, de 4.484.945.638 bytes, exige NTFS/exFAT, não FAT32.
+- O programa confere tamanho, resposta e assinatura ZIP antes de encaminhar ao importador existente. Manifesto, hashes, esquema, espaço para instalação e perfil sem cotações continuam sendo verificados pelo mesmo fluxo da 1.2.46. Não foi acrescentado `integrity_check`, cópia integral ou varredura da base no receptor.
+- A confirmação de substituição da base pública continua aparecendo antes da importação. Cotações, cestas, evidências e configurações locais são preservadas pelo mecanismo existente. Backups com cotações são recusados nessa opção.
+- Download interrompido ou incompleto é descartado, e a nova tentativa começa do início. O pacote completo fica em `%LOCALAPPDATA%\PNCP King\updates\drive-prices` e pode ser reutilizado na tentativa seguinte se os metadados na pasta não mudaram, sem outra leitura integral só para o download. Ao concluir um novo download, versões antigas geradas nesse cache são removidas; fica somente o pacote atual para nova tentativa. Os arquivos desse cache podem ser removidos com o programa fechado para liberar espaço; não são o banco ativo.
+- Login obrigatório, retirada do compartilhamento, cota do Drive, mudança do pacote ou listagem não reconhecida interrompem somente a etapa de preços, com orientação para repetir ou usar **Importar base completa de preços**. O programa não contorna permissões. A atualização somente do executável continua disponível.
+- A listagem pública do Drive não é uma API estável. Se o formato mudar ou a página indicar uma listagem incompleta (incluindo 50 ou mais entradas), o programa recusa adivinhar e orienta a importação manual.
+
+A atualização do programa continua usando as releases e a validação de SHA-256 do GitHub. As operações incrementais pendentes criadas por versões anteriores continuam compatíveis; a publicação antiga de `.pncpupdate` abaixo é documentada para manutenção desse canal legado.
+
+---
+
 # Atualização pelo GitHub
 
 **Atualizar pelo GitHub** consulta as releases públicas de `FamiliaEstudio/PNCPKing` somente após o clique. A prévia permite escolher **Atualizar o programa**, **Atualizar os preços** ou ambos, e mostra, com rolagem, as notas de cada versão do programa entre a instalada e a oferecida. Opções sem atualização disponível ficam desabilitadas. Se um pacote exigir uma versão mais recente, os preços só podem ser selecionados junto com o programa. Se o histórico estiver indisponível, a prévia avisa e ainda permite atualizar. Quando selecionado, o executável novo é baixado, conferido e instalado primeiro. Somente depois da reinicialização o novo programa baixa e importa os preços também selecionados na prévia. Escolher somente o programa não inicia a etapa de preços após o reinício. Uma falha no download dos preços não impede a atualização do programa. Selecionar somente os preços faz a importação diretamente, sem reiniciar.

@@ -180,10 +180,10 @@ public partial class CatalogDictionaryWindow : Window, INotifyPropertyChanged
         {
             span.Fail(exception);
             Status = $"Não foi possível concluir a operação: {exception.Message}";
-            _diagnosticLog.Error("catalog-equivalences", "Falha recuperável no editor.", exception);
+            var incident = _diagnosticLog.Error("catalog-equivalences", "Falha recuperável no editor.", exception);
             if (IsVisible)
             {
-                MessageBox.Show(this, exception.Message, "Equivalências", MessageBoxButton.OK, MessageBoxImage.Error);
+                await DiagnosticEmailDialog.OfferAsync(_diagnosticLog, exception.Message, incident, "Equivalências");
             }
         }
         finally
