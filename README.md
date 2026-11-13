@@ -1,236 +1,62 @@
 # PNCP King
 
-Aplicativo desktop Windows para manter um índice local dos últimos 11 meses do PNCP, pesquisar preços homologados por item e reunir as evidências documentais das cotações.
+[![Versão 1.2.50](https://img.shields.io/badge/vers%C3%A3o-1.2.50-28754D)](https://github.com/FamiliaEstudio/PNCPKing/releases/tag/v1.2.50)
+![Windows x64](https://img.shields.io/badge/Windows-x64-0078D4)
+[![Compilação e testes no Windows](https://github.com/FamiliaEstudio/PNCPKing/actions/workflows/publish-windows.yml/badge.svg?branch=main)](https://github.com/FamiliaEstudio/PNCPKing/actions/workflows/publish-windows.yml)
+[![Licença proprietária](https://img.shields.io/badge/licen%C3%A7a-propriet%C3%A1ria-70549B)](LICENSE)
 
-## Executável pronto
+O PNCP King é um aplicativo para Windows voltado à pesquisa de preços em compras públicas. Você consulta os valores unitários homologados no Portal Nacional de Contratações Públicas (PNCP), escolhe as referências de cada item e gera a planilha de avaliação, as tabelas do Termo de Referência e o relatório de evidências.
 
-A distribuição autocontida mais recente para Windows x64 está em `artifacts\win-x64\PNCPKing.exe`. Ela inclui o runtime do .NET 8, o mecanismo OCR local e o modelo oficial de português, portanto não exige instalação separada. O banco nacional será criado somente na pasta escolhida pelo usuário.
+**[Baixar PNCPKing.exe para Windows de 64 bits](https://github.com/FamiliaEstudio/PNCPKing/releases/download/v1.2.50/PNCPKing.exe)**
 
-## O que está implementado
+## O que mudou na versão 1.2.50
 
-- prévia obrigatória com quantidade exata, estimativa de rede/banco/cache, tempo e espaço livre;
-- recálculo da prévia e confirmação explícita imediatamente antes da carga nacional;
-- sincronização por modalidade e período, com checkpoint estruturado, pausa, cancelamento e retomada;
-- atualização exclusivamente manual: **Atualizar** preenche dias novos e lacunas, verifica alterações e conclui as etapas contratações → listas de itens → preços;
-- barra de cobertura com um segmento por dia da janela de 11 meses de calendário, do dia mais antigo ao mais recente, e estados ausente, parcial, baixando, completo e falha;
-- remoção local de contratações vencidas na abertura e na mudança de dia, independentemente da conexão com o PNCP;
-- atualização por `dataAtualizacaoGlobal` desde a última verificação concluída, com sobreposição de dois dias;
-- SQLite em WAL com FTS5 e pesquisa sem diferença entre acentos/maiúsculas, sempre por prefixo;
-- na pesquisa principal, `+` separa pesquisas locais independentes, com páginas alternadas e sem preços duplicados; dentro de cada trecho, espaços exigem todos os termos, `OU`, `OR` ou `|` permitem alternativas, aspas fechadas delimitam frases, `-palavra` ou `-"frase"` excluem descrições e `"pacote "unidade` indica unidades aceitas; Cotações e catálogo preservam sua sintaxe anterior;
-- pesquisa local primeiro: páginas de até 50 preços homologados atuais na ordem de descoberta, com eliminação de duplicidades e continuação por cursor; a tabela ordena somente os resultados carregados quando o usuário clica em uma coluna;
-- pesquisa local e progressiva, sem downloads ao pesquisar ou complementar cotações; **Atualizar** continua responsável por completar e renovar o banco;
-- filtros `Todos`, `Cidades Próximas`, `Sudeste` e UF, períodos de 7, 30, 90 e 180 dias, 10 e 11 meses, ou personalizados dentro dessa janela; o painel de contratações conserva a ordenação por relevância, data ou proximidade;
-- catálogo nacional embutido das localidades oficiais de 2022 do IBGE, usado somente para distância e ordem geográfica, sem consultas remotas por município;
-- percurso fixo de candidatos: Ribeirão Preto e os outros 49 municípios mais próximos por distância, restante de SP em amostra aleatória estável e depois cada UF pela proximidade de sua sede municipal mais próxima;
-- sorteio estável durante cada pesquisa, paginação por cursor sem repetição e nova rotação aleatória ao iniciar outra pesquisa;
-- resultados locais acrescentados progressivamente em uma única grade virtualizada, com percentual e preço encontrados no banco;
-- grade de preços inicialmente enxuta com as nove colunas principais e layouts de visibilidade, ordem e largura persistidos por grade; o seletor permite restaurar o padrão;
-- biblioteca opcional Sweet Code, persistida no backup, com um crivo por linha e autocomplete por prefixo usando setas e `TAB`;
-- sessão retomável separada para a última pesquisa geral, com cursor, resultados e falhas preservados ao fechar; a automação continua usando armazenamento temporário isolado;
-- listas de itens dos últimos 11 meses, com checkpoint por contratação, pausa, retomada e reserva de disco, como segunda etapa de **Atualizar**;
-- resultados homologados consultados somente para itens compatíveis com a pesquisa e preservados no banco principal para reutilização até a contratação receber uma atualização global ou sair da janela de 11 meses;
-- preços dos últimos 11 meses como terceira etapa de **Atualizar**, com concorrência agressiva adaptativa; ele consulta somente itens com `temResultado=true`, conserva todos os resultados `Informado` com valor unitário homologado positivo e conclui sem repetir respostas vazias, canceladas, sem valor útil ou `404`;
-- faixa inclusiva de preço unitário homologado, aplicada somente a resultados ativos e sem conversão entre unidades;
-- projetos persistentes de cotação que copiam a amostra já coletada, respeitando a faixa informada e sem novas chamadas ao PNCP;
-- qualificação auditável por cobertura do descritivo solicitado, unidade/embalagem, quantidade em faixas graduais, proximidade e atualidade;
-- elegibilidade de cotação determinada somente pela faixa de preço e compatibilidade descritiva; CNPJ, unidade, quantidade, proximidade, atualidade e índice permanecem informativos;
-- formação local de cestas automáticas com alvo configurável de 3 a 10 preços, redução até 2 quando necessário e até 100 opções curadas e determinísticas;
-- criação de várias cestas manuais persistentes por seleção múltipla dos preços na grade, com renomeação, exclusão e remoção individual de referências;
-- classificação da cesta recomendada, mais barata e mais cara, com situação textual e fundos suaves verde/vermelho para automáticas e azul/roxo para manuais;
-- atualização incremental da amostra com versionamento e reconfirmação da escolha anterior;
-- importação de cotações por `.xlsx` compatível com A:G, alvo opcional em H (`Número de preços na cesta`), CATMAT em I e quantidade mínima nominal por pedido em J, fila sequencial retomável e escolha automática da cesta recomendada;
-- exportação da **Tabela 1.1 em Word**, com localização do descritivo, grupos mesclados e quantidade mínima por pedido opcional para Registro de Preços;
-- exportação da **Tabela 9.1 em Word**, com descrição sumária, quantidades e preços das cestas selecionadas, respeitando os grupos e as cotas;
-- gerenciamento para criar, renomear e excluir cotações ou itens, além de cancelar e retomar automações;
-- exportação em uma única aba `.xlsx` baseada na planilha oficial de avaliação de preços, preservando cabeçalho e imagem da prefeitura, repetindo um bloco formatado por item e calculando por fórmulas os preços excessivos, inexequíveis e a média dos preços válidos;
-- acesso aos anexos do PNCP pela grade de preços, pelo cache da contratação e pelas referências das cestas/auditoria, com extração segura de PDF, ZIP, 7z e RAR, deduplicação e consolidação sob demanda em `Downloads`;
-- cache documental separado de até 2 GiB, com manifestos atômicos, remoção LRU e comando próprio de limpeza que não altera o banco nem os arquivos exportados;
-- geração opcional de `{planilha}_evidencias.pdf` ao exportar uma cotação, cobrindo todas as referências efetivamente exportadas sem realçar os crivos internos nas páginas, além da opção de exportar somente o Excel;
-- pacote portátil `.pncpcotacao` para transferir uma cotação sem substituir o banco inteiro, preservando itens, preços PNCP/web, cestas, escolhas confirmadas, pesquisas e retomadas, rascunhos e prints com validação SHA-256;
-- extração de texto e coordenadas diretamente do PDF sempre que a camada nativa for utilizável; OCR português local é acionado somente nas páginas escaneadas, sem enviar imagens para serviços externos;
-- medição por sessão de chamadas, bytes, duração e médias de listas de itens e resultados;
-- agendador único com concorrência adaptativa; no ciclo agressivo, `429`, timeouts e falhas temporárias reduzem a concorrência por rajada, sem cair diretamente para uma chamada após um erro isolado. Sem prazo informado pelo PNCP, novas tentativas começam em 250–349 ms e aumentam até 2–2,1 s em falhas consecutivas; a recuperação sobe um nível após oito sucessos. O ciclo de **Atualizar** repete falhas temporárias automaticamente até concluir ou ser pausado/cancelado, preservando os limites do perfil escolhido e os prazos `Retry-After` enviados pelo servidor;
-- distinção entre preço encontrado, resultado cancelado, item sem resultado, pendência e falha;
-- invalidação de listas e preços permanentes quando a contratação muda;
-- pesquisa principal por descoberta em todos os perfis: leitura de 250 identificadores de itens por lote interno, validação dos filtros e carregamento dos preços necessários à página; expressões sem termos indexáveis percorrem os itens em lotes limitados; não há ordenação global antecipada dos preços;
-- `PRAGMA optimize` marcado após atualizações concluídas e executado somente em ociosidade, com registro de sucesso para evitar manutenção concorrente com a primeira página;
-- link para a página oficial da contratação e comandos explícitos para obter seus documentos quando solicitado;
-- backup/importação validado no formato `.pncpking`, com **Completo — recomendado** como perfil padrão (contratações, itens, preços, snapshots e checkpoints), prévia detalhada de espaço, progresso cancelável por etapa, ativação atômica e migração segura de backups antigos do próprio PNCP King;
-- logs de diagnóstico por execução em `%LOCALAPPDATA%\PNCP King\logs`, acessíveis pelo botão **Logs de diagnóstico**, incluindo abertura, pasta do banco, fases da importação e exceções completas.
-- escolha em **Opções → Uso de recursos** entre Automático (padrão), Restrito, Médio e Amplo, salva neste PC e aplicada ao reabrir o programa. O perfil define os padrões de cache e processamento do banco e limita as consultas simultâneas ao PNCP; pouca memória e respostas da API podem reduzir o uso efetivo. Trocar o perfil remove a calibração anterior;
-- avaliação opcional em **Opções → Diagnóstico → Avaliar desempenho deste PC**, com limite de cinco minutos, leitura sem alterar o banco e comparação de caches de 32, 64 e 96 MiB usando a pesquisa por descoberta; recomendações anteriores à versão 3 da calibração são invalidadas; recomendações comprovadas valem para o perfil avaliado e podem ser aplicadas na próxima abertura, com opção de restaurar o padrão desse perfil.
+- Se uma imagem de evidência falhar, a exportação continua. O relatório registra “Não foi possível obter a imagem pelo arquivo.” junto ao preço afetado. O item, o preço e a etapa da falha ficam identificados em **Opções → Diagnóstico → Logs de diagnóstico**.
+- Assim que inclui duas imagens distintas de um preço, o programa passa à próxima referência sem abrir os PDFs restantes daquela contratação. Cada arquivo do relatório tem até 49 páginas e mantém juntas as evidências de um mesmo preço.
+- As páginas continuam em 300 dpi. Para reaproveitar as imagens recentes, o programa mantém um cache de até 32 MiB em memória, sem gravá-lo no HD.
 
-O aplicativo não fez a carga nacional durante a compilação. A medição atual será feita pela própria interface e nenhum download começará sem a confirmação dos números e da margem adicional de 20% de espaço livre.
+## Primeiros passos
 
-## Requisitos para desenvolvimento
+O executável já inclui o .NET 8. Na primeira abertura, escolha a pasta onde quer guardar a base de preços. Depois de carregar os dados, você pode pesquisar sem conexão os preços das contratações publicadas nos últimos 11 meses.
 
-- .NET SDK 8;
-- Windows 10/11 para executar a interface WPF;
-- conexão com a internet para sincronização e consulta de preços.
+- **Para começar com a base pronta**, abra **Atualizar pelo GitHub**, marque **Atualizar os preços** e confirme a importação do pacote do Google Drive. Em um PC já em uso, essa opção substitui a base pública e preserva suas cotações, cestas e evidências. [Guia de atualização](docs/github-updates.md)
+- **Para coletar os dados diretamente do PNCP**, clique em **Calcular tamanho**, confira o espaço e o tempo estimados e selecione **Atualizar**. Você pode pausar a coleta e retomá-la depois.
 
-## Compilar e testar
+Para atualizar o aplicativo, use **Atualizar pelo GitHub → Atualizar o programa**.
 
-```powershell
-dotnet restore PNCPKing.sln
-dotnet build PNCPKing.sln --configuration Release
-dotnet test tests\PNCPKing.Tests\PNCPKing.Tests.csproj --configuration Release
-```
+## Da pesquisa à cotação
 
-Para gerar uma distribuição Windows autocontida:
+1. Digite o que procura, ajuste o período, a localização ou a faixa de preço e clique em **Pesquisar**. Por exemplo, `"café torrado" -solúvel` busca a expressão entre aspas e exclui descrições com a palavra “solúvel”.
+2. Clique em **Usar esta amostra em uma cotação** e escolha ou crie um projeto. Para começar com uma lista de itens, use **Cotações → Importar XLSX**, com um item por linha e sem cabeçalho. [Como preencher a planilha](docs/importacao-excel.md)
+3. Revise a cesta sugerida para cada item ou monte a sua. Para incluir um preço de loja, use **Inserir preço da internet** na janela do item e registre a página e as capturas de tela do preço e do CNPJ. Ao terminar, confirme a cesta.
+4. Em **Organizar Itens**, você pode ordenar por nome ou definir a ordem manualmente, arrastando um item ou digitando a posição final. Ao organizar por grupos e cotas, o programa respeita essa sequência dentro de cada grupo.
+
+## Arquivos da cotação
+
+Na aba **Cotações**, abra **Exportar/Importar**.
+
+| Comando | O que você obtém |
+| --- | --- |
+| **Exportar somente Excel** | Planilha de Avaliação de Preços (`.xlsx`). Identifica preços excessivos ou inexequíveis e calcula a média ou a mediana dos válidos, conforme o método da cesta. |
+| **Exportar Excel e evidências** | A mesma planilha e o relatório em PDF com as evidências de cada preço. |
+| **Exportar Tabela 1.1 em Word** | Tabela editável com itens, unidades e quantidades. Em registro de preços, inclui a quantidade mínima por pedido. |
+| **Exportar Tabela 9.1 em Word** | Tabela editável com o preço unitário adotado e o total por item ou cota. O valor estimado da contratação aparece também por extenso. |
+| **Exportar pacote** | Uma cotação em `.pncpcotacao`, com suas cestas e evidências, para abrir em outro computador pelo comando **Importar pacote**. |
+
+Para medicamentos, ative **Cotação de medicamentos — 4 casas decimais** no menu **Cotações** antes de confirmar as cestas.
+
+## Compilar no Windows
+
+Com o SDK do .NET 8 instalado, execute o script no PowerShell, a partir da raiz do repositório. Ele compila a solução em Release, executa os testes e gera `artifacts\win-x64\PNCPKing.exe`.
 
 ```powershell
 .\scripts\publish-windows.ps1
 ```
 
-Somente `artifacts\win-x64\PNCPKing.exe` será publicado. O projeto PNCP Guard também é compilado em Release pela solução, mas não integra essa distribuição.
+## Licença e contato
 
-A suíte automatizada cobre pesquisa por objeto e item, geografia, faixa de preço, valores homologados, rejeição de valores estimados, múltiplos resultados, falha parcial, `429`, timeout, cobertura diária, retomada por checkpoint e validação de backups.
+O PNCP King é um projeto pessoal de Felipe Venturini Arcêncio, independente da Prefeitura Municipal de Ribeirão Preto. A Prefeitura tem autorização permanente de uso gratuito, inclusive se o programa passar a ser comercializado. Os modelos de documentos podem exibir o brasão municipal.
 
-## Backup e importação de bancos grandes
+O código está disponível para consulta e avaliação. O uso do programa depende de autorização prévia e expressa do titular, nos termos da [licença proprietária](LICENSE).
 
-Em **Opções → Arquivo → Exportar backup**, o perfil **Completo com cotações** preserva o banco integral, inclusive relações de itens, todos os resultados homologados, snapshots de atualização, índices nacionais, checkpoints, cotações, cestas, CATMAT/CATSER, Sweet Codes e referências de evidências web. **Completo sem cotações** mantém toda a base pública de preços e remove os dados particulares somente da cópia exportada. Ao importar na versão 1.2.45 ou posterior, substitui toda a base pública e preserva as cotações e os dados locais do destino; o banco de origem permanece intacto. O perfil **Compacto** preserva os dados permanentes, inclusive cotações, mas remove do snapshot descartável os itens, preços, FTS e checkpoints de cache que podem ser reconstruídos.
-
-Antes da exportação, a prévia mostra perfil, contagens materializadas, tamanho descompactado, evidências, unidades usadas e espaço necessário. O perfil completo precisa de espaço para o snapshot e para o arquivo `.partial`; o compacto e o completo sem cotações também reservam espaço adicional para o `VACUUM`. A exportação cria um único `.pncpking` com ZIP64, calcula SHA-256 durante a própria compactação e executa uma única verificação integral `PRAGMA integrity_check` no snapshot. Destinos FAT32 são recusados quando o arquivo pode ultrapassar 4 GiB; use NTFS ou exFAT.
-
-Na importação, o banco é extraído em staging ao lado do banco ativo, portanto a troca final ocorre por renomeação na mesma unidade. Backups atuais que já foram integralmente validados na origem passam por SHA-256 e conferência estrutural, sem repetir a longa varredura integral no HDD de destino. O receptor nunca executa `PRAGMA integrity_check`, inclusive após migração de esquema; a migração é transacional e, ao final, confirma-se apenas a versão interna. Backups legados sem prova de validação integral na origem são recusados e devem ser reexportados por uma versão atual do PNCP King.
-
-No instante da ativação, o banco atual é renomeado para `nome-do-banco.db.before-import-...bak`, o banco validado assume o caminho oficial e é aberto para confirmação. Se essa etapa falhar, a base anterior é restaurada automaticamente. O cancelamento fica disponível até o começo dessa curta troca. Depois de confirmar que não precisa mais da recuperação, use **Opções → Limpeza → Excluir bases anteriores de importação**; a ação mostra quantidade e tamanho e não alcança arquivos fora do padrão de recuperação do banco atual.
-
-## Base completa sem cotações entre PCs
-
-Use a versão **1.2.46 ou posterior** se um banco antigo apresentar o erro de esquema `trigger:contracts_fts_update`. Ela reconhece as estruturas históricas legítimas sem liberar objetos desconhecidos.
-
-Na versão **1.2.45 ou posterior**, use **Opções → Arquivo → Exportar backup → Completo → Sem cotações**, ou o atalho **Exportar base completa de preços**. As duas opções usam o mesmo pacote e o mesmo mecanismo. No outro PC, use **Importar backup** ou **Importar base completa de preços**.
-
-1. Atualize o programa nos dois PCs. No PC de origem, atualize a base de preços antes de exportar. A exportação não baixa dados novos por conta própria.
-2. Copie o único arquivo `.pncpking` concluído para o destino. Feche as janelas de item de cotação e de avaliação do PC e pause ou conclua as operações em andamento.
-3. Confira a prévia e confirme a **substituição total da base pública**. O programa prepara o banco recebido ao lado do ativo, copia as cotações e dados locais para ele e faz a troca recuperável. Não apaga antecipadamente o banco ativo.
-
-**O arquivo recebido passa a ser a base pública definitiva.** Contratos, itens, preços, histórico, cobertura e catálogo exclusivos do destino deixam de constar da base ativa. Não há comparação de versões nem mesclagem de contratos/itens/resultados. Use uma exportação atualizada e completa: o programa não tenta corrigir uma origem incompleta ou desatualizada.
-
-Cotações e seus IDs, cestas, conversões, evidências, rascunhos, histórico de processamento e configurações locais são preservados. Os preços já salvos nas cotações são snapshots independentes e continuam nos cálculos/relatórios mesmo quando o contrato, item ou resultado não existe no banco recebido. Isso não recria o preço no catálogo público. Consultas de detalhes públicos dependem do conteúdo da nova base. A migração do esquema 33 para 34 remove apenas o vínculo do histórico de processamento ao contrato público, sem apagar esse histórico.
-
-Compactação e verificação integral ficam no emissor. No receptor, o SHA-256 é calculado durante a extração; os índices chegam prontos, sem `VACUUM`, `PRAGMA integrity_check` ou poda de retenção durante esta transferência. O trabalho adicional se limita à preservação e conferência dos dados locais, configurações e marcações selecionadas. Pacotes legados sem contadores de catálogo exigem somente a contagem do catálogo recebido, nunca a comparação da base de preços antiga. A retenção normal de 11 meses continua fora da transferência.
-
-O banco anterior permanece em `.before-import-...bak`. Falhas/cancelamento antes da troca mantêm a base ativa; a troca final não pode ser cancelada. Não remova a recuperação antes de conferir o resultado. A prévia reserva espaço para preparação e preservação, sem apagar dados para abrir espaço. Para arquivos grandes, use NTFS ou exFAT.
-
-Os recibos de atualizações/Guard e as partições de coleta da base anterior são reiniciados, para não fazer futuras atualizações pularem dados descartados. Campanhas, configurações e histórico de tarefas locais são mantidos.
-
-Para esta substituição, pacotes de esquema anterior a 33 devem ser reexportados no PC de origem. Isso evita migrações antigas que reconstruíam índices ou aplicavam retenção no receptor. Backups de recuperação com cotações mantêm seu suporte de migração.
-
-O formato **Completo sem cotações** é reaproveitado. Pacotes **Base completa de preços** da versão 1.2.44 também usam a nova substituição total quando importados pela 1.2.45. Backups **Completo com cotações** e **Compacto** continuam sendo backups de recuperação e conservam seu comportamento anterior.
-
-
-## Transferência de atualizações entre PCs
-
-O botão **Atualizar pelo GitHub**, ao lado de **Opções**, verifica novas versões do programa no GitHub. Na versão **1.2.47 ou posterior**, a opção **Atualizar os preços** procura arquivos `.pncpking` na [pasta pública do Google Drive](https://drive.google.com/drive/folders/1g8N6-G7EnO2Ah_cF8-DDCbLpu2EuTe6g), baixa o pacote e abre a mesma confirmação de importação da base completa. Se houver vários pacotes, escolha qual usar. O download aceita arquivos maiores que 4 GiB e não altera a importação/preservação da 1.2.46. Preços podem ser atualizados independentemente do programa; escolhendo ambos, o programa reinicia antes de baixar os preços. A importação manual continua disponível. Detalhes e requisitos: [atualizações pelo GitHub](docs/github-updates.md).
-
-**Exportar backup** mantém a opção de banco completo `.pncpking`. A transferência `.pncpupdate` é adicional e incorpora apenas dados oficiais, preservando cotações, cestas, evidências particulares e configurações do destino, observada a retenção de 11 meses.
-
-1. Execute **Atualizar** no PC de origem até onde for possível. A exportação não consulta o PNCP e aceita dias ainda incompletos; leva somente listas e resultados comprovadamente concluídos, além dos checkpoints de páginas diárias já gravadas.
-2. Use **Opções → Arquivo → Exportar atualizações PNCP**. O arquivo contém hoje e os 19 dias anteriores, além de contratações antigas oficialmente alteradas nesse período. Pacotes anteriores de 10 dias continuam aceitos quando validados na origem. O receptor confere transporte e manifesto durante a leitura, sem verificação integral do banco.
-3. No outro PC, inclusive depois de restaurar qualquer backup compatível, use **Importar atualizações PNCP** e depois **Atualizar** para continuar as pendências. Não é necessária uma base inicial nem uma linhagem comum.
-4. Uma importação cancelada conserva os blocos diários já concluídos. Reimporte o arquivo para continuar; blocos idênticos são ignorados sem extração.
-5. Registros ausentes são inseridos. Somente versões oficiais comprovadamente mais novas substituem as locais; versões iguais, ausentes, mais novas no destino ou sem ordem segura são preservadas. A importação não inicia revalidação no PNCP.
-
-CATMAT/CATSER não faz parte do `.pncpupdate` e continua sendo atualizado separadamente. Detalhes técnicos e medições: [validação da atualização manual](docs/manual-update-validation.md).
-
-## Uso
-
-1. Na primeira abertura, escolha a pasta que armazenará o banco.
-2. Clique em **Calcular tamanho** e aguarde a contagem das modalidades.
-3. Revise o volume, o espaço e a duração estimados.
-4. Clique em **Atualizar** e confirme a prévia unificada. O ciclo executa contratações, listas de itens e preços nessa ordem.
-5. Use **Pausar/Continuar** e **Cancelar** para controlar o ciclo. Falhas e cancelamento preservam checkpoints; a retomada após fechar exige outro clique em **Atualizar**.
-6. CATMAT/CATSER é atualizado separadamente pelo comando manual do catálogo.
-7. Digite o objeto, escolha geografia e período e clique em **Pesquisar**. Os preços aparecem na ordem de descoberta; clique nos cabeçalhos para ordenar os resultados carregados por publicação, valor ou outra coluna. Novos preços seguem a ordenação escolhida. Os primeiros encontrados não são necessariamente os mais recentes do banco.
-8. Na pesquisa principal, `café filtro` exige ambos os termos; `café torrado + açúcar cristal + chá` combina três pesquisas independentes. A primeira página consulta o primeiro trecho; **Carregar mais resultados** alterna os demais, até 50 preços por página, sem duplicar preços. Exclusões e unidades valem somente no seu trecho; período, localização e faixa de preço valem para todos. `café OU chá` aceita qualquer um; `"café torrado"` busca a frase; `café -cafeteira -"filtro de papel"` exclui descrições; `"pacote "unidade` aceita qualquer uma dessas unidades. O `+` dentro de uma frase fechada ou de `C:(...)` não separa pesquisas. Trechos vazios são rejeitados. Consultar todos os trechos pode aumentar a leitura total, mas as páginas são lidas uma de cada vez. Cotações e catálogo mantêm sua sintaxe anterior; ao abrir um critério salvo de cotação na pesquisa principal, o antigo `+` de conjunção é convertido em espaço.
-9. **Pesquisar** entrega os preços locais progressivamente e procura um 51º preço válido para confirmar se há outra página. Essa confirmação pode continuar após os 50 aparecerem. A lista de contratações é consultada somente quando seu painel for aberto; o seletor de ordenação nesse painel afeta apenas essa lista. Use **Atualizar** para completar ou renovar os preços no banco.
-10. Use **Carregar mais resultados** para exibir páginas de até 50 preços salvos, **Reiniciar pesquisa** para criar nova rotação e **Parar preços** para interromper preservando o cursor. A pesquisa não consulta o PNCP.
-11. Use os campos de preço mínimo/máximo para filtrar o valor unitário homologado ativo.
-12. Para iniciar uma cotação, clique em **Usar esta amostra em uma cotação**, selecione ou crie um projeto e informe quantidade, unidade, alvo automático de 3 a 10 preços e faixa opcional.
-13. Para montar sua composição, clique e arraste pelas linhas e use **Marcar selecionados para cesta**, depois **Criar/adicionar à cesta**. Um clique seleciona um preço; segurar parado por um segundo alterna sua marcação para cesta; triplo clique fixa; clique direito remove fixação e marcação. Os botões de ações coletivas atuam sobre todas as linhas selecionadas. Na aba **Cotações**, você pode ampliar, renomear, revisar, confirmar ou excluir essas cestas.
-
-Nas pesquisas e nas referências, o brilho azul avalia os preços selecionados; o verde avalia os marcados ou os membros da cesta exibida. O grupo precisa ter pelo menos três preços válidos pelos crivos de desvio de até 25%, comparando cada preço efetivo com a média truncada dos demais. O realce considera conversões e a precisão da cotação, independentemente do rótulo **Elegível**, **Descartada** ou **Duplicada**.
-
-Os preços ocupam uma linha compacta. Dê duplo clique para ler o descritivo no painel inferior; **Dados da linha** permite selecionar e copiar outros campos. `Ctrl+C` na grade copia as linhas selecionadas com as colunas visíveis; no painel copia somente o trecho selecionado, para colar com `Ctrl+V` em outro aplicativo. Nas tabelas de itens e cestas, use **Ler/copiar dados**. `Ctrl+F` procura nos descritivos completos da lista já carregada, sem consultar o banco ou carregar mais páginas; `Enter`/`F3` avança e `Shift+Enter`/`Shift+F3` retrocede. `Esc` fecha a busca ou a leitura. Nas grades de preços de Cotações, os documentos continuam disponíveis pelo menu de ações.
-14. Faça novas pesquisas e adicione outros itens ao mesmo projeto. Se ampliar a coleta de um item, use **Atualizar amostra com a pesquisa atual**; a escolha anterior ficará marcada para reconfirmação.
-15. Use **Importar XLSX** para carregar vários itens pelas colunas A:G e, opcionalmente, o alvo da cesta em H, o CATMAT em I e a quantidade mínima nominal por pedido em J. H vazia usa 3. A primeira aba visível deve conter dados desde a linha 1, sem cabeçalho. Consulte o [guia de importação Excel](docs/importacao-excel.md) para o preenchimento A:J. A automação interpreta a coluna G como número de páginas locais de até 50 preços; falhas podem ser retomadas. **Exportar Excel e evidências** preenche o modelo de avaliação e salva o PDF na mesma pasta; **Exportar somente Excel** não gera documentos de evidência. **Exportar Tabela 1.1 em Word** gera o documento editável conforme o modelo, perguntando o local do descritivo e se é Registro de Preços. Neste caso, informe o percentual geral: o mínimo nominal do item tem prioridade e, quando ausente, o cálculo usa a quantidade total original, arredondando para cima e mantendo o mesmo mínimo nas cotas principal e reservada. Edite ou limpe os valores em **CATMAT e mínimo**, na janela do item. Cotações com grupos precisam de **Organizar Itens** antes da exportação.
-
-Use **Cotações → Exportar/Importar → Exportar Tabela 9.1 em Word** para gerar a tabela de preços editável conforme o modelo fornecido. Ela utiliza o preço adotado da cesta selecionada e confirmada de cada item, com duas casas decimais para itens comuns e quatro para medicamentos, sem arredondamento. O total é o unitário exibido multiplicado pela quantidade da linha ou cota. Grupos, números e quantidades seguem a organização vigente; sem grupos, a coluna de grupo é removida. Confirme as cestas pendentes e atualize a organização, quando necessário, antes de exportar.
-
-Acima da tabela 9.1, o documento informa o custo estimado total da contratação, com o valor numérico e por extenso em negrito. O parágrafo soma os totais das linhas exportadas e trunca somente o resultado final para duas casas decimais, mantendo as quatro casas na tabela de medicamentos.
-
-Para cotar medicamentos, marque **Cotações → Cotação de medicamentos — 4 casas decimais**. A opção fica salva por projeto e aplica quatro casas aos preços efetivos, às cestas, ao Excel e à Tabela 9.1 em Word, incluindo conversões, médias e medianas. Casas excedentes são truncadas. Ao alterar a opção, reconfirme as cestas escolhidas. As demais cotações continuam com duas casas nos valores efetivos; os preços PNCP originais permanecem preservados.
-Na janela do item, **Transferir ou copiar…** permite escolher outro projeto local e mover ou copiar o item com todos os preços, cestas, evidências e dados. **Transferir** remove o item da origem; **Copiar** preserva o original. Pause a automação antes da operação. O item recebe uma nova identidade no destino e entra como item solto, sem vínculo com a automação anterior. As imagens existentes são compartilhadas, sem duplicar arquivos. Se os projetos já estiverem organizados, aplique **Organizar Itens** novamente nos projetos alterados. Ao mudar entre projeto comum e de medicamentos, reconfirme a cesta para aplicar a precisão do destino. Pacotes antigos com identidades conflitantes são importados com novos IDs internos, preservando os itens locais e a identidade da cotação.
-
-16. Na aba **Cotações**, use **Exportar pacote** para criar um `.pncpcotacao` portátil com a cotação selecionada e seus prints. **Importar pacote** mostra uma prévia e, se o mesmo identificador já existir, permite importar como cópia, substituir com recuperação automática ou cancelar.
-17. Para fixar uma contratação no cache enquanto estiver na janela de 11 meses, selecione-a na segunda aba e use **Buscar/atualizar todos os preços**.
-18. Use **Abrir contratação no PNCP** para acessar a página oficial. Use **Acessar documentos** para baixar, extrair e consolidar os PDFs; o arquivo será salvo em `Downloads` e somente será aberto se você escolher **Abrir PDF** ao final.
-19. Use **Escolher colunas** para ajustar cada grade uma vez. Visibilidade, ordem e largura são restauradas nos usos seguintes; **Restaurar padrão** volta ao layout original.
-20. Se ocorrer uma falha de abertura ou importação, use **Logs de diagnóstico**, copie o arquivo `.log` mais recente e envie-o para análise. Mesmo quando a janela principal não abre, a mensagem de erro informa o caminho exato do log.
-
-### Organização de grupos e cotas
-
-Em **Organizar Itens**, escolha **Somente ordem alfabética** para ordenar todo o projeto mesmo com quantidade e unidade em branco ou sem cestas confirmadas. Essa opção substitui a numeração de cotas anterior e preserva os grupos cadastrados. Marque **Ignorar “Item + número”** para ordenar pelo nome que vem depois de prefixos como “Item 1”, “item 01”, “Item 01 -” ou “Item 3-”, sem mudar os nomes. A opção **Apagar “Item + número”** remove esses prefixos iniciais dos nomes de **todos os itens do projeto de uma vez**, mantendo as descrições técnicas, preços e cestas. A numeração automática “Item 1 -”, “Item 2 -” etc. continua sendo gerada na planilha Excel. Nomes sem esse prefixo ou sem descrição após o número são preservados.
-
-Na janela **Gerenciar grupos e visualizar cotas**, confira a prévia e salve os grupos. Em **Organizar Itens**, escolha **Organizar por grupos e cotas** para aplicar essa organização; nesse modo, informe quantidades inteiras positivas e confirme as cestas. As opções de ignorar e apagar prefixos também estão disponíveis. Quando houver cota, a quantidade reservada é calculada por item: 25% da quantidade total original, arredondando sempre para baixo. A principal recebe o restante, com o mesmo preço unitário nas duas parcelas, preservando a quantidade e o valor totais do item.
-
-| Quantidade original | Principal | Reservada |
-| --- | --- | --- |
-| 1, 2 ou 3 | Sem cota; quantidade integral | Nenhuma |
-| 4 | 3 | 1 |
-| 5 | 4 | 1 |
-| 7 | 6 | 1 |
-| 8 | 6 | 2 |
-| 100 | 75 | 25 |
-
-Itens com 1, 2 ou 3 unidades são separados dos grupos que teriam cotas: quando sai apenas um item, ele passa à sequência dos itens individuais; quando saem vários do mesmo grupo, eles formam um grupo separado **Sem cota**. O grupo restante é reavaliado pelo limite existente de R$ 80.000,00: até esse valor, fica sem cotas. Os resultados seguem a ordenação habitual de grupos e itens, preservando quantidades e valores totais. Grupos que já não teriam cotas, inclusive os compostos somente de pequenas quantidades, permanecem juntos. Organizações antigas afetadas por essa mudança precisam de **Organizar Itens** novamente antes da exportação.
-
-As tabelas usam o padrão brasileiro para valores e quantidades, como **R$ 1.234,56** e **1.234** unidades. Nas tabelas Word 1.1 e 9.1, os nomes dos itens com cotas recebem **- Cota Principal** ou **- Cota Reservada**, conforme a linha.
-
-## PNCP Guard
-
-Em **Opções → PNCP Guard**, escolha uma pasta local sincronizada pelo Google Drive, informe um computador por linha no formato `Nome|Peso` e gere a campanha. O PNCP King usa somente seu índice atual, exclui snapshots já completos e cria um arquivo `.pncpguardplan` imutável por trabalhador em `plans`.
-
-Em cada computador, abra `PNCPGuard.exe` uma vez, selecione o plano correspondente e a mesma raiz local do Google Drive. Ao salvar, a tarefa opcional do usuário inicia o Guard dez minutos após o logon e repete a cada trinta minutos, sem segunda instância. O Guard usa `%LOCALAPPDATA%\PNCP Guard`, faz uma chamada por vez, preserva 2 GiB livres e encerra a coleta se o PNCP King estiver aberto.
-
-Os pacotes prontos aparecem em `packages` e contêm somente listas de itens, nunca uma varredura de resultados homologados. No PNCP King mestre, volte a **Opções → PNCP Guard** e use **Importar pasta do PNCP Guard**. A importação valida versão e SHA-256, é idempotente e gera confirmações em `acks`; nenhum banco SQLite é colocado na pasta sincronizada.
-
-O total homologado geral mostrado na grade de contratações é apenas um resumo. Os preços dos itens vêm exclusivamente dos campos de resultado homologado do PNCP; valores estimados nunca são usados como substitutos.
-
-A janela inclusiva começa no mesmo dia de 11 meses de calendário atrás e termina hoje. O corte PNCP continua usando a publicação da contratação; a data do resultado/homologação aparece na coluna **Data Homologação/Obtenção do Preço** do Excel. Para preços web, essa coluna usa a captura já registrada. Datas de resultado ausentes são exportadas como **Não informada**, e os links permanecem na aba **Referências**.
-
-A limpeza ocorre ao abrir e quando o dia muda, inclusive offline. Ela remove contratações vencidas mesmo que fixadas e referências antigas das cotações, preservando os projetos e itens e exigindo reconfirmação das cestas afetadas. Contratações sem publicação mantêm o tratamento anterior: não são excluídas por ausência de data e ficam fora das buscas por período. Backups e pacotes antigos passam pela mesma regra ao serem importados; os arquivos originais permanecem preservados.
-
-A abertura e a importação validam os metadados da retenção e procuram dados vencidos. Sem remoções necessárias, a poda e a reconciliação nacional são dispensadas. A compactação só ocorre em **Opções → Arquivo → Compactar banco**, com reserva de espaço de duas vezes o banco.
-
-As medições em cópias isoladas e os cenários de validação estão em [docs/retention-validation.md](docs/retention-validation.md).
-
-O estudo histórico de custo está em `docs/price-load-study.md`. A atualização atual usa uma única prévia e reutiliza listas e resultados completos da versão vigente, inclusive respostas vazias.
-
-O Sweet Code pode ser aberto ao lado da pesquisa. Cole um crivo por linha, ative as sugestões e use ↑/↓ e `TAB` para preencher sem impedir a digitação livre.
-
-## Licença e direitos autorais
-
-**PNCP King — Copyright © 2026 Felipe Arcencio. Todos os direitos reservados.**
-
-Este é um projeto de **código-fonte publicamente disponível, mas não open source**. A disponibilização do código neste repositório não concede autorização para utilização, modificação, distribuição ou criação de trabalhos derivados.
-
-O uso depende de autorização prévia por escrito. Solicitações de licença: **felipearcencio@gmail.com**.
-
-Se precisar do banco de dados atualizado do PNCP, entre em contato pelo e-mail **felipearcencio@gmail.com**, pois o download completo pode levar vários dias.
-
-Consulte o arquivo [`LICENSE`](LICENSE) para as condições completas.
-
-O PNCP King é um projeto independente e não oficial. Não pertence, não é mantido e não representa a Prefeitura Municipal de Ribeirão Preto.
-
----
-
-## Aviso de independência institucional
-
-O PNCP King é um projeto independente e não oficial, desenvolvido e mantido por iniciativa de seu autor. Não é um software da Prefeitura Municipal de Ribeirão Preto, não é mantido pela Prefeitura e não representa manifestação, produto ou serviço oficial do Município, sendo realizado como projeto pessoal. A Prefeitura de Ribeirão Preto possui, ainda assim, autorização de uso gratuito e livre de custos para sempre, ainda que o programa se torne posteriormente comercial.
-
-Eventuais referências à Prefeitura Municipal de Ribeirão Preto, inclusive seu Brasão de Armas, aparecem exclusivamente quando necessárias à reprodução ou compatibilidade com modelos oficiais de documentos utilizados no fluxo administrativo. A presença desses elementos não implica patrocínio, aprovação, certificação ou vínculo institucional do PNCP King com a Prefeitura.
-
-O programa utiliza dados públicos disponibilizados por fontes oficiais, especialmente o Portal Nacional de Contratações Públicas — PNCP. O código, funcionalidades, documentação e decisões de desenvolvimento do PNCP King são de responsabilidade de seus mantenedores, ressalvados os direitos sobre símbolos, documentos, dados e demais conteúdos pertencentes aos respectivos titulares.
+Para tratar de licenciamento ou solicitar uma cópia atualizada da base de preços, escreva para [felipearcencio@gmail.com](mailto:felipearcencio@gmail.com).
