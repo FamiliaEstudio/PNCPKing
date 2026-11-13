@@ -66,8 +66,12 @@ public sealed class AppDiagnosticLog
         {
             builder.AppendLine(exception.ToString());
             for (var cause = exception; cause is not null; cause = cause.InnerException)
+            {
                 if (cause.Data[BackupService.TransferSchemaDiagnosticKey] is string definition)
                     builder.AppendLine(definition);
+                if (cause.Data[QuotationEvidenceExportService.DiagnosticKey] is string evidence)
+                    builder.AppendLine(evidence);
+            }
         }
 
         var entry = builder.ToString();

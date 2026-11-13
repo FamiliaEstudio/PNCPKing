@@ -212,7 +212,12 @@ public partial class App : Application
                 textIndexService,
                 rasterizer,
                 quotationRepository,
-                internetEvidenceStore);
+                internetEvidenceStore,
+                (context, error) =>
+                {
+                    if (error is null) _diagnosticLog?.Info("evidencias", context);
+                    else _diagnosticLog?.Error("evidencias", context, error);
+                });
             var syncService = new SyncService(client, repository, _performanceTelemetry);
             var autoSyncCoordinator = new AutoSyncCoordinator(client, repository, syncService);
             var priceCacheRepository = new SqlitePriceCacheRepository(sqliteConnections, _performanceTelemetry);
