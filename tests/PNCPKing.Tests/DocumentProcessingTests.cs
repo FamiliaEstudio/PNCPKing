@@ -931,7 +931,7 @@ public sealed class DocumentProcessingTests
             Assert.EndsWith(QuotationEvidenceExportService.ImageUnavailableMessage, warning);
             Assert.DoesNotContain("Exception", warning);
             Assert.DoesNotContain(source, warning);
-            var failure = Assert.Single(diagnostics.Where(entry => entry.Error is not null));
+            var failure = Assert.Single(diagnostics, entry => entry.Error is not null);
             var detail = Assert.IsType<string>(failure.Error!.Data[QuotationEvidenceExportService.DiagnosticKey]);
             Assert.Contains("etapa=inserir_imagem", detail);
             Assert.Contains("preco=1", detail);
