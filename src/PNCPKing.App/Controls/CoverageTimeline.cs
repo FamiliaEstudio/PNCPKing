@@ -56,10 +56,23 @@ public sealed class CoverageTimeline : FrameworkElement
             var right = index == _days.Count - 1
                 ? ActualWidth
                 : Math.Ceiling((index + 1) * unit);
+            var width = Math.Max(1, right - left);
+            var day = _days[index];
             drawingContext.DrawRectangle(
-                Brushes[_days[index].Status],
+                Brushes[day.Status],
                 null,
-                new Rect(left, 0, Math.Max(1, right - left), ActualHeight));
+                new Rect(left, 0, width, ActualHeight));
+            if (day.Status == CoverageStatus.Partial)
+            {
+                var pendingHeight = Math.Max(1d, Math.Ceiling(ActualHeight * (100d - day.Percentage) / 100d));
+                if (pendingHeight < ActualHeight)
+                {
+                    drawingContext.DrawRectangle(
+                        Brushes[CoverageStatus.Complete],
+                        null,
+                        new Rect(left, pendingHeight, width, ActualHeight - pendingHeight));
+                }
+            }
         }
     }
 

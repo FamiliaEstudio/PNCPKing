@@ -126,6 +126,8 @@ internal static partial class Program
                     Console.WriteLine("Brazilian currency and quantity formatting: passed");
                     await CheckThemeControlsAsync();
                     Console.WriteLine("Theme controls: passed");
+                    CheckCoverageTimeline();
+                    Console.WriteLine("Partial publication coverage: passed");
                     layoutApp.Shutdown();
                 }
                 catch (Exception error) { Console.Error.WriteLine(error); layoutApp.Shutdown(1); }

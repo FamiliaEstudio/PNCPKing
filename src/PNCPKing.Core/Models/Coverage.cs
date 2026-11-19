@@ -48,9 +48,9 @@ public sealed record CoverageSummary(
     int CompleteDays,
     int TotalDays)
 {
-    public double Percentage => TotalDays == 0 ? 0d : CompleteDays * 100d / TotalDays;
+    public double Percentage => TotalDays == 0 ? 0d : Days.Sum(day => day.Percentage) / TotalDays;
 
-    public string Display => $"{CompleteDays:N0} de {TotalDays:N0} dias completos - {Percentage:N1}%";
+    public string Display => $"{Percentage:N1}% de cobertura · {CompleteDays:N0} de {TotalDays:N0} dias completos";
 }
 
 public sealed record CoverageWorkItem(DateOnly Date, long ModalityId, string Uf);

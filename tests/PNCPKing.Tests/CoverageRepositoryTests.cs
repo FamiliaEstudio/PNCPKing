@@ -6,6 +6,30 @@ namespace PNCPKing.Tests;
 public sealed class CoverageRepositoryTests
 {
     [Fact]
+    public async Task CoverageShowsCompletedModalitiesWhenNewModalityIsPending()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var repository = database.Repository;
+        var start = new DateOnly(2026, 11, 16);
+        var end = start.AddDays(2);
+        var existingModalities = Enumerable.Range(1, 19).Select(id => (long)id).ToArray();
+        await repository.EnsureCoverageWindowAsync(start, end, existingModalities);
+        foreach (var modality in existingModalities)
+            await repository.SetCoverageStatusAsync(start, end, modality, "ALL", CoverageStatus.Complete);
+        await repository.EnsureCoverageWindowAsync(start, end, [..existingModalities, 20L]);
+
+        var days = await repository.GetCoverageDaysAsync(start, end);
+        var summary = new CoverageSummary(days, days.Count(day => day.IsComplete), days.Count);
+        Assert.Equal(95d, summary.Percentage);
+        Assert.Equal(0, summary.CompleteDays);
+        Assert.All(days, day => Assert.Equal(CoverageStatus.Partial, day.Status));
+        Assert.False(await repository.IsCoverageCompleteAsync(start, end));
+        var pending = await repository.GetIncompleteCoverageAsync(start, end, 10, true);
+        Assert.Equal(days.Count, pending.Count);
+        Assert.All(pending, item => Assert.Equal(20L, item.ModalityId));
+    }
+
+    [Fact]
     public async Task CoveragePreparationReleasesWriterEverySevenDaysAndResumesCommittedSlices()
     {
         await using var database = await TestDatabase.CreateAsync();

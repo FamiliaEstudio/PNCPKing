@@ -170,7 +170,7 @@
                                    HorizontalAlignment="Right" />
                         <TextBlock Text="Cobertura das publicações" FontWeight="SemiBold" />
                     </DockPanel>
-                    <TextBlock Text="100% de cobertura não significa atualização concluída: ainda pode haver alterações, itens e preços pendentes."
+                    <TextBlock Text="A cobertura acompanha as modalidades verificadas por dia. A atualização também confere alterações, itens e preços."
                                TextWrapping="Wrap" Foreground="{StaticResource MutedTextBrush}" Margin="0,3,0,0" />
                 </StackPanel>
                 <Grid Grid.Row="1" Margin="0,1,0,6"
@@ -222,7 +222,7 @@
                     </StackPanel>
                 </Grid>
                 <controls:CoverageTimeline Grid.Row="2" Height="12"
-                                           ToolTip="Publicações mais antigas à esquerda e mais novas à direita."
+                                           ToolTip="Cada coluna representa um dia. O verde mostra a parte conferida e o laranja mostra a parte pendente."
                                            ItemsSource="{Binding CoverageDays}" />
 
                 <Border Grid.Row="3" BorderBrush="{StaticResource DividerBrush}" BorderThickness="0,1,0,0"

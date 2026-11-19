@@ -18,6 +18,36 @@ using PNCPKing.Infrastructure.Services;
 
 internal static partial class Program
 {
+    private static void CheckCoverageTimeline()
+    {
+        var timeline = new AppUnderTest::PNCPKing.App.Controls.CoverageTimeline
+        {
+            ItemsSource =
+            [
+                new CoverageDay
+                {
+                    Date = new DateOnly(2026, 11, 19),
+                    Status = CoverageStatus.Partial,
+                    ExpectedModalities = 20,
+                    CompletedModalities = 19
+                }
+            ]
+        };
+        var size = new Size(40, 12);
+        timeline.Measure(size);
+        timeline.Arrange(new Rect(size));
+        timeline.UpdateLayout();
+        var bitmap = new RenderTargetBitmap(40, 12, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(timeline);
+        var pixel = new byte[4];
+        bitmap.CopyPixels(new Int32Rect(20, 0, 1, 1), pixel, 4, 0);
+        if (!pixel.SequenceEqual(new byte[] { 0x4E, 0xB8, 0xE6, 0xFF }))
+            throw new InvalidOperationException("The top of a partial day should show pending coverage.");
+        bitmap.CopyPixels(new Int32Rect(20, 1, 1, 1), pixel, 4, 0);
+        if (!pixel.SequenceEqual(new byte[] { 0x69, 0xA2, 0x36, 0xFF }))
+            throw new InvalidOperationException("A day with 19 of 20 modalities should show the rest of the bar as complete.");
+    }
+
     private static Application CreateUiApplication()
     {
         System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(AppUnderTest::PNCPKing.App.App).TypeHandle);
