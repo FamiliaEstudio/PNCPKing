@@ -1588,7 +1588,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private async Task SearchAsync(
         bool resetSession,
         bool restartPriceSession = false,
-        bool revalidateStalePrices = false)
+        bool revalidateStalePrices = false,
+        bool loadAllLocalPrices = true)
     {
         IReadOnlyList<SearchExpression> criteria;
         try
@@ -1747,7 +1748,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 return;
             }
 
-            if (LoadAllPrices && HasMoreStoredPriceRows)
+            if (loadAllLocalPrices && LoadAllPrices && HasMoreStoredPriceRows)
             {
                 activePriceCancellation.Token.ThrowIfCancellationRequested();
                 await LoadNextItemPageAsync().ConfigureAwait(true);
@@ -4130,10 +4131,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _selectedContractCacheCancellation?.Cancel();
         StopItemSearch();
         _maintenanceTimer.Stop();
-        using var backgroundSuppression = _requestScheduler.SuppressBackgroundRequests();
-        _priceCacheService.PauseForVisibleActivity();
+        var refreshPriceSearch = false;
+        var backgroundSuppression = _requestScheduler.SuppressBackgroundRequests();
         try
         {
+            _priceCacheService.PauseForVisibleActivity();
             await RunFileOperationAsync(async cancellationToken =>
             {
                 BackupImportStage? lastLoggedStage = null;
@@ -4182,21 +4184,26 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 await RefreshDatasetSummaryAsync().ConfigureAwait(true);
                 await RefreshCoverageAsync().ConfigureAwait(true);
                 await RefreshPriceCacheProgressAsync().ConfigureAwait(true);
-                await SearchAsync(
-                        resetSession: true,
-                        restartPriceSession: true,
-                        revalidateStalePrices: false)
-                    .ConfigureAwait(true);
+                if (preservesLocalData)
+                    refreshPriceSearch = true;
+                else
+                    await SearchAsync(resetSession: true, restartPriceSession: true).ConfigureAwait(true);
             }).ConfigureAwait(true);
         }
         finally
         {
+            backgroundSuppression.Dispose();
             _priceCacheService.ResumeAfterVisibleActivity();
             if (!_disposed)
             {
                 _maintenanceTimer.Start();
             }
         }
+
+        // The database is ready. Refresh one local page outside the import lock.
+        if (refreshPriceSearch && !_disposed)
+            await SearchAsync(resetSession: true, restartPriceSession: true, loadAllLocalPrices: false)
+                .ConfigureAwait(true);
     }
 
     private async Task ToggleDesktopShortcutAsync()

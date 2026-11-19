@@ -41,7 +41,8 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
         string destinationPath,
         QuotationProjectReport report,
         IProgress<DocumentProcessingProgress>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlySet<Guid>? selectedLineIds = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         ArgumentNullException.ThrowIfNull(report);
@@ -64,14 +65,16 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
         var units = new List<EvidenceUnit>();
         try
         {
-            var internetEvidence = await LoadAndValidateInternetEvidenceAsync(report, warnings, cancellationToken)
+            var items = report.Lines.Select((analysis, index) => (Analysis: analysis, Index: index))
+                .Where(item => selectedLineIds is null || selectedLineIds.Contains(item.Analysis.Line.Id))
+                .ToArray();
+            var internetEvidence = await LoadAndValidateInternetEvidenceAsync(
+                    items.Select(item => item.Analysis), warnings, cancellationToken)
                 .ConfigureAwait(false);
-            var analyses = report.Lines.ToArray();
-            var totalReferences = analyses.Sum(item => SelectExportedReferences(item).Count);
-            for (var itemIndex = 0; itemIndex < analyses.Length; itemIndex++)
+            var totalReferences = items.Sum(item => SelectExportedReferences(item.Analysis).Count);
+            foreach (var (analysis, itemIndex) in items)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var analysis = analyses[itemIndex];
                 itemCount++;
                 var references = SelectExportedReferences(analysis);
                 var itemTitle = BuildItemTitle(report.ItemNumbers(itemIndex), analysis.Line);
@@ -559,11 +562,11 @@ public sealed class QuotationEvidenceExportService : IQuotationEvidenceExportSer
 
     private async Task<Dictionary<(Guid LineId, string ReferenceId), InternetPriceEvidence>>
         LoadAndValidateInternetEvidenceAsync(
-            QuotationProjectReport report,
+            IEnumerable<QuotationLineAnalysis> analyses,
             ICollection<string> warnings,
             CancellationToken cancellationToken)
     {
-        var referencesByLine = report.Lines
+        var referencesByLine = analyses
             .Select(analysis => new
             {
                 analysis.Line.Id,

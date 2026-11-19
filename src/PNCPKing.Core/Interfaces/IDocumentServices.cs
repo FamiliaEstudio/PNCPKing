@@ -78,5 +78,6 @@ public interface IQuotationEvidenceExportService
         string destinationPath,
         QuotationProjectReport report,
         IProgress<DocumentProcessingProgress>? progress = null,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        IReadOnlySet<Guid>? selectedLineIds = null);
 }

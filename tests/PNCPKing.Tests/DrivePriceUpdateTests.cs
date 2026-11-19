@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using PNCPKing.App.Services;
 using PNCPKing.Core.Models;
+using PNCPKing.Infrastructure.Api;
 using PNCPKing.Infrastructure.Data;
 using PNCPKing.Infrastructure.Services;
 
@@ -221,12 +222,17 @@ public sealed class DrivePriceUpdateTests : IDisposable
     }
 
     [Fact]
-    public async Task DownloadedFullArchiveAcceptsLegacyFtsFormattingAndPreservesLocalQuotation()
+    public async Task DownloadedFullArchivePreservesLocalQuotationAndAllowsDirectPncpSync()
     {
         await using var source = await TestDatabase.CreateAsync();
         await using var destination = await TestDatabase.CreateAsync();
-        var contract = PriceCacheTests.RecentContract("drive-download-contract", DateOnly.FromDateTime(DateTime.Today), 1);
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var start = DataWindow.Start(today);
+        var contract = PriceCacheTests.RecentContract("drive-download-contract", today, 1);
         await source.Repository.UpsertContractsAsync([contract]);
+        await source.Repository.EnsureCoverageWindowAsync(start, today, [6]);
+        await source.Repository.SetCoverageStatusAsync(start, today, 6, "ALL", CoverageStatus.Complete);
+        await source.Repository.SetDatasetStateAsync(start, today, GeoScope.All, DateTimeOffset.Now.AddDays(-1));
         var localQuotations = new SqliteQuotationRepository(destination.Repository.DatabasePath);
         var local = await localQuotations.CreateProjectAsync("Cotação local preservada");
         await HistoricalTransferSchemaTests.ReformatFtsTriggerAsync(destination.Repository.DatabasePath, "contracts_fts_update");
@@ -244,6 +250,33 @@ public sealed class DrivePriceUpdateTests : IDisposable
         var recovery = await importer.ImportAsync(path);
         Assert.True(System.IO.File.Exists(recovery));
         Assert.NotNull(await destination.Repository.GetContractAsync(contract.PncpId));
+
+        using var pncpHandler = new FakeHandler(request => request.RequestUri!.AbsolutePath switch
+        {
+            "/api/pncp/v1/modalidades" => Binary(Encoding.UTF8.GetBytes("""[{"id":6,"nome":"Pregão","statusAtivo":true}]""")),
+            "/api/consulta/v1/contratacoes/atualizacao" => Binary(Encoding.UTF8.GetBytes($$"""
+                {
+                  "data": [{
+                    "numeroControlePNCP": "pncp-after-drive",
+                    "anoCompra": {{today.Year}},
+                    "sequencialCompra": 2,
+                    "dataPublicacaoPncp": "{{today:yyyy-MM-dd}}T12:00:00Z",
+                    "orgaoEntidade": { "cnpj": "12345678000100" }
+                  }],
+                  "totalRegistros": 1,
+                  "totalPaginas": 1,
+                  "numeroPagina": 1
+                }
+                """)),
+            _ => throw new InvalidOperationException($"Consulta inesperada: {request.RequestUri}")
+        });
+        using var pncpHttp = new HttpClient(pncpHandler);
+        var pncp = new PncpClient(pncpHttp);
+        Assert.False(await new PreflightService(pncp).RequiresInitialEstimateAsync(destination.Repository));
+        var sync = new SyncService(pncp, destination.Repository);
+        var refresh = await new AutoSyncCoordinator(pncp, destination.Repository, sync).SynchronizeAsync();
+        Assert.True(refresh.GlobalUpdateCompleted);
+        Assert.NotNull(await destination.Repository.GetContractAsync("pncp-after-drive"));
         Assert.Equal(local.Id, Assert.Single(await localQuotations.GetProjectsAsync()).Id);
     }
 

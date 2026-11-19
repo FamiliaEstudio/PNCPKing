@@ -732,6 +732,48 @@ public sealed partial class QuotationOrganizationTests
     }
 
     [Fact]
+    public void EvidenceSelectionAcceptsSingleItemsInclusiveRangesAndOverlaps()
+    {
+        var project = Project();
+        var lines = Enumerable.Range(1, 80).Select(number => Item(project, $"Item {number}", 1, 1)).ToArray();
+        var report = new QuotationProjectReport(project, lines);
+        Assert.Equal(lines[2].Line.Id, Assert.Single(QuotationEvidenceSelection.Parse("3", report)));
+        var expected = Enumerable.Range(1, 30).Append(57).Concat(Enumerable.Range(60, 17));
+        var selected = QuotationEvidenceSelection.Parse(" 1-30;57;60 - 76; 3 ", report);
+        Assert.True(selected.SetEquals(expected.Select(number => lines[number - 1].Line.Id)));
+
+        foreach (var invalid in new[] { "", "0", "81", "76-60", "3;;4", "3,4", "1-2147483647" })
+            Assert.Throws<FormatException>(() => QuotationEvidenceSelection.Parse(invalid, report));
+    }
+
+    [Fact]
+    public async Task SelectedEvidenceKeepsWorkbookNumbersAndExportsSharedQuotaOnce()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var project = Project();
+        var shared = Item(project, "Com cotas", 4, 25000);
+        var report = Apply(project, [shared, Item(project, "Fora da seleção", 1, 1)]);
+        var selected = QuotationEvidenceSelection.Parse("2;1-2", report);
+        Assert.Equal(shared.Line.Id, Assert.Single(selected));
+        var path = Path.Combine(database.Directory, "selecionadas.pdf");
+        var result = await new QuotationEvidenceExportService(null!, null!, null!)
+            .ExportAsync(path, report, selectedLineIds: selected);
+
+        Assert.Equal(1, result.Items);
+        using var actual = UglyToad.PdfPig.PdfDocument.Open(path);
+        Assert.Equal(2, actual.NumberOfPages);
+        var expectedPath = Path.Combine(database.Directory, "esperado.pdf");
+        using (var writer = new EvidencePdfWriter())
+        {
+            writer.AddTextPage("Item 1 e 2 — Com cotas", ["Nenhum preço foi exportado; não há documentos para pesquisar."]);
+            writer.Save(expectedPath);
+        }
+        using var expected = UglyToad.PdfPig.PdfDocument.Open(expectedPath);
+        Assert.Equal(Assert.Single(expected.GetPage(1).GetImages()).RawBytes.ToArray(),
+            Assert.Single(actual.GetPage(2).GetImages()).RawBytes.ToArray());
+    }
+
+    [Fact]
     public async Task FractionalInputIsRejectedAndLegacyFractionSurvivesMigrationForCorrection()
     {
         await using var database = await TestDatabase.CreateAsync();

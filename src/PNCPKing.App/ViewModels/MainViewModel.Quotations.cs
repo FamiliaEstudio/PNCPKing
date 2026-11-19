@@ -2165,29 +2165,38 @@ public sealed partial class MainViewModel
             return;
         }
 
-        var dialog = new SaveFileDialog
-        {
-            Title = "Exportar cotação",
-            Filter = "Planilha do Excel (*.xlsx)|*.xlsx",
-            DefaultExt = ".xlsx",
-            AddExtension = true,
-            FileName = SanitizeFileName(project.Name) + ".xlsx"
-        };
-        if (dialog.ShowDialog() != true)
-        {
-            return;
-        }
-
         IsFileBusy = true;
-        var workbookExported = false;
+        string? exportedWorkbookPath = null;
         try
         {
             var report = await _quotationService.GetReportAsync(project.Id).ConfigureAwait(true);
+            IReadOnlySet<Guid>? selectedLineIds = null;
+            if (includeEvidence)
+            {
+                report.ValidateExport();
+                var selection = new QuotationEvidenceSelectionWindow(report)
+                {
+                    Owner = Application.Current.MainWindow
+                };
+                if (selection.ShowDialog() != true) return;
+                selectedLineIds = selection.SelectedLineIds;
+            }
+
+            var dialog = new SaveFileDialog
+            {
+                Title = "Exportar cotação",
+                Filter = "Planilha do Excel (*.xlsx)|*.xlsx",
+                DefaultExt = ".xlsx",
+                AddExtension = true,
+                FileName = SanitizeFileName(project.Name) + ".xlsx"
+            };
+            if (dialog.ShowDialog() != true) return;
+
             await _quotationWorkbookService.ExportAsync(
                 dialog.FileName,
                 report,
                 responsibleName).ConfigureAwait(true);
-            workbookExported = true;
+            exportedWorkbookPath = dialog.FileName;
             if (!includeEvidence)
             {
                 StatusText = $"Cotação exportada sem evidências: {dialog.FileName}";
@@ -2197,6 +2206,7 @@ public sealed partial class MainViewModel
             var evidence = await ExportEvidenceAsync(
                 GetEvidencePath(dialog.FileName),
                 report,
+                selectedLineIds,
                 CancellationToken.None).ConfigureAwait(true);
             StatusText = $"Cotação exportada; {evidence.ReportPaths.Count:N0} PDF(s) de evidências em " +
                          $"{Path.GetDirectoryName(evidence.ReportPath)}" +
@@ -2215,8 +2225,8 @@ public sealed partial class MainViewModel
         }
         catch (Exception exception)
         {
-            var message = includeEvidence && workbookExported
-                ? $"A planilha foi salva em:\n{dialog.FileName}\n\n" +
+            var message = includeEvidence && exportedWorkbookPath is not null
+                ? $"A planilha foi salva em:\n{exportedWorkbookPath}\n\n" +
                   $"Não foi possível concluir o relatório de evidências: {exception.Message}"
                 : exception.Message;
             await DiagnosticEmailDialog.ShowErrorAsync(exception, message, "Exportar cotação");
@@ -2643,6 +2653,7 @@ public sealed partial class MainViewModel
     private async Task<QuotationEvidenceResult> ExportEvidenceAsync(
         string destinationPath,
         QuotationProjectReport report,
+        IReadOnlySet<Guid>? selectedLineIds,
         CancellationToken cancellationToken)
     {
         if (IsDocumentBusy)
@@ -2660,7 +2671,8 @@ public sealed partial class MainViewModel
                 destinationPath,
                 report,
                 CreateDocumentProgress(),
-                _documentCancellation.Token).ConfigureAwait(true);
+                _documentCancellation.Token,
+                selectedLineIds).ConfigureAwait(true);
             DocumentProgress = 100;
             DocumentProgressText =
                 $"Documentos: {result.ReportPaths.Count:N0} arquivo(s) concluído(s), " +
