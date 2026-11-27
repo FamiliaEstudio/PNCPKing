@@ -427,7 +427,7 @@ public sealed class QuotationDuplicatePriceTests
         }).ToArray();
         var marked = lines.Where((_, i) => i + 1 == lastMarked || (i + 1 < lastMarked && i % 3 == 0))
             .Select(line => line.Id).ToHashSet();
-        var picker = ManualBasketLineChoice.ForProject(project, lines.Reverse().ToArray(), marked);
+        var picker = ManualBasketLineChoice.ForProject(project, Enumerable.Reverse(lines).ToArray(), marked);
         Assert.Equal(452, picker.Choices.Length);
         Assert.Equal("Novo item", picker.Choices[0].Label);
         Assert.False(picker.Choices[0].HasBasket);
