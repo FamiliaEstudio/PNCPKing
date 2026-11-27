@@ -118,7 +118,7 @@ internal static partial class Program
         var marked = items.Where((_, i) => i < 427 && (i + 1) % 7 == 0).Select(row => row.Id).ToHashSet();
         var basketReads = 0;
         var window = new BasketWindow([project, empty],
-            (id, _) => Task.FromResult<IReadOnlyList<QuotationLine>>(items.Reverse().Select(line => line with { ProjectId = id }).ToArray()),
+            (id, _) => Task.FromResult<IReadOnlyList<QuotationLine>>(Enumerable.Reverse(items).Select(line => line with { ProjectId = id }).ToArray()),
             (_, _) => { basketReads++; return Task.FromResult<IReadOnlyList<QuotationManualBasket>>([]); },
             (id, _) => Task.FromResult<IReadOnlySet<Guid>>(id == project.Id ? marked : new HashSet<Guid>()), project.Id, "Café", "", "");
         try
