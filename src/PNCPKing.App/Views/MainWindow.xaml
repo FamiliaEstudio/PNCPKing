@@ -716,6 +716,7 @@
                                         <MenuItem Header="Organizar Itens" Command="{Binding OrganizeQuotationItemsCommand}"
                                                   Click="OrganizeQuotationItems_Click"
                                                   ToolTip="Aplica a sequência de grupos e cotas às telas e exportações. Exige quantidades inteiras e cestas confirmadas." />
+                                        <MenuItem Header="Remover preços duplicados" Command="{Binding RemoveDuplicateQuotationPricesCommand}" />
                                         <Separator />
                                         <MenuItem Header="Novo item" Command="{Binding NewQuotationItemCommand}" />
                                         <MenuItem Header="Excluir item" Command="{Binding DeleteQuotationLineCommand}" />

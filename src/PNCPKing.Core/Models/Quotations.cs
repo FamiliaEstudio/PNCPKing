@@ -415,6 +415,23 @@ public sealed record QuotationManualBasket
         ConversionFactors.TryGetValue(referenceId, out var factor) ? factor : 1m;
 }
 
+public sealed record QuotationPricePreview(string ReferenceId, string SupplierName, decimal UnitPrice,
+    DateOnly? ResultDate, int Position, decimal ConversionFactor, decimal? PriceDivisor);
+
+public sealed record QuotationCleanupImpact(
+    string? SelectedKey, bool SelectionConfirmed, int Before, int After, int Minimum, int DecimalPlaces,
+    QuotationAggregationMethod Method, decimal AdoptedPrice, string Validation, bool NeedsAcceptance,
+    string? BlockReason, string MemberSnapshot);
+
+public sealed record QuotationDuplicatePrice(
+    Guid LineId, string LineName, string BasketKey, string BasketName, string SupplierCnpj, string PurchaseId,
+    QuotationPricePreview Kept, QuotationPricePreview Removed, QuotationCleanupImpact Impact)
+{
+    public bool IsAutomatic => !BasketKey.StartsWith("manual:", StringComparison.Ordinal);
+    public bool CanRemove(IReadOnlySet<(Guid LineId, string BasketKey)>? acceptedWarnings) =>
+        Impact.BlockReason is null && (!Impact.NeedsAcceptance || acceptedWarnings?.Contains((LineId, BasketKey)) == true);
+}
+
 public sealed record QuotationLineAnalysis(
     QuotationLine Line,
     IReadOnlyList<QuotationReference> References,

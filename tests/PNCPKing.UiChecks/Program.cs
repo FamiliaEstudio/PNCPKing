@@ -97,13 +97,21 @@ internal static partial class Program
             };
             return readingApp.Run();
         }
-        if (args is ["--layout"])
+        if (args is ["--layout" or "--quotation-baskets"])
         {
             var layoutApp = CreateUiApplication();
             layoutApp.Startup += async (_, _) =>
             {
                 try
                 {
+                    if (args[0] == "--quotation-baskets")
+                    {
+                        await CheckQuotationNavigationScopeAsync();
+                        await CheckBasketPickerPositionAsync();
+                        await CheckDuplicatePricesCommandAsync();
+                        layoutApp.Shutdown();
+                        return;
+                    }
                     await CheckMonitorPlacementAsync();
                     Console.WriteLine("Monitor placement: passed");
                     await CheckQuotationGroupsAsync();

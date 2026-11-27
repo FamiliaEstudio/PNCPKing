@@ -35,7 +35,41 @@
 
         <TextBlock Grid.Row="3" Text="Item da cotação" VerticalAlignment="Center" />
         <ComboBox x:Name="LineComboBox" Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2"
-                  DisplayMemberPath="Label" SelectionChanged="LineComboBox_SelectionChanged" />
+                  TextSearch.TextPath="Label" SelectionChanged="LineComboBox_SelectionChanged"
+                  DropDownOpened="LineComboBox_DropDownOpened" ScrollViewer.CanContentScroll="True"
+                  VirtualizingPanel.ScrollUnit="Item" VirtualizingPanel.VirtualizationMode="Recycling">
+            <ComboBox.ItemsPanel>
+                <ItemsPanelTemplate><VirtualizingStackPanel /></ItemsPanelTemplate>
+            </ComboBox.ItemsPanel>
+            <ComboBox.ItemTemplate>
+                <DataTemplate>
+                    <Border x:Name="BasketMark" BorderThickness="3,0,0,0" Padding="5,0,0,0">
+                        <TextBlock Text="{Binding Label}" />
+                    </Border>
+                    <DataTemplate.Triggers>
+                        <DataTrigger Binding="{Binding HasBasket}" Value="True">
+                            <Setter TargetName="BasketMark" Property="BorderBrush" Value="{StaticResource ValidMarkedPriceBorderBrush}" />
+                        </DataTrigger>
+                    </DataTemplate.Triggers>
+                </DataTemplate>
+            </ComboBox.ItemTemplate>
+            <ComboBox.ItemContainerStyle>
+                <Style TargetType="ComboBoxItem">
+                    <Style.Triggers>
+                        <MultiDataTrigger>
+                            <MultiDataTrigger.Conditions>
+                                <Condition Binding="{Binding HasBasket}" Value="True" />
+                                <Condition Binding="{Binding IsHighlighted, RelativeSource={RelativeSource Self}}" Value="False" />
+                                <Condition Binding="{Binding IsSelected, RelativeSource={RelativeSource Self}}" Value="False" />
+                                <Condition Binding="{Binding IsKeyboardFocusWithin, RelativeSource={RelativeSource Self}}" Value="False" />
+                            </MultiDataTrigger.Conditions>
+                            <Setter Property="Background" Value="{StaticResource ValidMarkedPriceBrush}" />
+                            <Setter Property="Foreground" Value="{StaticResource ValidMarkedPriceTextBrush}" />
+                        </MultiDataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </ComboBox.ItemContainerStyle>
+        </ComboBox>
 
         <TextBlock Grid.Row="4" Text="Cesta manual" VerticalAlignment="Center" />
         <ComboBox x:Name="BasketComboBox" Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2"

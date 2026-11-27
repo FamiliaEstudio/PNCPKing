@@ -36,6 +36,7 @@ public interface IQuotationRepository
     Task<Guid> CopyLineAsync(Guid sourceProjectId, Guid lineId, Guid destinationProjectId,
         CancellationToken cancellationToken = default);
     Task<IReadOnlyList<QuotationLine>> GetLinesAsync(Guid projectId, CancellationToken cancellationToken = default);
+    Task<IReadOnlySet<Guid>> GetBasketLineIdsAsync(Guid projectId, CancellationToken cancellationToken = default);
     Task<QuotationLine?> GetLineAsync(
         Guid projectId,
         Guid lineId,
@@ -64,6 +65,9 @@ public interface IQuotationRepository
     Task<Guid> TransferBasketReferencesAsync(
         Guid lineId, QuotationBasket source, QuotationBasket destination,
         IReadOnlyList<string> referenceIds, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<QuotationDuplicatePrice>> FindDuplicatePricesAsync(Guid projectId, CancellationToken cancellationToken = default);
+    Task<IReadOnlySet<Guid>> RemoveDuplicatePricesAsync(Guid projectId, IReadOnlyList<QuotationDuplicatePrice> preview,
+        IReadOnlySet<(Guid LineId, string BasketKey)>? acceptedWarnings = null, CancellationToken cancellationToken = default);
     Task RenameManualBasketAsync(
         Guid basketId,
         string name,

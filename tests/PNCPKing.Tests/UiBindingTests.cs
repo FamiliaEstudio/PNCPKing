@@ -432,6 +432,7 @@ public sealed class UiBindingTests
                     "{Binding ToggleQuotationMedicationCommand}",
                     "{Binding ManageQuotationGroupsCommand}",
                     "{Binding OrganizeQuotationItemsCommand}",
+                    "{Binding RemoveDuplicateQuotationPricesCommand}",
                     "{Binding NewQuotationItemCommand}",
                     "{Binding DeleteQuotationLineCommand}",
                     "{Binding RenameQuotationLineCommand}",

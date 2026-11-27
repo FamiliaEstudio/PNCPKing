@@ -610,6 +610,23 @@ public sealed class QuotationItemViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
+    internal void ShowCleanedBasket(QuotationLineAnalysis analysis)
+    {
+        var key = analysis.Line.SelectionConfirmed ? analysis.Line.SelectedBasketKey : SelectedBasket?.Key;
+        Line = new QuotationLineDisplay(analysis);
+        Baskets.Clear();
+        foreach (var basket in analysis.Baskets)
+            Baskets.Add(new QuotationBasketDisplay(basket, basket.Key == analysis.Line.SelectedBasketKey, analysis.PriceDecimalPlaces));
+
+        References.Clear();
+        foreach (var reference in analysis.References.OrderBy(reference => reference.Source)
+                     .ThenByDescending(reference => reference.Adequacy.Total).ThenBy(reference => reference.UnitPrice))
+            References.Add(new QuotationReferenceDisplay(reference));
+
+        SelectedBasket = Baskets.FirstOrDefault(basket => basket.Key == key) ??
+                         Baskets.FirstOrDefault(basket => basket.WasPreviouslySelected) ?? Baskets.FirstOrDefault();
+    }
+
     public async Task RenameItemAsync(string displayName)
     {
         var previous = Line?.Line.EffectiveDisplayName ?? string.Empty;

@@ -735,33 +735,7 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
     {
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT l.id, l.project_id, l.description, l.requested_quantity_scaled, l.requested_unit,
-                   l.minimum_unit_price_scaled, l.maximum_unit_price_scaled, l.description_weight,
-                   l.unit_weight, l.quantity_weight, l.proximity_weight, l.recency_weight, l.sample_version,
-                   l.sampled_at, l.selected_basket_key, l.selection_confirmed, l.search_text,
-                   l.requested_batch_count, l.display_order, l.automation_run_id, l.automation_state,
-                   l.automation_message, l.requested_basket_size, l.estimated_unit_price_scaled,
-                   l.estimated_total_price_scaled, l.use_estimated_price, l.estimate_stage,
-                   l.search_random_pivot, l.search_cursor_geo_layer, l.search_cursor_group_rank,
-                   l.search_cursor_rotation_band, l.search_cursor_random_key, l.search_cursor_pncp_id,
-                   l.search_contracts_examined, l.search_batches_completed, l.search_candidate_exhausted,
-                   p.version, p.restrictive_text, p.intermediate_text, p.broad_text,
-                   p.origin, p.validation_state, p.active_level, p.contracts_at_level,
-                   p.matched_items, p.revealed_prices, p.updated_at,
-                   l.display_name, s.catalog_kind, s.catalog_code,
-                   s.description_snapshot, s.selected_at,
-                   CASE WHEN ce.code IS NULL THEN 1 ELSE ce.active END, l.group_id,
-                   l.catmat_code_override, l.minimum_order_quantity_scaled
-              FROM quotation_lines l
-              LEFT JOIN quotation_line_search_prompts p
-                ON p.line_id = l.id AND p.is_current = 1
-              LEFT JOIN quotation_catalog_selections s ON s.line_id = l.id
-              LEFT JOIN catalog_entries ce
-                ON ce.catalog_kind = s.catalog_kind AND ce.code = s.catalog_code
-             WHERE l.project_id = $projectId
-             ORDER BY l.display_order, l.sampled_at, l.id;
-            """;
+        command.CommandText = LineSelectSql + " WHERE l.project_id = $projectId ORDER BY l.display_order, l.sampled_at, l.id;";
         command.Parameters.AddWithValue("$projectId", projectId.ToString("N"));
         var lines = new List<QuotationLine>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -773,6 +747,24 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
         return lines;
     }
 
+    public async Task<IReadOnlySet<Guid>> GetBasketLineIdsAsync(Guid projectId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT l.id FROM quotation_lines l
+             WHERE l.project_id = $project AND (
+                 (l.selection_confirmed = 1 AND COALESCE(l.selected_basket_key, '') <> '')
+                 OR EXISTS (SELECT 1 FROM quotation_manual_baskets b WHERE b.line_id = l.id));
+            """;
+        command.Parameters.AddWithValue("$project", projectId.ToString("N"));
+        var ids = new HashSet<Guid>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            ids.Add(Guid.ParseExact(reader.GetString(0), "N"));
+        return ids;
+    }
+
     public async Task<QuotationLine?> GetLineAsync(
         Guid projectId,
         Guid lineId,
@@ -780,33 +772,7 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
     {
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT l.id, l.project_id, l.description, l.requested_quantity_scaled, l.requested_unit,
-                   l.minimum_unit_price_scaled, l.maximum_unit_price_scaled, l.description_weight,
-                   l.unit_weight, l.quantity_weight, l.proximity_weight, l.recency_weight, l.sample_version,
-                   l.sampled_at, l.selected_basket_key, l.selection_confirmed, l.search_text,
-                   l.requested_batch_count, l.display_order, l.automation_run_id, l.automation_state,
-                   l.automation_message, l.requested_basket_size, l.estimated_unit_price_scaled,
-                   l.estimated_total_price_scaled, l.use_estimated_price, l.estimate_stage,
-                   l.search_random_pivot, l.search_cursor_geo_layer, l.search_cursor_group_rank,
-                   l.search_cursor_rotation_band, l.search_cursor_random_key, l.search_cursor_pncp_id,
-                   l.search_contracts_examined, l.search_batches_completed, l.search_candidate_exhausted,
-                   p.version, p.restrictive_text, p.intermediate_text, p.broad_text,
-                   p.origin, p.validation_state, p.active_level, p.contracts_at_level,
-                   p.matched_items, p.revealed_prices, p.updated_at,
-                   l.display_name, s.catalog_kind, s.catalog_code,
-                   s.description_snapshot, s.selected_at,
-                   CASE WHEN ce.code IS NULL THEN 1 ELSE ce.active END, l.group_id,
-                   l.catmat_code_override, l.minimum_order_quantity_scaled
-              FROM quotation_lines l
-              LEFT JOIN quotation_line_search_prompts p
-                ON p.line_id = l.id AND p.is_current = 1
-              LEFT JOIN quotation_catalog_selections s ON s.line_id = l.id
-              LEFT JOIN catalog_entries ce
-                ON ce.catalog_kind = s.catalog_kind AND ce.code = s.catalog_code
-             WHERE l.project_id = $projectId AND l.id = $lineId
-             LIMIT 1;
-            """;
+        command.CommandText = LineSelectSql + " WHERE l.project_id = $projectId AND l.id = $lineId LIMIT 1;";
         command.Parameters.AddWithValue("$projectId", projectId.ToString("N"));
         command.Parameters.AddWithValue("$lineId", lineId.ToString("N"));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -3527,6 +3493,32 @@ public sealed partial class SqliteQuotationRepository : IQuotationRepository, IQ
                 .Distinct(StringComparer.Ordinal)
                 .Take(3));
     }
+
+    private const string LineSelectSql = """
+            SELECT l.id, l.project_id, l.description, l.requested_quantity_scaled, l.requested_unit,
+                   l.minimum_unit_price_scaled, l.maximum_unit_price_scaled, l.description_weight,
+                   l.unit_weight, l.quantity_weight, l.proximity_weight, l.recency_weight, l.sample_version,
+                   l.sampled_at, l.selected_basket_key, l.selection_confirmed, l.search_text,
+                   l.requested_batch_count, l.display_order, l.automation_run_id, l.automation_state,
+                   l.automation_message, l.requested_basket_size, l.estimated_unit_price_scaled,
+                   l.estimated_total_price_scaled, l.use_estimated_price, l.estimate_stage,
+                   l.search_random_pivot, l.search_cursor_geo_layer, l.search_cursor_group_rank,
+                   l.search_cursor_rotation_band, l.search_cursor_random_key, l.search_cursor_pncp_id,
+                   l.search_contracts_examined, l.search_batches_completed, l.search_candidate_exhausted,
+                   p.version, p.restrictive_text, p.intermediate_text, p.broad_text,
+                   p.origin, p.validation_state, p.active_level, p.contracts_at_level,
+                   p.matched_items, p.revealed_prices, p.updated_at,
+                   l.display_name, s.catalog_kind, s.catalog_code,
+                   s.description_snapshot, s.selected_at,
+                   CASE WHEN ce.code IS NULL THEN 1 ELSE ce.active END, l.group_id,
+                   l.catmat_code_override, l.minimum_order_quantity_scaled
+              FROM quotation_lines l
+              LEFT JOIN quotation_line_search_prompts p
+                ON p.line_id = l.id AND p.is_current = 1
+              LEFT JOIN quotation_catalog_selections s ON s.line_id = l.id
+              LEFT JOIN catalog_entries ce
+                ON ce.catalog_kind = s.catalog_kind AND ce.code = s.catalog_code
+            """;
 
     private const string ReferenceSelectSql = """
         SELECT id, line_id, contract_id, item_number, result_sequence, supplier_name,

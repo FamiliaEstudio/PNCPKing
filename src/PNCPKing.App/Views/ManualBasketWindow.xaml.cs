@@ -1,9 +1,12 @@
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Threading;
 using PNCPKing.Core.Models;
-using PNCPKing.Core.Quotations;
+using PNCPKing.App.ViewModels;
 
 namespace PNCPKing.App.Views;
 
@@ -11,6 +14,7 @@ public partial class ManualBasketWindow : Window
 {
     private readonly Func<Guid, CancellationToken, Task<IReadOnlyList<QuotationLine>>> _loadLines;
     private readonly Func<Guid, CancellationToken, Task<IReadOnlyList<QuotationManualBasket>>> _loadBaskets;
+    private readonly Func<Guid, CancellationToken, Task<IReadOnlySet<Guid>>> _loadBasketLineIds;
     private readonly string _suggestedDescription;
     private readonly CancellationTokenSource _lifetime = new();
     private bool _ready;
@@ -22,11 +26,13 @@ public partial class ManualBasketWindow : Window
     private int _lineLoadVersion;
     private int _basketLoadVersion;
     private int _manualBasketCount;
+    private int _openingLineIndex;
 
     public ManualBasketWindow(
         IReadOnlyList<QuotationProject> projects,
         Func<Guid, CancellationToken, Task<IReadOnlyList<QuotationLine>>> loadLines,
         Func<Guid, CancellationToken, Task<IReadOnlyList<QuotationManualBasket>>> loadBaskets,
+        Func<Guid, CancellationToken, Task<IReadOnlySet<Guid>>> loadBasketLineIds,
         Guid? selectedProjectId,
         string suggestedDescription,
         string minimumPrice,
@@ -47,6 +53,7 @@ public partial class ManualBasketWindow : Window
             }
         };
         _loadLines = loadLines;
+        _loadBasketLineIds = loadBasketLineIds;
         _loadBaskets = loadBaskets;
         _suggestedDescription = suggestedDescription;
         ProjectComboBox.ItemsSource = projects;
@@ -84,10 +91,31 @@ public partial class ManualBasketWindow : Window
         if (_ready && !_closed) await RefreshLinesAsync();
     }
 
+    private void LineComboBox_DropDownOpened(object sender, EventArgs e)
+    {
+        var version = _lineLoadVersion;
+        // The ComboBox first brings its current selection into view. Move only the viewport afterwards.
+        _ = Dispatcher.InvokeAsync(() =>
+        {
+            if (_closed || version != _lineLoadVersion || !LineComboBox.IsDropDownOpen ||
+                LineComboBox.Template.FindName("PART_Popup", LineComboBox) is not Popup { Child: { } child } ||
+                FindScrollViewer(child) is not { } scroll) return;
+            scroll.ScrollToVerticalOffset(_openingLineIndex);
+        }, DispatcherPriority.ContextIdle);
+    }
+
+    private static ScrollViewer? FindScrollViewer(DependencyObject root)
+    {
+        if (root is ScrollViewer viewer) return viewer;
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            if (FindScrollViewer(VisualTreeHelper.GetChild(root, i)) is { } found) return found;
+        return null;
+    }
+
     private async void LineComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_ready || _closed) return;
-        var line = (LineComboBox.SelectedItem as LineChoice)?.Line;
+        var line = (LineComboBox.SelectedItem as ManualBasketLineChoice)?.Line;
         var existing = line is not null;
         foreach (var control in NewLineControls)
         {
@@ -128,7 +156,8 @@ public partial class ManualBasketWindow : Window
         _linesFailed = false;
         LoadStatusTextBlock.Text = string.Empty;
         var project = ProjectComboBox.SelectedItem as QuotationProject;
-        LineComboBox.ItemsSource = new[] { new LineChoice("Novo item", null) };
+        _openingLineIndex = 0;
+        LineComboBox.ItemsSource = new[] { new ManualBasketLineChoice(Line: null) };
         LineComboBox.SelectedIndex = 0;
         UpdateLoadingState();
         try
@@ -136,10 +165,11 @@ public partial class ManualBasketWindow : Window
             if (project is null) return;
             var lines = await _loadLines(project.Id, _lifetime.Token);
             if (_closed || version != _lineLoadVersion) return;
-            var choices = new List<LineChoice> { new("Novo item", null) };
-            choices.AddRange(QuotationOrganization.OrderLines(project, lines)
-                .Select(line => new LineChoice(line.EffectiveDisplayName, line)));
-            LineComboBox.ItemsSource = choices;
+            var basketLineIds = await _loadBasketLineIds(project.Id, _lifetime.Token);
+            if (_closed || version != _lineLoadVersion) return;
+            var picker = ManualBasketLineChoice.ForProject(project, lines, basketLineIds);
+            _openingLineIndex = picker.OpeningIndex;
+            LineComboBox.ItemsSource = picker.Choices;
             LineComboBox.SelectedIndex = 0;
         }
         catch (OperationCanceledException) when (_closed) { }
@@ -162,7 +192,7 @@ public partial class ManualBasketWindow : Window
     private async Task RefreshBasketsAsync()
     {
         var version = ++_basketLoadVersion;
-        var line = (LineComboBox.SelectedItem as LineChoice)?.Line;
+        var line = (LineComboBox.SelectedItem as ManualBasketLineChoice)?.Line;
         _manualBasketCount = 0;
         _basketsFailed = false;
         _basketsLoading = line is not null;
@@ -233,7 +263,7 @@ public partial class ManualBasketWindow : Window
 
             var selectedLine = NewProjectName.Length > 0
                 ? null
-                : (LineComboBox.SelectedItem as LineChoice)?.Line;
+                : (LineComboBox.SelectedItem as ManualBasketLineChoice)?.Line;
             ExistingLineId = selectedLine?.Id;
             ExistingBasketId = selectedLine is null ? null : (BasketComboBox.SelectedItem as BasketChoice)?.Basket?.Id;
             BasketName = BasketNameTextBox.Text.Trim();
@@ -329,6 +359,5 @@ public partial class ManualBasketWindow : Window
         MaximumPriceTextBox
     ];
 
-    private sealed record LineChoice(string Label, QuotationLine? Line);
     private sealed record BasketChoice(string Label, QuotationManualBasket? Basket);
 }

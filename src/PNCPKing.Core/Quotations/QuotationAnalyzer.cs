@@ -512,20 +512,16 @@ public sealed partial class QuotationAnalyzer
                 continue;
             }
 
-            result.Add(CreateBasket(
-                references,
-                QuotationBasketKind.Manual,
-                manual.Name,
-                manual.Id,
-                requestedSize: 3,
-                manual.AggregationMethod,
-                manual.ConversionFactors,
-                priceDecimalPlaces,
-                manual.PriceDivisors));
+            result.Add(CalculateManualBasket(manual, references, priceDecimalPlaces));
         }
 
         return result;
     }
+
+    public static QuotationBasket CalculateManualBasket(QuotationManualBasket manual,
+        IReadOnlyList<QuotationReference> scoredMembers, int priceDecimalPlaces) =>
+        CreateBasket(scoredMembers, QuotationBasketKind.Manual, manual.Name, manual.Id, 3,
+            manual.AggregationMethod, manual.ConversionFactors, priceDecimalPlaces, manual.PriceDivisors);
 
     private static QuotationBasket CreateBasket(
         IReadOnlyList<QuotationReference> references,

@@ -1,4 +1,5 @@
 using PNCPKing.Core.Models;
+using PNCPKing.Core.Quotations;
 
 namespace PNCPKing.App.ViewModels;
 
@@ -9,8 +10,39 @@ public sealed record QuotationProjectDisplay(QuotationProject Source)
     public override string ToString() => Name;
 }
 
+public sealed record ManualBasketLineChoice(QuotationLine? Line, bool HasBasket = false)
+{
+    public string Label => Line?.EffectiveDisplayName ?? "Novo item";
+
+    public static (ManualBasketLineChoice[] Choices, int OpeningIndex) ForProject(
+        QuotationProject project, IReadOnlyList<QuotationLine> lines, IReadOnlySet<Guid> basketLineIds)
+    {
+        ManualBasketLineChoice[] choices = [new(Line: null), .. QuotationOrganization.OrderLines(project, lines)
+            .Select(line => new ManualBasketLineChoice(line, basketLineIds.Contains(line.Id)))];
+        return (choices, Math.Max(0, Array.FindLastIndex(choices, row => row.HasBasket)));
+    }
+}
+
 public sealed class QuotationLineDisplay(QuotationLineAnalysis analysis, QuotationOrganizationSnapshot? organization = null)
 {
+    internal static (QuotationProjectReport Report, int ResolvedDelta) ReplaceCleanedItems(QuotationProjectReport report,
+        IList<QuotationLineDisplay> displayed, IReadOnlyDictionary<Guid, QuotationLineAnalysis> changes)
+    {
+        if (changes.Count == 0) return (report, 0);
+        var lines = report.Lines.Select(line => changes.GetValueOrDefault(line.Line.Id) ?? line).ToArray();
+        var resolvedDelta = 0;
+        for (var index = 0; index < displayed.Count; index++)
+        {
+            var previous = displayed[index];
+            if (!changes.TryGetValue(previous.Line.Id, out var updated)) continue;
+            var row = new QuotationLineDisplay(updated, report.Project.Organization);
+            if (previous.Status == "Resolvido") resolvedDelta--;
+            if (row.Status == "Resolvido") resolvedDelta++;
+            displayed[index] = row;
+        }
+        return (report with { Lines = lines }, resolvedDelta);
+    }
+
     public string ItemNumbers => organization?.ItemNumbers(Line.Id) ?? string.Empty;
     public string GroupNumbers => organization?.GroupNumbers(Line.Id) ?? string.Empty;
     public QuotationLineAnalysis Analysis { get; } = analysis;

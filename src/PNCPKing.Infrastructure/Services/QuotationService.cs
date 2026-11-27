@@ -19,6 +19,9 @@ public sealed class QuotationService(
         Guid projectId, CancellationToken cancellationToken = default) =>
         repository.GetLinesAsync(projectId, cancellationToken);
 
+    public Task<IReadOnlySet<Guid>> GetBasketLineIdsAsync(Guid projectId, CancellationToken cancellationToken = default) =>
+        repository.GetBasketLineIdsAsync(projectId, cancellationToken);
+
     public Task<IReadOnlyList<QuotationManualBasket>> GetManualBasketsAsync(
         Guid lineId, CancellationToken cancellationToken = default) =>
         repository.GetManualBasketsAsync(lineId, cancellationToken);
@@ -528,6 +531,25 @@ public sealed class QuotationService(
                 RecencyScore = Stored(reference.Adequacy.RecencyScore)
             }
         };
+    }
+
+    public Task<IReadOnlyList<QuotationDuplicatePrice>> FindDuplicatePricesAsync(Guid projectId, CancellationToken cancellationToken = default) =>
+        repository.FindDuplicatePricesAsync(projectId, cancellationToken);
+
+    // A dismissed review has no decision. An empty set applies only baskets that need no warning.
+    public Task<IReadOnlySet<Guid>> ApplyDuplicatePriceReviewAsync(Guid projectId, IReadOnlyList<QuotationDuplicatePrice> preview,
+        IReadOnlySet<(Guid LineId, string BasketKey)>? acceptedWarnings, CancellationToken cancellationToken = default) =>
+        acceptedWarnings is null ? Task.FromResult<IReadOnlySet<Guid>>(new HashSet<Guid>())
+            : repository.RemoveDuplicatePricesAsync(projectId, preview, acceptedWarnings, cancellationToken);
+
+    public async Task<IReadOnlyDictionary<Guid, QuotationLineAnalysis>> GetCleanedItemsAsync(
+        Guid projectId, IReadOnlySet<Guid> changedLineIds, CancellationToken cancellationToken = default)
+    {
+        var items = new Dictionary<Guid, QuotationLineAnalysis>(changedLineIds.Count);
+        foreach (var id in changedLineIds)
+            items.Add(id, await GetAnalysisAsync(projectId, id, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("O item revisado não pertence mais à cotação."));
+        return items;
     }
 
     public Task RenameManualBasketAsync(

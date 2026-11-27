@@ -22,6 +22,7 @@
                       SkipGetTargetFrameworkProperties="true" />
   </ItemGroup>
   <ItemGroup>
+    <None Update="Fixtures/confirmada-3-v1.2.52.pncpcotacao" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Fixtures/drive-*.html" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../scripts/prepare-github-prices.ps1" Link="Scripts/prepare-github-prices.ps1" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../scripts/read-release-notes.ps1" Link="Scripts/read-release-notes.ps1" CopyToOutputDirectory="PreserveNewest" />

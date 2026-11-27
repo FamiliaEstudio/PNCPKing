@@ -21,6 +21,7 @@ public sealed partial class MainViewModel
     private IQuotationWordService _quotationWordService = null!;
     private QuotationProjectReport? _quotationWordReport;
     private int _quotationReportLoadVersion;
+    private int _resolvedQuotationLines;
     private bool _suppressQuotationProjectLoad;
     private IQuotationWorkbookImportService _quotationWorkbookImportService = null!;
     private IQuotationPackageService _quotationPackageService = null!;
@@ -73,6 +74,7 @@ public sealed partial class MainViewModel
     public ICommand RenameQuotationCommand { get; private set; } = null!;
     public ICommand ToggleQuotationMedicationCommand { get; private set; } = null!;
     public ICommand OrganizeQuotationItemsCommand { get; private set; } = null!;
+    public ICommand RemoveDuplicateQuotationPricesCommand { get; private set; } = null!;
     public ICommand ManageQuotationGroupsCommand { get; private set; } = null!;
     public bool IsMedicationQuotation => SelectedQuotationProject?.Source.IsMedication == true;
     public ICommand DeleteQuotationCommand { get; private set; } = null!;
@@ -290,6 +292,9 @@ public sealed partial class MainViewModel
             OrganizeQuotationItemsAsync,
             () => SelectedQuotationProject is not null && QuotationLines.Count > 0 &&
                   !IsFileBusy && !IsPriceBusy && !IsDocumentBusy && !IsQuotationAutomationRunning);
+        RemoveDuplicateQuotationPricesCommand = new AsyncRelayCommand(RemoveDuplicateQuotationPricesAsync,
+            () => _quotationWordReport is { } report && report.Project.Id == SelectedQuotationProject?.Id && !IsFileBusy && !IsPriceBusy && !IsDocumentBusy &&
+                  !IsQuotationAutomationRunning && !IsForegroundBusy && _quotationItemWindow?.ViewModel.IsBusy != true);
         ManageQuotationGroupsCommand = new AsyncRelayCommand(
             ManageQuotationGroupsAsync,
             () => SelectedQuotationProject is not null && QuotationLines.Count > 0 &&
@@ -739,14 +744,20 @@ public sealed partial class MainViewModel
         QuotationLines.ReplaceAll(report.Lines.Select(analysis => new QuotationLineDisplay(analysis, report.Project.Organization)));
         SelectedQuotationLine = QuotationLines.FirstOrDefault(line => line.Line.Id == preferredLineId)
                                   ?? QuotationLines.FirstOrDefault();
-        var resolved = QuotationLines.Count(line => line.Status == "Resolvido");
+        _resolvedQuotationLines = QuotationLines.Count(line => line.Status == "Resolvido");
+        UpdateQuotationSummary(report);
+        NotifyCommands();
+    }
+
+    private void UpdateQuotationSummary(QuotationProjectReport report)
+    {
+        var resolved = _resolvedQuotationLines;
         QuotationSummary = $"{QuotationLines.Count:N0} item(ns); {resolved:N0} resolvido(s); " +
                            $"{QuotationLines.Count - resolved:N0} pendente(s).";
         if (report.OrganizationIsStale)
             QuotationSummary += " Organização desatualizada — clique em Organizar Itens antes de exportar.";
         else if (report.Project.Organization is { } organization)
             QuotationSummary += $" {organization.Groups.Count} grupos; {organization.Positions.Count} posições.";
-        NotifyCommands();
     }
 
     internal void InvalidateQuotationWordReport()
@@ -931,6 +942,50 @@ public sealed partial class MainViewModel
             IsFileBusy = false;
             NotifyCommands();
         }
+    }
+
+    private async Task RemoveDuplicateQuotationPricesAsync()
+    {
+        if (SelectedQuotationProject is not { } project || _quotationWordReport?.Project.Id != project.Id) return;
+        IsFileBusy = true;
+        var committed = false;
+        try
+        {
+            var preview = await Task.Run(() => _quotationService.FindDuplicatePricesAsync(project.Id)).ConfigureAwait(true);
+            if (_quotationWordReport is not { } report || report.Project.Id != project.Id) return;
+            var window = new QuotationDuplicatePricesWindow(report, preview) { Owner = Application.Current.MainWindow };
+            var accepted = window.ShowDialog() == true ? window.AcceptedWarnings : null;
+            if (SelectedQuotationProject?.Id != project.Id) return;
+
+            var changed = await Task.Run(() => _quotationService.ApplyDuplicatePriceReviewAsync(project.Id, preview, accepted)).ConfigureAwait(true);
+            if (changed.Count == 0) return;
+            committed = true;
+            var updates = await Task.Run(() => _quotationService.GetCleanedItemsAsync(project.Id, changed)).ConfigureAwait(true);
+            if (_quotationWordReport is { } current && current.Project.Id == project.Id && SelectedQuotationProject?.Id == project.Id)
+            {
+                var selected = SelectedQuotationLine?.Line.Id;
+                var refreshed = QuotationLineDisplay.ReplaceCleanedItems(current, QuotationLines, updates);
+                _quotationWordReport = refreshed.Report;
+                _resolvedQuotationLines += refreshed.ResolvedDelta;
+                if (selected is Guid lineId && updates.TryGetValue(lineId, out var updated))
+                {
+                    SelectedQuotationLine = QuotationLines.First(line => line.Line.Id == lineId);
+                    if (updated.Line is { SelectionConfirmed: true, SelectedBasketKey: { } key } && SelectedQuotationBasket?.Key != key)
+                        SelectQuotationBasket(key);
+                }
+                UpdateQuotationSummary(_quotationWordReport);
+            }
+            if (_quotationItemWindow?.ViewModel is { } item && item.ProjectId == project.Id && updates.TryGetValue(item.LineId, out var analysis))
+                item.ShowCleanedBasket(analysis);
+            StatusText = $"{preview.Count(row => row.CanRemove(accepted)):N0} entrada(s) de preço removida(s) da cotação '{project.Name}'.";
+        }
+        catch (Exception exception)
+        {
+            if (committed && _quotationWordReport?.Project.Id == project.Id) InvalidateQuotationWordReport();
+            var message = committed ? $"Limpeza gravada. Reabra a cotação para atualizar a tela.\\n{exception.Message}" : exception.Message;
+            MessageBox.Show(message, "Remover preços duplicados", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally { IsFileBusy = false; NotifyCommands(); }
     }
 
     private async Task ManageQuotationGroupsAsync()
@@ -1728,6 +1783,7 @@ public sealed partial class MainViewModel
             projects,
             _quotationService.GetLinesAsync,
             _quotationService.GetManualBasketsAsync,
+            _quotationService.GetBasketLineIdsAsync,
             SelectedQuotationProject?.Id,
             description,
             MinimumPriceText,
